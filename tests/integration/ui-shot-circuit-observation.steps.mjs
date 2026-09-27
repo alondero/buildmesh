@@ -2,6 +2,9 @@ import { expect } from '@playwright/test';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 
+// Render/read-path verification only: history is seeded directly with SQL.
+// This does not exercise worker -> ledger writes or autonomous harness progress.
+
 export default async function ({ page, invoke }) {
   const mesh = await invoke('create_test_mesh', { name: 'Session observation verification' });
   const db = new DatabaseSync(path.join(process.env.APPDATA, 'com.alond.buildmesh.dev', 'buildmesh.db'));

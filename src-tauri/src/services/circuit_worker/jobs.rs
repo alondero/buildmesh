@@ -26,12 +26,13 @@ struct State<T> {
     entries: HashMap<Key, Entry<T>>,
     queue: VecDeque<Key>,
     limit: usize,
+    admission_deferrals: u64,
 }
 struct Pool<T>(Arc<Mutex<State<T>>>);
 
 impl<T: Send + 'static> Pool<T> {
     fn new(limit: usize) -> Self {
-        Self(Arc::new(Mutex::new(State { entries: HashMap::new(), queue: VecDeque::new(), limit })))
+        Self(Arc::new(Mutex::new(State { entries: HashMap::new(), queue: VecDeque::new(), limit, admission_deferrals: 0 })))
     }
 
     fn poll(&self, key: Key, resource: Option<String>, task: impl FnOnce(Arc<AtomicBool>) -> T + Send + 'static) -> Option<T> {
@@ -44,7 +45,19 @@ impl<T: Send + 'static> Pool<T> {
             }
             return None;
         }
-        if state.queue.len() >= 128 { return None; }
+        if state.queue.len() >= 128 {
+            state.admission_deferrals = state.admission_deferrals.saturating_add(1);
+            let admission_deferrals = state.admission_deferrals;
+            drop(state);
+            // Count refused admission attempts, not pending polls or distinct jobs.
+            // Exponential sampling keeps sustained pressure visible without per-tick spam.
+            if admission_deferrals.is_power_of_two() {
+                tracing::warn!(admission_deferrals, queue_limit = 128, run_id = key.run,
+                    step_id = %key.step, attempt = key.attempt,
+                    "Circuit job admission deferred: queue full; scheduler will retry");
+            }
+            return None;
+        }
         state.entries.insert(key.clone(), Entry {
             cancelled: Arc::new(AtomicBool::new(false)), resource, running: false,
             task: Some(Box::new(task)), result: None,
@@ -424,6 +437,33 @@ mod tests {
         assert_eq!(completed(&pool, test_key(1)), 11);
         assert!(!executed.load(Ordering::Acquire));
         assert!(!pool.0.lock().unwrap().entries.contains_key(&test_key(2)));
+    }
+
+    #[test]
+    fn full_queue_counts_refused_admission_but_not_pending_and_allows_retry() {
+        let pool = Pool::new(1);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        pool.poll(test_key(0), None, move |_| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            0
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        for id in 1..=128 { pool.poll(test_key(id), None, |_| panic!("queued job must be cancelled")); }
+        assert!(pool.poll(test_key(129), None, |_| panic!("refused job must not execute")).is_none());
+        assert!(pool.poll(test_key(1), None, |_| panic!("pending job must not be replaced")).is_none());
+        {
+            let state = pool.0.lock().unwrap();
+            assert_eq!(state.admission_deferrals, 1);
+            assert_eq!(state.queue.len(), 128);
+            assert!(!state.entries.contains_key(&test_key(129)));
+        }
+        pool.retain(|key| key.run == 0);
+        assert!(pool.poll(test_key(129), None, |_| 129).is_none());
+        release_tx.send(()).unwrap();
+        assert_eq!(completed(&pool, test_key(129)), 129);
+        assert_eq!(pool.0.lock().unwrap().admission_deferrals, 1);
     }
 
     #[test]

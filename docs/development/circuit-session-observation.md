@@ -65,6 +65,11 @@ Classifier and verification work use a bounded FIFO job service: four active
 jobs and at most 128 queued jobs. A gate/attempt key prevents duplicate in-flight
 work. Queued work is not meaningful agent progress. Queue pressure must defer
 observation without converting it to a semantic verdict.
+Refused admission attempts increment `admission_deferrals`; structured warnings
+report the cumulative count, queue limit and requesting run/step/attempt at
+counts 1, 2, 4, 8 and so on. Pending polls do not increment this counter.
+The scheduler retries admission; these warnings distinguish saturation from
+ordinary pending work without logging every poll.
 
 The circuit worker consumes results and retains transition ownership. Cancellation,
 attempt and evidence freshness are checked before a result can commit. Verification
@@ -86,26 +91,6 @@ or paused circuit cannot publish a stale recovery to its borrowed source.
 This isolates these expensive operations. It does not establish that every
 external effect, filesystem operation or runtime service is asynchronous.
 
-## Jev and System One classification
-
-Jev is a plausible optional interpretation backend: TypeSafe describes typed
-probabilistic decisions over supplied state, rather than generated prose.
-Its schema guarantee constrains output shape, not the correctness of a circuit
-decision. Vendor speed claims are not Buildmesh measurements.
-[TypeSafe introduction](https://typesafe.ai/blog/introducing-system-one-models-and-jev).
-
-Confidence is useful for choosing abstention and escalation policies, but requires
-evaluation on our reports. The vendor separately documents confidence and model
-limitations. [Confidence](https://docs.typesafe.ai/confidence),
-[Jev 1.13 limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13).
-
-First benchmark an optional backend in shadow mode on authorized, redacted
-fixtures: final versus intermediate reports, real questions, permissions,
-background progress, review findings and explicit approval. Measure incorrect
-advancement, abstention, calibration, latency and availability against the current
-classifier. Keep deterministic identity/freshness gates unchanged. This change
-adds no Jev dependency, credentials or external report transmission.
-
 ## Recorded verification
 
 - The complete frontend unit suite with two workers passed: 3,514 tests passed,
@@ -122,8 +107,12 @@ adds no Jev dependency, credentials or external report transmission.
   records the result; the driver is
   [the observation UI scenario](../../tests/integration/ui-shot-circuit-observation.steps.mjs).
   No new panic entries appeared. Startup errors referenced old missing fixture
-  repositories and inactive agents. This fixture verifies the operator surface,
-  not an autonomous live harness review or fleet soak.
+  repositories and inactive agents. The scenario inserts history rows directly
+  with SQL: it verifies backend history reads and the operator surface, not the
+  worker-to-database write path. That end-to-end write-path verification remains
+  a gap. Separate Rust stepper and history-ledger tests cover their respective
+  seams; they do not turn this UI fixture into a worker integration test. No
+  autonomous live harness review or fleet soak was performed.
 - The final serial Rust library suite passed 3,903 tests, with 24 ignored.
   Separate Rust integration targets passed 18 tests. One initial failure was a
   test fixture node identifier. The other exposed a production Windows quoting
@@ -164,3 +153,23 @@ Before claiming readiness for 20–30 supervised sessions, complete:
 The target is supported success paths plus explicit, bounded uncertainty and
 safe recovery. Neither this change nor a new classifier warrants a universal
 100% reliability promise across external harnesses and services.
+
+## Appendix: Jev and System One classification
+
+Jev is a plausible optional interpretation backend: TypeSafe describes typed
+probabilistic decisions over supplied state, rather than generated prose.
+Its schema guarantee constrains output shape, not the correctness of a circuit
+decision. Vendor speed claims are not Buildmesh measurements.
+[TypeSafe introduction](https://typesafe.ai/blog/introducing-system-one-models-and-jev).
+
+Confidence is useful for choosing abstention and escalation policies, but requires
+evaluation on our reports. The vendor separately documents confidence and model
+limitations. [Confidence](https://docs.typesafe.ai/confidence),
+[Jev 1.13 limitations](https://docs.typesafe.ai/model-jaggedness/jev-1.13).
+
+First benchmark an optional backend in shadow mode on authorized, redacted
+fixtures: final versus intermediate reports, real questions, permissions,
+background progress, review findings and explicit approval. Measure incorrect
+advancement, abstention, calibration, latency and availability against the current
+classifier. Keep deterministic identity/freshness gates unchanged. This change
+adds no Jev dependency, credentials or external report transmission.

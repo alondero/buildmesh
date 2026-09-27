@@ -42,7 +42,8 @@ pub(crate) fn prepare(
     if !finished && !yielded && step.status != StepStatus::Unverified { return Ok(None); }
     let session_id = agent.cli_session_id.as_deref().filter(|id| !id.is_empty()).ok_or(Blocker::SessionIdentityUnavailable)?;
     let incarnation = stamp.and_then(|stamp| stamp.split_once(':')).map(|(incarnation, _)| incarnation)
-        .filter(|incarnation| incarnation.parse::<i64>().is_ok()).ok_or(Blocker::SessionIdentityUnavailable)?;
+        .ok_or(Blocker::SessionIdentityUnavailable)?;
+    let incarnation_ms = incarnation.parse::<i64>().map_err(|_| Blocker::SessionIdentityUnavailable)?;
     let input = input.map_err(|reason| match reason {
         InputUnavailable::MissingProcess => Blocker::ProcessUnavailable,
         InputUnavailable::Draft => Blocker::InputDraft,
@@ -51,7 +52,7 @@ pub(crate) fn prepare(
     })?;
     let status = if finished { SessionStatus::Ready } else { agent.status };
     if let Ok(report) = &report {
-        if report.published_at_ms < incarnation.parse::<i64>().expect("validated incarnation")
+        if report.published_at_ms < incarnation_ms
             || view.context.get(&format!("agent.{}.previous_report_revision", agent.id)) == Some(report.revision.as_str()) {
             return Err(Blocker::ReportSuperseded);
         }
