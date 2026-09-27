@@ -18,6 +18,24 @@ Buildmesh only lists a harness it can detect in the selected runtime.
 
 The plain **Terminal** harness can still be used when no agent CLI is found.
 
+## Settings → Providers is slow to load
+
+The tab shows a spinner while Buildmesh checks which harnesses and providers it
+can launch. That check runs a few short version and capability commands per
+runtime, so it is normally well under a second. It takes noticeably longer when:
+
+- you have proxied a provider over OpenAI (a Codex route), which adds Codex
+  version, help, and location probes on both the Windows and WSL runtimes;
+- the WSL distribution is stopped, so its first command pays the full VM start
+  (this can take several seconds);
+- `codex` or `wsl` is slow to start because the disk or the WSL service is busy.
+
+The wait is bounded: a probe that does not answer is abandoned and reported as a
+load failure with a **Retry** button rather than leaving the tab stuck. The
+provider pickers stay disabled while the check runs and are enabled once it
+finishes. If a load fails, use **Retry** in the banner; the rest of Settings
+remains usable while it does.
+
 ## Command Code does not accept typing
 
 Command Code 1.56 and later can draw the prompt and then ignore keys on

@@ -36,13 +36,23 @@ use crate::models::EnvType;
 static DETECTED_DISTRO: Lazy<Option<String>> =
     Lazy::new(|| probe_until_some(3, detect_default_wsl_distro));
 
+/// Wall-clock bound for `wsl.exe` here.
+///
+/// Distro detection sits on the Settings -> Providers critical path (the
+/// Codex install probe resolves its distro through this) and is retried up
+/// to 3x, so an untimed spawn that wedges multiplied into a multi-minute
+/// stall. A cold distro start legitimately takes seconds, so the bound is
+/// generous.
+const WSL_DISTRO_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Get the default WSL distro name by parsing `wsl.exe -l -v` output.
 /// Returns the distro marked as (default) or the first one if none marked.
 pub(crate) fn detect_default_wsl_distro() -> Option<String> {
-    let output = command_no_window("wsl.exe")
-        .args(["-l", "-v"])
-        .output()
-        .ok()?;
+    let mut command = command_no_window("wsl.exe");
+    command.args(["-l", "-v"]);
+    let output =
+        crate::process_util::run_command_with_timeout(command, "WSL distro detection", WSL_DISTRO_PROBE_TIMEOUT)
+            .ok()?;
     let stdout = if output.stdout.iter().skip(1).step_by(2).any(|byte| *byte == 0) {
         let units = output
             .stdout
