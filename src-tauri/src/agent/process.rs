@@ -42,8 +42,7 @@ pub struct AgentProcess {
     input_version: std::sync::atomic::AtomicU64,
     last_submit_ms: std::sync::atomic::AtomicI64,
     retired: AtomicBool,
-    input_buffer_len: std::sync::atomic::AtomicUsize,
-    input_bracketed_paste: AtomicBool,
+    input_decoder: Mutex<TerminalInput>,
     /// Handle to the dedicated writer thread. `kill_session` joins it
     /// with a bounded timeout so the close path can never hang the UI
     /// on a wedged writer (mirror of the `reader_handle` contract).
@@ -124,7 +123,18 @@ pub(crate) struct InputStamp {
     version: u64,
 }
 
-const UNKNOWN_INPUT_BUFFER_LEN: usize = usize::MAX;
+#[path = "terminal_input.rs"]
+mod terminal_input;
+pub use terminal_input::InputActivity;
+use terminal_input::{TerminalInput, UNKNOWN_INPUT_BUFFER_LEN};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputUnavailable {
+    MissingProcess,
+    Draft,
+    UnknownInput,
+    Paste,
+}
 
 impl InputStamp {
     pub(crate) fn encode(self) -> String {
@@ -140,88 +150,11 @@ impl InputStamp {
     }
 }
 
-/// Update the CLI input-buffer estimate without treating terminal control
-/// packets as draft text. This is intentionally conservative: printable input
-/// grows the estimate, editing keys shrink it, and navigation/focus sequences
-/// make the state unknown until an explicit clear or submission. Bracketed
-/// paste markers keep embedded newlines as text.
-fn input_buffer_state_after(
-    mut len: usize,
-    mut bracketed_paste: bool,
-    data: &[u8],
-) -> (usize, bool) {
-    let mut index = 0;
-    while index < data.len() {
-        match data[index] {
-            0x1b => {
-                let start = index;
-                index += 1;
-                let mut sequence_complete = false;
-                if index < data.len() && matches!(data[index], b'[' | b']' | b'O') {
-                    index += 1;
-                    while index < data.len() {
-                        let byte = data[index];
-                        index += 1;
-                        if (0x40..=0x7e).contains(&byte) {
-                            sequence_complete = true;
-                            let sequence = &data[start..index];
-                            bracketed_paste = match sequence {
-                                b"\x1b[200~" => true,
-                                b"\x1b[201~" => false,
-                                _ => {
-                                    // Cursor movement, history recall, and
-                                    // focus events can change the provider's
-                                    // draft without carrying printable bytes.
-                                    // Treat those states as unknown/non-empty
-                                    // until an explicit clear or submission.
-                                    len = UNKNOWN_INPUT_BUFFER_LEN;
-                                    bracketed_paste
-                                }
-                            };
-                            break;
-                        }
-                    }
-                    // An incomplete escape sequence is ambiguous too. Keep
-                    // the paste mode that was already established, but fail
-                    // closed for continuation eligibility.
-                    if !sequence_complete { len = UNKNOWN_INPUT_BUFFER_LEN; }
-                } else if !bracketed_paste {
-                    len = UNKNOWN_INPUT_BUFFER_LEN;
-                }
-                continue;
-            }
-            b'\r' | b'\n' if !bracketed_paste => len = 0,
-            // Newlines in a bracketed paste are literal content. The length
-            // estimate intentionally ignores them, but an empty paste must
-            // still fail closed after it is closed.
-            b'\r' | b'\n' if bracketed_paste && len == 0 => len = UNKNOWN_INPUT_BUFFER_LEN,
-            b'\r' | b'\n' if bracketed_paste => {}
-            0x03 if !bracketed_paste => {
-                // Ctrl-C aborts the current command line, so it is an
-                // explicit clear that makes an empty prompt safe to use.
-                len = 0;
-            }
-            _ if len == UNKNOWN_INPUT_BUFFER_LEN => {}
-            0x08 | 0x7f if !bracketed_paste => len = len.saturating_sub(1),
-            byte if !bracketed_paste && byte < 0x20 => {
-                // Cursor movement, history, kill-word, and other readline
-                // controls can edit text that is not represented in this
-                // PTY packet. Do not guess that the prompt is empty.
-                len = UNKNOWN_INPUT_BUFFER_LEN;
-            }
-            byte if byte >= 0x20 && (byte & 0xc0) != 0x80 => len = len.saturating_add(1),
-            _ if bracketed_paste => {
-                // Bracketed paste may contain control bytes as literal
-                // content. Preserve the conservative unknown state until the
-                // paste is closed and an explicit submission or clear is
-                // observed.
-                len = UNKNOWN_INPUT_BUFFER_LEN;
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    (len, bracketed_paste)
+#[cfg(test)]
+fn input_buffer_state_after(len: usize, bracketed_paste: bool, data: &[u8]) -> (usize, bool) {
+    let mut input = TerminalInput::with_state(len, bracketed_paste);
+    input.accept(data);
+    (if input.has_pending_sequence() { UNKNOWN_INPUT_BUFFER_LEN } else { input.len }, input.bracketed_paste)
 }
 
 #[cfg(test)]
@@ -251,8 +184,7 @@ impl AgentProcess {
             input_version: std::sync::atomic::AtomicU64::new(0),
             last_submit_ms: std::sync::atomic::AtomicI64::new(0),
             retired: AtomicBool::new(false),
-            input_buffer_len: std::sync::atomic::AtomicUsize::new(0),
-            input_bracketed_paste: AtomicBool::new(false),
+            input_decoder: Mutex::new(TerminalInput::default()),
             writer_handle: Mutex::new(writer_handle),
             master: Arc::new(Mutex::new(Some(master))),
             reader_alive,
@@ -267,39 +199,42 @@ impl AgentProcess {
     }
 
     /// Non-blocking enqueue onto the dedicated writer thread.
-    fn enqueue_input(&self, data: Vec<u8>) -> Result<(), std::sync::mpsc::TrySendError<Vec<u8>>> {
-        self.enqueue_input_if_current(data, None).map(|_| ())
+    fn enqueue_input(&self, data: Vec<u8>) -> Result<InputActivity, std::sync::mpsc::TrySendError<Vec<u8>>> {
+        self.enqueue_input_if_current(data, None).map(|(_, activity)| activity)
     }
 
-    fn input_stamp(&self) -> Option<InputStamp> {
+    fn input_stamp_result(&self) -> Result<InputStamp, InputUnavailable> {
         let _guard = self.writer_tx.lock().unwrap();
-        if self.input_buffer_len.load(Ordering::Relaxed) != 0
-            || self.input_bracketed_paste.load(Ordering::Relaxed)
-        {
-            return None;
+        let input = self.input_decoder.lock().unwrap();
+        if input.bracketed_paste { return Err(InputUnavailable::Paste); }
+        if input.has_pending_sequence() || input.len == UNKNOWN_INPUT_BUFFER_LEN {
+            return Err(InputUnavailable::UnknownInput);
         }
-        Some(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
+        if input.len != 0 { return Err(InputUnavailable::Draft); }
+        Ok(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<Option<InputStamp>, std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<(Option<InputStamp>, InputActivity), std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
         if self.retired.load(Ordering::SeqCst) { return Err(std::sync::mpsc::TrySendError::Disconnected(data)); }
         let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
-        if expected.is_some_and(|expected| expected != stamp) { return Ok(None); }
-        let current_len = self.input_buffer_len.load(Ordering::Relaxed);
-        let current_bracketed_paste = self.input_bracketed_paste.load(Ordering::Relaxed);
-        let (next_len, next_bracketed_paste) =
-            input_buffer_state_after(current_len, current_bracketed_paste, &data);
-        let submits = !next_bracketed_paste && (data.contains(&b'\r') || data.contains(&b'\n'));
+        let mut input = self.input_decoder.lock().unwrap();
+        if expected.is_some_and(|expected| expected != stamp || input.has_pending_sequence()) {
+            return Ok((None, InputActivity::default()));
+        }
+        // Failed sends must not advance the decoder, including half a reply.
+        let mut next = input.clone();
+        let activity = next.accept(&data);
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
         }
-        let version = self.input_version.fetch_add(1, Ordering::Relaxed) + 1;
-        if submits { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
-        self.input_buffer_len.store(next_len, Ordering::Relaxed);
-        self.input_bracketed_paste.store(next_bracketed_paste, Ordering::Relaxed);
-        Ok(Some(InputStamp { generation: self.generation, version }))
+        let version = if activity.user_input {
+            self.input_version.fetch_add(1, Ordering::Relaxed) + 1
+        } else { stamp.version };
+        if activity.submitted { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
+        *input = next;
+        Ok((Some(InputStamp { generation: self.generation, version }), activity))
     }
 
     /// Stash the reader thread's `JoinHandle` on the registry entry.
@@ -339,6 +274,7 @@ impl AgentProcess {
 /// Trait abstracting the process registry methods needed by http_server.
 pub trait ProcessRegistryApi: Send + Sync {
     fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String>;
+    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String>;
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String>;
 }
 
@@ -378,6 +314,10 @@ impl AgentProcessRegistry {
     }
 
     pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+        self.write_input(session_id, data).map(|_| ())
+    }
+
+    pub fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String> {
         let agent = self
             .get(&session_id)
             .ok_or_else(|| "Agent not running".to_string())?;
@@ -397,14 +337,15 @@ impl AgentProcessRegistry {
         // one message of whatever size the caller passed (issue #1498);
         // do not split it into keystroke-sized writes.
         let send_result = agent.enqueue_input(data.to_vec());
-        match send_result {
-            Ok(()) => {}
+        let activity = match send_result {
+            Ok(activity) => activity,
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(
                     session_id,
                     "PTY writer channel full; dropping {} bytes (agent is slow to consume the PTY)",
                     data.len()
                 );
+                return Ok(InputActivity::default());
                 // Drop the bytes and still return Ok — the user can re-type;
                 // failing the call would surface as a confusing "Agent not
                 // running" toast and silently lose keystrokes.
@@ -415,7 +356,8 @@ impl AgentProcessRegistry {
                 // the same way the old code did on a pipe failure.
                 return Err("Agent not running".to_string());
             }
-        }
+        };
+        if !activity.user_input { return Ok(activity); }
         // Mark THIS MESH as active so the background warm-pool worker holds
         // off its idle refills for this mesh's pool while the user is typing
         // into the terminal (issue #613 AC2; issue #634 scopes the activity
@@ -434,11 +376,16 @@ impl AgentProcessRegistry {
             agent.spawn_start,
             session_id,
         );
-        Ok(())
+        Ok(activity)
     }
 
     pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
-        self.get(&session_id).and_then(|agent| agent.input_stamp()).map(InputStamp::encode)
+        self.input_stamp_result(session_id).ok()
+    }
+
+    pub(crate) fn input_stamp_result(&self, session_id: i64) -> Result<String, InputUnavailable> {
+        self.get(&session_id).ok_or(InputUnavailable::MissingProcess)?
+            .input_stamp_result().map(InputStamp::encode)
     }
 
     /// Commit a recovered lifecycle fact while input cannot change. The
@@ -453,8 +400,7 @@ impl AgentProcessRegistry {
         let Some(agent) = self.get(&session_id) else { return Ok(false); };
         let _guard = agent.writer_tx.lock().unwrap();
         if expected != (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
-            || agent.input_buffer_len.load(Ordering::Relaxed) != 0
-            || agent.input_bracketed_paste.load(Ordering::Relaxed)
+            || !agent.input_decoder.lock().unwrap().empty_prompt()
             || agent.last_submit_ms.load(Ordering::Relaxed) >= completed_at_ms
             || agent.retired.load(Ordering::SeqCst)
             || !agent.reader_alive.load(Ordering::SeqCst)
@@ -468,7 +414,7 @@ impl AgentProcessRegistry {
         let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
         let expected = InputStamp::decode(expected).ok_or_else(|| "Invalid input ownership stamp".to_string())?;
         agent.enqueue_input_if_current(data.to_vec(), Some(expected)).map_err(|e| e.to_string())
-            .map(|stamp| stamp.map(InputStamp::encode))
+            .map(|(stamp, _)| stamp.map(InputStamp::encode))
     }
 
     pub fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -769,6 +715,9 @@ impl ProcessRegistryApi for AgentProcessRegistry {
     fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
         AgentProcessRegistry::write_bytes(self, session_id, data)
     }
+    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String> {
+        AgentProcessRegistry::write_input(self, session_id, data)
+    }
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         AgentProcessRegistry::resize_pty(self, session_id, cols, rows)
     }
@@ -906,6 +855,83 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    #[test]
+    fn terminal_protocol_preserves_registry_report_fence_across_packets() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_020;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let agent = registry.get(&id).unwrap();
+        *agent.writer_tx.lock().unwrap() = Some(tx);
+        let stamp = registry.input_stamp(id).unwrap();
+        for packet in [b"\x1b[I".as_slice(), b"\x1b[O", b"\x1b[12;34R", b"\x1b[?1;2c", b"\x1b[<0;24;12M"] {
+            for byte in packet {
+                assert_eq!(registry.write_input(id, &[*byte]).unwrap(), InputActivity::default());
+                assert_eq!(rx.recv().unwrap(), vec![*byte]);
+            }
+            assert_eq!(registry.input_stamp(id).as_ref(), Some(&stamp));
+            assert!(registry.commit_recovered_turn(id, &stamp, 1, || Ok(true)).unwrap());
+        }
+        assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), 0);
+        assert!(!agent.first_user_input_logged.load(Ordering::Relaxed));
+        registry.write_input(id, b"\x1b[").unwrap();
+        rx.recv().unwrap();
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert!(!registry.commit_recovered_turn(id, &stamp, 1, || panic!("incomplete input is ambiguous")).unwrap());
+        assert!(registry.write_bytes_if_current(id, b"continue", &stamp).unwrap().is_none());
+        assert!(rx.try_recv().is_err());
+        registry.write_input(id, b"A").unwrap();
+        rx.recv().unwrap();
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert_ne!(agent.input_version.load(Ordering::Relaxed), InputStamp::decode(&stamp).unwrap().version);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn registry_distinguishes_drafts_paste_and_actual_submission() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_021;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let agent = registry.get(&id).unwrap();
+        *agent.writer_tx.lock().unwrap() = Some(tx);
+        let original = registry.input_stamp(id).unwrap();
+        assert_eq!(registry.write_input(id, b"draft").unwrap(), InputActivity { user_input: true, submitted: false });
+        rx.recv().unwrap();
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
+        registry.write_input(id, b"\x03").unwrap();
+        rx.recv().unwrap();
+        for packet in [b"\x1b[20".as_slice(), b"0~", b"line\n", b"\x1b[201", b"~"] {
+            assert!(!registry.write_input(id, packet).unwrap().submitted);
+            rx.recv().unwrap();
+        }
+        assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
+        assert!(!registry.commit_recovered_turn(id, &original, i64::MAX, || panic!("new draft invalidates old report")).unwrap());
+        assert_eq!(registry.write_input(id, b"\r").unwrap(), InputActivity { user_input: true, submitted: true });
+        rx.recv().unwrap();
+        assert!(agent.last_submit_ms.load(Ordering::Relaxed) > 0);
+        assert_ne!(registry.input_stamp(id).unwrap(), original);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn dropped_registry_input_does_not_advance_stream_or_activity() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_022;
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        let original = registry.input_stamp(id).unwrap();
+        registry.write_input(id, b"\x1b[").unwrap();
+        assert_eq!(registry.write_input(id, b"A").unwrap(), InputActivity::default());
+        assert_eq!(rx.recv().unwrap(), b"\x1b[");
+        assert_eq!(registry.write_input(id, b"I").unwrap(), InputActivity::default());
+        assert_eq!(rx.recv().unwrap(), b"I");
+        assert_eq!(registry.input_stamp(id).as_ref(), Some(&original));
+        registry.kill_session(id);
+    }
 
     #[test]
     fn circuit_retirement_cannot_stop_a_replacement_process_generation() {
@@ -1696,9 +1722,9 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     //    never hold a lock across an `.await`, so they go on the async
     //    runtime. Every keystroke — letters, arrows, backspace, paste —
     //    takes this path.
-    // 2. Slow path: only when the data contains a newline / carriage
-    //    return (the user pressed Enter, pasted a multi-line buffer, or
-    //    sent a Ctrl-M). Then we ask the DB whether the node is a plain
+    // 2. Slow path: only when the streaming decoder observes a submission
+    //    outside bracketed paste. Terminal replies and pasted newlines cannot
+    //    clear attention. Then we ask the DB whether the node is a plain
     //    shell (no LLM attention to clear) and, if not, record the
     //    attention-cleared transition. The DB work goes through
     //    `spawn_blocking` because it's IO-bound and the convention
@@ -1709,14 +1735,13 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     // write must not claim "user input accepted", otherwise the
     // post-exit detector would see no signal for the dead child and the
     // status flip would land on a session that never received the byte.
-    let contains_newline = data.bytes().any(|b| b == b'\n' || b == b'\r');
-    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
+    let activity = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
     // Any accepted keystroke means the user is engaged with this node —
     // the stale-mark hypothesis behind auto-clear (issue #878) no longer
     // holds, and the keystroke's own echo must not count toward the
     // resume burst.
-    crate::attention_autoclear::disarm(session_id);
-    if !contains_newline {
+    if activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    if !activity.submitted {
         return Ok(());
     }
     let should_signal = crate::commands::run_blocking("write_to_agent_signal", move || {
@@ -1773,9 +1798,9 @@ pub(crate) fn write_to_agent_signal_blocking(session_id: i64) -> Result<bool, St
 /// never received the byte.
 #[cfg(test)]
 pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
-    PROCESS_REGISTRY.write_bytes(session_id, data.as_bytes())?;
-    crate::attention_autoclear::disarm(session_id);
-    let should_signal = data.bytes().any(|b| b == b'\n' || b == b'\r')
+    let activity = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
+    if activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    let should_signal = activity.submitted
         && !should_skip_attention_signals(session_id);
     if should_signal {
         session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();

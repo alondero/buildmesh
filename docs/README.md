@@ -36,6 +36,12 @@ the complete product manual.
 - [CLAUDE.md](../CLAUDE.md) and [knowledge-primer.md](knowledge-primer.md) are
   AI context, not a substitute for human-facing documentation.
 
+## Circuit architecture
+
+[Session observation and autonomous supervision](development/circuit-session-observation.md)
+explains lifecycle evidence, report handoff, inference scheduling, and the
+remaining acceptance work for supervising many sessions.
+
 ## Documentation maintenance
 
 Read [Documentation standards](documentation-standards.md) before adding or

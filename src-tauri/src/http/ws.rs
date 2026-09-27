@@ -253,27 +253,22 @@ pub(crate) async fn handle_ws_connection(
 /// tests inject a mock sink here so the autoclear side-effects can be
 /// asserted on without standing up a real SQLite database.
 ///
-/// Drives `registry.write_bytes` first; on success, hands the
-/// payload to [`run_autoclear_side_effects`] which decides whether
-/// CR/LF triggers the autoclear side-effects. The autoclear is
-/// best-effort — failures from the sink are swallowed by
-/// `run_autoclear_side_effects` because the WS broadcasts + DB
-/// lifecycle emits are themselves infallible; we run them even when
-/// the underlying write succeeds so a `y\r` payload clears the
-/// awaiting_input flag exactly as a typed Enter would.
+/// The registry forwards accepted bytes and reports decoded input activity.
+/// Only a submission outside bracketed paste clears attention. Transport
+/// replies, partial control packets and rejected writes cannot clear it.
 pub(crate) fn write_mobile_input_with_sink(
     registry: &dyn ProcessRegistryApi,
     lifecycle_sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
     node_id: i64,
     text: &str,
 ) -> Result<(), String> {
-    registry.write_bytes(node_id, text.as_bytes())?;
-    run_autoclear_side_effects(lifecycle_sink, node_id, text);
+    let activity = registry.write_input(node_id, text.as_bytes())?;
+    run_autoclear_side_effects(lifecycle_sink, node_id, activity);
     Ok(())
 }
 
 /// Write a raw keystroke sequence to a node's PTY and run the attention
-/// autoclear side-effect when the payload contains CR/LF (issue #1377).
+/// autoclear side-effect when the registry observes a submitted prompt.
 ///
 /// Production wrapper around [`write_mobile_input_with_sink`]. The
 /// autoclear predicate and side-effects are covered by the `_with_sink`
@@ -286,8 +281,8 @@ pub(crate) fn write_mobile_input_with_sink(
 /// because a long-lived socket gets to try again, but a one-shot HTTP tap must
 /// report success/failure to the caller. The autoclear side-effects are
 /// best-effort (the WS broadcasts + DB lifecycle emits are themselves infallible);
-/// we run them even when the underlying write_bytes succeeds so a `y\r` payload
-/// clears the awaiting_input flag exactly as a typed Enter would.
+/// an accepted `y\r` submission clears the awaiting_input flag exactly as
+/// a typed Enter would, while pasted newlines remain draft content.
 ///
 /// Sink resolution: production always has a live `app_handle` (set by
 /// `lib.rs::setup`), so the `AppSessionLifecycleSink` branch fires
@@ -322,12 +317,14 @@ pub(crate) fn write_mobile_input(
 fn run_autoclear_side_effects(
     sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
     node_id: i64,
-    text: &str,
+    activity: crate::agent::process::InputActivity,
 ) {
-    if !text.bytes().any(|b| b == b'\n' || b == b'\r') {
+    if activity.user_input {
+        crate::attention_autoclear::disarm(node_id);
+    }
+    if !activity.submitted {
         return;
     }
-    crate::attention_autoclear::disarm(node_id);
     // Routes through SessionLifecycle (issue #132) for the DB write +
     // desktop emit; the mobile broadcast is a separate channel kept below.
     let _ = crate::agent::session_lifecycle::on_attention_cleared(sink, node_id);
@@ -875,6 +872,7 @@ mod tests {
         last_write_data: std::sync::Mutex<Vec<u8>>,
         last_resize: std::sync::Mutex<(u16, u16)>,
         should_fail: bool,
+        activity: crate::agent::process::InputActivity,
     }
 
     impl MockRegistry {
@@ -885,6 +883,7 @@ mod tests {
                 last_write_data: std::sync::Mutex::new(vec![]),
                 last_resize: std::sync::Mutex::new((0, 0)),
                 should_fail: false,
+                activity: crate::agent::process::InputActivity { user_input: true, submitted: false },
             }
         }
         fn failing() -> Self {
@@ -893,9 +892,19 @@ mod tests {
                 ..Self::new()
             }
         }
+        fn submitted() -> Self {
+            Self {
+                activity: crate::agent::process::InputActivity { user_input: true, submitted: true },
+                ..Self::new()
+            }
+        }
     }
 
     impl ProcessRegistryApi for MockRegistry {
+        fn write_input(&self, session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputActivity, String> {
+            self.write_bytes(session_id, data)?;
+            Ok(self.activity)
+        }
         fn write_bytes(&self, _session_id: i64, data: &[u8]) -> Result<(), String> {
             if self.should_fail {
                 return Err("mock error".into());
@@ -929,21 +938,8 @@ mod tests {
         assert!(!mock.write_called.load(AtomicOrdering::SeqCst));
     }
 
-    /// Production `write_mobile_input` wrapper — exercises the full
-    /// sink-resolution path with bare text so the autoclear side-effect
-    /// never fires (and the test never touches an `AppHandle`). The
-    /// `DbOnlySink` fallback fires in tests (no `app_handle`), and the
-    /// bare payload ensures the fallback sink is never actually
-    /// consulted. Pins the production wrapper as "calls
-    /// `write_mobile_input_with_sink` with the resolved sink" — a
-    /// regression that re-introduced the standalone autoclear logic
-    /// in the wrapper would split the seam and this test would diverge
-    /// from the `_with_sink` autoclear tests. The CR/LF autoclear
-    /// contract is pinned exhaustively by the `_with_sink` tests
-    /// (`autoclear_predicate_cr_only`, `…_lf_only`, `…_no_newline_…`);
-    /// driving CR/LF through the production wrapper would require
-    /// initialising the global DB, which the seam tests deliberately
-    /// avoid.
+    /// The production wrapper resolves its sink and delegates to the same
+    /// accepted-input seam used by HTTP and WebSocket callers.
     #[test]
     fn write_mobile_input_dispatches_to_seam() {
         let mock = MockRegistry::new();
@@ -974,7 +970,7 @@ mod tests {
     //
     // The new `POST /api/nodes/{id}/input` route uses the same
     // `write_mobile_input` helper, so the autoclear predicate
-    // ("a CR/LF in the payload triggers disarm + lifecycle emit") is
+    // ("an accepted submission triggers disarm + lifecycle emit") is
     // shared between the WS path and the HTTP path. A regression
     // that flips the predicate (e.g. autoclears on any input, or
     // never autoclears) would silently break the triage-deck flow —
@@ -1026,18 +1022,11 @@ mod tests {
         assert_eq!(sink.attention_cleared(), Vec::<i64>::new());
     }
 
-    /// The autoclear predicate: a CR (`\r`) in the payload is what
-    /// makes a `y\r` tap answer a permission prompt. Pin the
-    /// binary-shape so a refactor that accidentally widens the
-    /// predicate (e.g. autoclears on `\n` only) gets caught.
-    ///
-    /// Literal output assertions on `sink.writes()` and
-    /// `sink.attention_cleared()` — the previous version asserted
-    /// only on counts, which let a regression that wrote `Idle`
-    /// instead of `Running` slip past.
+    /// An accepted submission triggers a Running transition and clear event.
+    /// The real registry's CR/LF and paste decoding is covered below.
     #[test]
     fn autoclear_predicate_cr_only() {
-        let mock = MockRegistry::new();
+        let mock = MockRegistry::submitted();
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "y\r").expect("\\r writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"y\r");
@@ -1045,14 +1034,10 @@ mod tests {
         assert_eq!(sink.attention_cleared(), vec![1]);
     }
 
-    /// Symmetric to `autoclear_predicate_cr_only` for LF. A regression
-    /// that filters `\r` but not `\n` (or vice-versa) would be caught
-    /// here. Mirrors the CR test's full assertion set (writes +
-    /// attention_cleared) — the previous form asserted only on the
-    /// cleared count, hiding any drift in the `Running` write.
+    /// The lifecycle consumer accepts the same submission evidence for LF.
     #[test]
     fn autoclear_predicate_lf_only() {
-        let mock = MockRegistry::new();
+        let mock = MockRegistry::submitted();
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "n\n").expect("\\n writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"n\n");
@@ -1072,6 +1057,44 @@ mod tests {
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"y");
         assert_eq!(sink.writes(), Vec::<(i64, SessionStatus)>::new());
         assert_eq!(sink.attention_cleared(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn mobile_input_uses_streaming_registry_evidence_for_attention() {
+        let id = -930_023;
+        let (registry, received) = crate::agent::process::testing::capturing_registry(id);
+        let sink = RecordingSink::new();
+        let original = registry.input_stamp(id).unwrap();
+        for packet in ["\x1b[", "I", "\x1b[12;", "34R", "\x1b[O"] {
+            write_mobile_input_with_sink(registry.as_ref(), &sink, id, packet).unwrap();
+            assert_eq!(received.recv().unwrap(), packet.as_bytes());
+            assert!(sink.writes().is_empty());
+            assert!(sink.attention_cleared().is_empty());
+        }
+        assert_eq!(registry.input_stamp(id).as_ref(), Some(&original));
+        for packet in ["\x1b[20", "0~first\n", "second\rthird", "\x1b[201", "~"] {
+            write_mobile_input_with_sink(registry.as_ref(), &sink, id, packet).unwrap();
+            assert_eq!(received.recv().unwrap(), packet.as_bytes());
+            assert!(sink.writes().is_empty(), "paste must not change lifecycle");
+            assert!(sink.attention_cleared().is_empty());
+            assert!(registry.input_stamp(id).is_none());
+        }
+        write_mobile_input_with_sink(registry.as_ref(), &sink, id, "\r").unwrap();
+        assert_eq!(received.recv().unwrap(), b"\r");
+        assert_eq!(sink.writes(), vec![(id, SessionStatus::Running)]);
+        assert_eq!(sink.attention_cleared(), vec![id]);
+        assert_ne!(registry.input_stamp(id).unwrap(), original);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn mobile_input_does_not_infer_submission_from_rejected_bytes() {
+        let mock = MockRegistry { activity: crate::agent::process::InputActivity::default(), ..MockRegistry::new() };
+        let sink = RecordingSink::new();
+        write_mobile_input_with_sink(&mock, &sink, 1, "ignored\r\n").unwrap();
+        assert_eq!(*mock.last_write_data.lock().unwrap(), b"ignored\r\n");
+        assert!(sink.writes().is_empty());
+        assert!(sink.attention_cleared().is_empty());
     }
 
     #[test]

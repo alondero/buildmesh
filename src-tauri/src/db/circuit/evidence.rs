@@ -126,6 +126,9 @@ pub struct CircuitStepObservationCoverage {
     pub deadline_ms: Option<i64>,
     pub waits_active: bool,
     pub human_waits: Vec<crate::autopilot::circuit::observation::HumanWait>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub observation_blocker: Option<crate::autopilot::circuit::observation::CircuitObservationBlocker>,
 }
 
 pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
@@ -164,6 +167,8 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                         node_id: step.node_id.clone(), attempt: step.attempt,
                         platform: format!("{} host / {} launch", std::env::consts::OS, agent.env),
                         capabilities: crate::services::circuit_worker::observer_policy::for_agent(&agent), deadline_ms,
+                        observation_blocker: (step.status == "unverified").then(|| context.get(&format!("node.{}.observation_blocker", step.node_id))
+                            .and_then(|json| serde_json::from_str(json).ok())).flatten(),
                         waits_active: run.state == "running" && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
                         human_waits: context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
                             .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok())
@@ -722,6 +727,19 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
             }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(state))?;
         }
     }
+    let blocker_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys())
+        .filter(|key| key.starts_with("node.") && key.ends_with(".observation_blocker")).collect();
+    for key in blocker_keys {
+        if previous.get(key) == next.get(key) { continue; }
+        let node = key.strip_prefix("node.").and_then(|key| key.strip_suffix(".observation_blocker"));
+        let Some(node) = node else { continue; };
+        let attempt = db.query_row("SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
+            params![run_id, node], |row| row.get::<_, i32>(0)).optional()?;
+        let blocker = next.get(key).and_then(|value| serde_json::from_str::<crate::autopilot::circuit::observation::CircuitObservationBlocker>(value).ok());
+        let detail = serde_json::json!({"blocker": blocker, "message": blocker.as_ref().map(|blocker| blocker.message())});
+        append_history(db, run_id, Some(node), attempt, "observation_readiness", &detail.to_string(),
+            Some(SOURCE_RECONCILIATION), Some(wait_disposition(blocker.is_some())))?;
+    }
     let capacity_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys()).filter(|key|key.starts_with("node.") && key.ends_with(".capacity_wait")).collect();
     for key in capacity_keys {
         if previous.get(key) != next.get(key) {
@@ -1197,6 +1215,30 @@ fn claim_effect_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_history_retains_reason_without_duplicate_poll_entries() {
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'source',1,'unverified');").unwrap();
+        let waiting = serde_json::json!({"node.source.observation_blocker":"{\"kind\":\"input_uncertain\"}"}).to_string();
+        for _ in 0..3 {
+            super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&waiting),&[]).unwrap();
+        }
+        let history = history_inner(&db,1).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].kind, "observation_readiness");
+        assert_eq!(history[0].disposition.as_deref(), Some("waiting"));
+        assert!(history[0].detail.contains("Terminal input tracking is uncertain"));
+        let resolved = serde_json::json!({"node.source.observation_blocker":""}).to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&resolved),&[]).unwrap();
+        let history = history_inner(&db,1).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].disposition.as_deref(), Some("resolved"));
+    }
 
     #[test]
     fn input_freshness_rejections_are_distinct_from_transition_conflicts() {

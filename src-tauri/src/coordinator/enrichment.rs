@@ -158,10 +158,11 @@ pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::As
     Some(report)
 }
 
-pub(crate) fn circuit_report_snapshot(node: &AgentNode) -> Option<transcript_reader::report_snapshot::ReportSnapshot> {
+pub(crate) fn circuit_report_snapshot(node: &AgentNode) -> Result<transcript_reader::report_snapshot::ReportSnapshot, transcript_reader::report_snapshot::ReportReadError> {
+    use transcript_reader::report_snapshot::ReportReadError;
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    let format = TranscriptFormat::for_harness(adapter.id())?;
-    transcript_reader::report_snapshot::read(format, node.cli_session_id.as_deref()?, &transcript_dir(node))
+    let format = TranscriptFormat::for_harness(adapter.id()).ok_or(ReportReadError::Unsupported)?;
+    transcript_reader::report_snapshot::read(format, node.cli_session_id.as_deref().ok_or(ReportReadError::NoSession)?, &transcript_dir(node))
 }
 
 #[cfg(test)]

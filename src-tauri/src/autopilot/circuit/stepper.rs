@@ -143,12 +143,22 @@ impl RunView {
             .map_or_else(|| self.context.get(&format!("node.{node_id}.human_wait")) == Some("1"), |evidence| evidence.has_human_wait())
     }
 
-    pub(crate) fn report_has_known_blockers(&self, node_id: &str) -> bool {
+    pub(crate) fn report_blocker(&self, node_id: &str) -> Option<super::observation::CircuitObservationBlocker> {
+        use super::observation::CircuitObservationBlocker as B;
         let target = self.step(node_id).and_then(|step| step.agent_node_id).or_else(|| self.resolve_target_agent(node_id));
-        self.steps.iter().filter(|step| step.node_id == node_id || step.agent_node_id.or_else(|| self.resolve_target_agent(&step.node_id)).is_some_and(|id| Some(id) == target))
-            .any(|step| self.has_human_wait(&step.node_id) || self.context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-                .is_some_and(|json| serde_json::from_str::<super::observation::WorkEvidence>(json)
-                    .map_or(true, |evidence| evidence.conflicted || evidence.children.values().any(|terminal| !terminal))))
+        for step in self.steps.iter().filter(|step| step.node_id == node_id || step.agent_node_id.or_else(|| self.resolve_target_agent(&step.node_id)).is_some_and(|id| Some(id) == target)) {
+            if self.has_human_wait(&step.node_id) { return Some(B::HumanResponseRequired); }
+            if let Some(json) = self.context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt)) {
+                let Ok(evidence) = serde_json::from_str::<super::observation::WorkEvidence>(json) else { return Some(B::EvidenceConflict); };
+                if evidence.conflicted { return Some(B::EvidenceConflict); }
+                if evidence.children.values().any(|terminal| !terminal) { return Some(B::KnownWorkOutstanding); }
+            }
+        }
+        None
+    }
+
+    pub(crate) fn report_has_known_blockers(&self, node_id: &str) -> bool {
+        self.report_blocker(node_id).is_some()
     }
 
     fn accepts_report_binding(&self, node_id: &str, binding: &ClassificationBinding, output: Option<&str>) -> bool {
@@ -430,6 +440,10 @@ pub enum CircuitEvent {
     ObservationBatch { receipt_id: i64, expected: super::observation::ObservationIdentity, observations: Vec<super::observation::CircuitObservation>, stale: bool, input_guard: Option<ObservationInputFence> },
     Observed { expected: super::observation::ObservationIdentity, observation: Box<super::observation::CircuitObservation> },
     EffectUncertain { node_id: String, attempt: i32, reason: String },
+    ObservationDeferred {
+        node_id: String, attempt: i32, agent_node_id: i64,
+        blocker: super::observation::CircuitObservationBlocker,
+    },
     ContinuationObserved { node_id: String, attempt: i32, stamp: String, revision: String, input_stamp: String },
     ContinuationRetry { node_id: String, attempt: i32 },
     ContinuationDelivered { node_id: String, attempt: i32 },
@@ -503,7 +517,7 @@ pub enum CircuitEvent {
     /// outage (run 163's reviewer yielded mid-turn with a progress line). The
     /// gate's generic yielded-wait reason and its deadline still arrive from
     /// the separate `WaitObserved`, which is what bounds the wait.
-    TurnParked { node_id: String, output: String },
+    TurnParked { node_id: String, output: String, report_revision: Option<String> },
     /// The seam ran the DeterministicVerification command.
     VerificationResult { node_id: String, green: bool },
     /// The seam executed a GitHub action (e.g. OpenPr, AddLabel).
@@ -783,6 +797,21 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
         CircuitEvent::Observed { expected, observation } => {
             if apply_observation(run, &mut t, expected, observation) {
                 finish_observed_step(run, &mut t, expected);
+            }
+        }
+        CircuitEvent::ObservationDeferred { node_id, attempt, agent_node_id, blocker } => {
+            if run.state != RunState::Running || !run.step(node_id).is_some_and(|step|
+                step.attempt == *attempt && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+                    && step.agent_node_id.or_else(|| run.resolve_target_agent(node_id)) == Some(*agent_node_id)) { return t; }
+            let key = format!("node.{node_id}.observation_blocker");
+            let encoded = serde_json::to_string(blocker).expect("observation blocker");
+            let reason = blocker.message();
+            if run.context.get(&key) != Some(encoded.as_str()) {
+                run.context.set(&key, encoded);
+                t.context_changed = true;
+            }
+            if run.step(node_id).is_some_and(|step| step.status != StepStatus::Unverified || step.error.as_deref() != Some(reason.as_str())) {
+                unverify_step(run, &mut t, node_id, reason);
             }
         }
         CircuitEvent::EffectUncertain { node_id, attempt, reason } => {
@@ -1127,8 +1156,14 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         && binding.owner.session_id.as_deref() == Some(binding.input_guard.session_id.as_str())
                         && binding.owner.session_incarnation.as_deref() == Some(binding.input_guard.session_incarnation.as_str())
                 });
-                let valid = lifecycle_verified || binding.as_ref().is_some_and(|binding|
-                    run.accepts_report_binding(node_id, binding, output.as_deref()));
+                let valid = !run.report_has_known_blockers(node_id) && (lifecycle_verified || binding.as_ref().is_some_and(|binding|
+                    run.accepts_report_binding(node_id, binding, output.as_deref())));
+                if valid {
+                    if let Some(binding) = binding {
+                        run.context.set(&format!("node.{node_id}.evaluated_report_revision"), &binding.report_revision);
+                    }
+                    run.context.set(&format!("node.{node_id}.observation_blocker"), "");
+                }
                 if let Some(out) = output {
                     run.context.set(&format!("node.{node_id}.evaluated_output"), out.clone());
                     t.context_changed = true;
@@ -1265,7 +1300,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 }
             }
         }
-        CircuitEvent::TurnParked { node_id, output } => {
+        CircuitEvent::TurnParked { node_id, output, report_revision } => {
             // A deliberate wait is not a verdict, an outage, or a failure. The
             // report is recorded as observed so `should_classify_report` stops
             // re-asking about an unchanged one, and nothing else is written by
@@ -1288,6 +1323,9 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 if let Some(attempt) = run.step(node_id).map(|step| step.attempt) {
                     run.context.set(&format!("node.{node_id}.evaluated_attempt"), attempt.to_string());
                     run.context.set(&format!("node.{node_id}.evaluated_output"), output.clone());
+                    if let Some(revision) = report_revision {
+                        run.context.set(&format!("node.{node_id}.evaluated_report_revision"), revision);
+                    }
                     t.context_changed = true;
                 }
             }
@@ -2473,6 +2511,31 @@ mod tests {
     }
 
     // -- agent lifecycle --------------------------------------------------------
+
+    #[test]
+    fn observation_blockers_are_typed_deduplicated_and_attempt_scoped() {
+        use super::super::observation::CircuitObservationBlocker;
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        let event = |attempt, agent_node_id, blocker| CircuitEvent::ObservationDeferred {
+            node_id: "spawn".into(), attempt, agent_node_id, blocker,
+        };
+        let rejected = advance(&mut run, &event(2, 900, CircuitObservationBlocker::InputDraft));
+        assert!(rejected.is_empty());
+        assert!(advance(&mut run, &event(1, 901, CircuitObservationBlocker::InputDraft)).is_empty());
+        let first = advance(&mut run, &event(1, 900, CircuitObservationBlocker::InputUncertain));
+        assert_eq!(run.step("spawn").unwrap().status, StepStatus::Unverified);
+        assert_eq!(run.context.get("node.spawn.observation_blocker"), Some("{\"kind\":\"input_uncertain\"}"));
+        assert_eq!(first.step_writes.len(), 1);
+        assert!(first.classifications.is_empty());
+        assert!(first.effects.is_empty());
+        assert!(advance(&mut run, &event(1, 900, CircuitObservationBlocker::InputUncertain)).is_empty());
+        let updated = advance(&mut run, &event(1, 900, CircuitObservationBlocker::HumanResponseRequired));
+        assert_eq!(updated.step_writes.len(), 1);
+        assert!(run.step("spawn").unwrap().error.as_deref().unwrap().contains("question or permission"));
+    }
 
     #[test]
     fn scoped_observations_require_all_owned_work_and_reject_late_completion() {
@@ -4024,7 +4087,7 @@ mod tests {
         );
         fire_to_gate(&mut run, "verdict");
         let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim.";
-        let transition = advance(&mut run, &CircuitEvent::TurnParked {
+        let transition = advance(&mut run, &CircuitEvent::TurnParked { report_revision: None,
             node_id: "verdict".into(),
             output: progress.into(),
         });

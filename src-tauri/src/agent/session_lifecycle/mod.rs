@@ -720,6 +720,13 @@ pub fn on_attention_with_signal(
     } else {
         sink.write_status(node_id, SessionStatus::AwaitingInput)?;
     }
+    emit_attention(sink, node_id, semantic_turn, detail);
+    Ok(true)
+}
+
+fn emit_attention(sink: &dyn SessionLifecycleSink, node_id: i64,
+    semantic_turn: Option<SemanticTurnPayload>, detail: &HookSignalDetail,
+) {
     sink.emit_attention_needed_with_payload(node_id, semantic_turn.clone());
     let kind = detail
         .kind
@@ -741,7 +748,6 @@ pub fn on_attention_with_signal(
         "agent is waiting for input",
     ));
     tracing::info!("Node {node_id} awaiting user input (Node Turn)");
-    Ok(true)
 }
 
 /// The user typed into the node (or the autoclear safety net, or
@@ -916,18 +922,49 @@ pub fn on_turn_completed(
     Ok(true)
 }
 
+pub(crate) struct CircuitTurnRecovery<'a> {
+    pub stamp: &'a str,
+    pub input: &'a str,
+    pub observed_at_ms: i64,
+    pub fence: &'a db::agent_node::CircuitRecoveryFence,
+    pub cancelled: &'a std::sync::atomic::AtomicBool,
+}
+
 pub(crate) fn recover_turn_completed(
     sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail,
-    stamp: &str, input: &str, completed_at_ms: i64,
+    recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
+    let committed = recover_circuit_turn(node_id, SessionStatus::Ready, recovery)?;
+    if committed { emit_turn_completed(sink, node_id, detail); }
+    Ok(committed)
+}
+
+pub(crate) fn recover_attention(
+    sink: &dyn SessionLifecycleSink, node_id: i64,
+    recovery: &CircuitTurnRecovery<'_>,
+) -> Result<bool, String> {
+    let committed = recover_circuit_turn(node_id, SessionStatus::AwaitingInput, recovery)?;
+    if committed { emit_attention(sink, node_id, None, &HookSignalDetail::default()); }
+    Ok(committed)
+}
+
+fn recover_circuit_turn(
+    node_id: i64, status: SessionStatus, recovery: &CircuitTurnRecovery<'_>,
+) -> Result<bool, String> {
+    if recovery.fence.agent_node_id != node_id { return Ok(false); }
     let committed = {
         // Acquire SQLite before the per-agent input guard. Waiting for the
         // writer must never freeze registry access or terminal keystrokes.
-        let conn = db::write_conn();
-        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, input, completed_at_ms,
-            || db::complete_agent_turn_if_current_inner(&conn, node_id, stamp).map_err(|error| error.to_string()))?
+        let mut conn = db::write_conn();
+        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, recovery.input, recovery.observed_at_ms, || {
+            if recovery.cancelled.load(std::sync::atomic::Ordering::Acquire) { return Ok(false); }
+            let transaction = conn.transaction().map_err(|error| error.to_string())?;
+            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, status)
+                .map_err(|error| error.to_string())?;
+            if committed { transaction.commit().map_err(|error| error.to_string())?; }
+            Ok(committed)
+        })?
     };
-    if committed { emit_turn_completed(sink, node_id, detail); }
     Ok(committed)
 }
 
