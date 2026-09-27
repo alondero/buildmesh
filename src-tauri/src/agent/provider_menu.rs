@@ -245,11 +245,18 @@ pub(super) fn compose_provider_menu(
 /// `commands::run_blocking` already, so the menu derivation continues to
 /// stay off the async worker pool (issue #634).
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
+    // Issue #1937: this derivation dominates the Settings -> Providers load,
+    // so each derivation emits one `info` line (lands in `logs\buildmesh.log`
+    // on a default install) with the total wall-clock and the per-runtime
+    // Codex probe cost. Only the runtime identity and CLI version travel in
+    // the fields - never credentials, keys, or endpoint URLs.
+    let derivation_started = std::time::Instant::now();
     let accounts = crate::preferences::provider_accounts();
     let configured_pairings = crate::preferences::provider_pairings();
     let needs_codex = configured_pairings
         .iter()
         .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
+    let native_probe_started = std::time::Instant::now();
     let native_codex = needs_codex
         .then(|| {
             crate::agent::provider::adapters::codex::discover_supported_install(
@@ -257,7 +264,9 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             )
         })
         .and_then(Result::ok);
+    let native_probe_duration_ms = native_probe_started.elapsed().as_millis();
     let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
+    let foreign_probe_started = std::time::Instant::now();
     let wsl_codex = needs_codex
         .then(|| {
             crate::agent::provider::adapters::codex::discover_supported_install(
@@ -265,6 +274,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             )
         })
         .and_then(Result::ok);
+    let foreign_probe_duration_ms = foreign_probe_started.elapsed().as_millis();
     let pairings = configured_pairings
         .into_iter()
         .filter(|pairing| {
@@ -298,9 +308,39 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         &crate::preferences::harness_order(),
         &crate::preferences::proxied_provider_order(),
     );
-    let Ok(mut prefs) = crate::preferences::load() else { return menu; };
-    crate::preferences::launch_configurations::reconcile(&mut prefs);
-    configuration_menu(menu, &prefs, Platform::current())
+    let menu = match crate::preferences::load() {
+        Ok(mut prefs) => {
+            crate::preferences::launch_configurations::reconcile(&mut prefs);
+            configuration_menu(menu, &prefs, Platform::current())
+        }
+        Err(_) => menu,
+    };
+    tracing::info!(
+        needs_codex,
+        native_probe_duration_ms,
+        native_runtime_identity = native_codex
+            .as_ref()
+            .map(crate::agent::provider::adapters::codex::log_safe_runtime_identity)
+            .unwrap_or_else(|| "none".to_string()),
+        native_codex_version = native_codex
+            .as_ref()
+            .map(|install| install.version.as_str())
+            .unwrap_or("none"),
+        foreign_env = %foreign_runtime,
+        foreign_probe_duration_ms,
+        foreign_runtime_identity = wsl_codex
+            .as_ref()
+            .map(crate::agent::provider::adapters::codex::log_safe_runtime_identity)
+            .unwrap_or_else(|| "none".to_string()),
+        foreign_codex_version = wsl_codex
+            .as_ref()
+            .map(|install| install.version.as_str())
+            .unwrap_or("none"),
+        menu_rows = menu.len(),
+        total_duration_ms = derivation_started.elapsed().as_millis(),
+        "provider menu derivation completed"
+    );
+    menu
 }
 
 // Keep the native harness rows as submenu parents. Route rows still serve
@@ -1495,5 +1535,159 @@ mod tests {
             info.resumable,
             "legacy minimax id resolves to Anthropic (issue #538) and must be resumable"
         );
+    }
+
+    /// Issue #1937: every `available_providers` derivation must emit exactly
+    /// one greppable `info` line carrying the total wall-clock, the
+    /// per-runtime Codex probe cost, and the `needs_codex` gate state - the
+    /// acceptance test for the Settings -> Providers load work. The field
+    /// allow-list pins the redaction discipline: only runtime identities and
+    /// CLI versions travel, never credentials, keys, or endpoint URLs.
+    ///
+    /// A hand-rolled capturing subscriber (scoped via `with_default`, so no
+    /// global state) keeps this parallel-safe without new dev-dependencies.
+    #[test]
+    fn available_providers_emits_one_greppable_derivation_log_line() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Metadata};
+
+        struct Recorder {
+            fields: Vec<(String, String)>,
+        }
+        impl Visit for Recorder {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                // `record_debug` is the `Visit` funnel: every typed
+                // `record_*` defaults through it, so one arm captures all
+                // fields. String values arrive Debug-quoted - strip the
+                // quotes for assertion readability.
+                let rendered = format!("{value:?}");
+                let unquoted = rendered
+                    .strip_prefix('"')
+                    .and_then(|inner| inner.strip_suffix('"'))
+                    .unwrap_or(&rendered)
+                    .to_string();
+                self.fields.push((field.name().to_string(), unquoted));
+            }
+        }
+        struct Capture {
+            events: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+        }
+        impl tracing::Subscriber for Capture {
+            fn enabled(&self, _: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _: &Id, _: &Record<'_>) {}
+            fn record_follows_from(&self, _: &Id, _: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                let mut recorder = Recorder { fields: Vec::new() };
+                event.record(&mut recorder);
+                self.events.lock().unwrap().push(recorder.fields);
+            }
+            fn enter(&self, _: &Id) {}
+            fn exit(&self, _: &Id) {}
+        }
+
+        let events: Arc<Mutex<Vec<Vec<(String, String)>>>> = Arc::new(Mutex::new(Vec::new()));
+        // `tracing` caches per-callsite interest globally: a first hit under
+        // the default no-op dispatcher pins the site as disabled, and a
+        // rebuild only reaches already-registered sites - so a sibling test
+        // hitting `available_providers` first (or between rebuild and emit)
+        // would silently swallow the line under parallelism. Drive one
+        // throwaway derivation first (registering the site under the
+        // capturing dispatcher), rebuild, discard its line, and assert on
+        // the second derivation. Whatever the initial cache state, the
+        // second derivation contributes exactly one line - which also
+        // proves the "one line per derivation" budget.
+        let run_once = || {
+            tracing::dispatcher::with_default(
+                &tracing::dispatcher::Dispatch::new(Capture {
+                    events: events.clone(),
+                }),
+                || {
+                    tracing::callsite::rebuild_interest_cache();
+                    available_providers()
+                },
+            )
+        };
+        run_once();
+        tracing::callsite::rebuild_interest_cache();
+        events.lock().unwrap().clear();
+        let providers = run_once();
+
+        let events = events.lock().unwrap();
+        let derivations: Vec<_> = events
+            .iter()
+            .filter(|fields| {
+                fields.iter().any(|(name, value)| {
+                    name == "message" && value == "provider menu derivation completed"
+                })
+            })
+            .collect();
+        assert_eq!(
+            derivations.len(),
+            1,
+            "expected exactly one provider menu derivation log line, got {}",
+            derivations.len()
+        );
+        let fields = derivations[0];
+        let mut names: Vec<&str> = fields
+            .iter()
+            .filter(|(name, _)| name != "message")
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "foreign_codex_version",
+                "foreign_env",
+                "foreign_probe_duration_ms",
+                "foreign_runtime_identity",
+                "menu_rows",
+                "native_codex_version",
+                "native_probe_duration_ms",
+                "native_runtime_identity",
+                "needs_codex",
+                "total_duration_ms",
+            ],
+            "the derivation log field set is the redaction contract - adding a field is a deliberate change"
+        );
+        let value = |name: &str| {
+            fields
+                .iter()
+                .find(|(field, _)| field == name)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_else(|| panic!("derivation log must carry `{name}`"))
+        };
+        // The timings must flow from the real derivation, not hardcode a
+        // shape: the total parses as a millisecond count and the row count
+        // matches the returned menu.
+        value("total_duration_ms")
+            .parse::<u128>()
+            .expect("total_duration_ms must be a millisecond count");
+        value("native_probe_duration_ms")
+            .parse::<u128>()
+            .expect("native_probe_duration_ms must be a millisecond count");
+        value("foreign_probe_duration_ms")
+            .parse::<u128>()
+            .expect("foreign_probe_duration_ms must be a millisecond count");
+        assert_eq!(
+            value("menu_rows")
+                .parse::<usize>()
+                .expect("menu_rows must parse"),
+            providers.len(),
+            "logged menu_rows must match the derived menu"
+        );
+        // A bare test env configures no OpenAI-surface pairings, so the
+        // Codex probes are skipped - and the line must say so explicitly
+        // rather than reading as a genuinely fast probe (issue #1937).
+        assert_eq!(value("needs_codex"), "false");
+        assert_eq!(value("native_runtime_identity"), "none");
+        assert_eq!(value("foreign_runtime_identity"), "none");
     }
 }
