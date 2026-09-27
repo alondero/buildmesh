@@ -80,6 +80,10 @@ module. It uses a harness startup prefill only when the adapter says that the
 prompt is safe for the command line; otherwise it starts the process cleanly
 and pastes the prompt through the PTY. Codex uses the latter for multiline
 review/diff text, avoiding CLI argument parsing of diff lines such as `+ ...`.
+For a multiline Codex prompt, Buildmesh waits until Codex renders the pasted
+content in its input box and the redraw settles before sending Enter. A startup
+redraw alone cannot acknowledge the paste; if Codex never renders it, the node
+is marked for attention instead of leaving an apparently submitted review idle.
 Ordinary interactive spawn intents retain their user-facing startup-prefill
 behavior because they have different submit/readiness semantics, but both
 paths share prompt construction and harness argument preparation.

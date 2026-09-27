@@ -325,6 +325,9 @@ const PASTE_SETTLE_QUIET_MS: u128 = 1_000;
 
 /// Upper bound on waiting for the post-paste redraw to settle.
 const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
+/// Codex on Windows can take several seconds to consume a large bracketed
+/// paste. Its input box renders a collapsed marker only after that work ends.
+const CODEX_PASTE_READY_DEADLINE: Duration = Duration::from_secs(30);
 
 /// After an Enter keystroke, PTY output must appear within this window for
 /// the submit to count as acknowledged.
@@ -400,6 +403,7 @@ pub(crate) fn write_prompt_to_pty_guarded(
     expected_input: Option<&str>,
 ) -> Result<bool, String> {
     ensure_prompt_target_alive(registry, node_id)?;
+    let readiness = paste_readiness(node_id, text)?;
     let guarded = if let Some(expected) = expected_input {
         let Some(next) = registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)? else { return Ok(false); };
         Some(next)
@@ -407,22 +411,27 @@ pub(crate) fn write_prompt_to_pty_guarded(
         registry.write_bytes(node_id, injection_payload(text).as_bytes())?;
         None
     };
+    if matches!(&readiness, PasteReadiness::CodexMultiline { .. }) {
+        // Limit the marker check to this submission, after a guarded write
+        // has actually been accepted.
+        evaluator::note_turn_start(node_id);
+    }
     if expected_input.is_some() {
         // A continuation is not delivered until the separate Enter write has
         // been acknowledged by fresh PTY output.
-        submit_staged_prompt_result(registry, node_id, guarded).map(|submitted| submitted.is_some())
+        submit_staged_prompt_result(registry, node_id, guarded, &readiness).map(|submitted| submitted.is_some())
     } else {
         let registry = Arc::clone(registry);
         let app = app.clone();
-        std::thread::spawn(move || submit_staged_prompt(&registry, node_id, &app, guarded));
+        std::thread::spawn(move || submit_staged_prompt(&registry, node_id, &app, guarded, readiness));
         Ok(true)
     }
 }
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
-fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app: &AppHandle, guard: Option<String>) {
-    settle_after_paste(node_id);
-    match press_enter_until_output_guarded(registry, node_id, guard, ENTER_ACK_WINDOW) {
+fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app: &AppHandle, guard: Option<String>, readiness: PasteReadiness) {
+    let result = submit_staged_prompt_result(registry, node_id, guard, &readiness);
+    match result {
         Ok(Some(attempt)) => tracing::info!(
             "autopilot inject({}): staged prompt submitted (Enter attempt {})",
             node_id,
@@ -459,11 +468,52 @@ fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app:
 /// later, and the Autopilot prefill path injects into exactly that state
 /// (`node_launch` registers the evaluator before spawning). Reading the clock
 /// instead would quietly demote those callers to the unobservable path.
-fn settle_after_paste(node_id: i64) {
+/// Codex multiline pastes use their rendered input-box marker as the gate;
+/// startup output is otherwise indistinguishable from a paste echo here.
+#[derive(Debug)]
+enum PasteReadiness {
+    Generic,
+    CodexMultiline { chars: usize, content: String },
+}
+
+fn paste_readiness(node_id: i64, text: &str) -> Result<PasteReadiness, String> {
+    if !text.contains('\n') || !evaluator::is_piloted(node_id) {
+        return Ok(PasteReadiness::Generic);
+    }
+    let node = crate::db::get_agent_node_by_id(node_id)
+        .map_err(|error| format!("could not identify prompt target {node_id}: {error}"))?;
+    if node.provider != "codex" {
+        return Ok(PasteReadiness::Generic);
+    }
+    Ok(PasteReadiness::CodexMultiline {
+        chars: text.chars().count(),
+        content: crate::autopilot::launch::normalize_for_match(text),
+    })
+}
+
+fn codex_paste_visible(output: &str, chars: usize, content: &str) -> bool {
+    output.contains(&format!("[Pasted Content {chars} chars]"))
+        || (!content.is_empty()
+            && crate::autopilot::launch::normalize_for_match(output).contains(content))
+}
+
+fn settle_after_paste(node_id: i64, readiness: &PasteReadiness) -> Result<(), String> {
     let wrote_at = Instant::now();
+    if let PasteReadiness::CodexMultiline { chars, content } = readiness {
+        while Instant::now() < wrote_at + CODEX_PASTE_READY_DEADLINE {
+            if codex_paste_visible(&evaluator::cleaned_turn_tail(node_id), *chars, content)
+                && evaluator::millis_since_last_output(node_id)
+                    .is_some_and(|quiet| quiet >= PASTE_SETTLE_QUIET_MS)
+            {
+                return Ok(());
+            }
+            std::thread::sleep(SUBMIT_POLL);
+        }
+        return Err(format!("Codex did not render the {chars}-character pasted prompt before Enter"));
+    }
     if !evaluator::is_piloted(node_id) {
         std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
-        return;
+        return Ok(());
     }
     while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
         if output_seen_within(
@@ -481,10 +531,11 @@ fn settle_after_paste(node_id: i64) {
             _ => break, // quiet (or no output tracked at all) — settled
         }
     }
+    Ok(())
 }
 
-fn submit_staged_prompt_result(registry: &Arc<AgentProcessRegistry>, node_id: i64, guard: Option<String>) -> Result<Option<u32>, String> {
-    settle_after_paste(node_id);
+fn submit_staged_prompt_result(registry: &Arc<AgentProcessRegistry>, node_id: i64, guard: Option<String>, readiness: &PasteReadiness) -> Result<Option<u32>, String> {
+    settle_after_paste(node_id, readiness)?;
     press_enter_until_output_guarded(registry, node_id, guard, ENTER_ACK_WINDOW)
 }
 
@@ -1501,6 +1552,72 @@ mod tests {
     #[test]
     fn single_line_payload_is_written_verbatim() {
         assert_eq!(injection_payload("do the thing"), "do the thing");
+    }
+
+    #[test]
+    fn codex_multiline_waits_for_paste_render_before_enter() {
+        let id = -930_024;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        evaluator::note_turn_start(id);
+        let readiness = PasteReadiness::CodexMultiline {
+            chars: 3279,
+            content: "reviewthistestwithallremainingcontext".into(),
+        };
+        let registry_for_submit = Arc::clone(&registry);
+        let submit = std::thread::spawn(move || {
+            submit_staged_prompt_result(&registry_for_submit, id, None, &readiness)
+        });
+
+        evaluator::on_output(id, "Codex startup redraw; review this test");
+        assert_eq!(
+            writes.recv_timeout(Duration::from_millis(1500)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "startup output must not acknowledge a paste that Codex has not rendered"
+        );
+        evaluator::on_output(id, "[Pasted Content 3279 chars]");
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(3)).unwrap(),
+            b"\r".to_vec(),
+        );
+        std::thread::sleep(SUBMIT_POLL);
+        evaluator::on_output(id, "task started");
+        assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_paste_readiness_accepts_short_visible_text() {
+        assert!(codex_paste_visible("› review the diff", 15, "reviewthediff"));
+        assert!(!codex_paste_visible("› review the", 15, "reviewthediff"));
+        assert!(!codex_paste_visible("Codex startup redraw", 3279, "reviewthistest"));
+    }
+
+    #[test]
+    fn live_codex_node_selects_rendered_paste_gate() {
+        crate::db::test_support::ensure_db_for_tests();
+        let path = std::env::temp_dir().join(format!("codex-paste-selection-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("codex paste selection", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id, "reviewer", &path, "main", crate::models::EnvType::Windows,
+            "codex", None, None, None, None, false, None, None, None,
+        ).unwrap();
+        evaluator::register(node.id);
+
+        assert!(matches!(
+            paste_readiness(node.id, "review the change\nwith context").unwrap(),
+            PasteReadiness::CodexMultiline { .. }
+        ));
+        evaluator::register(-930_099);
+        assert!(
+            paste_readiness(-930_099, "review the change\nwith context")
+                .unwrap_err().contains("could not identify prompt target"),
+            "a failed provider lookup must not silently use the early-Enter path"
+        );
+        evaluator::unregister(-930_099);
+        evaluator::unregister(node.id);
     }
 
     #[test]
