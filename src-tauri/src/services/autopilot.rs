@@ -1121,6 +1121,14 @@ fn spawn_autopilot_node(
     )
 }
 
+// Windows-only, like `tests/job_object.rs`: the scenarios assert that an app
+// crash takes the contained agent processes with it, which is a property of the
+// kill-on-close job object the spawn uses. `JobHandle::contain` is inert
+// elsewhere, and an uncontained process survives its parent's death, so there is
+// no honest non-Windows form of these assertions to gate them per-item around.
+#[cfg(all(test, windows))]
+mod retirement_crash_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

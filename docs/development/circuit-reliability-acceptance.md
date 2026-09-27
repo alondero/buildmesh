@@ -18,7 +18,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt, spawn, continuation, local status, close, and notification recovery policies are inventoried in [the effect recovery contract](circuit-effect-recovery.md). SetNodeStatus now commits with its step; review continuation rollback, reopen deduplication, and publication exclusion have focused DB coverage | Live process crashes and live GitHub mutations remain unverified. Non-OpenPr GitHub actions have no automated read-only recheck and require operator outcome records |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
-| Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
+| Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks. A forced process kill at each durable cleanup boundary is now covered end to end (issue #1911): crash before/inside the intent, after the intent, between the owned-process kill and its acknowledgement, and after the acknowledgement, each followed by a relaunch that retries cleanup | A real agent session is not what the crash phases run against — the contained processes are real PTY-backed fixture children in kill-on-close jobs, and the two in-transaction boundaries are forced with a statement abort rather than a kill inside the commit. The suite is Windows-only: the process claims depend on Win32 job containment, so Linux and macOS run the #1889 retirement checks but not these scenarios (see the #1911 section) |
 | Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation. Every wired report adapter now has identity-bound valid/malformed/partial/unavailable cases (#1912, below) | Optional synthetic fast-model comparison deferred ([#1888](https://github.com/alondero/buildmesh/issues/1888)) |
 
 
@@ -778,6 +778,103 @@ reported 6 passed, 0 failed (3 pre-existing #1889 checks plus the 3 above);
 reported 135 passed, 0 failed. `cargo clippy --locked --all-targets` exited 0
 with the two existing library and 28 library-test warnings, none in the changed
 file.
+
+## Legacy retirement cleanup after a forced process crash (issue #1911)
+
+The #1889 retirement checks cover the deterministic startup cutover and a clean
+reopen. [#1911](https://github.com/alondero/buildmesh/issues/1911) covers the
+transition they skip: a crash *during* owned-agent cleanup, when part of the
+cleanup is durable and part is not, followed by the retry the next launch
+performs. The scenarios live in
+`src-tauri/src/services/autopilot/retirement_crash_tests.rs` and drive the
+production sweep (`services::autopilot::retire_legacy_automation`, the call
+`lib.rs` `setup` makes before crash recovery).
+
+Each phase runs in its own process, so the sweep gets the database singleton and
+the `PROCESS_REGISTRY` that a relaunch really starts from, and each crash phase
+ends in a real `std::process::abort()` between durable steps. A crash is only
+counted as covered when the child records that it reached its abort before dying:
+a failed assertion also exits nonzero, so the status alone would let a broken
+child pass for a covered boundary. The two boundaries that live inside a single
+transaction are forced with a `RAISE(ABORT)` trigger instead — a transaction
+that does not commit leaves the same durable state whether SQLite rolled it back
+or a killed process lost it. Where the claim is "the owned process was stopped",
+the child registers a real PTY-backed process in `PROCESS_REGISTRY` and asserts
+whether it died; where the claim is "the retry must not stop that process", the
+same child asserts it survived.
+
+The owned processes are held in the same kill-on-close `JobHandle` the real
+spawn uses, which is what makes the process state of a crash window decidable:
+when the app dies, every contained process dies with it, so the relaunch inherits
+a stop whose process is already gone instead of an orphan it has no handle to.
+Each phase holds two contained processes — the registered one the retirement
+stops, and a second one it never touches — so the exit observation is about the
+app crash reaching what it held, not merely about the sweep's own victim. An
+unobservable pid fails the test rather than counting as either state.
+
+**This suite is Windows-only**, and the module is gated
+`#[cfg(all(test, windows))]` rather than gating its process assertions
+individually. Kill-on-close job objects are a Win32 mechanism (`JobHandle::contain`
+is inert elsewhere), and an uncontained process *does* survive its parent's
+death — verified directly — so on Linux and macOS the assertion this suite exists
+to make is false rather than merely unimplemented. Gating per item would leave a
+suite that silently drops its central claim while still appearing to cover the
+issue. The consequence is recorded rather than hidden: Linux CI runs the #1889
+checks in `db::legacy_retirement` but not this crash suite, for the same reason
+`tests/job_object.rs` is `#![cfg(windows)]`.
+
+| Scenario | Observed result | Evidence boundary |
+| --- | --- | --- |
+| `retirement_crash_before_the_cleanup_intent_recovers_without_partial_retirement` | Passed: a kill during startup, and a kill inside the intent transaction after the retirement rows were written, each left every durable fact identical to the fixture — no retirement row, run still `finishing`, Mesh still enabled. The relaunch recorded the intent once, cancelled the run, disabled legacy scheduling, suspended the node and stamped the stop; a second relaunch changed nothing | Real process kill between steps; the in-transaction boundary is a forced statement abort |
+| `retirement_crash_after_the_cleanup_intent_resumes_the_outstanding_stop` | Passed: at the kill the intent was durable (1 retirement row, run `cancelled`, Mesh disabled) while the stop was outstanding (`stopped_at` null, node still `running`) and a replacement spawn claim was refused. Both contained processes were alive before the crash and gone before the relaunch — the kill-on-close jobs took them with the app, so the retry inherited a stop whose processes no longer existed and finished it (suspended, acknowledged, still one retirement row). A further relaunch beside a live process changed nothing | Real process kill between the intent and the stop; the process observation is Windows-only; the relaunch starts from an empty process registry, exactly as a real one does |
+| `retirement_crash_between_the_process_kill_and_its_acknowledgement_recovers` | Passed: the owned PTY process was really killed, and the acknowledgement that should have followed was forced to fail; the app then died with `stopped_at` still null and the node status rolled back to `running`. The relaunch acknowledged the stop whose process was already gone — suspended, acknowledged, legacy history intact | Real process kill, and a real process death; the acknowledgement is a forced statement abort inside `complete_stop` |
+| `retirement_crash_after_the_acknowledgement_leaves_nothing_to_retry` | Passed: the kill and the acknowledgement were both durable, and a relaunch beside a live process suspended nothing and stopped nothing — the snapshot was byte-for-byte the committed one | Real process kill after the last durable boundary |
+| `retirement_retry_protects_a_borrowed_process_and_the_retained_node` | Passed: a Circuit run borrowed the retained node while the stop was outstanding; the relaunch left the live process running, did not suspend the node, closed its own intent instead, and left the borrowing run `running` and unconverted | Real process alive across the retry; the child asserts it was not killed |
+| `retirement_retry_refuses_to_stop_a_new_session_incarnation` | Passed: the node started a new session incarnation after the retirement journalled the previous one; the relaunch left the live process running, kept the node `running`, and closed the retirement's own intent | Same; the fence is the journalled `(session incarnation, no borrower)` pair |
+
+Every scenario also asserts the retained side: the legacy run keeps its
+inspection-relevant identity — issue, attempts, PR number, PR URL, loop iteration
+and creation time — with only its state and `updated_at` moving; it is never
+reopened, split or converted (no Circuit run count change); the Agent Node and
+its worktree stay on disk for inspection; no worktree removal is ever queued;
+legacy and Circuit capacity stay independent; the suspended node never appears
+in the auto-resume list; and history agrees before and after every retry.
+
+Focused evidence: from `src-tauri` on Windows 11,
+`cargo test --locked --lib retirement_crash -- --test-threads=1` reported 6 passed,
+0 failed, 1 ignored (the `#[ignore]`d subprocess entry point, which `cargo test`
+never runs on its own). An earlier revision of this module called its
+Windows-only liveness probe from ungated code and failed to compile for
+`x86_64-unknown-linux-gnu` (`E0425: cannot find function 'observe_running' in this
+scope … found an item that was configured out`); the module is now gated as a
+whole. The full crate cannot be cross-checked for Linux from this Windows host —
+`libdbus-sys` and `openssl-sys` build scripts need Linux system libraries — so the
+non-Windows side of the fix is argued from the `#[cfg(all(test, windows))]`
+declaration plus the target-compiled reproduction of the failure, not from a
+green Linux build. Removing the ownership gate in
+`retire_legacy_automation` — so the sweep stops a process it no longer owns —
+fails exactly the two protection scenarios and leaves the other four green.
+Two mutations check that the crash harness and the process observation are not
+vacuous: making a crash child fail an assertion instead of aborting is rejected
+with the child's own message ("never reached its forced abort", exit 101) rather
+than counted as a covered boundary, and dropping the second process out of its
+kill-on-close job leaves it alive as an orphan, which the post-intent scenario
+detects in 17s. The existing #1889 checks still pass
+(`cargo test --locked --lib db::legacy_retirement`: 2 passed), and the
+whole lib target reports 3910 passed, 25 ignored, 1 failed — the failure is
+`sandbox::spawn::tests::curated_env_prepends_git_and_redirects_temp`, which also
+fails on this machine when run alone with these scenarios filtered out, because
+its `TEMP` is `AppData\Local\Temp`; it is unrelated to this work.
+`cargo clippy --locked --all-targets -j 1` exits 0 with the pre-existing 4
+library and 31 library-test warnings and no finding in the new file.
+
+These scenarios do not establish a machine-level power loss, a real agent
+session as the retired process, a descendant spawned by the contained process
+itself (the fixture's second process is spawned by the app, because a background
+child of a pseudoconsole-hosted shell does not survive on Windows), a race
+between the retirement sweep and a live borrow, or any behaviour off Windows —
+the module does not compile into non-Windows test targets, so nothing here is
+evidence about Linux or macOS.
 
 ## Wait, capacity, configuration and recovery history (#1909)
 

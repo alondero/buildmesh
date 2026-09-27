@@ -581,6 +581,23 @@ available for inspection. The Probe shows retained settings read-only. No legacy
 configuration or history is transferred into Circuits; their capacity remains
 independent. The following notes describe retained legacy code and history.
 
+**Stop fences (issue #1911):** a pending stop is owned by the pair *(the session
+incarnation the retirement journalled, no borrowing Circuit run)*. The sweep
+re-acknowledges a stop it no longer owns — a new incarnation or a newer Circuit
+borrower means someone else owns that process — instead of killing it, and an
+acknowledged stop is never re-run, so cleanup retries are idempotent and
+generation-fenced. A pending stop also refuses a replacement spawn claim, so the
+retry and a new session cannot fight over the same worktree. The stop and its
+acknowledgement commit in one transaction, and the stop is journalled before the
+process is killed, so a crash between the two is recovered by the next launch's
+sweep. An app crash also takes the owned agent with it, because every spawn is
+held in a kill-on-close Windows job: an uncontained process survives the crash as
+an orphan the relaunch has no handle to, and the relaunch then has a stop whose
+process is already gone rather than one to retry. That containment is a Windows
+mechanism, so the crash-recovery suite that verifies it is Windows-only;
+`services::autopilot::retirement_crash_tests`, with the evidence recorded in
+`docs/development/circuit-reliability-acceptance.md`.
+
 
 Event-driven agent provisioning: a mesh with `autopilot_enabled` is polled every 2 minutes (`services::autopilot::start_autopilot_worker`, started in `lib.rs` setup) for open GitHub issues carrying the mesh's trigger label (default `buildmesh:run`). New issues — capacity-gated by `autopilot_concurrency_limit`, deduped against `db::list_known_autopilot_issue_numbers`, and collaborator-gated via `autopilot::gate_trigger` (ADR-0012 §5) — spawn ordinary two-stage issue nodes with `use_worktree` forced on and `worktree_mode` forced `branched` (enforced in `spawn_agent_inner` off the `autopilot_runs` ledger row).
 
