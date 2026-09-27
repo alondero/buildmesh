@@ -34,6 +34,10 @@ const EMPTY_NODES: AgentNode[] = [];
 // provider subtree (and, through it, every sortable row) on each node update.
 const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
 
+// Issue #1939 — stable empty identity for the sortable-id retention below,
+// so the band-empty initial state shares one reference like `EMPTY_NODES`.
+const EMPTY_SORTABLE_IDS: number[] = [];
+
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
   // Single shared Spawn Option snapshot (issue #1502 — one fetch + one
@@ -61,8 +65,15 @@ export function Sidebar() {
   // Archived nodes are excluded here (issue #788 — they live in the
   // Archive probe tab, not the actionable sidebar list; mirrors mobile's
   // `visibleNodes` filter in src/mobile/screens/NodeList.tsx).
+  // Issue #1939 — the same pass also partitions the meshes into the
+  // active band (at least one open node, i.e. a non-empty group) and the
+  // inactive band. Both bands keep the manual drag order (`meshes` order):
+  // a mesh only ever crosses a band boundary, never reorders among its
+  // peers. Membership is an emptiness test on the group — no status
+  // interpretation participates — so it holds for both the close path
+  // (row deleted) and the archive path (status set, excluded above).
   const agentNodes = useAllAgentNodes();
-  const nodesByMesh = useMemo(() => {
+  const { nodesByMesh, activeMeshes, inactiveMeshes } = useMemo(() => {
     const grouped = new Map<number, AgentNode[]>();
     for (const node of agentNodes) {
       if (node.status === 'archived') continue;
@@ -70,8 +81,15 @@ export function Sidebar() {
       if (list) list.push(node);
       else grouped.set(node.mesh_id, [node]);
     }
-    return grouped;
-  }, [agentNodes]);
+    const active: Mesh[] = [];
+    const inactive: Mesh[] = [];
+    for (const mesh of meshes) {
+      const group = grouped.get(mesh.id);
+      if (group && group.length > 0) active.push(mesh);
+      else inactive.push(mesh);
+    }
+    return { nodesByMesh: grouped, activeMeshes: active, inactiveMeshes: inactive };
+  }, [meshes, agentNodes]);
   // Issue #1748 — `Sidebar` no longer subscribes to `activeNodeId`: each
   // `NodeItem` owns its own active bit, so activating a node re-renders
   // only the rows whose bit flips instead of the whole sidebar.
@@ -195,6 +213,10 @@ export function Sidebar() {
     await deleteAgentNode(nodeId);
   }, [deleteAgentNode]);
 
+  // Issue #1939 — the drop target resolves against the MANUAL `meshes`
+  // order, not the displayed band order, so dragging across the band
+  // boundary only changes the manual position; band membership (open-node
+  // count) is never a drag side effect and needs no special handling.
   const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event;
     if (!over || active.id === over.id) return;
@@ -222,10 +244,57 @@ export function Sidebar() {
 
   // Issue #1748 — `SortableContext` keys its context value on the `items`
   // array identity, and every `MeshItem` subscribes through `useSortable` —
-  // a fresh `meshes.map(...)` per render would re-render every row via
-  // context even with memoized props. The id list only changes when the
-  // mesh list itself changes, never on node updates.
-  const sortableMeshIds = useMemo(() => meshes.map(p => p.id), [meshes]);
+  // a fresh id list per render would re-render every row via context even
+  // with memoized props. The id list only changes when the displayed order
+  // actually changes, never on band-neutral node updates.
+  // Issue #1939 — the items follow the DISPLAYED order (active band first)
+  // so the keyboard sensor walks rows as the user sees them. The band
+  // arrays above are fresh literals on every node update, so mapping them
+  // directly would mint a new identity on each one. The previous list is
+  // retained while the joined id signature is unchanged (element-wise
+  // comparison, idempotent across re-renders), so identity flips only when
+  // a mesh actually crosses a band boundary or the mesh list itself
+  // changes. `handleDragEnd` below still resolves the drop target against
+  // the manual `meshes` order, so dragging across the band boundary only
+  // changes the manual position — band membership itself is never
+  // draggable.
+  const sortableMeshIdsPrevRef = useRef<number[]>(EMPTY_SORTABLE_IDS);
+  const nextSortableMeshIds = [...activeMeshes, ...inactiveMeshes].map(p => p.id);
+  const prevSortableMeshIds = sortableMeshIdsPrevRef.current;
+  if (
+    prevSortableMeshIds.length !== nextSortableMeshIds.length ||
+    prevSortableMeshIds.some((id, index) => id !== nextSortableMeshIds[index])
+  ) {
+    sortableMeshIdsPrevRef.current = nextSortableMeshIds;
+  }
+  const sortableMeshIds = sortableMeshIdsPrevRef.current;
+
+  // Issue #1939 — one row renderer for both bands. Inactive rows render
+  // `dimmed` (presentational only: same structure, same spawn affordance).
+  const renderMeshRow = (mesh: Mesh, dimmed: boolean) => (
+    <MeshItem
+      key={mesh.id}
+      mesh={mesh}
+      isSelected={selectedMeshId === mesh.id}
+      isDropdownOpen={openDropdownFor === dropdownId('mesh', mesh.id)}
+      isSpawning={spawningMeshIds.has(mesh.id)}
+      dimmed={dimmed}
+      providerList={providerData}
+      onSelectMesh={handleSelectMesh}
+      onNewNode={handleToggleDropdown}
+      onSelectProvider={handleSelectProvider}
+      onOpenFilesProbe={handleOpenFilesProbe}
+      onOpenPropertiesProbe={handleOpenPropertiesProbe}
+      onOpenWorktreesProbe={handleOpenWorktreesProbe}
+      onOpenIssuesProbe={handleOpenIssuesProbe}
+      onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
+      meshNodes={nodesByMesh.get(mesh.id) ?? EMPTY_NODES}
+      onActivateNode={activateNode}
+      selectMesh={selectMesh}
+      onDeleteNode={handleDeleteNode}
+      getDefaultProvider={getDefaultProvider}
+    />
+  );
 
   return (
     <div className="relative flex h-full" style={{ width }}>
@@ -262,29 +331,25 @@ export function Sidebar() {
             ) : (
               <DndContext sensors={sensors} onDragEnd={handleDragEnd}>
                 <SortableContext items={sortableMeshIds} strategy={verticalListSortingStrategy}>
-                  {meshes.map(mesh => (
-                    <MeshItem
-                      key={mesh.id}
-                      mesh={mesh}
-                      isSelected={selectedMeshId === mesh.id}
-                      isDropdownOpen={openDropdownFor === dropdownId('mesh', mesh.id)}
-                      isSpawning={spawningMeshIds.has(mesh.id)}
-                      providerList={providerData}
-                      onSelectMesh={handleSelectMesh}
-                      onNewNode={handleToggleDropdown}
-                      onSelectProvider={handleSelectProvider}
-                      onOpenFilesProbe={handleOpenFilesProbe}
-                      onOpenPropertiesProbe={handleOpenPropertiesProbe}
-                      onOpenWorktreesProbe={handleOpenWorktreesProbe}
-                      onOpenIssuesProbe={handleOpenIssuesProbe}
-                      onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
-                      meshNodes={nodesByMesh.get(mesh.id) ?? EMPTY_NODES}
-                      onActivateNode={activateNode}
-                      selectMesh={selectMesh}
-                      onDeleteNode={handleDeleteNode}
-                      getDefaultProvider={getDefaultProvider}
-                    />
-                  ))}
+                  {/* Issue #1939 — meshes with at least one open node form
+                      the top band under a single label; every other mesh
+                      follows below, dimmed, in manual drag order. With no
+                      open node anywhere there is no band and no label —
+                      just the manual list. One scroll container throughout;
+                      the label is a static (non-sticky) row in the same flow. */}
+                  {activeMeshes.length > 0 && (
+                    <p className="px-2 pt-1 pb-1 text-2xs uppercase tracking-wide text-text-muted">
+                      Active
+                    </p>
+                  )}
+                  {activeMeshes.length > 0
+                    ? (
+                      <>
+                        {activeMeshes.map(mesh => renderMeshRow(mesh, false))}
+                        {inactiveMeshes.map(mesh => renderMeshRow(mesh, true))}
+                      </>
+                    )
+                    : meshes.map(mesh => renderMeshRow(mesh, false))}
                 </SortableContext>
               </DndContext>
             )}

@@ -53,6 +53,12 @@ interface MeshItemProps {
   /** A spawn for this mesh is in flight — the `+ ▾` cluster shows
    *  "Spawning…" and disables to prevent duplicate nodes. */
   isSpawning: boolean;
+  /** Issue #1939 — the mesh sits in the sidebar's inactive band (no open
+   *  nodes). Presentational only: dimmed text with the colour accent
+   *  suppressed. Structure, height, and every affordance (spawn, reorder,
+   *  context menu) are unchanged. Optional so existing call sites are
+   *  unaffected; absent means active. */
+  dimmed?: boolean;
   providerList: SpawnOption[];
   onSelectMesh: (id: number) => void;
   onNewNode: (mesh: Mesh) => void;
@@ -110,6 +116,7 @@ function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): bo
     && previous.isSelected === next.isSelected
     && previous.isDropdownOpen === next.isDropdownOpen
     && previous.isSpawning === next.isSpawning
+    && previous.dimmed === next.dimmed
     && previous.providerList === next.providerList
     && sameMeshNodeRefs(previous.meshNodes, next.meshNodes)
     && previous.onSelectMesh === next.onSelectMesh
@@ -134,6 +141,7 @@ function MeshItemView({
   isSelected,
   isDropdownOpen,
   isSpawning,
+  dimmed = false,
   providerList,
   onSelectMesh,
   onNewNode,
@@ -371,7 +379,10 @@ function MeshItemView({
         // The left accent shows the mesh colour. Rendered via inline style
         // (not a Tailwind class) so a user-picked custom hex works, not just
         // the eight palette entries.
-        style={{ borderLeftColor: meshColor.hex }}
+        // Issue #1939 — inactive-band rows suppress the accent (transparent
+        // keeps the border width, so the row height and structure are
+        // unchanged).
+        style={{ borderLeftColor: dimmed ? 'transparent' : meshColor.hex }}
         className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${
           isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
         }`}
@@ -410,12 +421,14 @@ function MeshItemView({
             onClick={(e) => { e.stopPropagation(); setRecolorOpen(true); }}
             title="Change mesh colour"
             aria-label="Change mesh colour"
-            className="h-3 w-3 shrink-0 rounded-full border border-black/20 hover:scale-125 transition-transform"
+            // Issue #1939 — inactive-band rows mute the swatch (still the
+            // same size and still clickable; only the colour is suppressed).
+            className={`h-3 w-3 shrink-0 rounded-full border border-black/20 hover:scale-125 transition-transform ${dimmed ? 'opacity-30' : ''}`}
             style={{ backgroundColor: meshColor.hex }}
           />
           <span
             id={`mesh-item-name-${mesh.id}`}
-            className="font-sans font-semibold text-sm text-text-primary truncate flex-1"
+            className={`font-sans font-semibold text-sm truncate flex-1 ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
           >
             {mesh.name}
           </span>

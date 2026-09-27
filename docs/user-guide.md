@@ -119,6 +119,19 @@ the layout: agents retain their own processes, worktrees, and close actions.
 If the group's title node is archived or deleted, surviving members remain
 accessible. Grouping does not combine nodes from different Meshes.
 
+## Find open work in the sidebar
+
+Meshes that currently have at least one open agent node sit at the top of
+the sidebar under an **Active** label, in your own drag order; every other
+mesh follows below, dimmed, in the same manual order. Nothing is hidden — all
+meshes stay visible and every row keeps its spawn control, so a mesh with
+nothing open is still a working row you can spawn from.
+
+Opening the first node in a mesh moves it into the top band; closing or
+archiving its last node returns it to its manual position. Dragging a mesh
+only changes your manual arrangement — it never changes which band the mesh
+is in.
+
 ## Hand work over to another node
 
 Select text in an agent's terminal and right-click it to hand that selection on
