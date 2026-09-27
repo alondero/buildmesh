@@ -58,21 +58,34 @@ impl ReportReadError {
 pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
     if format == TranscriptFormat::OpenCode {
+        // Resolve the env-aware SQLite store, then read it. The resolve/read
+        // split mirrors `read_opencode_tail` and lets the store-backed read be
+        // exercised against a temporary DB without touching `$HOME`.
         let (path, session_id) = opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
-        let rows = read_opencode_message_rows(&path, session_id, OPENCODE_DIGEST_WINDOW).ok_or(E::Unreadable)?;
-        let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
-        let last = parsed.turns.last().ok_or(E::NoReport)?;
-        if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
-        let report = opencode_assistant_report(&path, session_id).ok_or(E::NoReport)?;
-        let published_at_ms = rows.last().and_then(|row| row.1.pointer("/info/time/completed"))
-            .and_then(|time| time.as_i64()).ok_or(E::NoTimestamp)?;
-        let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision, published_at_ms,
-            // Message completion is not a native session-idle boundary.
-            turn_finished: false,
-            source: ReportSource::OpenCode { path, session_id: session_id.into(), rows } };
-        return if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) };
+        return read_opencode_file(&path, session_id);
     }
     read_file(&locate_transcript(format, session_id, node_path).ok_or(E::NoTranscript)?, format)
+}
+
+/// Read an OpenCode session's report from its SQLite store. The store is the
+/// OpenCode equivalent of a transcript file, so a malformed message record must
+/// degrade to `MalformedRecord` exactly like the file-backed readers rather than
+/// masquerading as "no report yet".
+fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, ReportReadError> {
+    use ReportReadError as E;
+    let rows = read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).ok_or(E::Unreadable)?;
+    let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
+    if parsed.saw_malformed { return Err(E::MalformedRecord); }
+    let last = parsed.turns.last().ok_or(E::NoReport)?;
+    if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
+    let report = opencode_assistant_report(path, session_id).ok_or(E::NoReport)?;
+    let published_at_ms = rows.last().and_then(|row| row.1.pointer("/info/time/completed"))
+        .and_then(|time| time.as_i64()).ok_or(E::NoTimestamp)?;
+    let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision, published_at_ms,
+        // Message completion is not a native session-idle boundary.
+        turn_finished: false,
+        source: ReportSource::OpenCode { path: path.into(), session_id: session_id.into(), rows } };
+    if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) }
 }
 
 #[cfg(test)]
@@ -376,5 +389,314 @@ mod tests {
         assert_eq!(run.context.get("node.verdict.review_verdict"), Some("approved"));
         assert_eq!(run.step("approved").unwrap().status, StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
+    }
+
+    // --- Per-harness identity-bound report coverage (#1912) ---
+    //
+    // Every harness with a wired report adapter must read its own real
+    // transcript shape into the immutable classification envelope, must fail
+    // its own malformed/unavailable case explicitly, and must bind the exact
+    // source/session/attempt/revision identity. Harness/format shape is
+    // recorded beside each fixture; a report can never borrow another
+    // provider's parser or authorize completion on a wrong/stale/cross-session
+    // identity.
+
+    struct FileReportCase {
+        harness: &'static str,
+        format: TranscriptFormat,
+        /// The harness/transcript shape this fixture was written against.
+        shape: &'static str,
+        valid: Vec<String>,
+        text: &'static str,
+        published_at_ms: i64,
+        turn_finished: bool,
+        /// A record that keeps the harness envelope but breaks its shape.
+        shape_changed: &'static str,
+        /// A newer turn with no assistant report yet.
+        unfinished: &'static str,
+    }
+
+    fn file_report_cases() -> Vec<FileReportCase> {
+        vec![
+            FileReportCase {
+                harness: "anthropic", format: TranscriptFormat::ClaudeCode,
+                shape: "claude-code ~/.claude/projects/<cwd>/<session>.jsonl",
+                valid: vec![r#"{"type":"assistant","timestamp":"2026-09-25T12:00:00Z","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"Done."}]}}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
+                shape_changed: r#"{"type":"assistant","message":{"author":"assistant","blocks":[]}}"#,
+                unfinished: r#"{"type":"user","timestamp":"2026-09-25T12:00:00Z","message":{"role":"user","content":"keep going"}}"#,
+            },
+            FileReportCase {
+                harness: "cursor", format: TranscriptFormat::Cursor,
+                shape: "cursor ~/.cursor/projects/<slug>/agent-transcripts/<session>.jsonl",
+                valid: vec![r#"{"type":"assistant","timestamp":"2026-09-25T12:00:00Z","message":{"id":"m","role":"assistant","content":[{"type":"text","text":"Done."}]}}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
+                shape_changed: r#"{"type":"assistant","message":{"author":"assistant","blocks":[]}}"#,
+                unfinished: r#"{"type":"user","timestamp":"2026-09-25T12:00:00Z","message":{"role":"user","content":"keep going"}}"#,
+            },
+            FileReportCase {
+                harness: "codex", format: TranscriptFormat::Codex,
+                shape: "codex ~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl",
+                valid: vec![
+                    r#"{"type":"response_item","timestamp":"2026-09-25T12:00:00Z","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done."}]}}"#.into(),
+                    r#"{"type":"event_msg","timestamp":"2026-09-25T12:00:01Z","payload":{"type":"task_complete","turn_id":"turn","last_agent_message":"Done."}}"#.into(),
+                ],
+                text: "Done.", published_at_ms: 1_790_337_601_000, turn_finished: true,
+                shape_changed: r#"{"type":"response_item","payload":{"type":"message","author":"assistant"}}"#,
+                unfinished: r#"{"type":"response_item","timestamp":"2026-09-25T12:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"keep going"}]}}"#,
+            },
+            FileReportCase {
+                harness: "commandcode", format: TranscriptFormat::CommandCode,
+                shape: "commandcode ~/.commandcode/projects/<slug>/<session>.jsonl",
+                valid: vec![r#"{"type":"message","timestamp":"2026-09-25T12:00:00Z","message":{"role":"assistant","content":"Done."}}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: true,
+                shape_changed: r#"{"type":"message","message":{"role":"assistant"}}"#,
+                unfinished: r#"{"type":"message","timestamp":"2026-09-25T12:00:00Z","message":{"role":"user","content":"keep going"}}"#,
+            },
+            FileReportCase {
+                harness: "agy", format: TranscriptFormat::Agy,
+                shape: "agy brain/<conversation>/.system_generated/logs/transcript.jsonl",
+                valid: vec![r#"{"source":"MODEL","created_at":"2026-09-25T12:00:00Z","content":"Done.","status":"DONE"}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
+                shape_changed: r#"{"source":"USER_EXPLICIT"}"#,
+                unfinished: r#"{"source":"USER_EXPLICIT","created_at":"2026-09-25T12:00:00Z","content":"keep going"}"#,
+            },
+            FileReportCase {
+                harness: "grok", format: TranscriptFormat::Grok,
+                shape: "grok ~/.grok/sessions/<urlencoded-cwd>/<session>/chat_history.jsonl",
+                valid: vec![r#"{"role":"assistant","timestamp":"2026-09-25T12:00:00Z","content":"Done."}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
+                shape_changed: r#"{"role":"assistant"}"#,
+                unfinished: r#"{"role":"user","timestamp":"2026-09-25T12:00:00Z","content":"keep going"}"#,
+            },
+            FileReportCase {
+                harness: "mcode", format: TranscriptFormat::Mcode,
+                shape: "mcode <dataDir>/v2/sessions/<date>/<time>-session_<id>/messages.jsonl",
+                valid: vec![r#"{"message_id":"m","turn_id":"t","message":{"role":"assistant","timestamp":1790337600000,"content":[{"type":"text","text":"Done."}]}}"#.into()],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: false,
+                shape_changed: r#"{"message_id":"m","turn_id":"t","message":{"role":"assistant","timestamp":1}}"#,
+                unfinished: r#"{"message_id":"u","turn_id":"t","message":{"role":"user","timestamp":1790337600000,"content":[{"type":"text","text":"keep going"}]}}"#,
+            },
+            FileReportCase {
+                harness: "muse", format: TranscriptFormat::Muse,
+                shape: "muse ~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl",
+                valid: vec![
+                    r#"{"payload_type":"runtime.session","recorded_at":1790337600000000,"payload":{"kind":"run","run_id":"run","event":{"kind":"assistant_message_committed","text":"Done.","message_id":"report"}}}"#.into(),
+                    r#"{"payload_type":"runtime.session","recorded_at":1790337601000000,"payload":{"kind":"run","run_id":"run","event":{"kind":"terminal","terminal":"completed"}}}"#.into(),
+                ],
+                text: "Done.", published_at_ms: 1_790_337_600_000, turn_finished: true,
+                shape_changed: r#"{"payload_type":"runtime.session","payload":{"event":{"text":"broken"}}}"#,
+                unfinished: r#"{"payload_type":"runtime.session","recorded_at":1790337602000000,"payload":{"kind":"run","run_id":"run","event":{"kind":"user_prompt_display","prompt":"keep going"}}}"#,
+            },
+        ]
+    }
+
+    fn valid_lines(lines: &[String]) -> String {
+        lines.iter().map(|line| format!("{line}\n")).collect()
+    }
+
+    fn opencode_db(dir: &std::path::Path, session_id: &str, rows: &[(&str, i64, serde_json::Value)]) -> std::path::PathBuf {
+        let db_path = dir.join("opencode.db");
+        let _ = std::fs::remove_file(&db_path);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);").unwrap();
+        for (id, created, data) in rows {
+            conn.execute("INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![id, session_id, created, data.to_string()]).unwrap();
+        }
+        db_path
+    }
+
+    fn opencode_assistant_value(text: &str, completed: i64) -> serde_json::Value {
+        serde_json::json!({"info":{"role":"assistant","time":{"completed":completed}},
+            "parts":[{"type":"text","text":text}]})
+    }
+
+    /// Every wired report adapter's valid fixture, read through the real
+    /// envelope, with its temporary store kept alive for later freshness checks.
+    fn wired_report_snapshots() -> Vec<(&'static str, tempfile::TempDir, ReportSnapshot)> {
+        let mut snapshots = Vec::new();
+        for case in file_report_cases() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            fs::write(&path, valid_lines(&case.valid)).unwrap();
+            let snapshot = read_file(&path, case.format)
+                .unwrap_or_else(|error| panic!("{} ({}) valid report failed: {error:?}", case.harness, case.shape));
+            snapshots.push((case.harness, dir, snapshot));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
+            &[("msg-1", 1, opencode_assistant_value("Done.", 1_790_337_600_000))]);
+        let snapshot = read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap();
+        snapshots.push(("opencode", dir, snapshot));
+        snapshots
+    }
+
+    #[test]
+    fn every_wired_report_adapter_reads_its_own_valid_shape_into_the_envelope() {
+        for case in file_report_cases() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            fs::write(&path, valid_lines(&case.valid)).unwrap();
+            let report = read_file(&path, case.format)
+                .unwrap_or_else(|error| panic!("{} ({}) valid report failed: {error:?}", case.harness, case.shape));
+            assert_eq!(report.text, case.text, "{} text", case.harness);
+            assert!(!report.revision.is_empty(), "{} must carry a report revision", case.harness);
+            assert_eq!(report.published_at_ms, case.published_at_ms, "{} publication time", case.harness);
+            assert_eq!(report.turn_finished, case.turn_finished, "{} native turn boundary", case.harness);
+        }
+        // OpenCode is SQLite-backed: its report read is the store seam.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
+            &[("msg-1", 1, opencode_assistant_value("Done.", 1_790_337_600_000))]);
+        let snapshot = read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap();
+        assert_eq!(snapshot.text, "Done.");
+        assert!(snapshot.revision.starts_with("msg-1:"), "opencode revision is message-id + content hash");
+        assert_eq!(snapshot.published_at_ms, 1_790_337_600_000);
+        assert!(!snapshot.turn_finished, "message completion is not a native session-idle boundary");
+    }
+
+    #[test]
+    fn every_wired_report_adapter_rejects_its_own_malformed_partial_and_unavailable_shapes() {
+        for case in file_report_cases() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            let valid = valid_lines(&case.valid);
+            fs::write(&path, format!("{valid}not json\n")).unwrap();
+            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::MalformedRecord, "{} malformed json", case.harness);
+            fs::write(&path, format!("{valid}{}\n", case.shape_changed)).unwrap();
+            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::MalformedRecord, "{} shape change", case.harness);
+            fs::write(&path, format!("{valid}{{\"type\":\"message\"")).unwrap();
+            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::PartialPublication, "{} partial publication", case.harness);
+            fs::write(&path, format!("{valid}{}\n", case.unfinished)).unwrap();
+            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::WorkInProgress, "{} unfinished turn", case.harness);
+            fs::write(&path, String::new()).unwrap();
+            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::NoReport, "{} quiet transcript", case.harness);
+            assert_eq!(read_file(&dir.path().join("missing.jsonl"), case.format).unwrap_err(), ReportReadError::Unreadable, "{} missing transcript", case.harness);
+        }
+    }
+
+    #[test]
+    fn opencode_report_adapter_rejects_its_own_malformed_unfinished_and_unavailable_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = "ses_000000000000000000000000";
+        // Malformed: a recognised message envelope with no role.
+        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"author":"assistant"},"parts":[]}))]);
+        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::MalformedRecord);
+        // Unfinished: the newest turn is a user prompt, then an in-flight tool call.
+        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"role":"user"},"parts":[{"type":"text","text":"keep going"}]}))]);
+        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::WorkInProgress);
+        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"role":"assistant"},"parts":[{"type":"tool","state":{"title":"read","input":{}}}]}))]);
+        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::WorkInProgress);
+        // Unavailable: no messages at all, then no store on disk.
+        let db_path = opencode_db(dir.path(), session, &[]);
+        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::NoReport);
+        assert_eq!(read_opencode_file(&dir.path().join("missing.db"), session).unwrap_err(), ReportReadError::Unreadable);
+    }
+
+    #[test]
+    fn every_wired_report_adapter_binds_exact_identity_into_the_classification_envelope() {
+        use crate::services::circuit_worker::readiness;
+        use crate::models::{AgentNode, SessionStatus};
+        for (harness, _dir, snapshot) in wired_report_snapshots() {
+            let (run, _) = classified_run(snapshot.clone());
+            let agent = AgentNode { id: 900, provider: harness.into(), cli_session_id: Some("session".into()),
+                status: SessionStatus::Ready, ..Default::default() };
+            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone()))
+                .unwrap_or_else(|blocker| panic!("{harness} report blocked: {blocker:?}"))
+                .unwrap_or_else(|| panic!("{harness} report produced no candidate"));
+            let binding = candidate.binding;
+            assert_eq!(binding.owner.run_id, 42, "{harness}");
+            assert_eq!(binding.owner.step_id, "await_source", "{harness}");
+            assert_eq!(binding.owner.attempt, 1, "{harness}");
+            assert_eq!(binding.owner.agent_node_id, 900, "{harness}");
+            assert_eq!(binding.owner.session_id.as_deref(), Some("session"), "{harness}");
+            assert_eq!(binding.owner.session_incarnation.as_deref(), Some("100"), "{harness}");
+            assert_eq!(binding.owner.report_revision.as_deref(), Some(snapshot.revision.as_str()), "{harness} source revision");
+            assert_eq!(binding.report_revision, snapshot.revision, "{harness}");
+            let guard = binding.input_guard;
+            assert_eq!(guard.report_guard.as_ref(), Some(&snapshot), "{harness} immutable envelope");
+            assert_eq!(guard.agent_node_id, 900, "{harness}");
+            assert_eq!(guard.input_stamp, "1:0", "{harness}");
+            assert_eq!(guard.session_id, "session", "{harness}");
+            assert_eq!(guard.session_incarnation, "100", "{harness}");
+            assert_eq!(guard.observed_at_ms, snapshot.published_at_ms, "{harness}");
+        }
+    }
+
+    #[test]
+    fn superseded_and_stale_reports_cannot_bind_for_any_harness() {
+        use crate::services::circuit_worker::readiness;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        for (harness, _dir, snapshot) in wired_report_snapshots() {
+            let agent = AgentNode { id: 900, provider: harness.into(), cli_session_id: Some("session".into()),
+                status: SessionStatus::Ready, ..Default::default() };
+            let (mut run, _) = classified_run(snapshot.clone());
+            run.context.set("agent.900.previous_report_revision", &snapshot.revision);
+            assert_eq!(
+                readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone())).err(),
+                Some(B::ReportSuperseded),
+                "{harness} a superseded report must not bind"
+            );
+            let (run, _) = classified_run(snapshot.clone());
+            let incarnation = snapshot.published_at_ms + 1_000;
+            assert_eq!(
+                readiness::prepare(&run, "await_source", &agent, Some(&format!("{incarnation}:projection")), Ok("1:0".into()), Ok(snapshot.clone())).err(),
+                Some(B::ReportSuperseded),
+                "{harness} a report published before the bound session incarnation must not bind"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_session_attempt_agent_or_report_cannot_authorize_completion_for_any_harness() {
+        for (harness, _dir, snapshot) in wired_report_snapshots() {
+            type BindingMutation = fn(&mut ClassificationBinding);
+            let mutations: [(&str, BindingMutation); 4] = [
+                ("session", |binding| binding.owner.session_id = Some("other-session".into())),
+                ("attempt", |binding| binding.owner.attempt = 2),
+                ("agent", |binding| binding.owner.agent_node_id = 901),
+                ("report_revision", |binding| binding.owner.report_revision = Some("other:0".into())),
+            ];
+            for (label, mutate) in mutations {
+                let (mut run, mut event) = classified_run(snapshot.clone());
+                let CircuitEvent::TurnClassified { binding: Some(binding), .. } = &mut event else { panic!("classification fixture") };
+                mutate(binding);
+                advance(&mut run, &event);
+                assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified, "{harness} {label} must not complete");
+                assert_eq!(run.state, RunState::Running, "{harness} {label}");
+                assert!(run.context.get("source.output").is_none(), "{harness} {label} must not publish the report");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bound_report_cannot_clear_a_human_wait_for_any_harness() {
+        for (harness, _dir, snapshot) in wired_report_snapshots() {
+            let (mut run, event) = classified_run(snapshot);
+            run.context.set("node.await_source.human_wait", "1");
+            let transition = advance(&mut run, &event);
+            assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified, "{harness}");
+            assert_eq!(run.state, RunState::Running, "{harness}");
+            assert!(transition.effects.is_empty(), "{harness} a report must not emit an effect over a human wait");
+            assert!(run.context.get("source.output").is_none(), "{harness}");
+        }
+    }
+
+    #[test]
+    fn a_report_handoff_never_claims_native_lifecycle_or_owned_work_for_any_harness() {
+        use crate::autopilot::circuit::observation::ReportCompleteness;
+        for (harness, _dir, snapshot) in wired_report_snapshots() {
+            let (mut run, event) = classified_run(snapshot);
+            let transition = advance(&mut run, &event);
+            assert_eq!(run.step("await_source").unwrap().status, StepStatus::Completed, "{harness}");
+            assert_eq!(run.state, RunState::Completed, "{harness}");
+            let recorded = &transition.classifications[0];
+            assert!(!recorded.lifecycle_verified, "{harness} a report cannot prove native lifecycle");
+            assert!(matches!(recorded.report_completeness, ReportCompleteness::Partial),
+                "{harness} an unproven-completeness report is Partial, not Complete");
+            assert!(transition.input_guard.is_some(), "{harness} the immutable envelope must survive the handoff");
+        }
     }
 }

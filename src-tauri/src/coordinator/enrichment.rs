@@ -283,6 +283,23 @@ mod tests {
         );
     }
 
+    /// Issue #1912: a harness with no wired report adapter must yield an
+    /// explicit `Unsupported` — never another provider's parsed report. The
+    /// gate is the `TranscriptFormat::for_harness` resolver, so no file read
+    /// (and no fallback to the Claude Code directory) happens for these ids.
+    #[test]
+    fn unwired_harness_report_is_explicitly_unsupported_not_another_parser() {
+        use crate::services::transcript_reader::report_snapshot::ReportReadError;
+        for provider in [Provider::Kimi, Provider::Dsh, Provider::Freebuff, Provider::Cline, Provider::Terminal] {
+            let label = format!("{provider:?}");
+            assert_eq!(
+                circuit_report_snapshot(&node(provider, Some("sid"), true)).err(),
+                Some(ReportReadError::Unsupported),
+                "{label} has no wired report adapter"
+            );
+        }
+    }
+
     /// Secrets the agent echoed in its transcript must be masked before the tail
     /// leaves the host for a Coordinator (ADR-0012 §5). Covers all three content
     /// surfaces: turn text, a tool call's raw `input`, and the last assistant

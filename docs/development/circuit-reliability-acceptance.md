@@ -19,7 +19,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks | Startup cutover was covered; a forced process crash during cleanup and cleanup retry remain untested |
-| Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation | All-harness report coverage remains incomplete. Optional synthetic fast-model comparison deferred |
+| Classification (38-40) | #1850: exact fresh report interpretation cannot prove lifecycle | Immutable report envelope and pure classifier gate | Windows regression suites pass for wrong session/attempt/report/input, delayed children and invalidated evidence. Complete report retained separately from interpretation. Every wired report adapter now has identity-bound valid/malformed/partial/unavailable cases (#1912, below) | Optional synthetic fast-model comparison deferred ([#1888](https://github.com/alondero/buildmesh/issues/1888)) |
 
 
 Every supported observation strategy needs recorded capabilities, source, freshness bounds, child/background coverage, degraded cases, harness version, platform and launch/trust configuration. Fixture parsing alone cannot establish live delivery. Unsupported or untested combinations remain unverified.
@@ -857,3 +857,71 @@ Inspected captures (committed under `docs/pr-screenshots/issue-1909/`):
 This is a synthetic fixture (no agents spawned): it establishes the real-IPC
 read path, the 240px layout, and the operator copy — not a live harness
 lifecycle. The fixture mesh was removed through the bridge after the run.
+
+## Identity-bound report coverage for every wired adapter (#1912)
+
+Closes the row-22 "all-harness report coverage" gap. Work for
+[#1912](https://github.com/alondero/buildmesh/issues/1912), governed by
+[#1850](https://github.com/alondero/buildmesh/issues/1850). A classifier
+interpretation still cannot establish lifecycle or ownership completion; this
+section completes the per-harness report **matrix**, not the harnesses' live
+delivery.
+
+The wired report adapters are the ids `TranscriptFormat::for_harness` resolves
+(the same set `produces_readable_transcript = true` advertises, pinned by
+`transcript_format_for_harness_matches_capability_catalog`). Every one now runs
+its real transcript/report adapter into the immutable classification envelope,
+with the transcript shape recorded beside its fixture:
+
+| Harness id | Transcript format | Native turn boundary in the report |
+| --- | --- | --- |
+| `anthropic` / `claude` | Claude Code `~/.claude/projects/<cwd>/<session>.jsonl` | none (hook receipts only; `turn_finished = false`) |
+| `cursor` | Cursor `<workspace>/agent-transcripts/<session>/<session>.jsonl` (Claude-compatible) | none |
+| `codex` | Codex `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` | `task_complete` via `completed_turn` (`turn_finished = true`) |
+| `commandcode` | Command Code `~/.commandcode/projects/<slug>/<session>.jsonl` | watcher `report_turn_finished` (`turn_finished = true`) |
+| `agy` | Antigravity `brain/<conversation>/.system_generated/logs/transcript.jsonl` | none |
+| `grok` | Grok `~/.grok/sessions/<urlencoded-cwd>/<session>/chat_history.jsonl` | none |
+| `mcode` | MiniMax Code `<dataDir>/v2/sessions/<date>/…/messages.jsonl` | none |
+| `muse` | Muse `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` | watcher `report_turn_finished` (`turn_finished = true`) |
+| `opencode` | OpenCode `~/.local/share/opencode/opencode.db` (SQLite) | none (message completion is not a session-idle boundary) |
+
+`kimi`, `dsh`, `freebuff`, `cline`, and `terminal` have no wired report adapter;
+`circuit_report_snapshot` returns the explicit `Unsupported` reason for them and
+never reads another provider's directory.
+
+The matrix in `report_snapshot.rs` asserts, for every row above:
+
+- **Valid** — the real shape reads into `ReportSnapshot` with the exact text,
+  a non-empty revision, its publication time, and its native turn boundary
+  (true only for Codex/Muse/Command Code).
+- **Malformed** — a broken JSON record and a harness-shaped record whose shape
+  changed both degrade to `MalformedRecord`; OpenCode's store read now makes the
+  same distinction instead of reporting "no report yet".
+- **Partial / unfinished** — a torn trailing record is `PartialPublication`;
+  a newer user or in-flight tool turn is `WorkInProgress` (the OpenCode
+  equivalent).
+- **Unavailable** — an empty transcript is `NoReport`, a missing transcript is
+  `Unreadable`, and an unwired harness is `Unsupported`.
+- **Exact identity** — `readiness::prepare` binds `run_id`, `step_id`,
+  `attempt`, `agent_node_id`, `session_id`, `session_incarnation`, and
+  `report_revision`, and carries the identical `ReportSnapshot` on
+  `input_guard.report_guard`.
+- **No unauthorized completion** — a superseded revision or a report published
+  before the bound session incarnation is `ReportSuperseded`; a wrong session,
+  attempt, agent, or report revision, and any unresolved human wait, leave the
+  step Unverified and publish no report. These reuse the stepper's existing
+  delayed-child and invalidated-evidence regressions
+  (`circuit_child_receipts_cannot_refresh_an_older_report_input_fence`,
+  `circuit_classifier_cannot_route_without_bound_native_report_and_lifecycle`).
+
+### Automated evidence
+
+| Check | Result | Scope / limitation |
+|---|---|---|
+| From `src-tauri`: `cargo test --locked --lib -- services::transcript_reader coordinator::enrichment -- --test-threads=1` | Passed: 160 tests (9 added by #1912) | Deterministic reader/envelope seams; run on Windows |
+| `cargo test --locked --lib -- opencode_report_adapter unwired_harness -- --test-threads=1` | Passed: 3 tests | The SQLite store read and the unwired-harness isolation |
+
+This is source/deterministic-seam evidence. It does not claim live delivery for
+any harness; the per-harness live-delivery rows above remain the authority for
+that, and unsupported or untested combinations stay unverified. Platform:
+Windows, development configuration.
