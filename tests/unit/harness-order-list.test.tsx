@@ -6,24 +6,59 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { HarnessOrderList, reorderIds } from '../../src/components/AppSettings/HarnessOrderList';
+import { getOrderableHarnesses } from '../../src/components/AppSettings/harnessOrder';
 import type { ProviderInfo } from '../../src/lib/tauri';
 
-function provider(id: string, label: string, is_proxied = false): ProviderInfo {
+function provider(
+  id: string,
+  label: string,
+  is_proxied = false,
+  overrides: Partial<ProviderInfo> = {},
+): ProviderInfo {
   return {
     id,
     label,
     color: '#fff',
     icon: id,
     resumable: false,
-    // Issue #575 — Spawn Options carry the full wire shape; the
-    // HarnessOrderList now filters by `!is_proxied` so a Proxied
-    // Provider row never appears as an orderable harness.
+    // Spawn Options carry the full wire shape; the selection helper
+    // distinguishes harness rows from routes and saved configurations.
     harness_id: id,
     provider_id: null,
     is_proxied,
     group_key: id,
+    ...overrides,
   };
 }
+
+describe('getOrderableHarnesses', () => {
+  it('filters non-harness rows, deduplicates by harness, and keeps the first parent row', () => {
+    const rows = getOrderableHarnesses([
+      provider('astra', 'Astra'),
+      provider('astra-copy', 'Astra copy', false, { harness_id: 'astra' }),
+      provider('astra-low-config', 'Astra Low', false, {
+        harness_id: 'astra',
+        group_key: 'astra',
+        configuration: {
+          id: 'astra-low-config',
+          name: 'Astra Low',
+          spawn_option_id: 'astra',
+          model: null,
+          effort: null,
+          extra_args: null,
+        },
+      }),
+      provider('claude:minimax', 'MiniMax', true, { harness_id: 'claude' }),
+      provider('terminal', 'Terminal'),
+      provider('codex', 'Codex'),
+    ]);
+
+    expect(rows.map(({ id, label, harness_id }) => ({ id, label, harness_id }))).toEqual([
+      { id: 'astra', label: 'Astra', harness_id: 'astra' },
+      { id: 'codex', label: 'Codex', harness_id: 'codex' },
+    ]);
+  });
+});
 
 describe('reorderIds', () => {
   it('moves an id later in the list', () => {
@@ -97,6 +132,37 @@ describe('HarnessOrderList', () => {
     // And they don't render at all (not even a non-draggable row).
     expect(container.querySelector('[data-spawn-id="claude:minimax"]')).toBeNull();
     expect(container.querySelector('[data-spawn-id="claude:kimi"]')).toBeNull();
+  });
+
+  it('keeps a harness label when its saved configuration shares the harness id', () => {
+    const { container } = render(
+      <HarnessOrderList
+        providers={[
+          provider('claude', 'Claude Code'),
+          provider('astra', 'Astra'),
+          provider('astra-low-config', 'Astra Low', false, {
+            harness_id: 'astra',
+            group_key: 'astra',
+            configuration: {
+              id: 'astra-low-config',
+              name: 'Astra Low',
+              spawn_option_id: 'astra',
+              model: null,
+              effort: null,
+              extra_args: null,
+            },
+          }),
+        ]}
+        onReorder={() => {}}
+      />,
+    );
+
+    expect(screen.getByLabelText('Reorder Astra')).toBeTruthy();
+    expect(screen.queryByLabelText('Reorder Astra Low')).toBeNull();
+    expect(container.textContent).not.toContain('Astra Low');
+    expect(reorderIds(['claude', 'codex', 'astra'], 'astra', 'claude')).toEqual([
+      'astra', 'claude', 'codex',
+    ]);
   });
 });
 

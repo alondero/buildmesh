@@ -163,38 +163,6 @@ describe('ProviderIcon', () => {
     expect(screen.getByTitle('claude:minimax')).toBeTruthy();
   });
 
-  it('harness_order list filter rejects Proxied rows (#575 user fix)', async () => {
-    // The HarnessOrderList in Settings is for reordering Agent Harnesses,
-    // NOT Proxied Provider rows. Filter `!p.is_proxied && p.id !== 'terminal'`
-    // ensures MiniMax / Kimi don't show up as orderable harnesses.
-    const { HarnessOrderList, reorderIds } = await import(
-      '../../src/components/AppSettings/HarnessOrderList'
-    );
-    const { container } = render(
-      <HarnessOrderList
-        providers={[
-          { id: 'claude', label: 'Claude Code', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: null, is_proxied: false, group_key: 'claude' },
-          { id: 'claude:minimax', label: 'MiniMax', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: 'minimax', is_proxied: true, group_key: 'claude' },
-          { id: 'claude:kimi', label: 'Kimi', color: '', icon: '', resumable: true, harness_id: 'claude', provider_id: 'kimi', is_proxied: true, group_key: 'claude' },
-          { id: 'codex', label: 'Codex', color: '', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex' },
-          { id: 'terminal', label: 'Terminal', color: '', icon: '', resumable: false, harness_id: 'terminal', provider_id: null, is_proxied: false, group_key: 'terminal' },
-        ]}
-        onReorder={() => {}}
-      />,
-    );
-    // Orderable rows: claude + codex (terminal is pinned, proxied rows
-    // are not harnesses). Both must have a drag handle.
-    const dragHandles = container.querySelectorAll('[aria-label^="Reorder "]');
-    const labels = Array.from(dragHandles).map((h) => h.getAttribute('aria-label'));
-    expect(labels).toEqual(['Reorder Claude Code', 'Reorder Codex']);
-    expect(labels).not.toContain('Reorder MiniMax');
-    expect(labels).not.toContain('Reorder Kimi');
-    expect(labels).not.toContain('Reorder Terminal');
-    // Sanity: the pure reorder math still composes the order array
-    // from only the orderable rows.
-    expect(reorderIds(['claude', 'codex'], 'codex', 'claude')).toEqual(['codex', 'claude']);
-  });
-
   // ----- Issue #328 — `backgroundColor` + `chipSize` props -----
   //
   // Mobile `NodeRow` drives the chip's background from the live

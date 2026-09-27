@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
 import { HarnessOrderList } from './HarnessOrderList';
+import { getOrderableHarnesses } from './harnessOrder';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
@@ -1903,7 +1904,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             onRetry={() => retryResource('preferences')}
           />
         )}
-        {providers.filter(p => p.harness_id !== 'terminal').length >= 2 && (
+        {getOrderableHarnesses(providers).length >= 2 && (
           <SettingsSection title="Spawn menu order">
             <p className="pb-2 text-sm text-text-muted">
               Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.

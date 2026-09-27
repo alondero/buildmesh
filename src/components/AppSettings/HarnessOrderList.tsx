@@ -16,6 +16,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import type { ProviderInfo } from '../../lib/tauri';
+import { getOrderableHarnesses } from './harnessOrder';
 
 /**
  * Drag-to-reorder list for the spawn-menu harness rows (issue #573 / ADR-0016).
@@ -26,13 +27,11 @@ import type { ProviderInfo } from '../../lib/tauri';
  * applies the persisted id order). `Terminal` is excluded — it's pinned last by
  * the backend and isn't user-orderable.
  *
- * **Issue #575 fix** (user-reported): Proxied Provider rows (`claude:minimax`,
- * `claude:kimi`) are NOT orderable harnesses — they're a credential pairing
- * attached to a harness, not the executor itself. The previous filter
- * (`p.id !== 'terminal'`) accidentally included them after the composite-id
- * rename. The corrected filter is `!p.is_proxied && p.id !== 'terminal'`,
- * so only the native Agent Harnesses (Claude Code, Codex, Antigravity,
- * OpenCode, plus any user-defined custom harness profile) appear here.
+ * Proxied Provider rows (`claude:minimax`, `claude:kimi`) are not orderable
+ * harnesses because they are pairings, not executors. Saved launch
+ * configurations also appear in the backend list, but carry configuration
+ * metadata and are not harness rows. Both are excluded so this list shows
+ * only native Agent Harnesses plus any user-defined custom harness profile.
  */
 
 /** Pure: move `activeId` to where `overId` sits, returning the new id order.
@@ -120,8 +119,7 @@ export function HarnessOrderList({
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const rows = [...new Map(providers.filter(p => !p.is_proxied && p.harness_id !== 'terminal')
-    .map(p => [p.harness_id, { ...p, id: p.harness_id }])).values()];
+  const rows = getOrderableHarnesses(providers);
   // Nothing meaningful to drag with fewer than two rows.
   if (rows.length < 2) return null;
 
