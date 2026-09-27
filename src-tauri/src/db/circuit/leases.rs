@@ -513,7 +513,7 @@ pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim
 /// whose `trigger_identity` is a throwaway timestamp, minus each circuit's
 /// newest run.
 ///
-/// Two clauses here are load-bearing and easy to drop by accident:
+/// Three clauses here are load-bearing and easy to drop by accident:
 ///
 /// * The `LIKE` filter. `interval:<ms>` and `manual:<ms>` embed the fire time,
 ///   so the identity is never presented twice and the row is pure history once
@@ -531,6 +531,19 @@ pub(crate) fn archive_circuit_agent_inner(conn: &Connection, node_id: i64, claim
 ///   treats `None` as "fire now" — so sweeping a circuit's last surviving row
 ///   erases its cadence and fires it immediately. Keeping the newest row per
 ///   circuit preserves the anchor value exactly.
+/// * The `NOT EXISTS` lineage guard. A continued review stores the run it
+///   follows in its own `context_json` under `recovery.from_run_id`, and
+///   `recovery::continuation_target_inner` resolves the whole chain from that key
+///   and nothing else. Consecutive generations of one frozen review scope share
+///   a single recovery Circuit (`recovery_circuit_inner` reuses on `graph_json`),
+///   so every generation but the newest is sweepable on the `created_at <`
+///   clause alone — deleting an *intermediate* generation would leave the root's
+///   child missing and the next Continue would mint a sibling instead of
+///   following the chain (issue #1924). Excluding any run a surviving run still
+///   names keeps the whole lineage resolvable. A continuation is `manual:%`, so
+///   it is never compacted and the key it reads is always present (see the
+///   sweep's compaction tier below). The retained set is bounded: one chain per
+///   lineage, ending at the newest generation per recovery Circuit.
 ///
 /// `?1` is the retention window in days.
 const SWEEPABLE_RUNS: &str = "\
@@ -542,7 +555,11 @@ const SWEEPABLE_RUNS: &str = "\
         AND r.updated_at < datetime('now', '-' || ?1 || ' days') \
         AND (r.trigger_identity LIKE 'interval:%' OR r.trigger_identity LIKE 'manual:%') \
         AND r.created_at < (SELECT MAX(created_at) FROM autopilot_circuit_runs n \
-                             WHERE n.circuit_id = r.circuit_id)";
+                             WHERE n.circuit_id = r.circuit_id) \
+        AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs c \
+                        WHERE json_extract(CASE WHEN json_valid(c.context_json) \
+                                          THEN c.context_json ELSE '{}' END, \
+                                          '$.\"recovery.from_run_id\"') = r.id)";
 
 /// Bound `autopilot_circuit_runs` to a retention window. Returns
 /// `(rows_deleted, rows_compacted)`.

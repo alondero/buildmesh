@@ -38,10 +38,16 @@ That entry is an audit record, not a lookup path. The successor dedupe reads
 deletes a run together with its history rows. What keeps a lineage resolvable
 past the sweep is that a continuation's identity is `manual:%` — a family the
 sweep deletes rather than compacts, so the lineage key is never emptied — and
-that a continuation is the newest run on the recovery Circuit it is minted on,
-which the sweep always keeps. `retention_keeps_a_review_successor_resolvable`
-pins both halves. The one case that still breaks is recorded in
-[#1924](https://github.com/alondero/buildmesh/issues/1924).
+that `SWEEPABLE_RUNS` excludes any run a surviving run still names. That second
+half is the fix for [#1924](https://github.com/alondero/buildmesh/issues/1924):
+consecutive generations of one frozen review scope share a single recovery
+Circuit, so without the guard the sweep's newest-per-circuit allow-list would
+delete an intermediate generation and re-continuing the root would walk past the
+gap and mint a sibling. `retention_keeps_a_review_successor_resolvable` pins the
+single-follower case and
+`retention_keeps_a_generation_whose_successor_still_names_it` the
+three-generation case; `retention_still_sweeps_a_manual_run_outside_any_lineage`
+pins that an unrelated manual run is still swept.
 
 Environment: Windows, development profile, Codex CLI 0.157.0 (`codex --version`;
 its own TUI banner reads v0.157.1) on `gpt-6-luna` in native Windows PowerShell.

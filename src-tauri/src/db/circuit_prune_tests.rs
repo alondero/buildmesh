@@ -363,18 +363,13 @@ fn prune_on_an_empty_table_is_a_no_op() {
 /// `context_json` — `continuation_target_inner` finds children by
 /// `recovery.from_run_id` and nothing else.
 ///
-/// It survives for a structural reason that no test pinned until now: a
-/// continuation's identity family is `manual:%`, which the sweep **deletes**
-/// rather than compacts, but the sweep also keeps the newest run per circuit,
-/// and a continuation is the only run on the recovery Circuit it is minted on.
-/// A compacted (non-manual) row would lose the key and orphan the chain, so
-/// this test is the regression that would fail first if either half of that
-/// reasoning changed.
-///
-/// The remaining boundary is recorded in issue #1924: an *intermediate*
-/// generation that shares a recovery Circuit with a newer one is not the
-/// newest, so it is sweepable, and re-continuing the ancestor then walks past
-/// the gap. This test does not claim that case is safe.
+/// It survives for two reasons: a continuation's identity family is `manual:%`,
+/// which the sweep **deletes** rather than compacts, so the lineage key is never
+/// emptied; and `SWEEPABLE_RUNS`'s `NOT EXISTS` guard retains any run a surviving
+/// run still names. This test covers the single-successor case; the
+/// multi-generation case is
+/// [`retention_keeps_a_generation_whose_successor_still_names_it`], the
+/// regression for issue #1924.
 #[test]
 fn retention_keeps_a_review_successor_resolvable() {
     use crate::db::circuit::recovery::{ContinuationTarget, continuation_target_inner};
@@ -412,6 +407,88 @@ fn retention_keeps_a_review_successor_resolvable() {
     assert!(
         matches!(continuation_target_inner(&conn, ancestor).unwrap(), ContinuationTarget::Failed(id) if id == successor),
     );
+}
+
+/// A lineage with more than one generation on the same recovery Circuit puts
+/// every generation but the newest outside the newest-per-circuit allow-list.
+/// The lineage guard must retain them anyway, or re-continuing the root finds no
+/// child and mints a sibling (issue #1924). Consecutive generations share the
+/// recovery Circuit `recovery_circuit_inner` reuses on the frozen graph.
+#[test]
+fn retention_keeps_a_generation_whose_successor_still_names_it() {
+    use crate::db::circuit::recovery::{ContinuationTarget, continuation_target_inner};
+
+    let conn = prune_db();
+    let root = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    conn.execute(
+        "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
+        [],
+    ).unwrap();
+    // The middle generation is older than the newest on the same Circuit, so the
+    // newest-per-circuit clause alone would sweep it.
+    let middle = insert_run_for(
+        &conn,
+        2,
+        "manual:agent:7:bbb",
+        "failed",
+        400,
+        &format!(r#"{{"recovery.from_run_id":"{root}"}}"#),
+    );
+    let newest = insert_run_for(
+        &conn,
+        2,
+        "manual:agent:7:ccc",
+        "failed",
+        390,
+        &format!(r#"{{"recovery.from_run_id":"{middle}"}}"#),
+    );
+
+    let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+
+    assert_eq!((deleted, compacted), (0, 0), "every generation of a continuable lineage is retained");
+    assert_eq!(count(&conn, "autopilot_circuit_runs"), 3);
+    // Continuing any generation resolves through the retained chain to the newest
+    // one rather than stopping at the gap and minting a sibling.
+    for from in [root, middle, newest] {
+        assert!(
+            matches!(continuation_target_inner(&conn, from).unwrap(), ContinuationTarget::Failed(id) if id == newest),
+            "continuing run {from} must land on the newest generation {newest}"
+        );
+    }
+}
+
+/// The lineage guard retains only what a surviving run names. An old manual run
+/// outside any lineage is still swept on the same tick, so the guard does not
+/// blunt the sweep (issue #1924).
+#[test]
+fn retention_still_sweeps_a_manual_run_outside_any_lineage() {
+    let conn = prune_db();
+    let root = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    conn.execute(
+        "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
+        [],
+    ).unwrap();
+    insert_run_for(
+        &conn,
+        2,
+        "manual:agent:7:bbb",
+        "failed",
+        400,
+        &format!(r#"{{"recovery.from_run_id":"{root}"}}"#),
+    );
+    // Older than the root and named by nothing, so it is sweepable even though a
+    // lineage is in flight on another Circuit.
+    let unrelated = insert_run(&conn, "manual:unrelated", "failed", 500, r#"{"note":"no lineage here"}"#);
+
+    let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+
+    assert_eq!((deleted, compacted), (1, 0), "only the lineage-less manual run goes");
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs WHERE id = ?1", [unrelated], |r| r.get::<_, i64>(0)).unwrap(),
+        0,
+        "nothing named the unrelated run, so the lineage guard did not retain it"
+    );
+    assert_eq!(identities(&conn), vec!["manual:agent:7:aaa", "manual:agent:7:bbb"]);
 }
 
 /// A row exactly at the retention boundary is kept — the sweep uses
