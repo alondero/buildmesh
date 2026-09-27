@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { GroupedProviderMenu } from '../../src/components/Providers/GroupedProviderMenu';
 import type { SpawnOption } from '../../src/lib/groups';
 import * as api from '../../src/lib/tauri/provider';
+import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
   listSpawnConfigurations: vi.fn().mockResolvedValue([
@@ -13,6 +14,7 @@ vi.mock('../../src/lib/tauri/provider', () => ({
   verifyLaunchConfiguration: vi.fn(), getLaunchTargets: vi.fn().mockResolvedValue([]),
   saveSpawnConfiguration: vi.fn(),
   deleteSpawnConfiguration: vi.fn(),
+  listProviders: vi.fn(),
 }));
 
 const row = (id: string, harness: string, provider: string | null = null): SpawnOption => ({
@@ -83,5 +85,33 @@ describe('launch configurations in the spawn menu', () => {
     expect(within(editor).getByLabelText('Harness')).toBeTruthy();
     expect((within(editor).getByLabelText('Provider') as HTMLSelectElement).value).toBe('codex');
     expect(within(editor).getByRole('option', { name: 'MiniMax' })).toBeTruthy();
+  });
+
+  it('shows saving progress until the spawn menu has refreshed the saved configuration', async () => {
+    const saved: SpawnConfiguration = { id: 'launch/new', name: 'New Codex', spawn_option_id: 'codex', model: null, effort: null, extra_args: null };
+    let finishSave!: (value: SpawnConfiguration) => void;
+    let finishRefresh!: () => void;
+    vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+    ]);
+    vi.mocked(api.saveSpawnConfiguration).mockReturnValueOnce(new Promise((resolve) => { finishSave = resolve; }));
+    vi.mocked(api.listProviders).mockReturnValueOnce(new Promise((resolve) => { finishRefresh = () => resolve([]); }));
+    render(<GroupedProviderMenu providers={[
+      row('codex', 'codex'),
+      { ...row('launch/existing', 'codex'), configuration: configuration('launch/existing', 'Existing', 'codex') },
+    ]} onSelect={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole('button', { name: 'codex configurations' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'New configuration…' }));
+    await userEvent.type(screen.getByLabelText('Name'), 'New Codex');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(screen.getByRole('status').textContent).toBe('Saving configuration…');
+    expect(screen.getByRole('button', { name: 'Saving…' }).closest('fieldset')?.disabled).toBe(true);
+    await act(async () => { finishSave(saved); });
+    expect(screen.getByRole('status').textContent).toBe('Saving configuration…');
+    await act(async () => { finishRefresh(); });
+    expect(screen.queryByRole('form', { name: 'Launch Configuration' })).toBeNull();
+    expect(screen.queryByRole('status')).toBeNull();
   });
 });

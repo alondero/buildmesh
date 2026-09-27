@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { LaunchConfigurationEditor } from '../../src/components/Providers/LaunchConfigurationEditor';
 import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
@@ -64,10 +64,15 @@ describe('Launch Configuration editor', () => {
     await waitFor(() => expect(remove).toHaveBeenCalledOnce());
   });
   it('preserves a draft after a failed save and allows retry', async () => {
-    const save = vi.fn().mockRejectedValueOnce(new Error('Route unavailable')).mockResolvedValue(undefined);
+    let rejectSave!: (error: Error) => void;
+    const save = vi.fn().mockReturnValueOnce(new Promise<void>((_resolve, reject) => { rejectSave = reject; })).mockResolvedValue(undefined);
     render(<LaunchConfigurationEditor value={{ id: 'launch/test', name: 'My recipe', spawn_option_id: 'claude:minimax', model: 'MiniMax-M3', effort: null, extra_args: null }} targets={targets} onSave={save} onCancel={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    expect((await screen.findByRole('alert')).textContent).toContain('Route unavailable');
+    expect(screen.getByRole('status').textContent).toBe('Saving configuration…');
+    await act(async () => { rejectSave(new Error('Route unavailable')); });
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save' }).closest('fieldset')?.disabled).toBe(false);
+    expect(screen.getByRole('alert').textContent).toContain('Route unavailable');
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My recipe');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
