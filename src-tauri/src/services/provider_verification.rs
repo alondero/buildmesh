@@ -314,7 +314,7 @@ pub fn verify_route_blocking(pairing: &ProviderPairing, account: &ProviderAccoun
         .as_deref()
         .filter(|key| !key.trim().is_empty())
         .ok_or_else(|| "provider credential is missing".to_string())?;
-    let install = codex::discover_supported_install(env_type)?;
+    let install = codex::discover_supported_install_fresh(env_type)?;
     record.pairing_signature = signature_for(pairing, account, &install);
     record.runtime = install.runtime_identity.clone();
     record.executable = install.executable.clone();
