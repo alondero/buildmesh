@@ -77,17 +77,19 @@ apply to administrators too — there is no standing bypass actor.
 
 | Check | What it proves |
 |---|---|
-| `verify / Quality (Linux)` | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
-| `verify / Verify-smoke (Linux)` | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
-| `verify / Platform smoke (windows-latest)` | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
-| `verify / Platform smoke (macos-latest)` | The Tauri app compiles and links on macOS. |
+| `Verification / Quality (Linux)` | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
+| `Verification / Verify-smoke (Linux)` | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
+| `Verification / Platform smoke (windows-latest)` | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
+| `Verification / Platform smoke (macos-latest)` | The Tauri app compiles and links on macOS. |
 
-Those names are owned by `.github/workflows/verify.yml`. Because a job that
-calls a reusable workflow is reported as `<calling job> / <called job>`, the
-`verify / …` prefix comes from the `verify` job in `build.yml`. **Renaming a
-job in `verify.yml` is a branch-protection change**: update the ruleset and this
-table in the same commit, or every pull request will block on a check that no
-longer exists.
+Those names are owned by `.github/workflows/verify.yml`. A job that calls a
+reusable workflow is reported as `<calling job> / <called job>`, so the
+`Verification / …` prefix comes from the `verify` job in `build.yml` — its
+`name:` is `Verification`, and the job id (`verify`) does not appear. Both the
+`name:` in the caller and the job names in the callee are part of the
+required-check identity, so **changing either is a branch-protection change**:
+update the ruleset and this table in the same commit, or every pull request
+will block on a check that no longer exists.
 
 A weekly schedule additionally runs `Weekly package smoke` on all three
 platforms. It is not merge-gating: a weekly packaging failure is reported by

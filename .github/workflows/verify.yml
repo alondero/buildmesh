@@ -153,6 +153,14 @@ jobs:
       - name: Check desktop initial bundle budget (issue #1568)
         run: npm run check:bundle
 
+      # `tests/integration/ui-shot.test.ts` drives the fixture UI in headless
+      # Chromium (scripts/ui-shot.mjs) — it launches a real browser rather
+      # than mocking one, so the suite cannot pass on a runner without the
+      # pinned browser build. A GitHub runner has none, and `launchChromium`
+      # throws instead of skipping, so the job installs it here (issue #1520).
+      - name: Install Chromium for the UI screenshot tests
+        run: npx playwright install --with-deps chromium
+
       # Single invocation runs both unit and integration suites in the
       # same vitest worker-pool boot (cheaper than two separate calls
       # which each start node + transform every module twice). Issue #1257
