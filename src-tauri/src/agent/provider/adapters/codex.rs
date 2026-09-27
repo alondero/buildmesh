@@ -7,10 +7,11 @@ use crate::models::EnvType;
 use base64::Engine;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use toml_edit::{value, DocumentMut, Item, Table};
 
 pub struct CodexAdapter;
@@ -145,6 +146,141 @@ static PROFILE_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static ATTENTION_CONFIG_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static CLI_CAPABILITY_CACHE: Lazy<Mutex<HashSet<String>>> =
     Lazy::new(|| Mutex::new(HashSet::new()));
+// Bound stale executable/version metadata after an out-of-process CLI update.
+const CODEX_INSTALL_CACHE_TTL: Duration = Duration::from_secs(45);
+
+struct CachedCodexInstall {
+    resolved_at: Instant,
+    result: Result<CodexInstall, String>,
+}
+
+struct CodexInstallCacheSlot {
+    cell: Arc<OnceLock<CachedCodexInstall>>,
+    refreshing: bool,
+}
+
+#[derive(Default)]
+struct CodexInstallCache {
+    entries: Mutex<HashMap<&'static str, CodexInstallCacheSlot>>,
+}
+
+impl CodexInstallCache {
+    fn discover(
+        &self,
+        env_type: EnvType,
+        probe: impl FnOnce() -> Result<CodexInstall, String>,
+    ) -> Result<CodexInstall, String> {
+        self.discover_at(env_type, Instant::now(), probe)
+    }
+
+    fn discover_at(
+        &self,
+        env_type: EnvType,
+        now: Instant,
+        probe: impl FnOnce() -> Result<CodexInstall, String>,
+    ) -> Result<CodexInstall, String> {
+        let runtime = runtime_identity(env_type);
+        let cell = {
+            let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            match entries.get(runtime) {
+                Some(slot)
+                    if !slot.cell.get().is_some_and(|cached| {
+                        now.checked_duration_since(cached.resolved_at)
+                            .is_some_and(|age| age >= CODEX_INSTALL_CACHE_TTL)
+                    }) =>
+                {
+                    Arc::clone(&slot.cell)
+                }
+                _ => {
+                    let cell = Arc::new(OnceLock::new());
+                    entries.insert(
+                        runtime,
+                        CodexInstallCacheSlot {
+                            cell: Arc::clone(&cell),
+                            refreshing: false,
+                        },
+                    );
+                    cell
+                }
+            }
+        };
+
+        let result = resolve_codex_install_cell(&cell, probe);
+        if result.is_err() {
+            self.discard_failed_entry(runtime, &cell);
+        }
+        result
+    }
+
+    fn discover_fresh(
+        &self,
+        env_type: EnvType,
+        probe: impl FnOnce() -> Result<CodexInstall, String>,
+    ) -> Result<CodexInstall, String> {
+        let runtime = runtime_identity(env_type);
+        let cell = {
+            let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            match entries.get_mut(runtime) {
+                Some(slot) if slot.refreshing => Arc::clone(&slot.cell),
+                _ => {
+                    let cell = Arc::new(OnceLock::new());
+                    entries.insert(
+                        runtime,
+                        CodexInstallCacheSlot {
+                            cell: Arc::clone(&cell),
+                            refreshing: true,
+                        },
+                    );
+                    cell
+                }
+            }
+        };
+
+        let result = resolve_codex_install_cell(&cell, probe);
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if entries
+            .get(runtime)
+            .is_some_and(|slot| Arc::ptr_eq(&slot.cell, &cell))
+        {
+            if result.is_err() {
+                entries.remove(runtime);
+            } else if let Some(slot) = entries.get_mut(runtime) {
+                slot.refreshing = false;
+            }
+        }
+        result
+    }
+
+    fn discard_failed_entry(&self, runtime: &'static str, cell: &Arc<OnceLock<CachedCodexInstall>>) {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        if entries
+            .get(runtime)
+            .is_some_and(|slot| Arc::ptr_eq(&slot.cell, cell))
+        {
+            entries.remove(runtime);
+        }
+    }
+}
+
+fn resolve_codex_install_cell(
+    cell: &OnceLock<CachedCodexInstall>,
+    probe: impl FnOnce() -> Result<CodexInstall, String>,
+) -> Result<CodexInstall, String> {
+    cell.get_or_init(|| {
+        let result = probe();
+        CachedCodexInstall {
+            resolved_at: Instant::now(),
+            result,
+        }
+    })
+    .result
+    .clone()
+}
+
+/// Keep Settings reads fast without hiding a Codex CLI update for long: Codex
+/// can update independently while Buildmesh stays open. Per-runtime OnceLocks
+/// share one in-flight probe, while this map mutex never spans process work.
+static CODEX_INSTALL_CACHE: Lazy<CodexInstallCache> = Lazy::new(CodexInstallCache::default);
 
 pub fn runtime_identity(env_type: EnvType) -> &'static str {
     match env_type {
@@ -836,6 +972,17 @@ fn successful_help(
 }
 
 pub fn discover_supported_install(env_type: EnvType) -> Result<CodexInstall, String> {
+    CODEX_INSTALL_CACHE.discover(env_type, || discover_supported_install_uncached(env_type))
+}
+
+/// Re-resolve Codex for an explicit pairing verification. Verifying still
+/// checks the live endpoint, and it must also observe a CLI update immediately
+/// instead of trusting the short-lived Settings cache.
+pub fn discover_supported_install_fresh(env_type: EnvType) -> Result<CodexInstall, String> {
+    CODEX_INSTALL_CACHE.discover_fresh(env_type, || discover_supported_install_uncached(env_type))
+}
+
+fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall, String> {
     let wsl_distro = if env_type == EnvType::Wsl {
         Some(
             crate::env::detect_default_wsl_distro()
@@ -1384,11 +1531,11 @@ mod tests {
     /// Regression guard: no read probe in this module may spawn a child
     /// with a bare `.output()`.
     ///
-    /// `discover_supported_install` runs four times per Settings →
-    /// Providers tab load (twice inside `available_providers`, twice more
-    /// via `get_pairing_verifications` across Windows + WSL), and every
-    /// probe used to wait on `.output()`, which blocks forever when the
-    /// child never exits — a wedged `wsl.exe` on a paused VM, a `.cmd`
+    /// Settings can request the Codex install for Windows and the foreign
+    /// runtime through both `available_providers` and pairing statuses. The
+    /// cache collapses repeated requests, but every actual probe still needs
+    /// a timeout: an unbounded child blocks forever if it never exits — a
+    /// wedged `wsl.exe` on a paused VM, a `.cmd`
     /// shim stuck on a console handle. That pinned a blocking-pool thread
     /// for the life of the process with no way for the user to recover, so
     /// the tab sat on "loading" indefinitely.
@@ -1426,6 +1573,195 @@ mod tests {
              a bare `.output()` can block forever and strands the Settings → \
              Providers tab on a spinner with no recovery"
         );
+    }
+
+    fn test_install(version: &str) -> CodexInstall {
+        CodexInstall {
+            executable: "codex-test".into(),
+            version: version.into(),
+            runtime_identity: "test-runtime".into(),
+            codex_home: "/tmp/codex-test".into(),
+            wsl_distro: None,
+        }
+    }
+
+    fn wait_for_probe_release(release: &Arc<(Mutex<bool>, std::sync::Condvar)>) {
+        let (lock, condition) = &**release;
+        let released = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _released = condition
+            .wait_while(released, |released| !*released)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+
+    fn release_probes(release: &Arc<(Mutex<bool>, std::sync::Condvar)>) {
+        let (lock, condition) = &**release;
+        *lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        condition.notify_all();
+    }
+
+    #[test]
+    fn install_resolution_is_single_flight_and_refreshes_after_ttl() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::thread;
+
+        let cache = Arc::new(CodexInstallCache::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (probe_started_tx, probe_started_rx) = mpsc::channel();
+        let first_cache = Arc::clone(&cache);
+        let first_calls = Arc::clone(&calls);
+        let first_release = Arc::clone(&release);
+        let first = thread::spawn(move || {
+            first_cache.discover(EnvType::Wsl, || {
+                first_calls.fetch_add(1, Ordering::SeqCst);
+                probe_started_tx.send(()).unwrap();
+                wait_for_probe_release(&first_release);
+                Ok(test_install("0.144.0"))
+            })
+        });
+        probe_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first caller starts the runtime probe");
+
+        let (second_calling_tx, second_calling_rx) = mpsc::sync_channel(0);
+        let second_cache = Arc::clone(&cache);
+        let second_calls = Arc::clone(&calls);
+        let second = thread::spawn(move || {
+            second_calling_tx.send(()).unwrap();
+            second_cache.discover(EnvType::Wsl, || {
+                second_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(test_install("0.145.0"))
+            })
+        });
+        second_calling_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second caller reaches the same runtime cache");
+        release_probes(&release);
+
+        assert_eq!(first.join().unwrap().unwrap().version, "0.144.0");
+        assert_eq!(second.join().unwrap().unwrap().version, "0.144.0");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let resolved_at = cache
+            .entries
+            .lock()
+            .unwrap()
+            .get(runtime_identity(EnvType::Wsl))
+            .unwrap()
+            .cell
+            .get()
+            .unwrap()
+            .resolved_at;
+        let just_before_expiry = resolved_at + CODEX_INSTALL_CACHE_TTL - Duration::from_nanos(1);
+        let still_cached = cache
+            .discover_at(EnvType::Wsl, just_before_expiry, || {
+                panic!("a fresh install result must be reused until its TTL expires")
+            })
+            .unwrap();
+        assert_eq!(still_cached.version, "0.144.0");
+
+        let refreshed = cache
+            .discover_at(EnvType::Wsl, resolved_at + CODEX_INSTALL_CACHE_TTL, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(test_install("0.145.0"))
+            })
+            .unwrap();
+        assert_eq!(refreshed.version, "0.145.0");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn separate_runtime_probes_can_run_at_the_same_time() {
+        use std::sync::mpsc;
+        use std::thread;
+
+        let cache = Arc::new(CodexInstallCache::default());
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (probe_started_tx, probe_started_rx) = mpsc::channel();
+        let mut probes = Vec::new();
+        for (env_type, version) in [
+            (EnvType::Windows, "0.144.0"),
+            (EnvType::Wsl, "0.145.0"),
+            (EnvType::WindowsInterop, "0.146.0"),
+        ] {
+            let cache = Arc::clone(&cache);
+            let release = Arc::clone(&release);
+            let probe_started_tx = probe_started_tx.clone();
+            probes.push(thread::spawn(move || {
+                cache.discover(env_type, || {
+                    probe_started_tx.send(env_type).unwrap();
+                    wait_for_probe_release(&release);
+                    Ok(test_install(version))
+                })
+            }));
+        }
+        drop(probe_started_tx);
+        let started = (0..3)
+            .filter_map(|_| probe_started_rx.recv_timeout(Duration::from_secs(2)).ok())
+            .collect::<Vec<_>>();
+        release_probes(&release);
+        for probe in probes {
+            probe.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            started.len(),
+            3,
+            "each runtime must start before either probe completes"
+        );
+    }
+
+    #[test]
+    fn fresh_install_resolution_replaces_the_cached_version() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CodexInstallCache::default();
+        let calls = AtomicUsize::new(0);
+        let initial = cache
+            .discover(EnvType::Windows, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(test_install("0.144.0"))
+            })
+            .unwrap();
+        assert_eq!(initial.version, "0.144.0");
+
+        let verified = cache
+            .discover_fresh(EnvType::Windows, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(test_install("0.145.0"))
+            })
+            .unwrap();
+        assert_eq!(verified.version, "0.145.0");
+
+        let next_read = cache
+            .discover(EnvType::Windows, || {
+                panic!("fresh verification should have replaced the cached install")
+            })
+            .unwrap();
+        assert_eq!(next_read.version, "0.145.0");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn failed_install_resolution_is_retried_on_the_next_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let cache = CodexInstallCache::default();
+        let calls = AtomicUsize::new(0);
+        let failed = cache.discover(EnvType::Windows, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("Codex is unavailable".into())
+        });
+        assert_eq!(failed.unwrap_err(), "Codex is unavailable");
+
+        let recovered = cache
+            .discover(EnvType::Windows, || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(test_install("0.145.0"))
+            })
+            .unwrap();
+        assert_eq!(recovered.version, "0.145.0");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     /// The probe bounds must stay generous enough for a cold WSL distro
