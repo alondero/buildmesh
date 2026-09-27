@@ -101,9 +101,12 @@ received and the turn it opened. The binding is the intersection.
    - no *other* turn has already claimed that same submission.
 
 3. **Inherit it.** A later `Stop` names the same `prompt_id`, so it reads the
-   bound stamp back from the persisted turn-start receipt. That receipt then
-   replays with `submission_correlated = true` and the observation is
-   authoritative under the existing freshness fences.
+   bound stamp *and* the submission ordinal back from the persisted turn-start
+   receipt. Both travel together: the terminal receipt records which submission
+   it completed, so the ledger answers "which input ended here?" without
+   re-deriving it from the turn start. That receipt then replays with
+   `submission_correlated = true` and the observation is authoritative under
+   the existing freshness fences.
 
 ### Why each hazard is closed
 

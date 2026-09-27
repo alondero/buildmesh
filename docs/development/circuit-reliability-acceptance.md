@@ -418,8 +418,10 @@ itself is never persisted. A `UserPromptSubmit` receipt is bound to that
 submission only when its prompt digest matches, the submission is still the
 newest for the agent, no other turn has claimed it, and the receipt carries a
 current input stamp. A later `Stop` naming the same `prompt_id` inherits the
-bound stamp. Ordering, not arrival, decides: a receipt is never trusted to
-assert its own correlation, and `source_id` dedup makes redelivery idempotent.
+bound stamp and the submission ordinal, so the terminal receipt itself records
+which input it completed. Ordering, not arrival, decides: a receipt is never
+trusted to assert its own correlation, and `source_id` dedup makes redelivery
+idempotent.
 
 **Closed hazards.** Delayed, duplicate, prior-turn and cross-run hooks are
 each covered by a distinct guard and by a test named for the hazard.
