@@ -239,23 +239,7 @@ jobs:
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
       # or sets `creation_flags` inline. Only process_util may own those details.
       - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
-        shell: bash
-        run: |
-          HITS=$(find src-tauri/src \
-                  -type f -name '*.rs' \
-                  ! -name '*_tests.rs' \
-                  ! -name 'tests.rs' \
-                  ! -path '*/tests/*' \
-                  ! -name 'process_util.rs' \
-                  -exec grep -nE '\.creation_flags\(|std::process::Command::new\("git"\)' {} + \
-                  | grep -v '// allow-inline-process-spawn' \
-                  || true)
-          if [ -n "$HITS" ]; then
-            echo "::error::Inline process-spawn pattern outside process_util (issue #665 / #690):"
-            echo "$HITS"
-            echo "::error::Use crate::process_util::command_no_window(\"program\") so CREATE_NO_WINDOW is set on Windows."
-            exit 1
-          fi
+        run: node scripts/check-process-spawn-discipline.mjs
 
       # Fail CI if the committed bindings drift from what the Rust structs now
       # generate ??? wire-shape drift becomes a red build, not a runtime crash.
