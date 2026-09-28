@@ -58,6 +58,19 @@
 //! than being overwritten silently, and an unresolvable data dir returns
 //! `Ok(())` with no side effects.
 //!
+//! **Full Access** is pinned on every spawn. mcode's TUI accepts no permission
+//! flag — `mcode --help` offers `--model`, `--lane`, `--session`,
+//! `--continue` and `--tui-mode` and nothing else; `--permission` exists on
+//! `mcode exec` only, which we never spawn — and mcode reads no environment
+//! variable for the mode. The sole lever is the `permissionMode` key in
+//! `<dataDir>/config.yaml`, so [`pin_permission_mode`] sets it to
+//! `bypassPermissions` (Full Access) alongside the attention plugin. This
+//! matches how Buildmesh already treats Codex
+//! (`--ask-for-approval never --sandbox danger-full-access`): nobody is
+//! watching a circuit's PTY, so an approval prompt is a stall. That function
+//! also documents why the edit is surgical and why it never fabricates a
+//! config.
+//!
 //! **Transcript**: `messages.jsonl` canonical history is parsed via
 //! `TranscriptFormat::Mcode`, so the Coordinator Node Digest rich layer,
 //! the archived-node resume picker, and circuit assistant reports all work.
@@ -97,6 +110,29 @@ const MCODE_PLUGIN_NAME: &str = "buildmesh-attention";
 
 const MCODE_PLUGIN_VERSION: &str = "1.0.0";
 
+/// mcode's settings file, at `<dataDir>/config.yaml`. This is a **user-owned**
+/// document — it holds the provider block, the API key and the model catalog —
+/// not a Buildmesh-owned artifact like the plugin dir. See
+/// [`pin_permission_mode`] for what we do, and deliberately do not do, to it.
+const MCODE_CONFIG_FILE: &str = "config.yaml";
+
+/// Top-level `config.yaml` key that selects mcode's permission policy.
+///
+/// mcode validates it against `["default", "bypassPermissions", "auto",
+/// "off"]` and silently discards anything else, falling back to its compiled
+/// default of `"auto"`. The TUI surfaces the same four values under the labels
+/// Ask, Full access and Auto (`/permission`, or `approval-mode` in the status
+/// bar), with `full` mapping to `bypassPermissions`.
+const MCODE_PERMISSION_MODE_KEY: &str = "permissionMode";
+
+/// The value that means **Full Access**. Chosen over leaving mcode on its
+/// `"auto"` default for the same reason Codex is launched with
+/// `--ask-for-approval never --sandbox danger-full-access` (`codex.rs:43-61`):
+/// nobody is watching a circuit's PTY, so an approval prompt is a stall, and
+/// `auto` still interrupts for anything its policy does not recognise. This is
+/// also MiniMax's own recommendation for unattended runs.
+const MCODE_PERMISSION_MODE_VALUE: &str = "bypassPermissions";
+
 const MCODE_PLUGIN_DESCRIPTION: &str =
     "Buildmesh attention observer: reports turn completion to the local Buildmesh node.";
 
@@ -107,10 +143,10 @@ const MCODE_HOOK_TIMEOUT_SECONDS: u64 = 5;
 /// Events Buildmesh provisions into the mcode plugin manifest. `Stop` (turn
 /// finished) is the validated signal that drives Node Digest turn completion.
 /// `PermissionRequest` is provisioned for completeness but is **not**
-/// advertised in `attention_capability`: Buildmesh launches mcode with its
-/// default permission policy, which auto-approves (the live hook envelope
-/// reports `"permission_mode": "auto"`), so no approval prompt is raised and
-/// the event is never observed.
+/// advertised in `attention_capability`: Buildmesh launches mcode in Full
+/// Access (`permissionMode: bypassPermissions`, pinned by
+/// [`pin_permission_mode`] on every spawn), so no approval prompt is ever
+/// raised and the event is never observed.
 const MCODE_PROVISIONED_EVENTS: &[&str] = &["Stop", "PermissionRequest"];
 
 /// Marker substring identifying the Buildmesh-owned handler inside the
@@ -207,17 +243,19 @@ fn attention_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
     })
 }
 
-/// Resolve the directory Buildmesh's mcode attention plugin lives in.
-/// `runtime.harness_home` is the per-launch override (preferred when
-/// the caller has already picked a writable data dir); absent that,
-/// we route through `cli_dir_for_spawn` (`env::environment.rs:402`)
-/// so a WSL-guest mcode spawn writes into the *guest* `$HOME/.minimax`
-/// converted to a host `\\wsl$\…` path — never the Windows host's
-/// `%USERPROFILE%\.minimax` (the round-1 / round-2 reviewer
+/// Resolve mcode's data root — the directory holding both the Buildmesh
+/// attention plugin and the user's `config.yaml`. `runtime.harness_home`
+/// is the per-launch override (preferred when the caller has already picked a
+/// writable data dir); absent that, we route through `cli_dir_for_spawn`
+/// (`env::environment.rs:402`) so a WSL-guest mcode spawn writes into the
+/// *guest* `$HOME/.minimax` converted to a host `\\wsl$\…` path — never the
+/// Windows host's `%USERPROFILE%\.minimax` (the round-1 / round-2 reviewer
 /// correction: silently calling `minimax_data_dir()` ignored
-/// `resolved.spawn_path`, writing the plugin into the wrong
-/// filesystem and violating the buildmesh hard rule
-/// `CLAUDE.md:21` "Never pass Linux/WSL paths to Windows-side APIs").
+/// `resolved.spawn_path`, writing the plugin into the wrong filesystem and
+/// violating the buildmesh hard rule `CLAUDE.md:21` "Never pass Linux/WSL
+/// paths to Windows-side APIs"). The permission-mode pin must resolve
+/// through this same path, or a WSL guest would be configured from the
+/// Windows host's config.
 ///
 /// Returns `None` when no path can be resolved — the exact case the
 /// issue #1796 acceptance names "Return Ok(()) without side effects":
@@ -225,7 +263,7 @@ fn attention_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
 /// `wsl_home()` (or a host that has neither HOME nor USERPROFILE)
 /// resolves to `None`, and `provision_attention_hooks` consumes that
 /// as the "spawn proceeds, attention callback only is lost" signal.
-fn resolve_plugin_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf> {
+fn resolve_data_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<PathBuf> {
     if let Some(home) = runtime.harness_home.as_deref() {
         let trimmed = home.trim();
         // Treat an empty string the same as "no override" rather than
@@ -353,6 +391,160 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         return Err(e);
     }
     Ok(())
+}
+
+/// Best-effort Full Access pin, run on every mcode spawn.
+///
+/// Failure is logged, never propagated. A node that starts in mcode's own
+/// `auto` default is working-but-slow, whereas failing the provision would
+/// abort a launch the user asked for over a permission-convenience setting.
+/// This is the same split `provision_at` makes for an unresolvable hook
+/// root: degrade the capability, keep the agent.
+fn pin_full_access(data_root: Option<&Path>) {
+    let Some(root) = data_root else {
+        tracing::debug!("mcode pin_permission_mode: data dir unresolvable; leaving mode alone");
+        return;
+    };
+    if let Err(e) = pin_permission_mode(root) {
+        tracing::warn!(
+            "mcode pin_permission_mode: {e} — the session starts in mcode's own default \
+             mode instead of Full Access"
+        );
+    }
+}
+
+/// Pin mcode's permission policy to Full Access in `<dataDir>/config.yaml`.
+///
+/// **Why a config write.** The interactive TUI is the only mcode entry point
+/// Buildmesh launches, and it accepts no permission flag. `--permission`
+/// exists on `mcode exec` only, which this adapter never spawns, and mcode
+/// reads no environment variable for the mode. The settings key is the sole
+/// lever the CLI offers.
+///
+/// **Why a surgical line edit.** `config.yaml` is the user's document: it
+/// carries their comments, key order, an API key and a model catalog. A
+/// parse-and-re-serialise round-trip would strip every comment and reflow the
+/// file, so this rewrites exactly one line (or appends one) and leaves every
+/// other byte alone. No YAML dependency is needed for that.
+///
+/// **Invariants**
+///
+/// * **Never fabricates a config.** mcode bootstraps its own config on first
+///   run and *skips* that bootstrap when the file already exists, so creating
+///   a file containing only this key would suppress the bootstrap and leave
+///   the CLI with no `provider` block at all — a worse failure than running in
+///   `auto`. An absent config is left absent; the next spawn (or the user's own
+///   first run) finds the file and pins it.
+/// * **Only the top-level key.** An indented `permissionMode` belongs to some
+///   other mapping and is left alone, as are longer siblings like
+///   `permissionModes:` and a commented-out key.
+/// * **Idempotent.** A config already at Full Access is not rewritten, so a
+///   steady-state spawn does no I/O.
+///
+/// Returns whether the file changed, or `Err` when a config exists but cannot
+/// be read — a config we cannot read is one we must not clobber.
+fn pin_permission_mode(data_root: &Path) -> Result<bool, String> {
+    let path = data_root.join(MCODE_CONFIG_FILE);
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+
+    // The line ending this document already uses. mcode itself writes LF
+    // (`yaml.dump` never emits CRLF), but a Windows user who hand-edited the
+    // file must not get it silently half-converted.
+    let eol = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+
+    let Some((key_line, comment)) = find_top_level_key(&existing, MCODE_PERMISSION_MODE_KEY) else {
+        let mut out = existing;
+        if !out.is_empty() {
+            if !out.ends_with('\n') {
+                out.push_str(eol);
+            }
+            // Blank separator so the appended key reads as its own setting.
+            out.push_str(eol);
+        }
+        out.push_str(&format!("{MCODE_PERMISSION_MODE_KEY}: {MCODE_PERMISSION_MODE_VALUE}{eol}"));
+        return write_pinned_config(&path, &out);
+    };
+
+    if already_pinned(&key_line, comment, MCODE_PERMISSION_MODE_VALUE) {
+        return Ok(false);
+    }
+
+    // `key_line` has its `\r` stripped and the original terminator still
+    // follows it in `existing`, so the replacement must NOT carry one — it
+    // would leave a blank line behind. A comment that hugged the value
+    // (`permissionMode:# note`) gains a separating space so the two don't fuse.
+    let comment = match comment.is_empty() {
+        true => String::new(),
+        false if comment.starts_with([' ', '\t']) => comment.to_string(),
+        false => format!(" {comment}"),
+    };
+    let replaced = format!("{MCODE_PERMISSION_MODE_KEY}: {MCODE_PERMISSION_MODE_VALUE}{comment}");
+    write_pinned_config(&path, &existing.replacen(&key_line, &replaced, 1))
+}
+
+/// Locate a **top-level** `key: …` line, returning the line without its
+/// terminator and, separately, the trailing `# …` comment (leading whitespace
+/// included) or `""` when the line carries none.
+///
+/// A top-level key starts at column 0. That is sound against a false positive
+/// from a block scalar: YAML block-scalar content is always indented deeper
+/// than its parent key, so it can never begin at column 0.
+fn find_top_level_key<'a>(text: &'a str, key: &str) -> Option<(&'a str, &'a str)> {
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        // A top-level key starts at column 0, so an indented `permissionMode`
+        // is some other mapping's key and a `#`-led line is a comment.
+        let Some(rest) = line.strip_prefix(key) else { continue };
+        // The character right after the name must be a `:` (optionally
+        // spaced) — this is what rejects a longer sibling key.
+        let rest = rest.trim_start_matches([' ', '\t']);
+        let Some(value_and_comment) = rest.strip_prefix(':') else { continue };
+        return Some((line, trailing_comment(value_and_comment)));
+    }
+    None
+}
+
+/// The trailing `# …` comment in the part of a line after the `key:`, including
+/// the whitespace that separates it from the value, or `""`. A `#` only opens
+/// a comment when it starts the value or follows whitespace; anything else is
+/// part of the value. mcode's four mode values contain no `#`, so this never
+/// splits one. Carrying the whitespace run along keeps a user's column
+/// alignment intact across the rewrite.
+fn trailing_comment(value_and_comment: &str) -> &str {
+    let bytes = value_and_comment.as_bytes();
+    for (i, b) in bytes.iter().enumerate() {
+        if *b != b'#' {
+            continue;
+        }
+        if i != 0 && !bytes[i - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let start = (0..i).rev().find(|j| !bytes[*j].is_ascii_whitespace()).map_or(0, |j| j + 1);
+        return &value_and_comment[start..];
+    }
+    ""
+}
+
+/// True when the located line already carries `value`, i.e. nothing to do.
+/// Compares only the text between the `:` and any comment, trimmed, so
+/// `permissionMode:  bypassPermissions ` counts as already pinned.
+fn already_pinned(line: &str, comment: &str, value: &str) -> bool {
+    let value_end = line.len().saturating_sub(comment.len());
+    line[..value_end].split_once(':').map(|(_, found)| found.trim() == value).unwrap_or(false)
+}
+
+/// Persist the pinned config and report that the write happened.
+fn write_pinned_config(path: &Path, contents: &str) -> Result<bool, String> {
+    atomic_write(path, contents).map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+    tracing::info!(
+        "mcode pin_permission_mode: set {MCODE_PERMISSION_MODE_KEY}={MCODE_PERMISSION_MODE_VALUE} in {:?}",
+        path
+    );
+    Ok(true)
 }
 
 /// True when one executable entry resolves to the Buildmesh attention URL.
@@ -584,9 +776,9 @@ impl AgentProvider for McodeAdapter {
 
     /// Issue #1797 — the structured attention contract. mcode's `Stop` hook is
     /// the validated signal: a completed turn POSTs the mcode envelope to
-    /// `/api/attention/<node-id>`. Buildmesh launches mcode with its default
-    /// permission policy, which auto-approves (the live envelope reports
-    /// `"permission_mode": "auto"`), so no approval prompt is raised and
+    /// `/api/attention/<node-id>`. Buildmesh launches mcode in Full Access
+    /// (`permissionMode: bypassPermissions`, pinned by
+    /// [`pin_permission_mode`]), so no approval prompt is raised and
     /// `PermissionRequested` is not advertised — exactly like Cursor under
     /// `--force`. No workspace-trust step is required and none is taken, so
     /// `trust` stays `None`.
@@ -604,6 +796,15 @@ impl AgentProvider for McodeAdapter {
     /// `<mcode-data-dir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
     /// with the `Stop` + `PermissionRequest` handlers inlined on the manifest
     /// in mcode's 0.4.0+ (Claude-compatible) shape.
+    ///
+    /// The same data dir also gets its `config.yaml` permission mode pinned to
+    /// Full Access by [`pin_permission_mode`], because the TUI has no flag for
+    /// it. That pin is best-effort — a failure there is logged, never
+    /// propagated, so an unpinnable config cannot abort a launch (the node
+    /// simply starts in mcode's own default mode). Note it is a
+    /// **machine-global** setting, shared with the user's standalone `mcode`
+    /// sessions, unlike the node-scoped `node_id` baked into the manifest
+    /// below.
     ///
     /// The merge is additive (sibling events and user handlers round-trip) and
     /// idempotent (issue #886); a malformed existing file returns `Err` rather
@@ -644,8 +845,9 @@ impl AgentProvider for McodeAdapter {
         // (issue #1797 review, finding 2). The node's own distro is threaded
         // through so the preflight inspects the right one (finding 3).
         ensure_wsl_callbacks_reachable(resolved.env_type, runtime.wsl_distro.as_deref())?;
-        let plugin_root = resolve_plugin_dir(resolved, runtime);
-        provision_at(plugin_root.as_deref(), resolved.env_type, node_id)
+        let data_root = resolve_data_dir(resolved, runtime);
+        pin_full_access(data_root.as_deref());
+        provision_at(data_root.as_deref(), resolved.env_type, node_id)
     }
 
     /// `true` — mcode persists canonical history under
@@ -1551,6 +1753,338 @@ mod tests {
         assert!(
             tmp_files.is_empty(),
             "atomic write must not leave .tmp residue; found {tmp_files:?}"
+        );
+    }
+
+    // ---- Full Access pin ---------------------------------------------------
+
+    /// The `config.yaml` a temp data dir is expected to hold.
+    fn config_path(home: &Path) -> PathBuf {
+        home.join(MCODE_CONFIG_FILE)
+    }
+
+    /// Write `body` as the data dir's `config.yaml`.
+    fn seed_config(home: &Path, body: &str) {
+        std::fs::create_dir_all(home).unwrap();
+        std::fs::write(config_path(home), body).unwrap();
+    }
+
+    /// A representative real-world `config.yaml`: a leading comment, a nested
+    /// provider map holding the API key and a model catalog, and a trailing
+    /// comment. Every byte must survive the pin except the one line we touch.
+    const REALISTIC_CONFIG: &str = "\
+logLevel: info
+# managed by the MiniMax installer
+provider:
+  minimax:
+    name: MiniMax
+    options:
+      apiKey: sk-xxx
+      baseURL: https://agent.minimax.io/mavis/api/v1/llm/v1
+    models:
+      - id: MiniMax-M3
+        thinking:
+          effort: xhigh
+defaultModel: minimax/MiniMax-M3 # the one we default to
+defaultModelThinking:
+  effort: xhigh
+";
+
+    #[test]
+    fn permission_mode_constants_name_a_value_mcode_accepts() {
+        // mcode validates the key against ["default", "bypassPermissions",
+        // "auto", "off"] and silently discards anything else, falling back to
+        // "auto" — the exact mode this pin exists to escape.
+        assert_eq!(MCODE_PERMISSION_MODE_KEY, "permissionMode");
+        assert_eq!(MCODE_PERMISSION_MODE_VALUE, "bypassPermissions");
+        assert_eq!(MCODE_CONFIG_FILE, "config.yaml");
+    }
+
+    #[test]
+    fn pin_appends_the_key_when_the_config_has_none() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), REALISTIC_CONFIG);
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert!(
+            after.starts_with(REALISTIC_CONFIG),
+            "every pre-existing byte must survive the append; got:\n{after}"
+        );
+        assert!(
+            after.contains("permissionMode: bypassPermissions\n"),
+            "the key must be appended; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn pin_overwrites_auto_with_full_access() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "logLevel: info\npermissionMode: auto\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(after, "logLevel: info\npermissionMode: bypassPermissions\n");
+    }
+
+    #[test]
+    fn pin_overwrites_every_other_mode() {
+        // mcode accepts four values; all three non-Full-Access ones must be
+        // replaced, or the fix silently no-ops for someone on "ask".
+        for mode in ["default", "auto", "off"] {
+            let home = tempfile::tempdir().unwrap();
+            seed_config(home.path(), &format!("permissionMode: {mode}\n"));
+            assert_eq!(pin_permission_mode(home.path()), Ok(true), "mode {mode}");
+            let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+            assert_eq!(after, "permissionMode: bypassPermissions\n", "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn pin_is_idempotent_and_leaves_the_file_byte_identical() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "permissionMode: bypassPermissions\n");
+        let before = std::fs::read_to_string(config_path(home.path())).unwrap();
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(false));
+        assert_eq!(pin_permission_mode(home.path()), Ok(false));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(after, before, "a second pin must be a no-op");
+    }
+
+    #[test]
+    fn pin_tolerates_padded_and_commented_pinned_values() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "permissionMode:  bypassPermissions  \n");
+
+        assert_eq!(
+            pin_permission_mode(home.path()),
+            Ok(false),
+            "extra whitespace around an already-correct value is still correct"
+        );
+    }
+
+    #[test]
+    fn pin_preserves_a_trailing_comment_on_the_key_line() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "permissionMode: ask  # deliberately strict\nlogLevel: info\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(
+            after, "permissionMode: bypassPermissions  # deliberately strict\nlogLevel: info\n",
+            "the user's own comment and its alignment must not be discarded"
+        );
+    }
+
+    #[test]
+    fn pin_leaves_every_other_line_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let original = REALISTIC_CONFIG.replace("logLevel: info\n", "logLevel: info\npermissionMode: auto\n");
+        seed_config(home.path(), &original);
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(
+            after,
+            original.replace("permissionMode: auto", "permissionMode: bypassPermissions"),
+            "the API key, model catalog and comments must round-trip"
+        );
+    }
+
+    #[test]
+    fn pin_ignores_an_indented_nested_permission_mode() {
+        // Only the top-level key selects the mode. An indented one belongs to
+        // some other mapping; rewriting it would corrupt an unrelated part of
+        // the user's config.
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "provider:\n  minimax:\n    permissionMode: ask\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert!(
+            after.contains("    permissionMode: ask\n"),
+            "the nested key must be untouched; got:\n{after}"
+        );
+        assert!(
+            after.ends_with("permissionMode: bypassPermissions\n"),
+            "the top-level key must be appended; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn pin_does_not_match_a_key_that_merely_starts_the_same() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "permissionModeOverride: keep\npermissionModes: keep\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert!(
+            after.contains("permissionModeOverride: keep\n"),
+            "a longer sibling key must not be rewritten; got:\n{after}"
+        );
+        assert!(
+            after.contains("permissionModes: keep\n"),
+            "a longer sibling key must not be rewritten; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn pin_does_not_match_a_commented_out_key() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "# permissionMode: ask\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert!(
+            after.contains("# permissionMode: ask\n"),
+            "a comment is not a key; got:\n{after}"
+        );
+    }
+
+    #[test]
+    fn pin_appends_correctly_when_the_file_has_no_trailing_newline() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "logLevel: info");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(
+            after, "logLevel: info\n\npermissionMode: bypassPermissions\n",
+            "a missing final newline must not glue the key onto the last value"
+        );
+    }
+
+    #[test]
+    fn pin_preserves_crlf_line_endings() {
+        // A Windows user who hand-edited the file must not get it silently
+        // half-converted to LF.
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), "logLevel: info\r\npermissionMode: auto\r\n");
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(true));
+
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert_eq!(after, "logLevel: info\r\npermissionMode: bypassPermissions\r\n");
+        assert!(!after.replace("\r\n", "").contains('\n'), "no bare LF may be introduced; got {after:?}");
+    }
+
+    #[test]
+    fn pin_never_fabricates_a_config_file_that_does_not_exist() {
+        // mcode bootstraps its own config on first run and *skips* that
+        // bootstrap when the file already exists. Writing a file holding only
+        // `permissionMode` would suppress the bootstrap and leave the CLI with
+        // no `provider` block at all — a worse failure than running in "auto".
+        // So an absent config is left absent.
+        let home = tempfile::tempdir().unwrap();
+
+        assert_eq!(pin_permission_mode(home.path()), Ok(false));
+        assert_eq!(pin_permission_mode(home.path()), Ok(false));
+        assert!(
+            !config_path(home.path()).exists(),
+            "no config.yaml may be created; the dir now holds {:?}",
+            walk_dir_files(home.path())
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pin_reports_an_unreadable_config_rather_than_overwriting_it() {
+        // A config we cannot read is a config we must not clobber. `chmod 000`
+        // only denies the owner on Unix, and Windows has no equivalent, hence
+        // the compile-time gate.
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), REALISTIC_CONFIG);
+        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+
+        let result = pin_permission_mode(home.path());
+        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        assert!(
+            result.is_err(),
+            "an unreadable config must surface an error, not Ok(false); got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config_path(home.path())).unwrap(),
+            REALISTIC_CONFIG,
+            "the unreadable file must be left byte-identical"
+        );
+    }
+
+    #[test]
+    fn pin_leaves_no_tmp_residue() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), REALISTIC_CONFIG);
+        pin_permission_mode(home.path()).unwrap();
+
+        let tmp_files: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(tmp_files.is_empty(), "atomic write must not leave .tmp residue; found {tmp_files:?}");
+    }
+
+    /// The pin runs on every spawn next to the attention provisioner, so the
+    /// two must coexist in one data dir.
+    #[test]
+    fn provision_attention_hooks_pins_full_access_and_writes_the_plugin() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), REALISTIC_CONFIG);
+
+        let manifest = provision_test_home(home.path(), EnvType::Windows);
+
+        assert!(manifest.exists(), "the attention plugin must still be provisioned alongside the pin");
+        let after = std::fs::read_to_string(config_path(home.path())).unwrap();
+        assert!(
+            after.contains("permissionMode: bypassPermissions"),
+            "a normal spawn must pin Full Access; got:\n{after}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn provision_attention_hooks_still_provisions_when_the_config_is_unreadable() {
+        let home = tempfile::tempdir().unwrap();
+        seed_config(home.path(), REALISTIC_CONFIG);
+        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o000))
+            .unwrap();
+
+        let path = home.to_string_lossy().to_string();
+        let result = MCODE.provision_attention_hooks(
+            &ResolvedPath {
+                host_path: path.clone(),
+                spawn_path: path,
+                raw_path: home.to_string_lossy().to_string(),
+                env_type: EnvType::Windows,
+            },
+            &LaunchRuntime {
+                harness_home: Some(home.to_string_lossy().to_string()),
+                wsl_distro: None,
+            },
+            7,
+        );
+        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+
+        assert!(
+            result.is_ok(),
+            "an unpinnable config must not fail the spawn; got {result:?}"
+        );
+        assert!(
+            plugin_manifest_path(home.path()).exists(),
+            "the attention plugin must be provisioned regardless"
         );
     }
 
