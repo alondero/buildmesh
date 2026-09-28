@@ -469,7 +469,7 @@ fn pin_permission_mode(data_root: &Path) -> Result<bool, String> {
         return write_pinned_config(&path, &out);
     };
 
-    if already_pinned(&key_line, comment, MCODE_PERMISSION_MODE_VALUE) {
+    if already_pinned(key_line, comment, MCODE_PERMISSION_MODE_VALUE) {
         return Ok(false);
     }
 
@@ -483,7 +483,7 @@ fn pin_permission_mode(data_root: &Path) -> Result<bool, String> {
         false => format!(" {comment}"),
     };
     let replaced = format!("{MCODE_PERMISSION_MODE_KEY}: {MCODE_PERMISSION_MODE_VALUE}{comment}");
-    write_pinned_config(&path, &existing.replacen(&key_line, &replaced, 1))
+    write_pinned_config(&path, &existing.replacen(key_line, &replaced, 1))
 }
 
 /// Locate a **top-level** `key: …` line, returning the line without its
