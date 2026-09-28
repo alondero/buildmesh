@@ -1582,41 +1582,70 @@ mod tests {
     #[test]
     fn native_question_resolution_unblocks_completion_and_old_turns_stay_stale() {
         let mut state = crate::agent::hook_state::HookState::default();
-        let mut apply = |value: serde_json::Value| {
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
             let body = value.to_string();
-            accept_hook(
-                &mut state,
-                &HookPayload::parse(body.as_bytes()).unwrap(),
-                &classify(body.as_bytes(), "opencode", |_| Some(0)),
-            )
-            .accepted
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+            accept_hook(state, &payload, &classified).accepted
         };
         assert!(apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"first"})
         ));
         assert!(apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})
         ));
         assert!(apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"question.asked", "request_id":"two"})
         ));
         assert!(!apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"session.idle"})
         ));
-        assert!(!apply(
-            serde_json::json!({"hook_event_name":"question.replied", "request_id":"one"})
-        ));
+        let reply_body = serde_json::json!({
+            "hook_event_name":"question.replied", "request_id":"one"
+        })
+        .to_string();
+        let reply_payload = HookPayload::parse(reply_body.as_bytes()).unwrap();
+        let reply_classified = classify(reply_body.as_bytes(), "opencode", |_| Some(0));
+        let reply = accept_hook(&mut state, &reply_payload, &reply_classified);
+        let published = lifecycle_decision(reply_classified.decision, &state, false, reply);
+        assert!(
+            reply.accepted,
+            "the reply is accepted rather than dropped as stale"
+        );
+        assert!(reply.preserve_attention);
+        assert_eq!(published, Decision::Ignore);
+        assert!(state.has_foreground_question("two"));
+        assert!(
+            !apply(
+                &mut state,
+                serde_json::json!({"hook_event_name":"session.idle"})
+            ),
+            "turn completion stays fenced while question two is open"
+        );
         assert!(apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"question.rejected", "request_id":"two"})
         ));
-        assert!(apply(serde_json::json!({"hook_event_name":"session.idle"})));
         assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"session.idle"})
+        ));
+        assert!(apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"second"})
         ));
         assert!(!apply(
+            &mut state,
             serde_json::json!({"hook_event_name":"Stop", "promptId":"first"})
         ));
-        assert!(apply(serde_json::json!({"hook_event_name":"Stop"})));
+        assert!(apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"Stop"})
+        ));
     }
 
     #[test]
@@ -2259,14 +2288,25 @@ mod tests {
             &mut state,
             serde_json::json!({"hook_event_name":"PermissionRequest", "toolUseId":"p2", "tool_name":"Write"})
         ));
-        assert!(!apply(
-            &mut state,
-            serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p1"})
-        ));
-        assert!(!apply(
-            &mut state,
-            serde_json::json!({"hook_event_name":"Stop"})
-        ));
+        let reply_body = serde_json::json!({
+            "hook_event_name":"PermissionResult", "toolUseId":"p1"
+        })
+        .to_string();
+        let reply_payload = HookPayload::parse(reply_body.as_bytes()).unwrap();
+        let reply_classified = classify(reply_body.as_bytes(), "kimi", |_| Some(0));
+        let reply = accept_hook(&mut state, &reply_payload, &reply_classified);
+        let published = lifecycle_decision(reply_classified.decision, &state, false, reply);
+        assert!(
+            reply.accepted,
+            "the matched reply is accepted while p2 remains open"
+        );
+        assert!(reply.preserve_attention);
+        assert_eq!(published, Decision::Ignore);
+        assert!(state.has_foreground_question("p2"));
+        assert!(
+            !apply(&mut state, serde_json::json!({"hook_event_name":"Stop"})),
+            "turn completion stays fenced while p2 is open"
+        );
         assert!(apply(
             &mut state,
             serde_json::json!({"hook_event_name":"PermissionResult", "toolUseId":"p2"})

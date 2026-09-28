@@ -159,6 +159,7 @@ impl HookState {
         self.early_replies.iter().any(|pending| pending == key)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_foreground_question(&self, key: &str) -> bool {
         matches!(self.questions.get(key), Some(QuestionKind::Foreground))
     }
