@@ -726,7 +726,7 @@ fn terminate_classifier_tree(pid: u32, job: Option<&crate::process_util::JobHand
     {
         let group = format!("-{pid}");
         let _ = crate::process_util::command_no_window("kill")
-            .args(["-KILL", &group])
+            .args(["-KILL", "--", &group])
             .status();
     }
 }

@@ -474,7 +474,12 @@ pub(super) fn resolve_from_windows_install_paths(
 ) -> Option<std::path::PathBuf> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
     if let Some(home) = userprofile {
-        candidates.push(std::path::PathBuf::from(home).join(r".local\bin\claude.exe"));
+        candidates.push(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("bin")
+                .join("claude.exe"),
+        );
     }
     if let Some(appdata) = appdata {
         let npm = std::path::PathBuf::from(appdata).join("npm");
