@@ -316,27 +316,10 @@ test.describe('verify-smoke (issue #157)', () => {
     await expect(page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`)).toBeVisible();
   });
 
-  // Issue #1947 — the build/run terminal does not survive a utility tab
-  // round trip. `BuildRunTerminal`'s contract (its own docstring, and the
-  // detach/attach pair in `BuildRunTerminalRegistry`) is that unmount only
-  // detaches the DOM node: the same Terminal, its scrollback, and its PTY
-  // survive and are re-parented into the new container. Measured in Chromium
-  // against a utility tab round trip: the registry still resolves an instance
-  // and re-attaches a terminal, but it is a different `.xterm` element and
-  // bytes written before the switch are gone from the buffer, so the
-  // invariant does not hold today.
-  //
-  // `test.fail`, not `test.fixme`, because the two have opposite reporting and
-  // only one of them gates. Verified locally against this Playwright version:
-  // a `test.fixme` body is never executed and is always reported `skipped`,
-  // so it cannot catch the regression in the other direction, and a suite
-  // whose only fixme test would now pass still exits 0. `test.fail` runs the
-  // body: while the invariant is broken the run stays green (the failing test
-  // is reported as the expected failure), and once the invariant holds
-  // Playwright reports "Expected to fail, but passed" and exits 1. That makes
-  // the annotation self-clearing — fixing #1947 without deleting this line
-  // turns CI red and forces the removal.
-  test.fail('utility terminal re-parents the same .xterm element across a tab round trip', async ({ page }) => {
+  // Issue #1947: switching away from a terminal tab detaches its view. When
+  // the tab is selected again, the existing terminal element and its buffer
+  // should be reused.
+  test('utility terminal reattaches the same .xterm element across a tab round trip', async ({ page }) => {
     await page.goto('/');
     await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
     await page.getByTestId('grid-node-header').getByRole('button', { name: 'Open build menu' }).click();
