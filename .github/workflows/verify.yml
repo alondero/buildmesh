@@ -37,7 +37,11 @@ jobs:
     # 53m01s of job time with exactly that signature, so state the real budget:
     # this job builds the frontend, installs a browser, runs the JS suites, and
     # compiles and runs the full Rust suite.
-    timeout-minutes: 90
+    # A backstop above the sum of the real work (frontend gates, Chromium,
+    # a cold one-codegen-unit compile, then the capped test run). The cap that
+    # matters is the per-step one on the test execution below; this only exists
+    # so a job cannot bill for six hours.
+    timeout-minutes: 150
     env:
       # Four runs of issue #1520's first CI execution lost the hosted runner at
       # the same point in `cargo test` ("The hosted runner lost communication
@@ -234,7 +238,15 @@ jobs:
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
+      #
+      # The step-level cap is the point of this split. Five runs of issue
+      # #1520's first CI execution lost the hosted runner *inside test
+      # execution* (the compile step above now completes and reports), always
+      # with no step conclusion and no log. A per-step timeout converts that
+      # from an unexplainable runner loss into a normal failure that keeps the
+      # log, so the hanging test is named instead of inferred.
       - name: Rust tests + regenerate TS bindings
+        timeout-minutes: 30
         run: cargo test --locked
         working-directory: src-tauri
 
