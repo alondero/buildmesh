@@ -474,16 +474,24 @@ mod tests {
             false,
         );
         let args = argv(&cmd);
-        // `cmd.exe /c <resolved> <base_args...>` — the resolved path
-        // must replace the bare `cline` stem so cmd.exe's `cmd.exe /c`
-        // wrapper can find the binary off-`PATH`.
-        assert!(
-            args.windows(2).any(|pair| {
-                pair[0] == "/c" && pair[1] == fake_binary_str
-            }),
-            "the resolved absolute path must follow `/c`; got {:?}",
-            args
-        );
+        // Windows wraps the resolved path with `cmd.exe /c`; Unix spawns it
+        // directly as argv[0]. Both routes must replace the bare `cline` stem.
+        if cfg!(windows) {
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "/c" && pair[1] == fake_binary_str
+                }),
+                "the resolved absolute path must follow `/c`; got {:?}",
+                args
+            );
+        } else {
+            assert_eq!(
+                args.first(),
+                Some(&fake_binary_str),
+                "native Unix routing must spawn the resolved executable directly; got {:?}",
+                args
+            );
+        }
         // And the Cline recipe's `-i` base arg must survive intact.
         let after_binary = args
             .iter()
@@ -1097,7 +1105,7 @@ mod tests {
     /// agent spawn first runs the user's PowerShell profile (modules, prompt
     /// frameworks) before claude, adding hundreds of ms per node. This shell
     /// only relays ANSI output, so the profile is dead weight.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     #[test]
     fn windows_powershell_launcher_uses_no_profile() {
         let cmd = cmd_for(

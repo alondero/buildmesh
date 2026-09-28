@@ -1660,7 +1660,9 @@ mod tests {
     fn init_repo_with_commit() -> (TempGitRepo, String) {
         let tmp = TempGitRepo::new();
         fs::create_dir_all(tmp.path()).unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        let repo = git2::Repository::init_opts(tmp.path(), &options).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
         fs::write(tmp.path().join("file.txt"), "content").unwrap();
         let mut index = repo.index().unwrap();
@@ -1679,7 +1681,9 @@ mod tests {
     fn init_repo_unborn() -> (TempGitRepo, String) {
         let tmp = TempGitRepo::new();
         fs::create_dir_all(tmp.path()).unwrap();
-        git2::Repository::init(tmp.path()).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        git2::Repository::init_opts(tmp.path(), &options).unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         (tmp, path)
     }

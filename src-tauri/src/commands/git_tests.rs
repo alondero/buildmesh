@@ -1000,6 +1000,7 @@ mod tests {
         assert!(stage_file_blocking(path, "/").is_err());
 
         // Class C: bare Windows backslash (root marker on Windows).
+        #[cfg(windows)]
         assert!(stage_file_blocking(path, "\\").is_err());
 
         // Class D: Windows drive prefix. Splits to `["D:", "secret.txt"]`
