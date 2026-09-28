@@ -166,6 +166,39 @@ mod tests {
     use crate::autopilot::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNode, CircuitNodeKind, CircuitEdge},
         observation::{ObservationIdentity, WorkEvidence}, stepper::*};
 
+    #[test]
+    fn circuit_report_preserves_long_review_verdict_and_tail_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review.jsonl");
+        let findings = "Inspected source and verified the requirements.\n".repeat(150);
+        let write = |verdict: &str| {
+            let text = format!("{findings}\nVerdict: {verdict}");
+            fs::write(&path, format!("{}\n", serde_json::json!({
+                "type": "assistant", "timestamp": "2026-09-27T22:30:00Z",
+                "message": {"id": "review", "role": "assistant", "content": [{"type":"text", "text":text}]}
+            }))).unwrap();
+            text
+        };
+        let expected = write("Approve");
+        let approved = read_file(&path, TranscriptFormat::ClaudeCode).unwrap();
+        assert_eq!(approved.text, expected, "a circuit must classify the verdict, not a display preview");
+        let expected = write("Decline");
+        let rejected = read_file(&path, TranscriptFormat::ClaudeCode).unwrap();
+        assert_eq!(rejected.text, expected);
+        assert_ne!(approved.revision, rejected.revision);
+        assert_eq!(approved.revision.split(':').next(), rejected.revision.split(':').next(),
+            "equal-length edits exercise content hashing, not just record position");
+        let legacy = approved.revision.rsplit_once(':').unwrap().0;
+        assert!(same_assistant_revision(&approved.revision, legacy));
+        assert!(same_assistant_revision(&rejected.revision, legacy),
+            "old preview-only boundaries cannot authorize unseen tail edits in the same record");
+        assert!(!same_assistant_revision(&rejected.revision, &approved.revision));
+        let TranscriptTail::Available { last_assistant_message: Some(preview), .. } =
+            read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode)
+        else { panic!("expected a display preview"); };
+        assert!(preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8());
+    }
+
     fn classified_run(snapshot: ReportSnapshot) -> (RunView, CircuitEvent) {
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "900");
@@ -554,6 +587,30 @@ mod tests {
         assert!(snapshot.revision.starts_with("msg-1:"), "opencode revision is message-id + content hash");
         assert_eq!(snapshot.published_at_ms, 1_790_337_600_000);
         assert!(!snapshot.turn_finished, "message completion is not a native session-idle boundary");
+    }
+
+    #[test]
+    fn every_wired_report_adapter_preserves_long_reports_but_bounds_previews() {
+        let text = format!("{}\nVerdict: Request changes", "Reviewed requirement and test. ".repeat(220));
+        for case in file_report_cases() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.jsonl");
+            let lines = valid_lines(&case.valid).replace(
+                &serde_json::to_string(case.text).unwrap(), &serde_json::to_string(&text).unwrap(),
+            );
+            fs::write(&path, lines).unwrap();
+            let report = read_file(&path, case.format)
+                .unwrap_or_else(|error| panic!("{}: {error:?}", case.harness));
+            assert_eq!(report.text, text, "{} complete report", case.harness);
+            let TranscriptTail::Available { last_assistant_message: Some(preview), .. } =
+                read_last_assistant_message_from_file(&path, case.format)
+            else { panic!("{} missing preview", case.harness); };
+            assert!(preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8(), "{} preview", case.harness);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
+            &[("msg-1", 1, opencode_assistant_value(&text, 1_790_337_600_000))]);
+        assert_eq!(read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap().text, text);
     }
 
     #[test]

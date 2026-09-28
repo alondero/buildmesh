@@ -29,7 +29,7 @@ use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
-    MAX_TOOL_STRING, MAX_TURN_TEXT,
+    MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for MiniMax Code.
@@ -45,8 +45,8 @@ impl TranscriptAdapter for McodeAdapter {
         find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_mcode_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_mcode_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -207,7 +207,12 @@ fn extract_mcode_tool_calls(message: &serde_json::Value) -> Vec<ToolCall> {
 /// last-assistant tracking, malformed flag so a renamed shape degrades loudly
 /// as `ShapeChanged`. `toolResult` echoes and `compactionSummary`
 /// bookkeeping are silently skipped — never flagged, never turns.
+#[cfg(test)]
 pub(crate) fn parse_mcode_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    parse_mcode_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_mcode_turns_with_text_limit(lines: impl Iterator<Item = String>, keep: usize, max_text: usize) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -256,7 +261,7 @@ pub(crate) fn parse_mcode_turns(lines: impl Iterator<Item = String>, keep: usize
             cap_tool_calls(&mut tool_calls);
             let turn = Turn {
                 role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
+                text: truncate(&text, max_text),
                 tool_calls,
             };
             if !turn.text.trim().is_empty() {
@@ -268,7 +273,7 @@ pub(crate) fn parse_mcode_turns(lines: impl Iterator<Item = String>, keep: usize
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
+                    text: truncate(&text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,

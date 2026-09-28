@@ -19,7 +19,7 @@ use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
-    MAX_TOOL_STRING, MAX_TURN_TEXT,
+    MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for Antigravity.
@@ -36,8 +36,8 @@ impl TranscriptAdapter for AgyAdapter {
         agy_locator_in(&home.join("brain"), ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_agy_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_agy_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -81,9 +81,18 @@ pub(crate) fn agy_locator_in(brain_root: &Path, session_id: &str) -> Option<Path
 /// tracking, malformed flag). Each line is one self-contained turn — no
 /// message-id coalescing is needed for AGY because its emission shape
 /// never splits a single assistant message across multiple JSONL lines.
+#[cfg(test)]
 pub(crate) fn parse_agy_turns(
     lines: impl Iterator<Item = String>,
     keep: usize,
+) -> Parsed {
+    parse_agy_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_agy_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
 ) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
@@ -112,7 +121,7 @@ pub(crate) fn parse_agy_turns(
                     &mut turns,
                     Turn {
                         role: "user".to_string(),
-                        text: truncate(text, MAX_TURN_TEXT),
+                        text: truncate(text, max_text),
                         tool_calls: Vec::new(),
                     },
                     keep,
@@ -135,7 +144,7 @@ pub(crate) fn parse_agy_turns(
                 cap_tool_calls(&mut tool_calls);
                 let turn = Turn {
                     role: "assistant".to_string(),
-                    text: truncate(text, MAX_TURN_TEXT),
+                    text: truncate(text, max_text),
                     tool_calls,
                 };
                 if !turn.text.is_empty() {

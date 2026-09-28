@@ -21,7 +21,7 @@ use crate::services::transcript_reader::adapter::{
 };
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
-    MAX_TOOL_STRING, MAX_TURN_TEXT,
+    MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for Grok Code.
@@ -40,8 +40,8 @@ impl TranscriptAdapter for GrokAdapter {
         )
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_grok_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_grok_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -226,7 +226,12 @@ fn extract_grok_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
 /// renamed-shape line degrades loudly as `ShapeChanged`. Unknown event
 /// types (tool echoes, telemetry, status, …) are silently skipped — never
 /// flagged.
+#[cfg(test)]
 pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    parse_grok_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_grok_turns_with_text_limit(lines: impl Iterator<Item = String>, keep: usize, max_text: usize) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -278,7 +283,7 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
             cap_tool_calls(&mut tool_calls);
             let turn = Turn {
                 role: "assistant".to_string(),
-                text: truncate(&text, MAX_TURN_TEXT),
+                text: truncate(&text, max_text),
                 tool_calls,
             };
             if !turn.text.trim().is_empty() {
@@ -290,7 +295,7 @@ pub(crate) fn parse_grok_turns(lines: impl Iterator<Item = String>, keep: usize)
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
+                    text: truncate(&text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,
