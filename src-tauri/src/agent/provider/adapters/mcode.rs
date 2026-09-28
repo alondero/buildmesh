@@ -2061,16 +2061,16 @@ defaultModelThinking:
         std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o000))
             .unwrap();
 
-        let path = home.to_string_lossy().to_string();
+        let path = home.path().to_string_lossy().to_string();
         let result = MCODE.provision_attention_hooks(
             &ResolvedPath {
                 host_path: path.clone(),
                 spawn_path: path,
-                raw_path: home.to_string_lossy().to_string(),
+                raw_path: home.path().to_string_lossy().to_string(),
                 env_type: EnvType::Windows,
             },
             &LaunchRuntime {
-                harness_home: Some(home.to_string_lossy().to_string()),
+                harness_home: Some(home.path().to_string_lossy().to_string()),
                 wsl_distro: None,
             },
             7,
