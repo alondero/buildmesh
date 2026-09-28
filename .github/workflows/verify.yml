@@ -39,6 +39,16 @@ jobs:
     # compiles and runs the full Rust suite.
     timeout-minutes: 90
     env:
+      # A hosted Linux runner has roughly 14 GB free on `/`, and a debug-symbol
+      # build of this crate is an order of magnitude larger than that: the
+      # workspace's `target/` measures 64.9 GB, of which `debug/` alone is
+      # 55 GB. That is why three attempts of issue #1520's first CI run died at
+      # 53m01s inside `cargo test` with no step conclusion and no retrievable
+      # log — the runner ran out of disk, not out of patience. Symbols are the
+      # bulk of that figure and are worth nothing to a pass/fail test run, so
+      # build without them and let the size live in the cache instead.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
       # Keeps the target/ directory (and therefore runner disk pressure) down
       # for a full test build of a Tauri crate.
       CARGO_INCREMENTAL: "0"
@@ -187,13 +197,29 @@ jobs:
       # target/ plus a linked test binary for a Tauri crate, on top of the
       # frontend build and the Chromium download above. Record the budget and
       # drop the runner image's unused toolchains first, so disk exhaustion
-      # surfaces here as a visible number instead of the runner disappearing
-      # mid-`cargo` (issue #1520).
+      # surfaces as a visible number instead of the runner disappearing
+      # mid-`cargo` (issue #1520). The report is also uploaded as an artifact
+      # because a runner that dies mid-build never gets to flush its log.
       - name: Report disk and reclaim runner image space
         run: |
-          df -h / /home/runner
+          {
+            echo "=== before ==="
+            df -h /
+            du -sh src-tauri/target 2>/dev/null || echo "no target/ yet"
+          } | tee disk-report.txt
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
-          df -h / /home/runner
+          {
+            echo "=== after ==="
+            df -h /
+          } | tee -a disk-report.txt
+
+      - name: Upload the disk report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-disk-report
+          path: disk-report.txt
+          retention-days: 7
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
