@@ -556,8 +556,9 @@ fn normalize_decision(
 
 /// Decision the route actually publishes. An ask whose reply already arrived
 /// (`--auto` answers in the same turn, and the HTTP callbacks can reorder)
-/// must not raise a banner. If some other prompt is still outstanding, leave
-/// that banner alone.
+/// must not raise a banner and must not move the node. The reply's own
+/// callback is what resumes work. Publishing `Running` here would undo a
+/// later `session.idle` that landed before this late ask.
 fn lifecycle_decision(
     decision: Decision,
     state: &crate::agent::hook_state::HookState,
@@ -565,11 +566,7 @@ fn lifecycle_decision(
 ) -> Decision {
     let decision = normalize_decision(decision, state, codex_permission_pending);
     if state.input_already_resolved() {
-        if state.has_foreground_questions() {
-            Decision::Ignore
-        } else {
-            Decision::Running
-        }
+        Decision::Ignore
     } else {
         decision
     }
@@ -1637,13 +1634,37 @@ mod tests {
         assert!(!state.has_foreground_questions(), "the earlier reply already satisfied this ask");
         assert_eq!(
             lifecycle_decision(decision, &state, false),
-            Decision::Running,
-            "publishing MarkInput here would leave the permission banner up"
+            Decision::Ignore,
+            "an ask that was already answered must not change the node's lifecycle"
+        );
+    }
+
+    #[test]
+    fn late_permission_ask_after_idle_does_not_resume_a_finished_turn() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+            let accepted = accept_hook(state, &payload, &classified);
+            (accepted, classified.decision, lifecycle_decision(classified.decision, state, false))
+        };
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})),
+            (true, Decision::Running, Decision::Running)
         );
         assert_eq!(
             apply(&mut state, serde_json::json!({"hook_event_name":"session.idle"})),
-            (true, Decision::Ready)
+            (true, Decision::Ready, Decision::Ready)
         );
+        let (accepted, decision, published) = apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"permission.asked", "request_id":"per_external"}),
+        );
+        assert!(accepted);
+        assert_eq!(decision, Decision::MarkInput);
+        assert_eq!(published, Decision::Ignore);
+        assert!(!state.has_foreground_questions());
     }
 
     #[test]
