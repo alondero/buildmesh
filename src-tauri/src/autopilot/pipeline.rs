@@ -358,8 +358,7 @@ pub(crate) fn injection_payload(text: &str) -> String {
 }
 
 /// Has the node produced PTY output more recently than `ms_since_mark`
-/// milliseconds ago? Pure core of both the paste-echo check and the
-/// Enter-acknowledgement check.
+/// milliseconds ago? Pure core of the generic paste-echo check.
 pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u128) -> bool {
     matches!(ms_since_output, Some(m) if m < ms_since_mark)
 }
@@ -605,7 +604,7 @@ fn press_enter_until_output_guarded(
     mut guard: Option<String>,
     ack_window: Duration,
 ) -> Result<Option<u32>, String> {
-    // An Enter can only be *acknowledged* against an output clock, so the retry
+    // An Enter can only be *acknowledged* against buffered output, so the retry
     // ladder only exists for a node the evaluator buffers. A node it does not
     // (an ordinary, hand-spawned node — see `settle_after_paste`) gets exactly
     // one Enter: a retry would type extra carriage returns into an agent that is
@@ -614,8 +613,14 @@ fn press_enter_until_output_guarded(
     // submission this path has no way to observe either way.
     let verifiable = evaluator::is_piloted(node_id);
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
-        // The PTY reader can observe an immediate response before the write
-        // call returns. Mark first so that response acknowledges this Enter.
+        // Compare byte positions rather than rounded millisecond ages: an
+        // immediate PTY response can share the same millisecond as this write.
+        let output_before = if verifiable {
+            evaluator::output_cursor(node_id)
+                .ok_or_else(|| format!("node {node_id} lost its PTY output buffer"))?
+        } else {
+            0
+        };
         let sent_at = Instant::now();
         if let Some(expected) = guard.as_deref() {
             let Some(next) = registry.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
@@ -628,10 +633,7 @@ fn press_enter_until_output_guarded(
         }
         while Instant::now() < sent_at + ack_window {
             std::thread::sleep(SUBMIT_POLL);
-            if output_seen_within(
-                evaluator::millis_since_last_output(node_id),
-                sent_at.elapsed().as_millis(),
-            ) {
+            if evaluator::output_cursor(node_id).is_some_and(|current| current > output_before) {
                 return Ok(Some(attempt));
             }
         }

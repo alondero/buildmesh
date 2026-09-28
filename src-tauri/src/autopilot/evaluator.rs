@@ -271,9 +271,12 @@ pub(crate) fn cleaned_output_since(node_id: i64, cursor: u64) -> String {
         .get(&node_id)
         .map(|state| {
             let retained_from = state.output_bytes.saturating_sub(state.tail.len() as u64);
-            let offset = cursor
+            let mut offset = cursor
                 .saturating_sub(retained_from)
                 .min(state.tail.len() as u64) as usize;
+            while !state.tail.is_char_boundary(offset) {
+                offset += 1;
+            }
             state.tail[offset..].to_string()
         })
         .unwrap_or_default();
