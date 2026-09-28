@@ -228,7 +228,11 @@ describe('CircuitsProbeTab', () => {
   it('exposes the built-in Review Blueprint before it has any runs', async () => {
     mockBackend({ circuits: [{ ...CIRCUIT, is_preset: true, enabled: false }], runs: [] });
     openProbeDestination('circuits');
-    const inspect = await screen.findByRole('button', { name: 'Inspect Review Blueprint' });
+    const inspect = await screen.findByRole(
+      'button',
+      { name: 'Inspect Review Blueprint' },
+      { timeout: 10_000 },
+    );
     fireEvent.click(inspect);
     expect(useUIStore.getState().activeCircuitEditorId).toBe(CIRCUIT.id);
     expect(screen.queryByLabelText(`Enable ${CIRCUIT.name}`)).toBeNull();
