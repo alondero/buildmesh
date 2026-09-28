@@ -66,21 +66,9 @@ jobs:
           fetch-depth: 0
 
       # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
-      # appindicator3, libxdo, and OpenSSL even when running the Rust tests.
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
+      # appindicator3, libxdo, and OpenSSL even when running the Rust tests, so
+      # every job that compiles or runs the Rust suite installs them.
+      - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -335,6 +323,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - uses: ./.github/actions/install-linux-build-deps
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -395,24 +385,33 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Fail closed, and say why in the run rather than letting a skipped job
+      # read as success. GitHub counts a *skipped* required status check as
+      # satisfied, so an aggregate that silently skips when a shard fails would
+      # be a hole in the merge gate; this job always runs and fails instead.
+      #
+      # The dependency results arrive as env vars, not through an expression:
+      # GitHub's workflow validator rejects the `needs.*.result` wildcard
+      # inside a function call (`join(needs.*.result, " ")` fails the whole file
+      # with zero jobs), so read the two jobs individually. A matrix
+      # dependency's `result` is `success` only when every leg succeeded, which
+      # is the aggregate this gate needs.
       - name: Refuse to run unless every shard succeeded
         shell: bash
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
         run: |
-          results="success success"
-          total=0
-          not_ok=0
-          for r in $results; do
-            total=$((total + 1))
-            [ "$r" = "success" ] || not_ok=$((not_ok + 1))
-          done
-          echo "dependencies ($total): $results"
-          if [ "$not_ok" -ne 0 ]; then
-            echo "::error::$not_ok of $total dependencies did not succeed, so the Rust suite is not fully green. Not running the authoritative pass."
+          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
+            echo "::error::quality=$QUALITY_RESULT rust-tests=$RUST_TESTS_RESULT — the Rust suite is not fully green, so the authoritative pass is not running."
             exit 1
           fi
+          echo "quality=$QUALITY_RESULT rust-tests=$RUST_TESTS_RESULT"
 
       - name: Checkout
         uses: actions/checkout@v7
+
+      - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
