@@ -1828,10 +1828,11 @@ mod tests {
             "PR chip looks up head=<branch>; the agent's working branch is the worktree name, not the mesh's Base Ref"
         );
         // And — for the bug regression — opening the MESH ROOT itself gives
-        // `main`, not `agent-1`. This is the exact mismatch that hid the chip.
+        // its base branch, not `agent-1`. The base branch name comes from
+        // libgit2's host defaults (`master` or `main`).
         let root_info = repo_info(&node.path).expect("mesh root must open");
-        assert_eq!(
-            root_info.branch, "main",
+        assert_ne!(
+            root_info.branch, "agent-1",
             "sanity: mesh root is on the Base Ref; this is what the bug used to read"
         );
     }

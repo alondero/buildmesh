@@ -1010,11 +1010,15 @@ mod tests {
         // the base). `revert_file`'s else branch then called
         // `std::fs::remove_file("D:\secret.txt")`. The new gate
         // catches it at `Component::Prefix`.
-        assert!(stage_file_blocking(path, "D:\\secret.txt").is_err());
-        assert!(stage_file_blocking(path, "C:\\Users\\foo\\bar").is_err());
-        assert!(revert_file_blocking(path, "D:\\secret.txt").is_err());
+        #[cfg(windows)]
+        {
+            assert!(stage_file_blocking(path, "D:\\secret.txt").is_err());
+            assert!(stage_file_blocking(path, "C:\\Users\\foo\\bar").is_err());
+            assert!(revert_file_blocking(path, "D:\\secret.txt").is_err());
+        }
 
         // Class E: UNC path. `Component::Prefix(UNC)`.
+        #[cfg(windows)]
         assert!(stage_file_blocking(path, "\\\\server\\share\\file").is_err());
 
         // `..bar` is a VALID POSIX filename — joining `repo + ..bar`
