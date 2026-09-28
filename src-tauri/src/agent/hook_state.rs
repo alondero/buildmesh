@@ -159,6 +159,10 @@ impl HookState {
         self.early_replies.iter().any(|pending| pending == key)
     }
 
+    pub(crate) fn has_foreground_question(&self, key: &str) -> bool {
+        matches!(self.questions.get(key), Some(QuestionKind::Foreground))
+    }
+
     /// Returns true when this ask was already satisfied by an earlier reply.
     /// The caller decides whether this callback is the one that consumes it.
     pub(crate) fn take_early_reply(&mut self, key: &str) -> bool {
@@ -185,6 +189,10 @@ impl HookState {
 
     pub(crate) fn end_turn(&mut self) {
         self.is_turn_active = false;
+        // OpenCode completes a turn with session.idle and never sends
+        // userpromptsubmit, so this is the boundary that drops a reply
+        // from the turn that just finished.
+        self.early_replies.clear();
     }
 
     /// Codex has no permission-result hook. Once its Stop callback arrives,
@@ -197,6 +205,13 @@ impl HookState {
     }
 
     pub(crate) fn mark_turn_active(&mut self) {
+        // session.busy activates a turn. A reply left over from a turn
+        // that was not active is not an answer to this one. A busy event
+        // inside an already-active turn must keep an in-flight reply so
+        // the matching ask can still find it.
+        if !self.is_turn_active {
+            self.early_replies.clear();
+        }
         self.is_turn_active = true;
     }
 
@@ -268,13 +283,26 @@ mod tests {
     fn a_remembered_reply_is_not_quiescent_state() {
         let mut state = HookState::default();
         state.resolve_reply(Some("per_external"));
+        assert!(!state.is_quiescent());
         state.end_turn();
         assert!(
-            !state.is_quiescent(),
-            "evicting this entry would forget the reply and the late ask would raise a banner"
+            !state.has_early_reply("per_external"),
+            "a completed turn must not keep its unmatched reply"
         );
-        assert!(state.take_early_reply("per_external"));
         assert!(state.is_quiescent());
+    }
+
+    #[test]
+    fn session_busy_clears_a_reply_only_when_it_activates_a_turn() {
+        let mut state = HookState::default();
+        state.resolve_reply(Some("per_external"));
+        state.mark_turn_active();
+        assert!(!state.has_early_reply("per_external"));
+
+        state.mark_turn_active();
+        state.resolve_reply(Some("per_external"));
+        state.mark_turn_active();
+        assert!(state.has_early_reply("per_external"));
     }
 
     #[test]

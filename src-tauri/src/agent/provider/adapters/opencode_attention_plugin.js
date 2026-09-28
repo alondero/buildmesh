@@ -213,9 +213,13 @@ function pickRequestId(event) {
 function permissionSubject(event) {
   const toolName = pickToolInfo(event);
   if (toolName) return { toolName, label: toolName };
-  const permission = event.properties?.permission;
-  const patterns = Array.isArray(event.properties?.patterns)
-    ? event.properties.patterns.filter((pattern) => typeof pattern === "string" && pattern.length > 0)
+  // Same wrapper tolerance as pickRequestId: the loader puts the payload on
+  // `properties`, and some revisions put it on `data`. Read both from one
+  // object so the name and the patterns cannot come from different shapes.
+  const source = event.properties || event.data;
+  const permission = source?.permission;
+  const patterns = Array.isArray(source?.patterns)
+    ? source.patterns.filter((pattern) => typeof pattern === "string" && pattern.length > 0)
     : [];
   if (typeof permission === "string" && permission.length > 0 && patterns.length > 0) {
     return { toolName: undefined, label: `${permission} (${patterns.join(", ")})` };
@@ -296,8 +300,41 @@ async function postAttention(body) {
   }
 }
 
+// Hold a permission announcement only long enough for `--auto` to reply.
+// The event handler stores a timer and returns. It does not await the hold,
+// so a serial dispatcher can still deliver permission.replied in time to
+// cancel the post.
+const PERMISSION_ASK_HOLD_MS = 750;
+
 export const BuildmeshAttention = async () => {
   let cachedSessionId = null;
+  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
+  const pendingPermissionAsks = new Map();
+
+  function armPermissionAsk(requestId, body) {
+    if (!requestId) {
+      void postAttention(body);
+      return;
+    }
+    const previous = pendingPermissionAsks.get(requestId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      pendingPermissionAsks.delete(requestId);
+      void postAttention(body);
+    }, PERMISSION_ASK_HOLD_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    pendingPermissionAsks.set(requestId, timer);
+  }
+
+  function cancelPermissionAsk(requestId) {
+    if (!requestId) return false;
+    const timer = pendingPermissionAsks.get(requestId);
+    if (!timer) return false;
+    clearTimeout(timer);
+    pendingPermissionAsks.delete(requestId);
+    return true;
+  }
+
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -361,8 +398,9 @@ export const BuildmeshAttention = async () => {
         return;
       }
       if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
-        const body = { hook_event_name: event.type };
         const requestId = pickRequestId(event);
+        if (event.type === "permission.replied" && cancelPermissionAsk(requestId)) return;
+        const body = { hook_event_name: event.type };
         if (requestId) body.request_id = requestId;
         const id = suppliedId ?? cachedSessionId;
         if (isValidSessionId(id)) body.sessionID = id;
@@ -440,7 +478,7 @@ export const BuildmeshAttention = async () => {
             "permission.asked missing or malformed id; posting without fencing token\n",
           );
         }
-        await postAttention(body);
+        armPermissionAsk(requestId, body);
         return;
       }
 

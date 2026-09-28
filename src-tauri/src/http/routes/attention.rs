@@ -394,6 +394,9 @@ enum Decision {
 struct Accept {
     accepted: bool,
     ask_already_resolved: bool,
+    /// A reply was recorded while some other prompt is still open. Do not
+    /// publish `Running` for the whole node.
+    preserve_attention: bool,
 }
 
 impl Accept {
@@ -401,6 +404,15 @@ impl Accept {
         Self {
             accepted: false,
             ask_already_resolved: false,
+            preserve_attention: false,
+        }
+    }
+
+    fn passthrough() -> Self {
+        Self {
+            accepted: true,
+            ask_already_resolved: false,
+            preserve_attention: false,
         }
     }
 }
@@ -439,6 +451,7 @@ fn accept_hook(
         return Accept {
             accepted,
             ask_already_resolved: false,
+            preserve_attention: false,
         };
     }
     let starts_turn = event == "userpromptsubmit";
@@ -527,7 +540,21 @@ fn accept_hook(
     // detached/background question. The background request remains tracked
     // and can still resolve later, but dropping this callback would leave the
     // node frozen in its previous attention state (review finding).
-    let accepted = starts_turn
+    // A reply resolves its own key. Publishing it as `Running` while another
+    // question is open would resume the whole node, so the gate used to
+    // reject it after the id had already been stored. Accept the reply and
+    // tell the route not to resume.
+    let keyed_reply = matches!(
+        event.as_str(),
+        "permissionresult"
+            | "permission.replied"
+            | "elicitationresult"
+            | "question.replied"
+            | "question.rejected"
+    );
+    let preserve_attention = keyed_reply && state.has_foreground_questions();
+    let accepted = preserve_attention
+        || starts_turn
         || !(state.has_questions()
             && matches!(
                 classified.decision,
@@ -552,6 +579,7 @@ fn accept_hook(
     Accept {
         accepted: true,
         ask_already_resolved,
+        preserve_attention,
     }
 }
 
@@ -590,10 +618,10 @@ fn lifecycle_decision(
     decision: Decision,
     state: &crate::agent::hook_state::HookState,
     codex_permission_pending: bool,
-    ask_already_resolved: bool,
+    accept: Accept,
 ) -> Decision {
     let decision = normalize_decision(decision, state, codex_permission_pending);
-    if ask_already_resolved {
+    if accept.ask_already_resolved || accept.preserve_attention {
         Decision::Ignore
     } else {
         decision
@@ -1213,7 +1241,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 hook_payload.as_ref(),
                 &classified,
                 native_hook.as_ref(),
-                |state, native_hook, ask_already_resolved| {
+                |state, native_hook, accept| {
                     // `PostToolUse` is catch-all in Codex. Only an approval marker
                     // makes it a lifecycle resume; ordinary tool output is
                     // correlation-neutral and must not spam `work_resumed`.
@@ -1237,7 +1265,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         classified_decision,
                         &state,
                         codex_permission_pending,
-                        ask_already_resolved,
+                        accept,
                     );
 
                     // A real, high-confidence callback proves hook delivery — persist
@@ -1363,13 +1391,13 @@ fn apply_hook_after_turn_fence(
     on_accepted: impl FnOnce(
         &mut crate::agent::hook_state::HookState,
         Option<&crate::services::circuit_worker::native_hooks::NativeHook>,
-        bool,
+        Accept,
     ) -> Result<Applied, String>,
 ) -> Result<Applied, String> {
     // No payload means an empty or unparseable body. That callback did not
     // resolve an ask, so the degraded mark-attention path must not inherit
     // a previous callback's answer.
-    let ask_already_resolved = if let Some(payload) = payload {
+    let accept = if let Some(payload) = payload {
         let accept = accept_hook(state, payload, classified);
         if !accept.accepted {
             // Preserve an explicitly old-turn native lifecycle event for
@@ -1388,11 +1416,11 @@ fn apply_hook_after_turn_fence(
             }
             return Ok(Applied::StaleDropped);
         }
-        accept.ask_already_resolved
+        accept
     } else {
-        false
+        Accept::passthrough()
     };
-    on_accepted(state, native_hook, ask_already_resolved)
+    on_accepted(state, native_hook, accept)
 }
 
 #[cfg(test)]
@@ -1674,7 +1702,7 @@ mod tests {
         assert_eq!(decision, Decision::MarkInput, "the ask itself is still a permission event");
         assert!(!state.has_foreground_questions(), "the earlier reply already satisfied this ask");
         assert_eq!(
-            lifecycle_decision(decision, &state, false, accept.ask_already_resolved),
+            lifecycle_decision(decision, &state, false, accept),
             Decision::Ignore,
             "an ask that was already answered must not change the node's lifecycle"
         );
@@ -1691,16 +1719,21 @@ mod tests {
             (
                 accept.accepted,
                 classified.decision,
-                lifecycle_decision(classified.decision, state, false, accept.ask_already_resolved),
+                lifecycle_decision(classified.decision, state, false, accept),
             )
         };
         assert_eq!(
             apply(&mut state, serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})),
             (true, Decision::Running, Decision::Running)
         );
+        assert!(state.has_early_reply("per_external"));
         assert_eq!(
             apply(&mut state, serde_json::json!({"hook_event_name":"session.idle"})),
             (true, Decision::Ready, Decision::Ready)
+        );
+        assert!(
+            !state.has_early_reply("per_external"),
+            "idle completes the turn and drops its unmatched reply"
         );
         let (accepted, decision, published) = apply(
             &mut state,
@@ -1708,8 +1741,8 @@ mod tests {
         );
         assert!(accepted);
         assert_eq!(decision, Decision::MarkInput);
-        assert_eq!(published, Decision::Ignore);
-        assert!(!state.has_foreground_questions());
+        assert_eq!(published, Decision::MarkInput);
+        assert!(!matches!(published, Decision::Running));
     }
 
     #[test]
@@ -1720,29 +1753,42 @@ mod tests {
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
             let accept = accept_hook(state, &payload, &classified);
-            (classified.decision, accept.ask_already_resolved)
+            (accept, classified.decision)
         };
-        assert_eq!(
-            apply(&mut state, serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})).0,
-            Decision::MarkInput
+        let (asked, asked_decision) = apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"}),
         );
-        assert_eq!(
-            apply(
-                &mut state,
-                serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})
-            )
-            .0,
-            Decision::Running
+        assert!(asked.accepted);
+        assert_eq!(asked_decision, Decision::MarkInput);
+        assert!(state.has_foreground_question("one"));
+
+        let (reply, reply_decision) = apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"}),
         );
-        let (decision, ask_already_resolved) = apply(
+        assert!(reply.accepted, "a reply is accepted even while another question is open");
+        assert!(reply.preserve_attention);
+        assert_eq!(reply_decision, Decision::Running, "classification stays Running");
+        assert_eq!(
+            lifecycle_decision(reply_decision, &state, false, reply),
+            Decision::Ignore,
+            "the reply must not move the whole node to Running"
+        );
+        assert!(state.has_foreground_question("one"));
+        assert!(state.has_early_reply("per_external"));
+
+        let (ask, ask_decision) = apply(
             &mut state,
             serde_json::json!({"hook_event_name":"permission.asked", "request_id":"per_external"}),
         );
-        assert!(state.has_foreground_questions());
+        assert!(ask.accepted);
+        assert!(ask.ask_already_resolved);
         assert_eq!(
-            lifecycle_decision(decision, &state, false, ask_already_resolved),
+            lifecycle_decision(ask_decision, &state, false, ask),
             Decision::Ignore
         );
+        assert!(state.has_foreground_question("one"));
 
         // The resolved-ask bit must not survive into the next callback. An
         // empty body is the degraded "mark attention" path and never enters
