@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act, configure } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
@@ -19,6 +19,16 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+
+// Every async query in this file polls up to RTL's 1s default. Under the
+// full `vitest run tests/unit tests/integration` load (263 files, one
+// threads pool — the exact command CI runs) the first render of this tab can
+// miss that window and fail a test that passes in isolation, which is how
+// issue #1520's restored CI found it. The timeout is only an upper bound:
+// a satisfied query resolves immediately, so raising it cannot turn a real
+// failure into a pass, it only stops the suite from reporting load as a
+// product regression. Assertions are unchanged.
+configure({ asyncUtilTimeout: 10_000 });
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetail';

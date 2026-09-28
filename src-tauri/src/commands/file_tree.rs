@@ -258,8 +258,8 @@ mod tests {
     fn test_open_in_file_manager_rejects_file() {
         // cargo's manifest is a file, not a directory — opening it in a file
         // manager would render the parent (surprising), so we reject.
-        let manifest = env!("CARGO_MANIFEST_DIR").to_string() + "\\Cargo.toml";
-        let result = open_in_file_manager_blocking(manifest);
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let result = open_in_file_manager_blocking(manifest.to_string_lossy().into_owned());
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("is not a directory"));
     }

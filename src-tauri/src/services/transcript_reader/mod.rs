@@ -1704,17 +1704,17 @@ mod tests {
     fn commandcode_transcript_path_uses_session_id_under_sessions_root() {
         // Issue #1500: the sessions root is the per-project
         // `projects/<encoded-cwd>/` dir; the pure locator just joins the id.
+        let sessions_root = Path::new(
+            r"C:\Users\adam\.commandcode\projects\f-src-buildmesh-claude-worktrees-saucy-thunderous-cove",
+        );
         let path = commandcode_transcript_path_in(
-            Path::new(
-                r"C:\Users\adam\.commandcode\projects\f-src-buildmesh-claude-worktrees-saucy-thunderous-cove",
-            ),
+            sessions_root,
             "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9",
         );
+        assert_eq!(path.parent(), Some(sessions_root));
         assert_eq!(
-            path,
-            PathBuf::from(
-                r"C:\Users\adam\.commandcode\projects\f-src-buildmesh-claude-worktrees-saucy-thunderous-cove\3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl"
-            )
+            path.file_name().and_then(|name| name.to_str()),
+            Some("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9.jsonl")
         );
     }
 

@@ -935,18 +935,28 @@ mod tests {
     #[tokio::test]
     async fn read_body_with_cap_handles_zero_length_body() {
         // Content-Length: 0 — the read fast-paths to an empty Vec without
-        // touching the wire. Tests the `if content_length > 0` branch.
+        // consuming the sentinel byte the server sends. Tests the
+        // `if content_length > 0` branch without a close-before-accept race.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            // Drop the listener without accepting — proves we never read.
-            drop(listener);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            stream.write_all(b"x").await.unwrap();
+            stream.shutdown().await.unwrap();
         });
 
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let mut lines = BufStream::new(MaybeTls::Plain(stream));
         let buf = read_body_with_cap(&mut lines, 0, 1024).await.unwrap();
         assert!(buf.is_empty());
+        let mut sentinel = [0u8; 1];
+        lines.read_exact(&mut sentinel).await.unwrap();
+        assert_eq!(
+            sentinel, *b"x",
+            "zero-length reads must leave the stream untouched"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

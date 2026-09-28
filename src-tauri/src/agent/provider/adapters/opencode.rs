@@ -715,7 +715,9 @@ mod tests {
                 || err.kind() == std::io::ErrorKind::AlreadyExists
                 || matches!(
                     err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::Other
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::NotADirectory
+                        | std::io::ErrorKind::Other
                 ),
             "expected a filesystem error, got {:?}",
             err
