@@ -2065,12 +2065,12 @@ defaultModelThinking:
         let result = MCODE.provision_attention_hooks(
             &ResolvedPath {
                 host_path: path.clone(),
-                spawn_path: path,
-                raw_path: home.path().to_string_lossy().to_string(),
+                spawn_path: path.clone(),
+                raw_path: path.clone(),
                 env_type: EnvType::Windows,
             },
             &LaunchRuntime {
-                harness_home: Some(home.path().to_string_lossy().to_string()),
+                harness_home: Some(path),
                 wsl_distro: None,
             },
             7,
