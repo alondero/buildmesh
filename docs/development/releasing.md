@@ -70,17 +70,25 @@ workflow-generated body.
 
 ## Required checks and branch protection
 
-`main` is protected by the `main: verified merges only` ruleset. A pull request
-can merge only when every check below has passed on its head commit, the branch
-is up to date with `main`, and all review conversations are resolved. The rules
-apply to administrators too — there is no standing bypass actor.
+`main` is protected in two places, because the two mechanisms do not cover the
+same ground:
 
-| Check | What it proves |
-|---|---|
-| `Verification / Quality (Linux)` | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
-| `Verification / Verify-smoke (Linux)` | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
-| `Verification / Platform smoke (windows-latest)` | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
-| `Verification / Platform smoke (macos-latest)` | The Tauri app compiles and links on macOS. |
+- The `main: verified merges only` **ruleset** requires a pull request (no
+  direct pushes), blocks deletion and force-push, and requires the checks below
+  to pass on the head commit with the branch up to date. It has **no bypass
+  actors**, so administrators are subject to it too.
+- **Classic branch protection** carries `required_conversation_resolution`, with
+  `enforce_admins` on. The rulesets API on this repository rejects
+  `required_conversation_resolution` in every form (bare, empty parameters,
+  null), so conversation resolution is enforced there instead of in the
+  ruleset. That split is deliberate, not an oversight.
+
+| Check | Required | What it proves |
+|---|---|---|
+| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
+| `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
+| `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
+| `Verification / Platform smoke (macos-latest)` | yes | The Tauri app compiles and links on macOS. |
 
 Those names are owned by `.github/workflows/verify.yml`. A job that calls a
 reusable workflow is reported as `<calling job> / <called job>`, so the
@@ -89,12 +97,22 @@ reusable workflow is reported as `<calling job> / <called job>`, so the
 `name:` in the caller and the job names in the callee are part of the
 required-check identity, so **changing either is a branch-protection change**:
 update the ruleset and this table in the same commit, or every pull request
-will block on a check that no longer exists.
+will block on a check that no longer exists. The same applies to the matrix
+`os:` values, which are part of the platform-smoke check names.
+
+To read or change the required set:
+
+```
+gh api repos/alondero/buildmesh/rulesets
+gh api -X PUT repos/alondero/buildmesh/rulesets/<id> --input ruleset.json
+```
 
 A weekly schedule additionally runs `Weekly package smoke` on all three
 platforms. It is not merge-gating: a weekly packaging failure is reported by
 opening or updating a `ci-alert` issue from the workflow itself, because a
-scheduled run has no pull request to turn red.
+scheduled run has no pull request to turn red. Its concurrency group is keyed
+by event name, so a push to `main` cannot cancel a weekly run and suppress the
+alert it would have raised.
 
 GitHub disables scheduled workflows after 60 days without repository activity.
 If the weekly packaging stops appearing, check the workflow is still `active`
@@ -136,19 +154,30 @@ that would otherwise block a security fix). Prefer fixing CI over bypassing it.
 2. Local checks still apply: run the smallest relevant `scripts\check.ps1`
    target plus `npm run check:docs` and record the output in the PR. A bypass is
    not a substitute for evidence, only for a missing remote run.
-3. Remove the required-check rule temporarily:
+3. Set the ruleset to `disabled` with an empty rule set, rather than deleting
+   it, so the intended policy stays visible while the exception is in force.
+   A ruleset `PUT` replaces the whole document, so send a complete one:
    ```
    gh api repos/alondero/buildmesh/rulesets --jq '.[] | select(.name=="main: verified merges only") | .id'
-   gh api -X DELETE repos/alondero/buildmesh/rulesets/<ruleset-id>
+   # body: name, target: branch, enforcement: disabled, bypass_actors: [],
+   #       conditions { ref_name { include: ["~DEFAULT_BRANCH"] } }, rules: []
+   gh api -X PUT repos/alondero/buildmesh/rulesets/<ruleset-id> --input ruleset-disabled.json
    ```
-4. Merge, then restore the ruleset in the same day — the bypass is a
+   Emptying the rules lifts the pull-request requirement too, so the branch can
+   be merged directly. Conversation resolution lives in classic branch
+   protection, not in this ruleset — leave it on unless the exception is
+   specifically about unresolved threads.
+4. Merge, then restore the ruleset in the same day. The bypass is a
    time-boxed exception, not a new default:
    ```
-   gh api -X POST repos/alondero/buildmesh/rulesets --input ruleset.json
+   gh api -X PUT repos/alondero/buildmesh/rulesets/<ruleset-id> --input ruleset.json
+   gh api repos/alondero/buildmesh/rulesets/<id> --jq .enforcement   # must read active
    ```
    The `ruleset.json` body is the current ruleset definition
    (`gh api repos/alondero/buildmesh/rulesets/<id>`, minus `id`, `node_id`, and
-   `created_at`/`updated_at`).
+   `created_at`/`updated_at`). This disable/restore round trip has been
+   executed against the live repository, so the commands above are known to
+   work rather than aspirational.
 5. Never bypass the release gate to ship a hotfix. If a tagged commit cannot
    pass verification, the fix is a new commit on a branch that can, then a new
    tag.

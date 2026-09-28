@@ -239,15 +239,36 @@ jobs:
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
       #
-      # The step-level cap is the point of this split. Five runs of issue
-      # #1520's first CI execution lost the hosted runner *inside test
-      # execution* (the compile step above now completes and reports), always
-      # with no step conclusion and no log. A per-step timeout converts that
-      # from an unexplainable runner loss into a normal failure that keeps the
-      # log, so the hanging test is named instead of inferred.
-      - name: Rust tests + regenerate TS bindings
+      # Unit target first, integration targets second, as separate steps. A
+      # hosted runner lost mid-step records no conclusion and no log, so with
+      # one combined step a loss localises nothing; with the split, the last
+      # green step names the half that died. `--test-threads=1` is the mode
+      # CLAUDE.md documents for a trustworthy verdict, because the `db::`
+      # tests share one process-global database and report phantom failures
+      # (and can wedge) in parallel. The in-shell `timeout` turns a hang into
+      # a step failure with a log rather than a lost runner.
+      - name: Rust unit tests + regenerate TS bindings
         timeout-minutes: 30
-        run: cargo test --locked
+        run: |
+          set -o pipefail
+          timeout --kill-after=2m 25m cargo test --locked --lib -- --test-threads=1 2>&1 | tee cargo-unit.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" = 124 ]; then
+            echo "::error::The Rust unit tests exceeded 25 minutes and were killed — a test is hanging."
+          fi
+          exit "$status"
+        working-directory: src-tauri
+
+      - name: Rust integration tests
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          timeout --kill-after=2m 25m cargo test --locked --tests -- --test-threads=1 2>&1 | tee cargo-integration.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" = 124 ]; then
+            echo "::error::The Rust integration tests exceeded 25 minutes and were killed — a test is hanging."
+          fi
+          exit "$status"
         working-directory: src-tauri
 
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
