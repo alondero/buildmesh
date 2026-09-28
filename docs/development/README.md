@@ -67,6 +67,11 @@ without pretending that a code linter can judge prose quality. CI passes
 `--base <commit>` to the same script to require documentation or a reasoned
 `docs: none — <reason>` exemption for behavior-sensitive diffs.
 
+The Quality, Verify-smoke, and Windows/macOS platform checks are required
+status checks on `main`, so a change is not mergeable until CI has run them.
+The required names, the release gate, and the emergency bypass are documented
+in [the release procedure](releasing.md#required-checks-and-branch-protection).
+
 ## Common change checklists
 
 ### Adding or changing a harness/provider

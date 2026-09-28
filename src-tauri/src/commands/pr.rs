@@ -1660,7 +1660,9 @@ mod tests {
     fn init_repo_with_commit() -> (TempGitRepo, String) {
         let tmp = TempGitRepo::new();
         fs::create_dir_all(tmp.path()).unwrap();
-        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        let repo = git2::Repository::init_opts(tmp.path(), &options).unwrap();
         let sig = git2::Signature::now("test", "test@example.com").unwrap();
         fs::write(tmp.path().join("file.txt"), "content").unwrap();
         let mut index = repo.index().unwrap();
@@ -1679,7 +1681,9 @@ mod tests {
     fn init_repo_unborn() -> (TempGitRepo, String) {
         let tmp = TempGitRepo::new();
         fs::create_dir_all(tmp.path()).unwrap();
-        git2::Repository::init(tmp.path()).unwrap();
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main");
+        git2::Repository::init_opts(tmp.path(), &options).unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         (tmp, path)
     }
@@ -1824,10 +1828,11 @@ mod tests {
             "PR chip looks up head=<branch>; the agent's working branch is the worktree name, not the mesh's Base Ref"
         );
         // And — for the bug regression — opening the MESH ROOT itself gives
-        // `main`, not `agent-1`. This is the exact mismatch that hid the chip.
+        // its base branch, not `agent-1`. The base branch name comes from
+        // libgit2's host defaults (`master` or `main`).
         let root_info = repo_info(&node.path).expect("mesh root must open");
-        assert_eq!(
-            root_info.branch, "main",
+        assert_ne!(
+            root_info.branch, "agent-1",
             "sanity: mesh root is on the Base Ref; this is what the bug used to read"
         );
     }

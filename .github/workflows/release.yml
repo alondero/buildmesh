@@ -4,6 +4,11 @@ name: Release
 # gets expensive fast). Bump the version in tauri.conf.json / Cargo.toml /
 # package.json, then push a matching `vX.Y.Z` tag to cut a release. See
 # docs/development/releasing.md. Issue #826.
+#
+# Nothing is built or published before `verify` passes on the tagged SHA, and
+# the tag must point at a commit that reached `main` through the required
+# checks (issue #1520). A draft release is still a release: treat the
+# green-gated run as the authorization to create it.
 on:
   push:
     tags:
@@ -19,9 +24,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Issue #1520 — a tag is only a release candidate after the *same* jobs that
+  # gate a merge have passed on the tagged SHA. `release` needs this job, so
+  # `tauri-action` cannot create a draft release or upload an installer from a
+  # commit that fails typecheck, tests, docs, lint, or the supported-platform
+  # compile checks. Re-running them here (rather than trusting the push-to-main
+  # run) is what makes the tag itself, not "some commit that reached main
+  # earlier", the verified artifact.
+  verify:
+    name: Verification
+    uses: ./.github/workflows/verify.yml
+    permissions:
+      contents: read
+
   release:
     # Windows-only for now — the app is Windows/WSL-centric and this keeps
     # releases cheap. macOS/Linux release builds are tracked separately.
+    needs: verify
     runs-on: windows-latest
     permissions:
       # tauri-action needs write access to create the GitHub Release + upload
@@ -31,6 +50,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history so the release-lineage guard below can prove the tag
+          # is reachable from main.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -66,6 +89,20 @@ jobs:
             echo "::error::Tag v$TAG does not match the version in src-tauri/Cargo.toml ($TOML_V), src-tauri/tauri.conf.json ($JSON_V), or package.json ($PKG_V). Bump all three before pushing a release tag."
             exit 1
           fi
+
+      # A tag cut from a side branch, or from a commit that never went through
+      # the `main` ruleset, would publish a build whose exact SHA was never
+      # reviewed. `verify` above proves the tree is sound; this proves it is
+      # also mainline. Neither gate can be skipped by pushing a tag.
+      - name: Verify tag points at a merged main commit
+        shell: bash
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at $GITHUB_SHA, which is not reachable from main. Merge the release commit through a pull request that passes the required checks, then retag."
+            exit 1
+          fi
+          echo "tag=${GITHUB_REF_NAME} sha=$GITHUB_SHA is on main"
 
       - name: Verify and load release notes
         id: release-notes
