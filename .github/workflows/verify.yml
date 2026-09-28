@@ -39,18 +39,20 @@ jobs:
     # compiles and runs the full Rust suite.
     timeout-minutes: 90
     env:
-      # A hosted Linux runner has roughly 14 GB free on `/`, and a debug-symbol
-      # build of this crate is an order of magnitude larger than that: the
-      # workspace's `target/` measures 64.9 GB, of which `debug/` alone is
-      # 55 GB. That is why three attempts of issue #1520's first CI run died at
-      # 53m01s inside `cargo test` with no step conclusion and no retrievable
-      # log — the runner ran out of disk, not out of patience. Symbols are the
-      # bulk of that figure and are worth nothing to a pass/fail test run, so
-      # build without them and let the size live in the cache instead.
+      # Four runs of issue #1520's first CI execution lost the hosted runner at
+      # the same point in `cargo test` ("The hosted runner lost communication
+      # with the server"), which GitHub attributes to terminating the runner
+      # process, starving it for CPU/memory, or blocking its network. Disk is
+      # not the cause: the pre-build artifact reports 145 GB total with 85 GB
+      # free, so the remaining candidate is the build's memory peak. One
+      # codegen unit at a time trades wall-clock for a peak the runner can
+      # survive, and this job is not on an interactive path.
+      CARGO_BUILD_JOBS: "1"
+      # Debug symbols are the bulk of this crate's build output (the
+      # workspace's target/ is 64.9 GB, debug/ 55 GB of it) and buy a
+      # pass/fail test run nothing. They also cost memory and link time.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      # Keeps the target/ directory (and therefore runner disk pressure) down
-      # for a full test build of a Tauri crate.
       CARGO_INCREMENTAL: "0"
 
     steps:
@@ -193,33 +195,42 @@ jobs:
       - name: Run vitest test suite (unit + integration)
         run: npx vitest run --pool=threads tests/unit tests/integration
 
-      # The Rust build is the biggest single consumer of runner disk: a fresh
-      # target/ plus a linked test binary for a Tauri crate, on top of the
-      # frontend build and the Chromium download above. Record the budget and
-      # drop the runner image's unused toolchains first, so disk exhaustion
-      # surfaces as a visible number instead of the runner disappearing
-      # mid-`cargo` (issue #1520). The report is also uploaded as an artifact
-      # because a runner that dies mid-build never gets to flush its log.
-      - name: Report disk and reclaim runner image space
+      # Record the runner's disk and memory budget before the build, then drop
+      # the image's unused toolchains. Uploaded as an artifact rather than only
+      # printed: a runner that dies mid-build never flushes its log, which is
+      # exactly how the first four attempts of issue #1520 lost their evidence.
+      - name: Report runner disk and memory
         run: |
           {
             echo "=== before ==="
             df -h /
+            free -h
+            nproc
             du -sh src-tauri/target 2>/dev/null || echo "no target/ yet"
-          } | tee disk-report.txt
+          } | tee runner-budget.txt
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
           {
-            echo "=== after ==="
+            echo "=== after image cleanup ==="
             df -h /
-          } | tee -a disk-report.txt
+            free -h
+          } | tee -a runner-budget.txt
 
-      - name: Upload the disk report
+      - name: Upload the runner budget report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quality-disk-report
-          path: disk-report.txt
+          name: quality-runner-budget
+          path: runner-budget.txt
           retention-days: 7
+
+      # Compile and run are separate steps so a lost runner names the phase it
+      # died in: a step that never reports a conclusion is the compile, and a
+      # green compile followed by a lost runner is the test execution. The
+      # ts-rs binding regeneration (issue #359) happens in the run step, not
+      # the compile step, so the drift gate below still needs the run.
+      - name: Compile the Rust test binaries
+        run: cargo test --locked --no-run
+        working-directory: src-tauri
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.

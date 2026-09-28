@@ -16,8 +16,15 @@ on:
 
 # A newer commit on the same PR or branch supersedes an in-flight build. This
 # keeps rapid agent pushes from consuming runners for results nobody can merge.
+#
+# The event name is part of the group on purpose (issue #1520). A schedule and
+# a push to `main` share the same `github.ref`, so without it they land in one
+# group and `cancel-in-progress: true` lets a routine push kill the weekly
+# package run mid-flight — cancelling the very job whose failure is supposed to
+# raise the `ci-alert` issue. Keying by event means only a newer run of the
+# *same* trigger can supersede an in-flight one.
 concurrency:
-  group: build-${{ github.event.pull_request.number || github.ref }}
+  group: build-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
