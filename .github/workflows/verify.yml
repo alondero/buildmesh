@@ -61,6 +61,13 @@ jobs:
           node-version: "20"
           cache: "npm"
 
+      # `npm ci` must precede every step that loads a dependency. `test:lint`
+      # runs the ESLint fixture verifier in-process, and on a clean runner it
+      # died with ERR_MODULE_NOT_FOUND for 'eslint' when this step sat below
+      # it (issue #1520). Cheap gates first, expensive compile after.
+      - name: Install frontend dependencies
+        run: npm ci
+
       - name: Check agent infrastructure and changed-code rules
         env:
           AGENT_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
@@ -129,9 +136,6 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
-
-      - name: Install frontend dependencies
-        run: npm ci
 
       # Typecheck the frontend against the committed bindings and build the
       # desktop + mobile bundles the Rust tests embed and the budget gate
