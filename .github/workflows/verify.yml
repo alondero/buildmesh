@@ -418,18 +418,27 @@ jobs:
       - name: Verify the Rust shards cover every unit test
         run: node scripts/check-rust-shard-coverage.mjs
 
-      # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
-      # them from `#[derive(TS)]` during `cargo test`). Issue #359. No
+      # The matrix above runs every Rust unit test, and the coverage gate
+      # verifies none were missed. Here, run the ts-rs export tests, doctests,
+      # and every integration-test target; rerunning all unit tests serially
+      # adds no coverage and can exceed the hosted-runner budget. No
       # TS_RS_EXPORT_DIR here, so the crate's own .cargo/config.toml applies
       # and the bindings land in src/types/generated/.
-      - name: Run the full Rust suite and regenerate the TS bindings
+      - name: Run Rust export, documentation, and integration tests
         run: |
           set -o pipefail
-          timeout --kill-after=2m 45m \
-            cargo test --locked -- --test-threads=1 2>&1 | tee cargo-full.log
+          timeout --kill-after=2m 45m bash -euo pipefail -c '
+            cargo test --locked --lib export_bindings -- --test-threads=1
+            cargo test --locked --doc -- --test-threads=1
+            for test_file in tests/*.rs; do
+              test_target="${test_file##*/}"
+              test_target="${test_target%.rs}"
+              cargo test --locked --test "$test_target" -- --test-threads=1
+            done
+          ' 2>&1 | tee cargo-nonshard-tests.log
           status=${PIPESTATUS[0]}
           if [ "$status" = 124 ]; then
-            echo "::error::The full Rust suite exceeded 45 minutes and was killed ??? a test is hanging."
+            echo "::error::Rust export, documentation, and integration tests exceeded 45 minutes."
           fi
           exit "$status"
         working-directory: src-tauri
