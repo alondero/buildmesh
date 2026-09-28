@@ -392,6 +392,7 @@ fn accept_hook(
     payload: &HookPayload,
     classified: &Classified,
 ) -> bool {
+    state.begin_callback();
     let event = payload
         .hook_event_name
         .as_deref()
@@ -433,10 +434,14 @@ fn accept_hook(
         || matches!(event.as_str(), "permissionrequest" | "permission.asked")
         || (event == "pretooluse" && payload.tool_name.as_deref() == Some("ExitPlanMode"));
     if tracks_input_request && event != "notification" {
-        if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
-            state.permission_request(key);
-        } else {
-            state.question(key, crate::agent::hook_state::QuestionKind::Foreground);
+        // A reply that won the race satisfies this ask. `--auto` publishes
+        // the reply in the same turn, so the ask must not open a prompt.
+        if !state.take_early_reply(key) {
+            if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
+                state.permission_request(key);
+            } else {
+                state.question(key, crate::agent::hook_state::QuestionKind::Foreground);
+            }
         }
     } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure")
         && payload.tool_name.as_deref() == Some("AskUserQuestion")
@@ -461,14 +466,19 @@ fn accept_hook(
         }
     } else if matches!(
         event.as_str(),
-        "posttooluse"
-            | "posttoolusefailure"
-            | "permissionresult"
+        "permissionresult"
             | "permission.replied"
             | "elicitationresult"
             | "question.replied"
             | "question.rejected"
     ) {
+        state.resolve_reply(
+            payload
+                .request_id
+                .as_deref()
+                .or(payload.tool_name.as_deref()),
+        );
+    } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure") {
         state.resolve_question(
             payload
                 .request_id
@@ -541,6 +551,27 @@ fn normalize_decision(
         }
     } else {
         effective_decision(decision, state)
+    }
+}
+
+/// Decision the route actually publishes. An ask whose reply already arrived
+/// (`--auto` answers in the same turn, and the HTTP callbacks can reorder)
+/// must not raise a banner. If some other prompt is still outstanding, leave
+/// that banner alone.
+fn lifecycle_decision(
+    decision: Decision,
+    state: &crate::agent::hook_state::HookState,
+    codex_permission_pending: bool,
+) -> Decision {
+    let decision = normalize_decision(decision, state, codex_permission_pending);
+    if state.input_already_resolved() {
+        if state.has_foreground_questions() {
+            Decision::Ignore
+        } else {
+            Decision::Running
+        }
+    } else {
+        decision
     }
 }
 
@@ -1177,7 +1208,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     // the foreground turn has ended it is the authoritative clean
                     // completion. This prevents an asynchronous background callback
                     // from flipping an active turn to Ready.
-                    let decision = normalize_decision(
+                    let decision = lifecycle_decision(
                         classified_decision,
                         &state,
                         codex_permission_pending,
@@ -1573,6 +1604,75 @@ mod tests {
             ),
             (true, Decision::Ready)
         );
+    }
+
+    #[test]
+    fn opencode_auto_reply_that_arrives_before_the_ask_does_not_raise_a_prompt() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+            (accept_hook(state, &payload, &classified), classified.decision)
+        };
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "hook_event_name":"permission.replied", "request_id":"per_external"
+                })
+            ),
+            (true, Decision::Running)
+        );
+        let (accepted, decision) = apply(
+            &mut state,
+            serde_json::json!({
+                "hook_event_name":"permission.asked",
+                "request_id":"per_external",
+                "message":"OpenCode is asking for permission: external_directory (F:\\tmp\\*)"
+            }),
+        );
+        assert!(accepted);
+        assert_eq!(decision, Decision::MarkInput, "the ask itself is still a permission event");
+        assert!(!state.has_foreground_questions(), "the earlier reply already satisfied this ask");
+        assert_eq!(
+            lifecycle_decision(decision, &state, false),
+            Decision::Running,
+            "publishing MarkInput here would leave the permission banner up"
+        );
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"session.idle"})),
+            (true, Decision::Ready)
+        );
+    }
+
+    #[test]
+    fn early_permission_reply_does_not_dismiss_a_different_question() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+            let body = value.to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
+            accept_hook(state, &payload, &classified);
+            classified.decision
+        };
+        assert_eq!(
+            apply(&mut state, serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})),
+            Decision::MarkInput
+        );
+        assert_eq!(
+            apply(
+                &mut state,
+                serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})
+            ),
+            Decision::Running
+        );
+        let decision = apply(
+            &mut state,
+            serde_json::json!({"hook_event_name":"permission.asked", "request_id":"per_external"}),
+        );
+        assert!(state.has_foreground_questions());
+        assert_eq!(lifecycle_decision(decision, &state, false), Decision::Ignore);
     }
 
     #[test]

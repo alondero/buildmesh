@@ -174,36 +174,56 @@ function pickSessionId(event) {
   return undefined;
 }
 
-// Permission/question ids are distinct from session ids. In particular,
-// OpenCode's `permission.asked` uses `properties.id`, while its reply carries
-// that same value as `properties.requestID`; never let the former be mistaken
-// for a session id or the route cannot correlate the resolution.
+// Permission/question ids are distinct from session ids and from the bus
+// event id. OpenCode's plugin loader always delivers
+// `{ id: event.id, type, properties: event.data }`. `event.id` is the bus
+// event (`evt_…`); the permission or question id is `properties.id` on the
+// ask and `properties.requestID` on the reply. Prefer those. Falling back
+// to `event.id` makes every ask and its `--auto` reply look like different
+// requests, so the banner never clears.
 function pickRequestId(event) {
   if (!event || typeof event !== "object") return undefined;
   const props = event.properties;
   const data = event.data;
   const candidates = [
-    event.requestID,
-    event.requestId,
-    event.permissionID,
-    event.permissionId,
-    event.call_id,
-    event.callId,
-    event.id,
     props?.requestID,
     props?.requestId,
     props?.permissionID,
     props?.permissionId,
-    props?.call_id,
-    props?.callId,
     props?.id,
     data?.requestID,
     data?.requestId,
     data?.permissionID,
     data?.permissionId,
     data?.id,
+    event.requestID,
+    event.requestId,
+    event.permissionID,
+    event.permissionId,
+    event.call_id,
+    event.callId,
   ];
+  // A bare `{ id }` payload (no properties/data wrapper) is the request id.
+  // Once a wrapper is present, `event.id` is the bus event id and must not
+  // be used — it differs between the ask and the reply.
+  if (!props && !data) candidates.push(event.id);
   return candidates.find((value) => typeof value === "string" && value.length > 0);
+}
+
+function permissionSubject(event) {
+  const toolName = pickToolInfo(event);
+  if (toolName) return { toolName, label: toolName };
+  const permission = event.properties?.permission;
+  const patterns = Array.isArray(event.properties?.patterns)
+    ? event.properties.patterns.filter((pattern) => typeof pattern === "string" && pattern.length > 0)
+    : [];
+  if (typeof permission === "string" && permission.length > 0 && patterns.length > 0) {
+    return { toolName: undefined, label: `${permission} (${patterns.join(", ")})` };
+  }
+  if (typeof permission === "string" && permission.length > 0) {
+    return { toolName: undefined, label: permission };
+  }
+  return { toolName: undefined, label: undefined };
 }
 
 // Forward the permission event's tool info when OpenCode provides it.
@@ -276,8 +296,40 @@ async function postAttention(body) {
   }
 }
 
+// `--auto` replies to `permission.asked` in the same turn, over loopback,
+// without showing a prompt. Hold the announcement long enough for that
+// reply to arrive and cancel it. A person answering a real prompt takes
+// longer than this, so a genuine ask is still delivered.
+const PERMISSION_ASK_HOLD_MS = 750;
+
 export const BuildmeshAttention = async () => {
   let cachedSessionId = null;
+  /** @type {Map<string, { timer: ReturnType<typeof setTimeout>, resolve: () => void }>} */
+  const pendingPermissionAsks = new Map();
+
+  function schedulePermissionAsk(requestId, body) {
+    if (!requestId) return postAttention(body);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        pendingPermissionAsks.delete(requestId);
+        resolve(postAttention(body));
+      }, PERMISSION_ASK_HOLD_MS);
+      pendingPermissionAsks.set(requestId, { timer, resolve });
+    });
+  }
+
+  // Returns true when the reply beat the announcement. Nothing was posted,
+  // so there is no banner to clear.
+  function consumeScheduledPermissionAsk(requestId) {
+    if (!requestId) return false;
+    const pending = pendingPermissionAsks.get(requestId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    pendingPermissionAsks.delete(requestId);
+    pending.resolve();
+    return true;
+  }
+
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -341,8 +393,9 @@ export const BuildmeshAttention = async () => {
         return;
       }
       if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
-        const body = { hook_event_name: event.type };
         const requestId = pickRequestId(event);
+        if (event.type === "permission.replied" && consumeScheduledPermissionAsk(requestId)) return;
+        const body = { hook_event_name: event.type };
         if (requestId) body.request_id = requestId;
         const id = suppliedId ?? cachedSessionId;
         if (isValidSessionId(id)) body.sessionID = id;
@@ -401,18 +454,18 @@ export const BuildmeshAttention = async () => {
       // and dropping a permission prompt here means the user never
       // sees the approval dialog and the agent hangs indefinitely.
       if (event.type === "permission.asked") {
-        const toolName = pickToolInfo(event);
+        const subject = permissionSubject(event);
         const id = pickSessionId(event) ?? cachedSessionId;
         const body = {
           hook_event_name: "permission.asked",
           notification_type: "permission_prompt",
-          message: toolName
-            ? `OpenCode is asking for permission: ${toolName}`
+          message: subject.label
+            ? `OpenCode is asking for permission: ${subject.label}`
             : "OpenCode is asking for permission",
         };
         const requestId = pickRequestId(event);
         if (requestId) body.request_id = requestId;
-        if (toolName) body.tool_name = toolName;
+        if (subject.toolName) body.tool_name = subject.toolName;
         if (isValidSessionId(id)) {
           body.sessionID = id;
         } else {
@@ -420,7 +473,7 @@ export const BuildmeshAttention = async () => {
             "permission.asked missing or malformed id; posting without fencing token\n",
           );
         }
-        await postAttention(body);
+        await schedulePermissionAsk(requestId, body);
         return;
       }
 

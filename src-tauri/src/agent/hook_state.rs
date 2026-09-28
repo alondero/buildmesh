@@ -24,6 +24,13 @@ pub(crate) struct HookState {
     turn: Option<String>,
     questions: HashMap<String, QuestionKind>,
     permission_requests: HashSet<String>,
+    /// Replies that arrived before their ask. `--auto` publishes
+    /// `permission.replied` in the same turn as `permission.asked`, and the
+    /// two HTTP callbacks can be applied in either order.
+    early_replies: VecDeque<String>,
+    /// The ask just applied was already satisfied by an earlier reply, so
+    /// the route must not raise a permission banner for it.
+    input_already_resolved: bool,
     completed_tasks: VecDeque<String>,
     /// Whether the foreground harness turn is still executing. Background
     /// callbacks may arrive after the foreground turn has yielded; keeping
@@ -51,6 +58,7 @@ impl HookState {
                     .get(key)
                     .is_some_and(|kind| matches!(kind, QuestionKind::Detached))
             });
+            self.early_replies.clear();
             self.is_turn_active = true;
             return true;
         }
@@ -74,9 +82,23 @@ impl HookState {
     /// the request id on the reply; only fall back to the sole foreground
     /// request so multiple outstanding prompts are never resolved by guess.
     pub(crate) fn resolve_question(&mut self, key: Option<&str>) {
+        self.resolve_question_ex(key, false);
+    }
+
+    /// Same as [`Self::resolve_question`], but a reply that names a request
+    /// which is not pending yet is remembered. The matching ask must not
+    /// raise attention when it arrives later.
+    pub(crate) fn resolve_reply(&mut self, key: Option<&str>) {
+        self.resolve_question_ex(key, true);
+    }
+
+    fn resolve_question_ex(&mut self, key: Option<&str>, note_if_missing: bool) {
         if let Some(key) = key.filter(|key| !key.is_empty()) {
             if self.questions.remove(key).is_some() {
                 self.permission_requests.remove(key);
+                self.early_replies.retain(|pending| pending != key);
+            } else if note_if_missing {
+                self.note_early_reply(key);
             }
             // An identified reply for a different request cannot resolve the
             // sole outstanding question by guess. Only callbacks that truly
@@ -133,6 +155,34 @@ impl HookState {
 
     pub(crate) fn has_permission_requests(&self) -> bool {
         !self.permission_requests.is_empty()
+    }
+
+    pub(crate) fn begin_callback(&mut self) {
+        self.input_already_resolved = false;
+    }
+
+    pub(crate) fn input_already_resolved(&self) -> bool {
+        self.input_already_resolved
+    }
+
+    /// Returns true when this ask was already satisfied by an earlier reply.
+    pub(crate) fn take_early_reply(&mut self, key: &str) -> bool {
+        let Some(index) = self.early_replies.iter().position(|pending| pending == key) else {
+            return false;
+        };
+        self.early_replies.remove(index);
+        self.input_already_resolved = true;
+        true
+    }
+
+    fn note_early_reply(&mut self, key: &str) {
+        if self.early_replies.iter().any(|pending| pending == key) {
+            return;
+        }
+        if self.early_replies.len() == 32 {
+            self.early_replies.pop_front();
+        }
+        self.early_replies.push_back(key.to_owned());
     }
 
     fn is_quiescent(&self) -> bool {
