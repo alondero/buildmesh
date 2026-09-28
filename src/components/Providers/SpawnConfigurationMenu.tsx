@@ -140,11 +140,12 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       if (mounted.current && draftSession.current === session) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
     }
   };
-  const persistConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing) => {
+  const persistConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing, onRefreshing?: () => void) => {
     const session = draftSession.current;
     const saved = route ? await saveSpawnConfiguration(value, route) : await saveSpawnConfiguration(value);
     if (!mounted.current) return;
     replaceConfiguration(saved, saved.harness_id ?? saved.spawn_option_id.split(':')[0]);
+    onRefreshing?.();
     await refreshAvailability(saved, session);
     if (mounted.current && draftSession.current === session) setDraft(null);
   };

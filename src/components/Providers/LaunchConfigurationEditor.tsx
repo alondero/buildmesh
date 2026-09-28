@@ -5,18 +5,23 @@ import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
 import './launchConfigurations.css';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { Spinner } from '../shared/Spinner';
+
+// Verify, save, and delete share the fieldset lock; status text is derived separately.
+type BusyAction = 'save' | 'verify' | 'delete';
 
 export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, onDelete, onDirtyChange, onVerify }: {
   value: SpawnConfiguration;
   targets: LaunchTarget[];
-  onSave: (value: SpawnConfiguration, route?: ProviderPairing) => Promise<void>;
+  onSave: (value: SpawnConfiguration, route?: ProviderPairing, onRefreshing?: () => void) => Promise<void>;
   onVerify?: (value: SpawnConfiguration, route?: ProviderPairing) => Promise<PairingVerification>;
   onCancel: () => void;
   onDelete?: () => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [draft, setDraft] = useState(value);
-  const [busyAction, setBusyAction] = useState<'save' | 'verify' | 'delete' | null>(null);
+  const [busyAction, setBusyAction] = useState<BusyAction | null>(null);
+  const [saveStage, setSaveStage] = useState<'saving' | 'refreshing'>('saving');
   const [error, setError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [endpoint, setEndpoint] = useState<string | null>(null);
@@ -38,16 +43,29 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
   const inputs = JSON.stringify([draft, route, target?.route]);
   const canSubmit = !!target && !!draft.name.trim() && (!route || !!route.base_url?.trim())
     && (!customModel || !!draft.model?.trim()) && (!target.route || !!(draft.model ?? target.default_model ?? target.route.model_tiers.default)?.trim());
-  const act = async (action: () => Promise<void>, kind: 'save' | 'verify' | 'delete') => {
+  const runBusyAction = async (action: () => Promise<void>, kind: BusyAction) => {
     setBusyAction(kind);
     setError(null);
     try { await action(); } catch (e) { setError(String(e)); } finally { setBusyAction(null); }
   };
+  const statusMessage = busyAction === 'save'
+    ? saveStage === 'refreshing' ? 'Refreshing availability…' : 'Saving configuration…'
+    : busyAction === 'verify' ? 'Verifying provider and model…'
+    : busyAction === 'delete' ? 'Deleting configuration…'
+    : verification
+      ? verification.inputs === inputs ? verification.message : 'Configuration changed; verify again before launching.'
+      : '';
   const selectTarget = (id: string) => {
     setDraft({ ...draft, spawn_option_id: id, harness_id: undefined, provider_route_id: undefined, model: null, effort: null, extra_args: null });
     setEndpoint(null); setCustomModel(false); setVerification(null);
   };
-  return <form className="launch-config-form" aria-label="Launch Configuration" onSubmit={(e) => { e.preventDefault(); if (canSubmit && !busyAction) void act(() => route ? onSave(draft, route) : onSave(draft), 'save'); }}>
+  return <form className="launch-config-form" aria-label="Launch Configuration" onSubmit={(e) => {
+    e.preventDefault();
+    if (canSubmit) {
+      setSaveStage('saving');
+      void runBusyAction(() => onSave(draft, route, () => setSaveStage('refreshing')), 'save');
+    }
+  }}>
     <p>{draft.generated && !draft.generated.user_owned ? 'Generated configuration. Saving an edit preserves your choices against catalogue updates.' : 'User-owned configuration'}</p>
     <fieldset disabled={busyAction !== null}>
       <label>Name<input autoFocus required value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} /></label>
@@ -85,24 +103,26 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
       {target?.verification_required && onVerify && <>
         <p>Verify the selected endpoint and model before launching. Verification sends a small tool-call request using your provider credential.</p>
-        <button type="button" disabled={!canSubmit} onClick={() => void act(async () => {
+        <button type="button" disabled={!canSubmit} onClick={() => void runBusyAction(async () => {
           const result = await onVerify(draft, route);
           if (result.status !== 'verified') throw new Error(result.reason ?? 'Provider verification failed');
           setVerification({ inputs, message: `Verified ${result.model_id} for ${result.runtime}` });
         }, 'verify')}>Verify provider and model</button>
-        {verification && <p role="status">{verification.inputs === inputs ? verification.message : 'Configuration changed; verify again before launching.'}</p>}
       </>}
       {target?.supports_extra_args && <label>Extra arguments<input value={draft.extra_args ?? ''} onChange={(e) => setDraft({ ...draft, extra_args: e.target.value || null })} /></label>}
       <div className="launch-config-actions">
-        <button type="submit" disabled={!canSubmit}>{busyAction === 'save' ? 'Saving…' : 'Save'}</button>
+        <button type="submit" disabled={!canSubmit || busyAction !== null}>{busyAction === 'save' ? 'Saving…' : 'Save'}</button>
         <button type="button" onClick={onCancel}>Cancel</button>
         {onDelete && <button type="button" onClick={() => setConfirmDelete(true)}>Delete</button>}
       </div>
     </fieldset>
-    {busyAction === 'save' && <p role="status">Saving configuration…</p>}
+    <div className="launch-config-status" role="status" aria-live="polite" aria-atomic="true">
+      {busyAction !== null && <Spinner className="w-3.5 h-3.5 shrink-0" />}
+      <span>{statusMessage}</span>
+    </div>
     {error && <p role="alert">{error}</p>}
     {confirmDelete && onDelete && <ConfirmDialog className="launch-delete-dialog" title="Delete Launch Configuration?"
       message="Existing nodes keep their saved launch settings. Generated recipes will not be recreated automatically."
-      onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void act(onDelete, 'delete'); }} />}
+      onCancel={() => setConfirmDelete(false)} onConfirm={() => { setConfirmDelete(false); void runBusyAction(onDelete, 'delete'); }} />}
   </form>;
 }

@@ -4,6 +4,7 @@ import { LaunchConfigurationEditor } from '../../src/components/Providers/Launch
 import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import { LaunchConfigurations } from '../../src/components/Providers/LaunchConfigurations';
 import type { ProviderPairing } from '../../src/types/generated/ProviderPairing';
+import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
 
 const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'MiniMax', models: [{ id: 'MiniMax-M3', name: 'MiniMax M3', surface: 'anthropic', efforts: [] }], efforts: ['low', 'high'], route_attached: false, manual_model: false, supports_model: true, supports_extra_args: true }];
 const route: ProviderPairing = { harness_id: 'claude', provider_id: 'minimax', surface: 'anthropic', base_url: 'https://api.minimax.io/anthropic', model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
@@ -14,7 +15,7 @@ describe('Launch Configuration editor', () => {
     render(<LaunchConfigurationEditor value={{ id: '', name: 'My proxy', spawn_option_id: route.harness_id + ':' + route.provider_id, model: null, effort: null, extra_args: null }} targets={[{ ...targets[0], route, route_attached: false }]} onSave={save} onCancel={vi.fn()} />);
     expect((screen.getByLabelText('Provider endpoint') as HTMLInputElement).value).toBe(route.base_url);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'My proxy' }), route));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'My proxy' }), route, expect.any(Function)));
   });
 
   it('cancels a custom pairing without saving and resets endpoint when switching providers', () => {
@@ -36,10 +37,27 @@ describe('Launch Configuration editor', () => {
     const codexRoute = { ...route, harness_id: 'codex', surface: 'openai' as const, base_url: 'https://api.minimax.io/v1' };
     const codex = { ...targets[0], id: 'codex:minimax', harness_id: 'codex', route: codexRoute, route_attached: true, verification_required: true };
     const verify = vi.fn().mockResolvedValue({ status: 'verified', model_id: 'MiniMax-M3', runtime: 'native-windows' });
-    render(<LaunchConfigurationEditor value={{ id: '', name: 'Proxy', spawn_option_id: codex.id, model: 'MiniMax-M3', effort: null, extra_args: null }} targets={[codex]} onVerify={verify} onSave={vi.fn()} onCancel={vi.fn()} />);
+    let finishSave!: () => void;
+    let startRefresh!: () => void;
+    const save = vi.fn((_value: SpawnConfiguration, _route: ProviderPairing | undefined, onRefreshing: (() => void) | undefined) => new Promise<void>((resolve) => {
+      finishSave = resolve;
+      startRefresh = onRefreshing!;
+    }));
+    render(<LaunchConfigurationEditor value={{ id: '', name: 'Proxy', spawn_option_id: codex.id, model: 'MiniMax-M3', effort: null, extra_args: null }} targets={[codex]} onVerify={verify} onSave={save} onCancel={vi.fn()} />);
+    const status = screen.getByRole('status');
     fireEvent.click(screen.getByRole('button', { name: 'Verify provider and model' }));
     await screen.findByText('Verified MiniMax-M3 for native-windows');
     expect(verify).toHaveBeenCalledWith(expect.objectContaining({ model: 'MiniMax-M3', spawn_option_id: 'codex:minimax' }), undefined);
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(status.textContent).toContain('Verified MiniMax-M3');
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(status.textContent).toBe('Saving configuration…');
+    await act(async () => { startRefresh(); });
+    expect(status.textContent).toBe('Refreshing availability…');
+    await act(async () => { finishSave(); });
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(status.textContent).toContain('Verified MiniMax-M3');
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: '__custom__' } });
     fireEvent.change(screen.getByLabelText('Custom model'), { target: { value: 'new-model' } });
     expect(screen.getByRole('status').textContent).toContain('verify again');
@@ -67,10 +85,11 @@ describe('Launch Configuration editor', () => {
     let rejectSave!: (error: Error) => void;
     const save = vi.fn().mockReturnValueOnce(new Promise<void>((_resolve, reject) => { rejectSave = reject; })).mockResolvedValue(undefined);
     render(<LaunchConfigurationEditor value={{ id: 'launch/test', name: 'My recipe', spawn_option_id: 'claude:minimax', model: 'MiniMax-M3', effort: null, extra_args: null }} targets={targets} onSave={save} onCancel={() => {}} />);
+    expect(screen.getByRole('status').textContent).toBe('');
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(screen.getByRole('status').textContent).toBe('Saving configuration…');
     await act(async () => { rejectSave(new Error('Route unavailable')); });
-    expect(screen.queryByRole('status')).toBeNull();
+    expect(screen.getByRole('status').textContent).toBe('');
     expect(screen.getByRole('button', { name: 'Save' }).closest('fieldset')?.disabled).toBe(false);
     expect(screen.getByRole('alert').textContent).toContain('Route unavailable');
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('My recipe');
@@ -108,6 +127,6 @@ describe('Launch Configuration editor', () => {
     fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'MiniMax-M3' } });
     expect(screen.queryByLabelText('Effort')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Fast review', model: 'MiniMax-M3', effort: null })));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Fast review', model: 'MiniMax-M3', effort: null }), undefined, expect.any(Function)));
   });
 });

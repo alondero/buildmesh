@@ -218,10 +218,10 @@ keyed providers can be selected even before a pairing exists. New pairings colle
 their endpoint in the editor and are saved together with the configuration;
 cancelling creates neither. **Advanced Provider Routes** edits existing shared
 endpoints and model-tier overrides; **Providers** owns credentials and billing.
-While a configuration is saving, the editor shows **Saving…** and keeps its
-fields disabled. In the spawn menu, this remains visible through the saved
-recipe refresh. A failed save shows an error and leaves the draft available to
-retry.
+While a configuration is saving, the editor shows progress and keeps its fields
+disabled. In the spawn menu, the status changes from **Saving configuration…**
+to **Refreshing availability…** while provider availability is fetched. A failed
+save shows an error and leaves the draft available to retry.
 
 Model choices belong to the selected provider and API surface; **Custom model**
 allows a model not yet in the catalogue. Effort choices are restricted to documented
