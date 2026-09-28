@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");
 const load = new Function(source.replace("export const BuildmeshAttention", "const BuildmeshAttention") + ";return BuildmeshAttention;");
 
-afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); vi.useRealTimers(); });
+afterEach(() => { vi.unstubAllGlobals(); vi.unstubAllEnvs(); });
 
 describe("OpenCode attention delivery", () => {
   it("forwards completion, permission and question as distinct events", async () => {
@@ -49,19 +49,16 @@ describe("OpenCode attention delivery", () => {
   });
 
   it("preserves OpenCode permission ids across ask and reply", async () => {
-    vi.useFakeTimers();
     vi.stubEnv("BUILDMESH_PORT", "2992");
     vi.stubEnv("BUILDMESH_SESSION_ID", "42");
     const fetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetch);
     const plugin = await load()();
 
-    const asked = plugin.event({ event: {
+    await plugin.event({ event: {
       type: "permission.asked",
       properties: { sessionID: "ses_Root", id: "perm-1", tool: { name: "Bash" } },
     } });
-    await vi.advanceTimersByTimeAsync(750);
-    await asked;
     await plugin.event({ event: {
       type: "permission.replied",
       properties: { sessionID: "ses_Root", requestID: "perm-1", reply: "once" },
@@ -78,17 +75,16 @@ describe("OpenCode attention delivery", () => {
     });
   });
 
-  it("does not announce a permission that --auto replies to before the hold elapses", async () => {
-    vi.useFakeTimers();
+  it("forwards an ask and its auto-reply under the permission id, not the bus event id", async () => {
     vi.stubEnv("BUILDMESH_PORT", "2992");
     vi.stubEnv("BUILDMESH_SESSION_ID", "42");
     const fetch = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetch);
     const plugin = await load()();
 
-    // OpenCode's plugin loader stamps the bus event id on `event.id`.
-    // `--auto` replies immediately; `properties.requestID` matches `properties.id`.
-    const asked = plugin.event({ event: {
+    // The loader stamps the bus event id on `event.id`. `--auto` replies
+    // with `properties.requestID` equal to the ask's `properties.id`.
+    await plugin.event({ event: {
       id: "evt_ask",
       type: "permission.asked",
       properties: {
@@ -106,42 +102,13 @@ describe("OpenCode attention delivery", () => {
       type: "permission.replied",
       properties: { sessionID: "ses_Root", requestID: "per_external", reply: "once" },
     }});
-    await vi.advanceTimersByTimeAsync(750);
-    await asked;
 
-    expect(fetch).not.toHaveBeenCalled();
-  });
-
-  it("announces a permission that is still unanswered after the hold, using the permission id", async () => {
-    vi.useFakeTimers();
-    vi.stubEnv("BUILDMESH_PORT", "2992");
-    vi.stubEnv("BUILDMESH_SESSION_ID", "42");
-    const fetch = vi.fn().mockResolvedValue({ ok: true });
-    vi.stubGlobal("fetch", fetch);
-    const plugin = await load()();
-
-    const asked = plugin.event({ event: {
-      id: "evt_ask",
-      type: "permission.asked",
-      properties: {
-        id: "per_external",
-        sessionID: "ses_Root",
-        permission: "external_directory",
-        patterns: ["F:\\tmp\\*"],
-        metadata: {},
-        always: ["F:\\tmp\\*"],
-        tool: { messageID: "msg_1", callID: "call_1" },
-      },
-    }});
-    await vi.advanceTimersByTimeAsync(749);
-    expect(fetch).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    await asked;
-
-    const body = JSON.parse(fetch.mock.calls[0][1].body);
-    expect(body.request_id).toBe("per_external");
-    expect(body.message).toContain("external_directory");
-    expect(body.message).toContain("F:\\tmp\\*");
-    expect(body.tool_name).toBeUndefined();
+    const asked = JSON.parse(fetch.mock.calls[0][1].body);
+    const replied = JSON.parse(fetch.mock.calls[1][1].body);
+    expect(asked.request_id).toBe("per_external");
+    expect(replied.request_id).toBe("per_external");
+    expect(asked.message).toContain("external_directory");
+    expect(asked.message).toContain("F:\\tmp\\*");
+    expect(asked.tool_name).toBeUndefined();
   });
 });

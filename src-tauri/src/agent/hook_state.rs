@@ -26,11 +26,9 @@ pub(crate) struct HookState {
     permission_requests: HashSet<String>,
     /// Replies that arrived before their ask. `--auto` publishes
     /// `permission.replied` in the same turn as `permission.asked`, and the
-    /// two HTTP callbacks can be applied in either order.
+    /// two HTTP callbacks can be applied in either order. This is correlation
+    /// memory for a later ask, not a flag the next unrelated callback reads.
     early_replies: VecDeque<String>,
-    /// The ask just applied was already satisfied by an earlier reply, so
-    /// the route must not raise a permission banner for it.
-    input_already_resolved: bool,
     completed_tasks: VecDeque<String>,
     /// Whether the foreground harness turn is still executing. Background
     /// callbacks may arrive after the foreground turn has yielded; keeping
@@ -157,21 +155,17 @@ impl HookState {
         !self.permission_requests.is_empty()
     }
 
-    pub(crate) fn begin_callback(&mut self) {
-        self.input_already_resolved = false;
-    }
-
-    pub(crate) fn input_already_resolved(&self) -> bool {
-        self.input_already_resolved
+    pub(crate) fn has_early_reply(&self, key: &str) -> bool {
+        self.early_replies.iter().any(|pending| pending == key)
     }
 
     /// Returns true when this ask was already satisfied by an earlier reply.
+    /// The caller decides whether this callback is the one that consumes it.
     pub(crate) fn take_early_reply(&mut self, key: &str) -> bool {
         let Some(index) = self.early_replies.iter().position(|pending| pending == key) else {
             return false;
         };
         self.early_replies.remove(index);
-        self.input_already_resolved = true;
         true
     }
 
@@ -186,7 +180,7 @@ impl HookState {
     }
 
     fn is_quiescent(&self) -> bool {
-        !self.is_turn_active && self.questions.is_empty()
+        !self.is_turn_active && self.questions.is_empty() && self.early_replies.is_empty()
     }
 
     pub(crate) fn end_turn(&mut self) {
@@ -268,6 +262,19 @@ mod tests {
         assert!(!state.accepts(Some("old"), false));
         assert!(state.accepts(Some("new"), false));
         assert!(state.accepts(None, false));
+    }
+
+    #[test]
+    fn a_remembered_reply_is_not_quiescent_state() {
+        let mut state = HookState::default();
+        state.resolve_reply(Some("per_external"));
+        state.end_turn();
+        assert!(
+            !state.is_quiescent(),
+            "evicting this entry would forget the reply and the late ask would raise a banner"
+        );
+        assert!(state.take_early_reply("per_external"));
+        assert!(state.is_quiescent());
     }
 
     #[test]

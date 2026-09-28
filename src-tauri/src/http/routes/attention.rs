@@ -387,12 +387,29 @@ enum Decision {
     Ignore,
 }
 
+/// Result of one attention callback. `ask_already_resolved` is true only for
+/// this callback: an ask whose reply already arrived. It is not stored on
+/// the node, so a later empty or unparseable body cannot inherit it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Accept {
+    accepted: bool,
+    ask_already_resolved: bool,
+}
+
+impl Accept {
+    fn rejected() -> Self {
+        Self {
+            accepted: false,
+            ask_already_resolved: false,
+        }
+    }
+}
+
 fn accept_hook(
     state: &mut crate::agent::hook_state::HookState,
     payload: &HookPayload,
     classified: &Classified,
-) -> bool {
-    state.begin_callback();
+) -> Accept {
     let event = payload
         .hook_event_name
         .as_deref()
@@ -414,15 +431,19 @@ fn accept_hook(
         && payload.source_kind.as_deref() == Some("background_task")
         && classified.decision == Decision::BackgroundTaskCompleted
     {
-        return payload
+        let accepted = payload
             .source_id
             .as_deref()
             .is_some_and(|task| state.finish_background_task(task))
             && !state.has_questions();
+        return Accept {
+            accepted,
+            ask_already_resolved: false,
+        };
     }
     let starts_turn = event == "userpromptsubmit";
     if !state.accepts(payload.turn_id.as_deref(), starts_turn) {
-        return false;
+        return Accept::rejected();
     }
     let key = payload
         .request_id
@@ -433,15 +454,15 @@ fn accept_hook(
         == Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
         || matches!(event.as_str(), "permissionrequest" | "permission.asked")
         || (event == "pretooluse" && payload.tool_name.as_deref() == Some("ExitPlanMode"));
-    if tracks_input_request && event != "notification" {
-        // A reply that won the race satisfies this ask. `--auto` publishes
-        // the reply in the same turn, so the ask must not open a prompt.
-        if !state.take_early_reply(key) {
-            if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
-                state.permission_request(key);
-            } else {
-                state.question(key, crate::agent::hook_state::QuestionKind::Foreground);
-            }
+    // Peek only. The id is consumed after this callback is accepted, so a
+    // rejected ask cannot eat a reply that a later callback still needs.
+    let ask_already_resolved =
+        tracks_input_request && event != "notification" && state.has_early_reply(key);
+    if tracks_input_request && event != "notification" && !ask_already_resolved {
+        if matches!(event.as_str(), "permissionrequest" | "permission.asked") {
+            state.permission_request(key);
+        } else {
+            state.question(key, crate::agent::hook_state::QuestionKind::Foreground);
         }
     } else if matches!(event.as_str(), "posttooluse" | "posttoolusefailure")
         && payload.tool_name.as_deref() == Some("AskUserQuestion")
@@ -516,7 +537,10 @@ fn accept_hook(
                     | Decision::CodexToolResult
             ));
     if !accepted {
-        return false;
+        return Accept::rejected();
+    }
+    if ask_already_resolved {
+        state.take_early_reply(key);
     }
 
     if resets_session_state {
@@ -525,7 +549,10 @@ fn accept_hook(
     if event == "session.busy" {
         state.mark_turn_active();
     }
-    true
+    Accept {
+        accepted: true,
+        ask_already_resolved,
+    }
 }
 
 fn effective_decision(decision: Decision, state: &crate::agent::hook_state::HookState) -> Decision {
@@ -563,9 +590,10 @@ fn lifecycle_decision(
     decision: Decision,
     state: &crate::agent::hook_state::HookState,
     codex_permission_pending: bool,
+    ask_already_resolved: bool,
 ) -> Decision {
     let decision = normalize_decision(decision, state, codex_permission_pending);
-    if state.input_already_resolved() {
+    if ask_already_resolved {
         Decision::Ignore
     } else {
         decision
@@ -1185,7 +1213,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 hook_payload.as_ref(),
                 &classified,
                 native_hook.as_ref(),
-                |state, native_hook| {
+                |state, native_hook, ask_already_resolved| {
                     // `PostToolUse` is catch-all in Codex. Only an approval marker
                     // makes it a lifecycle resume; ordinary tool output is
                     // correlation-neutral and must not spam `work_resumed`.
@@ -1209,6 +1237,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         classified_decision,
                         &state,
                         codex_permission_pending,
+                        ask_already_resolved,
                     );
 
                     // A real, high-confidence callback proves hook delivery — persist
@@ -1334,10 +1363,15 @@ fn apply_hook_after_turn_fence(
     on_accepted: impl FnOnce(
         &mut crate::agent::hook_state::HookState,
         Option<&crate::services::circuit_worker::native_hooks::NativeHook>,
+        bool,
     ) -> Result<Applied, String>,
 ) -> Result<Applied, String> {
-    if let Some(payload) = payload {
-        if !accept_hook(state, payload, classified) {
+    // No payload means an empty or unparseable body. That callback did not
+    // resolve an ask, so the degraded mark-attention path must not inherit
+    // a previous callback's answer.
+    let ask_already_resolved = if let Some(payload) = payload {
+        let accept = accept_hook(state, payload, classified);
+        if !accept.accepted {
             // Preserve an explicitly old-turn native lifecycle event for
             // Circuit history while keeping it out of the active session
             // projection. A missing optional turn ID is not an explicit
@@ -1354,8 +1388,11 @@ fn apply_hook_after_turn_fence(
             }
             return Ok(Applied::StaleDropped);
         }
-    }
-    on_accepted(state, native_hook)
+        accept.ask_already_resolved
+    } else {
+        false
+    };
+    on_accepted(state, native_hook, ask_already_resolved)
 }
 
 #[cfg(test)]
@@ -1436,7 +1473,7 @@ mod tests {
             Some(&payload),
             &classified,
             Some(&native_hook),
-            |_, _| {
+            |_, _, _| {
                 lifecycle_projection_called = true;
                 Ok(Applied::Applied)
             },
@@ -1473,7 +1510,7 @@ mod tests {
             Some(&current_payload),
             &current_classified,
             Some(&current_native_hook),
-            |state, hook| {
+            |state, hook, _| {
                 accepted_projection_called = true;
                 let hook = hook.expect("matching Stop has a native receipt");
                 crate::services::circuit_worker::native_hooks::receive(
@@ -1524,6 +1561,7 @@ mod tests {
                 &HookPayload::parse(body.as_bytes()).unwrap(),
                 &classify(body.as_bytes(), "opencode", |_| Some(0)),
             )
+            .accepted
         };
         assert!(apply(
             serde_json::json!({"hook_event_name":"UserPromptSubmit", "promptId":"first"})
@@ -1561,7 +1599,7 @@ mod tests {
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
             (
-                accept_hook(state, &payload, &classified),
+                accept_hook(state, &payload, &classified).accepted,
                 classified.decision,
             )
         };
@@ -1610,7 +1648,8 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            let accept = accept_hook(state, &payload, &classified);
+            (accept, classified.decision)
         };
         assert_eq!(
             apply(
@@ -1618,10 +1657,12 @@ mod tests {
                 serde_json::json!({
                     "hook_event_name":"permission.replied", "request_id":"per_external"
                 })
-            ),
-            (true, Decision::Running)
+            )
+            .0
+            .accepted,
+            true
         );
-        let (accepted, decision) = apply(
+        let (accept, decision) = apply(
             &mut state,
             serde_json::json!({
                 "hook_event_name":"permission.asked",
@@ -1629,11 +1670,11 @@ mod tests {
                 "message":"OpenCode is asking for permission: external_directory (F:\\tmp\\*)"
             }),
         );
-        assert!(accepted);
+        assert!(accept.accepted);
         assert_eq!(decision, Decision::MarkInput, "the ask itself is still a permission event");
         assert!(!state.has_foreground_questions(), "the earlier reply already satisfied this ask");
         assert_eq!(
-            lifecycle_decision(decision, &state, false),
+            lifecycle_decision(decision, &state, false, accept.ask_already_resolved),
             Decision::Ignore,
             "an ask that was already answered must not change the node's lifecycle"
         );
@@ -1646,8 +1687,12 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
-            let accepted = accept_hook(state, &payload, &classified);
-            (accepted, classified.decision, lifecycle_decision(classified.decision, state, false))
+            let accept = accept_hook(state, &payload, &classified);
+            (
+                accept.accepted,
+                classified.decision,
+                lifecycle_decision(classified.decision, state, false, accept.ask_already_resolved),
+            )
         };
         assert_eq!(
             apply(&mut state, serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})),
@@ -1674,26 +1719,55 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
-            accept_hook(state, &payload, &classified);
-            classified.decision
+            let accept = accept_hook(state, &payload, &classified);
+            (classified.decision, accept.ask_already_resolved)
         };
         assert_eq!(
-            apply(&mut state, serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})),
+            apply(&mut state, serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"})).0,
             Decision::MarkInput
         );
         assert_eq!(
             apply(
                 &mut state,
                 serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"})
-            ),
+            )
+            .0,
             Decision::Running
         );
-        let decision = apply(
+        let (decision, ask_already_resolved) = apply(
             &mut state,
             serde_json::json!({"hook_event_name":"permission.asked", "request_id":"per_external"}),
         );
         assert!(state.has_foreground_questions());
-        assert_eq!(lifecycle_decision(decision, &state, false), Decision::Ignore);
+        assert_eq!(
+            lifecycle_decision(decision, &state, false, ask_already_resolved),
+            Decision::Ignore
+        );
+
+        // The resolved-ask bit must not survive into the next callback. An
+        // empty body is the degraded "mark attention" path and never enters
+        // accept_hook, so a sticky flag would silence it.
+        let classified = classify(b"", "opencode", |_| Some(0));
+        let mut published = None;
+        let applied = apply_hook_after_turn_fence(
+            1,
+            &mut state,
+            None,
+            &classified,
+            None,
+            |state, _, ask_already_resolved| {
+                published = Some(lifecycle_decision(
+                    classified.decision,
+                    state,
+                    false,
+                    ask_already_resolved,
+                ));
+                Ok(Applied::Applied)
+            },
+        )
+        .unwrap();
+        assert!(matches!(applied, Applied::Applied));
+        assert_eq!(published, Some(Decision::MarkInput));
     }
 
     #[test]
@@ -1704,7 +1778,7 @@ mod tests {
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "codex", |_| Some(0));
             (
-                accept_hook(state, &payload, &classified),
+                accept_hook(state, &payload, &classified).accepted,
                 classified.decision,
             )
         };
@@ -1755,7 +1829,7 @@ mod tests {
             let classified = classify(body.as_bytes(), "codex", |_| Some(0));
             let permission_pending =
                 classified.decision == Decision::CodexToolResult && state.has_permission_requests();
-            let accepted = accept_hook(state, &payload, &classified);
+            let accepted = accept_hook(state, &payload, &classified).accepted;
             (
                 accepted,
                 normalize_decision(classified.decision, state, permission_pending),
@@ -1818,7 +1892,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "codex", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            (accept_hook(state, &payload, &classified).accepted, classified.decision)
         };
         assert!(apply(
             &mut state,
@@ -1849,7 +1923,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "codex", |_| Some(0));
-            (accept_hook(state, &payload, &classified), classified.decision)
+            (accept_hook(state, &payload, &classified).accepted, classified.decision)
         };
         assert!(apply(&mut state, serde_json::json!({
             "hook_event_name":"UserPromptSubmit", "turn_id":"turn-1"
@@ -1871,7 +1945,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            let accepted = accept_hook(state, &payload, &classified);
+            let accepted = accept_hook(state, &payload, &classified).accepted;
             (
                 accepted,
                 classified.decision,
@@ -1933,7 +2007,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            let accepted = accept_hook(state, &payload, &classified);
+            let accepted = accept_hook(state, &payload, &classified).accepted;
             (
                 accepted,
                 classified.decision,
@@ -1974,7 +2048,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            let accepted = accept_hook(state, &payload, &classified);
+            let accepted = accept_hook(state, &payload, &classified).accepted;
             (
                 accepted,
                 classified.decision,
@@ -2021,7 +2095,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            let accepted = accept_hook(state, &payload, &classified);
+            let accepted = accept_hook(state, &payload, &classified).accepted;
             (
                 accepted,
                 classified.decision,
@@ -2093,7 +2167,8 @@ mod tests {
                     &mut state,
                     &HookPayload::parse(body.as_bytes()).unwrap(),
                     &classify(body.as_bytes(), "anthropic", |_| Some(0))
-                ),
+                )
+                .accepted,
                 accepted,
                 "{event}"
             );
@@ -2107,7 +2182,7 @@ mod tests {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "kimi", |_| Some(0));
-            accept_hook(state, &payload, &classified)
+            accept_hook(state, &payload, &classified).accepted
         };
         assert!(apply(
             &mut state,

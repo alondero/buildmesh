@@ -296,40 +296,8 @@ async function postAttention(body) {
   }
 }
 
-// `--auto` replies to `permission.asked` in the same turn, over loopback,
-// without showing a prompt. Hold the announcement long enough for that
-// reply to arrive and cancel it. A person answering a real prompt takes
-// longer than this, so a genuine ask is still delivered.
-const PERMISSION_ASK_HOLD_MS = 750;
-
 export const BuildmeshAttention = async () => {
   let cachedSessionId = null;
-  /** @type {Map<string, { timer: ReturnType<typeof setTimeout>, resolve: () => void }>} */
-  const pendingPermissionAsks = new Map();
-
-  function schedulePermissionAsk(requestId, body) {
-    if (!requestId) return postAttention(body);
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingPermissionAsks.delete(requestId);
-        resolve(postAttention(body));
-      }, PERMISSION_ASK_HOLD_MS);
-      pendingPermissionAsks.set(requestId, { timer, resolve });
-    });
-  }
-
-  // Returns true when the reply beat the announcement. Nothing was posted,
-  // so there is no banner to clear.
-  function consumeScheduledPermissionAsk(requestId) {
-    if (!requestId) return false;
-    const pending = pendingPermissionAsks.get(requestId);
-    if (!pending) return false;
-    clearTimeout(pending.timer);
-    pendingPermissionAsks.delete(requestId);
-    pending.resolve();
-    return true;
-  }
-
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -393,9 +361,8 @@ export const BuildmeshAttention = async () => {
         return;
       }
       if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
-        const requestId = pickRequestId(event);
-        if (event.type === "permission.replied" && consumeScheduledPermissionAsk(requestId)) return;
         const body = { hook_event_name: event.type };
+        const requestId = pickRequestId(event);
         if (requestId) body.request_id = requestId;
         const id = suppliedId ?? cachedSessionId;
         if (isValidSessionId(id)) body.sessionID = id;
@@ -473,7 +440,7 @@ export const BuildmeshAttention = async () => {
             "permission.asked missing or malformed id; posting without fencing token\n",
           );
         }
-        await schedulePermissionAsk(requestId, body);
+        await postAttention(body);
         return;
       }
 
