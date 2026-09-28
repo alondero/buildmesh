@@ -1748,47 +1748,68 @@ mod tests {
     #[test]
     fn early_permission_reply_does_not_dismiss_a_different_question() {
         let mut state = crate::agent::hook_state::HookState::default();
-        let apply = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
+        // The fence is what production uses. Its closure sees the `Accept`
+        // `accept_hook` returned, and the decision is computed from that
+        // value. A rejected callback never enters the closure.
+        let publish = |state: &mut crate::agent::hook_state::HookState, value: serde_json::Value| {
             let body = value.to_string();
             let payload = HookPayload::parse(body.as_bytes()).unwrap();
             let classified = classify(body.as_bytes(), "opencode", |_| Some(0));
-            let accept = accept_hook(state, &payload, &classified);
-            (accept, classified.decision)
+            let mut seen = None;
+            let applied = apply_hook_after_turn_fence(
+                1,
+                state,
+                Some(&payload),
+                &classified,
+                None,
+                |state, _, accept| {
+                    seen = Some((
+                        accept,
+                        lifecycle_decision(classified.decision, state, false, accept),
+                    ));
+                    Ok(Applied::Applied)
+                },
+            )
+            .unwrap();
+            let (accept, published) = seen.expect("a rejected hook must not be described as published");
+            (applied, accept, published)
         };
-        let (asked, asked_decision) = apply(
+        let (asked_applied, asked, asked_published) = publish(
             &mut state,
             serde_json::json!({"hook_event_name":"question.asked", "request_id":"one"}),
         );
+        assert!(matches!(asked_applied, Applied::Applied));
         assert!(asked.accepted);
-        assert_eq!(asked_decision, Decision::MarkInput);
+        assert_eq!(asked_published, Decision::MarkInput);
         assert!(state.has_foreground_question("one"));
 
-        let (reply, reply_decision) = apply(
+        let (reply_applied, reply, reply_published) = publish(
             &mut state,
             serde_json::json!({"hook_event_name":"permission.replied", "request_id":"per_external"}),
         );
-        assert!(reply.accepted, "a reply is accepted even while another question is open");
-        assert!(reply.preserve_attention);
-        assert_eq!(reply_decision, Decision::Running, "classification stays Running");
-        assert_eq!(
-            lifecycle_decision(reply_decision, &state, false, reply),
-            Decision::Ignore,
-            "the reply must not move the whole node to Running"
+        assert!(
+            matches!(reply_applied, Applied::Applied),
+            "the reply is not StaleDropped"
         );
+        assert!(reply.accepted);
+        assert!(reply.preserve_attention);
+        assert_eq!(reply_published, Decision::Ignore);
         assert!(state.has_foreground_question("one"));
-        assert!(state.has_early_reply("per_external"));
+        assert!(
+            state.has_early_reply("per_external"),
+            "the stored id belongs to an accepted reply"
+        );
 
-        let (ask, ask_decision) = apply(
+        let (ask_applied, ask, ask_published) = publish(
             &mut state,
             serde_json::json!({"hook_event_name":"permission.asked", "request_id":"per_external"}),
         );
+        assert!(matches!(ask_applied, Applied::Applied));
         assert!(ask.accepted);
         assert!(ask.ask_already_resolved);
-        assert_eq!(
-            lifecycle_decision(ask_decision, &state, false, ask),
-            Decision::Ignore
-        );
+        assert_eq!(ask_published, Decision::Ignore);
         assert!(state.has_foreground_question("one"));
+        assert!(!state.has_early_reply("per_external"));
 
         // The resolved-ask bit must not survive into the next callback. An
         // empty body is the degraded "mark attention" path and never enters
