@@ -31,6 +31,17 @@ jobs:
   quality:
     name: Quality (Linux)
     runs-on: ubuntu-latest
+    # Without an explicit cap, a lost runner or a hung test runs to the 6-hour
+    # default and reports as an unexplained failure with no step conclusion and
+    # no retrievable log. Two attempts of issue #1520's first CI run died at
+    # 53m01s of job time with exactly that signature, so state the real budget:
+    # this job builds the frontend, installs a browser, runs the JS suites, and
+    # compiles and runs the full Rust suite.
+    timeout-minutes: 90
+    env:
+      # Keeps the target/ directory (and therefore runner disk pressure) down
+      # for a full test build of a Tauri crate.
+      CARGO_INCREMENTAL: "0"
 
     steps:
       - name: Checkout
@@ -171,6 +182,18 @@ jobs:
       # in.
       - name: Run vitest test suite (unit + integration)
         run: npx vitest run --pool=threads tests/unit tests/integration
+
+      # The Rust build is the biggest single consumer of runner disk: a fresh
+      # target/ plus a linked test binary for a Tauri crate, on top of the
+      # frontend build and the Chromium download above. Record the budget and
+      # drop the runner image's unused toolchains first, so disk exhaustion
+      # surfaces here as a visible number instead of the runner disappearing
+      # mid-`cargo` (issue #1520).
+      - name: Report disk and reclaim runner image space
+        run: |
+          df -h / /home/runner
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          df -h / /home/runner
 
       # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
       # them from `#[derive(TS)]` during `cargo test`). Issue #359.
