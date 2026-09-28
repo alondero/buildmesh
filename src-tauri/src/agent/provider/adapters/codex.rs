@@ -1464,6 +1464,16 @@ impl AgentProvider for CodexAdapter {
             || trimmed.starts_with('+')
     }
 
+    fn ready_for_initial_prompt(&self, tail: &str) -> bool {
+        // Codex paints an input box while its model is still loading. Pasting
+        // then can lose Enter even though the boot redraw looks like an ACK.
+        // Use the most recent header, never an older ready banner in scrollback.
+        let Some((_, header)) = tail.rsplit_once("model:") else { return false; };
+        let Some((model, _)) = header.split_once("/model to change") else { return false; };
+        !model.trim().is_empty() && !model.trim().eq_ignore_ascii_case("loading")
+            && header.contains('›')
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Macos, Platform::Windows, Platform::Linux]
     }
@@ -1798,6 +1808,17 @@ mod tests {
         assert!(CODEX.prefill_requires_pty("review the diff\r+ added line"));
         assert!(CODEX.prefill_requires_pty("- review this change"));
         assert!(CODEX.prefill_requires_pty("+ review this change"));
+    }
+
+    #[test]
+    fn initial_prompt_waits_for_codex_loaded_model_and_input_box() {
+        let loading = "model: loading /model to change\n› Ask Codex to do anything";
+        let ready = "model: GPT-6-Luna xhigh /model to change\npermissions: YOLO mode\n› Ask Codex to do anything";
+        assert!(!CODEX.ready_for_initial_prompt(""));
+        assert!(!CODEX.ready_for_initial_prompt(loading));
+        assert!(!CODEX.ready_for_initial_prompt("model: GPT-6-Luna xhigh /model to change"));
+        assert!(CODEX.ready_for_initial_prompt(&format!("{loading}\n{ready}")));
+        assert!(!CODEX.ready_for_initial_prompt(&format!("{ready}\n{loading}")));
     }
 
     #[test]

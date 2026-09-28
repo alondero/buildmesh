@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
-    cap_tool_calls, merge_into, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
-    Turn, MAX_TOOL_STRING, MAX_TURN_TEXT,
+    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
+    Turn, MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for Codex.
@@ -40,8 +40,8 @@ impl TranscriptAdapter for CodexAdapter {
         find_codex_rollout_in(&home.join("sessions"), ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_codex_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_codex_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn completed_turn(&self, lines: &str) -> Option<super::super::NativeTurnCompletion> {
@@ -204,9 +204,18 @@ fn codex_tool_input(arguments: Option<&serde_json::Value>) -> serde_json::Value 
 /// the *payload* type rather than the envelope type (`response_item`
 /// vs `event_msg`) — Codex has carried `function_call` under both across
 /// versions.
+#[cfg(test)]
 pub(crate) fn parse_codex_turns(
     lines: impl Iterator<Item = String>,
     keep: usize,
+) -> Parsed {
+    parse_codex_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_codex_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
 ) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
@@ -252,7 +261,7 @@ pub(crate) fn parse_codex_turns(
                         &mut turns,
                         Turn {
                             role: "user".to_string(),
-                            text: truncate(&text, MAX_TURN_TEXT),
+                            text: truncate(&text, max_text),
                             tool_calls: Vec::new(),
                         },
                         keep,
@@ -264,7 +273,7 @@ pub(crate) fn parse_codex_turns(
                     }
                     if assistant_open {
                         if let Some(last) = turns.back_mut() {
-                            merge_into(last, &text, Vec::new());
+                            merge_into_with_text_limit(last, &text, Vec::new(), max_text);
                             if !last.text.is_empty() {
                                 last_assistant_message = Some(last.text.clone());
                             }
@@ -272,7 +281,7 @@ pub(crate) fn parse_codex_turns(
                     } else {
                         let turn = Turn {
                             role: "assistant".to_string(),
-                            text: truncate(&text, MAX_TURN_TEXT),
+                            text: truncate(&text, max_text),
                             tool_calls: Vec::new(),
                         };
                         last_assistant_message = Some(turn.text.clone());

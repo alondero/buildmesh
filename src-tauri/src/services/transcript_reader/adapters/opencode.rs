@@ -118,7 +118,7 @@ impl TranscriptAdapter for OpenCodeAdapter {
         None
     }
 
-    fn parse(&self, _lines: Box<dyn Iterator<Item = String> + '_>, _keep: usize) -> Parsed {
+    fn parse(&self, _lines: Box<dyn Iterator<Item = String> + '_>, _keep: usize, _max_text: usize) -> Parsed {
         // Unreachable: the reader short-circuits before this is called.
         Parsed {
             turns: Vec::new(),
@@ -389,6 +389,14 @@ pub(crate) fn parse_opencode_messages(
     messages: &[serde_json::Value],
     keep: usize,
 ) -> Parsed {
+    parse_opencode_messages_with_text_limit(messages, keep, MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_opencode_messages_with_text_limit(
+    messages: &[serde_json::Value],
+    keep: usize,
+    max_text: usize,
+) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -435,7 +443,7 @@ pub(crate) fn parse_opencode_messages(
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
+                    text: truncate(&text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,
@@ -451,7 +459,7 @@ pub(crate) fn parse_opencode_messages(
         cap_tool_calls(&mut tool_calls);
         let turn = Turn {
             role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
+            text: truncate(&text, max_text),
             tool_calls,
         };
         if !turn.text.is_empty() {

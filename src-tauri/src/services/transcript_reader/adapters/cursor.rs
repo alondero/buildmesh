@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::Parsed;
-use crate::services::transcript_reader::parse_turns;
+use crate::services::transcript_reader::adapters::claude_code::parse_turns_with_text_limit;
 
 use super::claude_code::ClaudeCodeAdapter;
 
@@ -35,10 +35,10 @@ impl TranscriptAdapter for CursorAdapter {
         ))
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
         // Cursor's JSONL shape matches Claude Code's — delegate to the
         // Claude Code parser rather than duplicate `parse_turns`.
-        parse_turns(lines, keep)
+        parse_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {

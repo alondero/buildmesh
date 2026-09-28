@@ -65,8 +65,8 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
-    cap_tool_calls, merge_into, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
-    Turn, MAX_TOOL_STRING, MAX_TURN_TEXT,
+    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
+    Turn, MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for Muse Code.
@@ -82,8 +82,8 @@ impl TranscriptAdapter for MuseAdapter {
         muse_locator_in(&index, ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_muse_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_muse_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -192,7 +192,12 @@ fn extract_muse_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
 /// into one turn. Lines without a `message_id` (or with a different id)
 /// each emit their own turn — defensive so a future muse release that
 /// drops `message_id` doesn't silently widen the turn window.
+#[cfg(test)]
 pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize) -> Parsed {
+    parse_muse_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_muse_turns_with_text_limit(lines: impl Iterator<Item = String>, keep: usize, max_text: usize) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -240,7 +245,7 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
                     &mut turns,
                     Turn {
                         role: "user".to_string(),
-                        text: truncate(prompt, MAX_TURN_TEXT),
+                        text: truncate(prompt, max_text),
                         tool_calls: Vec::new(),
                     },
                     keep,
@@ -276,7 +281,7 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
                     &mut turns,
                     Turn {
                         role: "user".to_string(),
-                        text: truncate(prompt, MAX_TURN_TEXT),
+                        text: truncate(prompt, max_text),
                         tool_calls: Vec::new(),
                     },
                     keep,
@@ -296,7 +301,7 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
                     id.as_deref(),
                     text,
                     Vec::new(),
-                    keep,
+                    (keep, max_text),
                 );
             }
             "assistant_tool_calls_committed" => {
@@ -313,7 +318,7 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
                     id.as_deref(),
                     "",
                     std::mem::take(&mut tool_calls),
-                    keep,
+                    (keep, max_text),
                 );
             }
             // --- Silently skipped (privacy + plumbing) -----------------------
@@ -355,7 +360,7 @@ fn coalesce_or_open_assistant(
     new_id: Option<&str>,
     text: &str,
     mut more_tools: Vec<ToolCall>,
-    keep: usize,
+    (keep, max_text): (usize, usize),
 ) {
     // No-op guard — an assistant line with neither text nor tool calls
     // carries nothing the Coordinator can use.
@@ -367,7 +372,7 @@ fn coalesce_or_open_assistant(
     if let (Some(open_id), Some(new_id)) = (open_message_id.as_deref(), new_id) {
         if open_id == new_id {
             if let Some(last) = turns.back_mut() {
-                merge_into(last, text, std::mem::take(&mut more_tools));
+                merge_into_with_text_limit(last, text, std::mem::take(&mut more_tools), max_text);
                 if !last.text.trim().is_empty() {
                     *last_assistant_message = Some(last.text.clone());
                 }
@@ -380,7 +385,7 @@ fn coalesce_or_open_assistant(
     cap_tool_calls(&mut more_tools);
     let turn = Turn {
         role: "assistant".to_string(),
-        text: truncate(text, MAX_TURN_TEXT),
+        text: truncate(text, max_text),
         tool_calls: std::mem::take(&mut more_tools),
     };
     if !turn.text.is_empty() {

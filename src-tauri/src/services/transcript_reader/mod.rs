@@ -219,7 +219,6 @@ mod native_completion_tests {
 // re-exported — external callers reach the seam directly via the
 // adapter modules, issue #1661 step 10).
 use types::{Parsed, build_tail, effective_tail, empty_or_shape_changed};
-use adapters::claude_code::parse_turns;
 use adapters::opencode::{
     opencode_resolve, parse_opencode_messages, read_opencode_digest,
     read_opencode_message_rows, read_opencode_tail, OPENCODE_DIGEST_WINDOW,
@@ -471,7 +470,7 @@ fn parse_transcript(
     // is reached so its adapter's `parse` is unreachable in practice.
     let adapter = adapter::dispatch(adapter_id_for_format(format))
         .unwrap_or_else(adapter::default_adapter);
-    adapter.parse(Box::new(lines), keep)
+    adapter.parse(Box::new(lines), keep, types::MAX_TURN_TEXT)
 }
 
 /// Map a [`TranscriptFormat`] to its adapter's harness id (issue #1661).
@@ -548,19 +547,18 @@ pub(crate) fn read_assistant_report(
 }
 
 fn opencode_assistant_report(path: &Path, session_id: &str) -> Option<AssistantReport> {
-    use sha2::{Digest, Sha256};
     read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)?
         .into_iter().rev().find_map(|(id, message)| {
-            let text = parse_opencode_messages(&[message], 1).last_assistant_message?;
+            let preview = parse_opencode_messages(std::slice::from_ref(&message), 1).last_assistant_message?;
+            let text = adapters::opencode::parse_opencode_messages_with_text_limit(&[message], 1, usize::MAX).last_assistant_message?;
             Some(AssistantReport {
-                revision: format!("{id}:{:x}", Sha256::digest(text.as_bytes())),
+                revision: assistant_revision(&id, &preview, &text),
                 text,
             })
         })
 }
 
 fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<AssistantReport> {
-    use sha2::{Digest, Sha256};
     let mut file = fs::File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let start = size.saturating_sub(256 * 1024);
@@ -586,16 +584,31 @@ fn assistant_report_from_file(path: &Path, format: TranscriptFormat) -> Option<A
         }
         lines.push(std::mem::take(&mut line));
     }
-    let text = parse_transcript(format, lines.into_iter(), 1).last_assistant_message?;
+    let preview = parse_transcript(format, lines.iter().cloned(), 1).last_assistant_message?;
+    let parser = adapter::dispatch(adapter_id_for_format(format))?;
+    let text = parser.parse(Box::new(lines.into_iter()), 1, usize::MAX).last_assistant_message?;
     let offset = assistant_line_offset?;
     Some(AssistantReport {
         // Revisions identify the assistant content plus its position. Hashing
         // the normalized text keeps file-backed providers consistent with the
         // OpenCode report reader; the offset still distinguishes identical
         // responses emitted at different points in one transcript.
-        revision: format!("{offset}:{:x}", Sha256::digest(text.as_bytes())),
+        revision: assistant_revision(&offset.to_string(), &preview, &text),
         text,
     })
+}
+
+fn assistant_revision(position: &str, preview: &str, text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let legacy = format!("{position}:{:x}", Sha256::digest(preview.as_bytes()));
+    if preview == text { legacy } else { format!("{legacy}:{:x}", Sha256::digest(text.as_bytes())) }
+}
+
+/// A persisted pre-injection boundary from the preview reader must still
+/// exclude the same old report after upgrading to full report text.
+pub(crate) fn same_assistant_revision(current: &str, previous: &str) -> bool {
+    current == previous || (current.split(':').count() == 3
+        && current.rsplit_once(':').is_some_and(|(legacy, _)| legacy == previous))
 }
 
 /// Identify a line that can advance `Parsed::last_assistant_message` without
