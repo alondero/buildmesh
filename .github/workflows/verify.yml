@@ -113,7 +113,7 @@ jobs:
           if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
           node scripts/check-agent-diff.mjs --base "$base"
 
-      # Issue #1545 — gate the README against drift in the Provider enum
+      # Issue #1545 ??? gate the README against drift in the Provider enum
       # count, supported-platforms claim, SmartScreen warning, and the
       # CLAUDE.md "no internal issue numbers in user-facing docs" rule.
       # Cheap (no build), runs in ~50ms; safe to add at the top of the
@@ -134,7 +134,7 @@ jobs:
             node scripts/check-docs.mjs
           fi
 
-      # Issue #1542 — enforced ESLint + React Hooks gate. Two steps:
+      # Issue #1542 ??? enforced ESLint + React Hooks gate. Two steps:
       #  (a) `npm run lint` runs ESLint across the codebase; the flat
       #      config excludes `src/types/generated/**`, `dist/**`, the
       #      agent working dir, docs, and the lint-fixtures dir so a
@@ -142,7 +142,7 @@ jobs:
       #      (closed #1242 was a real one) before they ship.
       #  (b) `npm run lint:fixtures` runs ESLint against the two
       #      intentional-violation fixtures and asserts each one trips
-      #      its target rule. This is the inverse of (a) — it must
+      #      its target rule. This is the inverse of (a) ??? it must
       #      succeed (the gate is live), proving a future rule tweak
       #      that accidentally silences React Hooks would fail CI.
       # Run before the build so a syntax-level regression trips in
@@ -181,7 +181,7 @@ jobs:
         run: npm run check:bundle
 
       # `tests/integration/ui-shot.test.ts` drives the fixture UI in headless
-      # Chromium (scripts/ui-shot.mjs) — it launches a real browser rather
+      # Chromium (scripts/ui-shot.mjs) ??? it launches a real browser rather
       # than mocking one, so the suite cannot pass on a runner without the
       # pinned browser build. A GitHub runner has none, and `launchChromium`
       # throws instead of skipping, so the job installs it here (issue #1520).
@@ -191,7 +191,7 @@ jobs:
       # Single invocation runs both unit and integration suites in the
       # same vitest worker-pool boot (cheaper than two separate calls
       # which each start node + transform every module twice). Issue #1257
-      # — --pool=threads is required; the default forks pool silently
+      # ??? --pool=threads is required; the default forks pool silently
       # times out inside CI's container and reports PASS(0) FAIL(0) exit
       # 0, the same false-green we hit in worktrees. Tests scope is
       # explicit (no `vitest run` default) so a new suite dir can't sneak
@@ -227,49 +227,26 @@ jobs:
           path: runner-budget.txt
           retention-days: 7
 
-      # Compile and run are separate steps so a lost runner names the phase it
-      # died in: a step that never reports a conclusion is the compile, and a
-      # green compile followed by a lost runner is the test execution. The
-      # ts-rs binding regeneration (issue #359) happens in the run step, not
-      # the compile step, so the drift gate below still needs the run.
+      # Compile only. The Rust *tests* run in the `rust-tests` matrix and in
+      # `rust-bindings` below, which between them give every test a log that
+      # survives the failure mode this job kept hitting: a hosted runner lost
+      # mid-step reports no conclusion and takes its log with it, so a single
+      # combined `cargo test` localises nothing. Compiling here means the
+      # shards restore a warm Cargo cache instead of rebuilding the crate.
       - name: Compile the Rust test binaries
         run: cargo test --locked --no-run
         working-directory: src-tauri
 
-      # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
-      # them from `#[derive(TS)]` during `cargo test`). Issue #359.
-      #
-      # Unit target first, integration targets second, as separate steps. A
-      # hosted runner lost mid-step records no conclusion and no log, so with
-      # one combined step a loss localises nothing; with the split, the last
-      # green step names the half that died. `--test-threads=1` is the mode
-      # CLAUDE.md documents for a trustworthy verdict, because the `db::`
-      # tests share one process-global database and report phantom failures
-      # (and can wedge) in parallel. The in-shell `timeout` turns a hang into
-      # a step failure with a log rather than a lost runner.
-      - name: Rust unit tests + regenerate TS bindings
-        timeout-minutes: 30
-        run: |
-          set -o pipefail
-          timeout --kill-after=2m 25m cargo test --locked --lib -- --test-threads=1 2>&1 | tee cargo-unit.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" = 124 ]; then
-            echo "::error::The Rust unit tests exceeded 25 minutes and were killed — a test is hanging."
-          fi
-          exit "$status"
-        working-directory: src-tauri
-
-      - name: Rust integration tests
-        timeout-minutes: 30
-        run: |
-          set -o pipefail
-          timeout --kill-after=2m 25m cargo test --locked --tests -- --test-threads=1 2>&1 | tee cargo-integration.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" = 124 ]; then
-            echo "::error::The Rust integration tests exceeded 25 minutes and were killed — a test is hanging."
-          fi
-          exit "$status"
-        working-directory: src-tauri
+      # `http::assets::tests::mobile_assets_include_built_index_html` reads
+      # dist/mobile/index.html, so the shards need the built output. Handing
+      # it over as an artifact is much cheaper than a per-shard `npm ci` plus
+      # mobile build, and it is already built here.
+      - name: Upload the built mobile assets for the Rust shards
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-dist
+          path: dist/mobile
+          retention-days: 1
 
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
       # or sets `creation_flags` inline. Only process_util may own those details.
@@ -293,20 +270,14 @@ jobs:
           fi
 
       # Fail CI if the committed bindings drift from what the Rust structs now
-      # generate — wire-shape drift becomes a red build, not a runtime crash.
-      - name: Check Rust↔TS type bindings are up to date
-        shell: bash
-        run: |
-          git add --intent-to-add src/types/generated
-          if ! git diff --exit-code -- src/types/generated; then
-            echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
-            exit 1
-          fi
+      # generate ??? wire-shape drift becomes a red build, not a runtime crash.
+      # The bindings are regenerated by `rust-bindings`, which owns the
+      # authoritative run; this job keeps the grep gates that need no test run.
 
       # Manual runs additionally exercise the real CLI contract at a known
       # version. Regular PRs stay hermetic and use deterministic help-parser
       # coverage in the Rust suite. A release tag runs this workflow through
-      # the `push` path and therefore skips both steps below — the release gate
+      # the `push` path and therefore skips both steps below ??? the release gate
       # is verification, not a live-CLI contract re-run.
       - name: Install pinned Codex CLI for proxy contract smoke
         if: github.event_name == 'workflow_dispatch'
@@ -317,14 +288,186 @@ jobs:
         run: cargo test --locked pinned_codex_cli_loads_profile_for_fresh_and_resume -- --ignored
         working-directory: src-tauri
 
-  # Issue #1257 — the Playwright verify-smoke spec (issue #157) was
-  # designed to run WITHOUT a Rust compile — it boots just Vite and
+  # Issue #1520 ??? the Rust suite, sharded by module group.
+  #
+  # Seven runs of the first CI execution lost the hosted runner inside
+  # `cargo test --lib`, every one of them with no step conclusion and no
+  # retrievable log, so a single combined run cannot say which test did it: a
+  # split into sequential steps only narrows it one step per hour-long cycle.
+  # One job per module group instead means a lost runner costs exactly one
+  # group, and every other shard keeps its log and its conclusion. `fail-fast:
+  # false` for the same reason ??? a sibling's failure must not cancel the
+  # evidence.
+  #
+  # `--test-threads=1` throughout: CLAUDE.md documents the `db::` tests as
+  # sharing one process-global database and reporting phantom failures (and
+  # wedging) in parallel, and a gate that cries wolf trains people to re-run
+  # it. The in-shell `timeout` turns a hang into a step failure with a log.
+  rust-tests:
+    name: Rust tests (${{ matrix.shard.label }})
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - label: db
+            args: "db::"
+          - label: services
+            args: "services::"
+          - label: agent
+            args: "agent:: --skip commands::agent:: --skip models::agent::"
+          - label: commands-http
+            args: "commands:: http::"
+          - label: autopilot-coordinator
+            args: "autopilot:: coordinator:: --skip commands::coordinator:: --skip http::routes:: --skip services::autopilot::"
+          - label: git-env-preferences
+            args: "git:: env:: preferences:: --skip commands::git:: --skip commands::preferences:: --skip models::git::"
+          # Everything whose first path segment no other shard owns, so a new
+          # module lands in one place instead of going untested. The
+          # `--skip agent::sandbox::` is the same nested-path problem the other
+          # shards solve: `sandbox::` would otherwise also claim it.
+          - label: remaining
+            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: windowing:: --skip agent::sandbox::"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Warm cache from `quality`, which compiled the same targets.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Restore the built mobile assets
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-dist
+          path: dist/mobile
+
+      - name: Run the ${{ matrix.shard.label }} tests
+        env:
+          # Point ts-rs away from the working tree. Every shard runs the same
+          # lib test binary, so without this they would all rewrite
+          # src/types/generated/ at once, and the drift gate would be reading
+          # files seven jobs are writing. ts-rs joins the export dir onto the
+          # test binary's working directory, and an absolute path replaces it
+          # outright, so this lands outside the repository.
+          TS_RS_EXPORT_DIR: ${{ runner.temp }}/ts-rs-${{ matrix.shard.label }}
+        run: |
+          set -o pipefail
+          timeout --kill-after=2m 30m \
+            cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }} 2>&1 \
+            | tee "cargo-${{ matrix.shard.label }}.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" = 124 ]; then
+            echo "::error::The ${{ matrix.shard.label }} shard exceeded 30 minutes and was killed ??? a test in it is hanging."
+          fi
+          exit "$status"
+        working-directory: src-tauri
+
+      - name: Upload the shard log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-shard-log-${{ matrix.shard.label }}
+          path: src-tauri/cargo-${{ matrix.shard.label }}.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  # The authoritative Rust pass: every target, in one process, with the real
+  # export directory, so ts-rs regenerates the committed bindings and the
+  # drift gate has a single writer. Runs only once every shard has passed, and
+  # `if: always()` with an explicit result check rather than relying on the
+  # implicit skip: a required status check that is *skipped* counts as
+  # satisfied by GitHub, so a silently skipped aggregate would be a hole in
+  # the merge gate. It fails instead.
+  rust-bindings:
+    name: Rust tests + TS bindings
+    needs: [quality, rust-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Refuse to run unless every shard succeeded
+        shell: bash
+        run: |
+          results="success success"
+          total=0
+          not_ok=0
+          for r in $results; do
+            total=$((total + 1))
+            [ "$r" = "success" ] || not_ok=$((not_ok + 1))
+          done
+          echo "dependencies ($total): $results"
+          if [ "$not_ok" -ne 0 ]; then
+            echo "::error::$not_ok of $total dependencies did not succeed, so the Rust suite is not fully green. Not running the authoritative pass."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Restore the built mobile assets
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-dist
+          path: dist/mobile
+
+      # The filters above are exact only for today's test list, and libtest
+      # cannot express "first path segment is X", so a new top-level module
+      # would silently go unrun. This gate lists the unit tests from the test
+      # binary and fails if any is unclaimed or doubly claimed.
+      - name: Verify the Rust shards cover every unit test
+        run: node scripts/check-rust-shard-coverage.mjs
+
+      # Runs the Rust suite AND regenerates the shared TS bindings (ts-rs emits
+      # them from `#[derive(TS)]` during `cargo test`). Issue #359. No
+      # TS_RS_EXPORT_DIR here, so the crate's own .cargo/config.toml applies
+      # and the bindings land in src/types/generated/.
+      - name: Run the full Rust suite and regenerate the TS bindings
+        run: |
+          set -o pipefail
+          timeout --kill-after=2m 45m \
+            cargo test --locked -- --test-threads=1 2>&1 | tee cargo-full.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" = 124 ]; then
+            echo "::error::The full Rust suite exceeded 45 minutes and was killed ??? a test is hanging."
+          fi
+          exit "$status"
+        working-directory: src-tauri
+
+      - name: Check Rust???TS type bindings are up to date
+        shell: bash
+        run: |
+          git add --intent-to-add src/types/generated
+          if ! git diff --exit-code -- src/types/generated; then
+            echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
+            exit 1
+          fi
+
+  # Issue #1257 ??? the Playwright verify-smoke spec (issue #157) was
+  # designed to run WITHOUT a Rust compile ??? it boots just Vite and
   # installs a JS-side Tauri mock before any app module evaluates.
   # Previously this CI never ran it, so the receiver-binding regression
-  # class (#149 — bytes emitted but never reach xterm.js) had no
+  # class (#149 ??? bytes emitted but never reach xterm.js) had no
   # pre-merge gate. The job installs Chromium, runs only the
   # `verify-smoke` Playwright project, and stays well under 5 minutes.
-  # Intentionally does NOT `needs: quality` — verify-smoke is a
+  # Intentionally does NOT `needs: quality` ??? verify-smoke is a
   # lightweight frontend test with a mock backend; gating it on the
   # ~10-minute quality job destroys the fast feedback loop for a
   # nothing-in-common dependency. It also doesn't gate `platform-smoke`
@@ -349,7 +492,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Issue #157 — verify-smoke installs Chromium with its system
+      # Issue #157 ??? verify-smoke installs Chromium with its system
       # dependencies (libnss3, libatk-bridge2.0-0, etc.) so the headless
       # browser can render xterm.js + the React app. --with-deps is a
       # no-op on hosts that already have the libs.

@@ -85,10 +85,27 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
-| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and the full Rust suite. Also fails if `src/types/generated/` is stale. |
+| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and a compile of every Rust test target. |
+| `Verification / Rust tests + TS bindings` | yes | The full Rust suite, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It also refuses to run unless every test shard below passed. |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
 | `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
 | `Verification / Platform smoke (macos-latest)` | yes | The Tauri app compiles and links on macOS. |
+
+The Rust unit target also runs as seven parallel `Rust tests (<group>)` jobs —
+`db`, `services`, `agent`, `commands-http`, `autopilot-coordinator`,
+`git-env-preferences`, `remaining`. They exist because a hosted runner lost
+mid-`cargo-test` reports no step conclusion and no log, so a single combined
+run cannot say which test did it; one job per group means a loss costs one
+group. The shards are **not** required checks — `Rust tests + TS bindings` is
+the authoritative, single-writer pass and the gate.
+
+Because libtest filters are substring matches, they cannot express "this
+test's first path segment is X", so the split is a list of exact filters and
+`--skip`s. A new top-level module would therefore go unrun silently unless it
+is claimed, which `npm run check:rust-shards`
+(`scripts/check-rust-shard-coverage.mjs`, also a CI step) prevents: it lists
+the unit tests from the test binary and fails if any is unclaimed or claimed
+twice. Run it after adding a module, not only in CI.
 
 Those names are owned by `.github/workflows/verify.yml`. A job that calls a
 reusable workflow is reported as `<calling job> / <called job>`, so the
