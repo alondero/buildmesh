@@ -248,8 +248,8 @@ fn attention_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
 /// is the per-launch override (preferred when the caller has already picked a
 /// writable data dir); absent that, we route through `cli_dir_for_spawn`
 /// (`env::environment.rs:402`) so a WSL-guest mcode spawn writes into the
-/// *guest* `$HOME/.minimax` converted to a host `\\wsl$\…` path — never the
-/// Windows host's `%USERPROFILE%\.minimax` (the round-1 / round-2 reviewer
+/// *guest* `$HOME/.minimax` through the environment's host-path conversion —
+/// never the Windows host's `%USERPROFILE%\.minimax` (the round-1 / round-2 reviewer
 /// correction: silently calling `minimax_data_dir()` ignored
 /// `resolved.spawn_path`, writing the plugin into the wrong filesystem and
 /// violating the buildmesh hard rule `CLAUDE.md:21` "Never pass Linux/WSL
@@ -275,8 +275,8 @@ fn resolve_data_dir(resolved: &ResolvedPath, runtime: &LaunchRuntime) -> Option<
         }
     }
     // Route through `cli_dir_for_spawn` so WSL-guest mcode spawns
-    // resolve to the *guest* home (converted to a `\\wsl$\…` host
-    // path), not the Windows host's `%USERPROFILE%\.minimax`.
+    // resolve to the *guest* home through the environment's host-path
+    // conversion, not the Windows host's `%USERPROFILE%\.minimax`.
     // `cli_dir_for_spawn` itself returns `None` only when the host
     // has no resolvable WSL distro + no fallback home — that is the
     // legitimate "unresolvable hook config root" case for issue
