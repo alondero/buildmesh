@@ -229,7 +229,10 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'files' });
     render(<ProbePanel />);
 
-    expect(await screen.findByText('Changed Files')).toBeTruthy();
+    // This body loads asynchronously through the full Probe panel. Keep the
+    // assertion unchanged while allowing the full-suite worker load more than
+    // Testing Library's 1s default query window.
+    expect(await screen.findByText('Changed Files', {}, { timeout: 10_000 })).toBeTruthy();
     expect(screen.getByText('File Tree')).toBeTruthy();
   });
 
