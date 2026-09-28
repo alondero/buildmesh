@@ -64,7 +64,7 @@ impl TranscriptAdapter for ClineAdapter {
         None
     }
 
-    fn parse(&self, _lines: Box<dyn Iterator<Item = String> + '_>, _keep: usize) -> Parsed {
+    fn parse(&self, _lines: Box<dyn Iterator<Item = String> + '_>, _keep: usize, _max_text: usize) -> Parsed {
         Parsed {
             turns: Vec::new(),
             last_assistant_message: None,

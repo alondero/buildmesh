@@ -976,6 +976,16 @@ pub(super) fn persist_transition(run_id: i64, view: &mut RunView, transition: &T
     persist_transition_checked(run_id, view, transition).map_err(TransitionPersistFailure::into_message)
 }
 
+fn dispatch_prompt_and_acknowledge(
+    submit: impl FnOnce() -> Result<bool, String>,
+    acknowledge: impl FnOnce() -> Result<Option<i64>, String>,
+) -> Result<Option<i64>, String> {
+    if !submit()? {
+        return Err("Input ownership changed before prompt submission completed".into());
+    }
+    acknowledge()
+}
+
 /// Commit one effect outcome through the production seam: advance the event,
 /// then persist the transition atomically. `drive_run` composes this into its
 /// pending-outcome loop; the deterministic coverage drives it directly so a
@@ -1769,6 +1779,19 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                 view.graph.node(&step.node_id).map(|n| &n.kind)
             {
                 if view.context.get(&format!("node.{}.prompt_delivery.{}", step.node_id, step.attempt)) == Some("intent") {
+                    // A concurrent receipt may have rejected the step commit
+                    // after delivery. Replay only its durable acknowledgement.
+                    match db::circuit::evidence::prompt_delivery_acknowledged(view.run_id, &step.node_id, step.attempt) {
+                        Ok(true) => {
+                            events.push(CircuitEvent::PromptDelivered { node_id: step.node_id.clone(), attempt: step.attempt });
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!("circuits: prompt acknowledgement lookup failed: {error}");
+                            continue;
+                        }
+                        Ok(false) => {}
+                    }
                     events.push(CircuitEvent::EffectUncertain {
                         node_id: step.node_id.clone(), attempt: step.attempt,
                         reason: "Prompt dispatch has no durable acknowledgement. Inspect the agent before recording an outcome; the prompt will not be replayed.".into(),
@@ -2278,7 +2301,8 @@ fn select_turn_report(
 ) -> Option<String> {
     if let Some(report) = transcript.filter(|report| {
         !report.text.trim().is_empty()
-            && previous_revision.is_none_or(|previous| report.revision != previous)
+            && previous_revision.is_none_or(|previous|
+                !crate::services::transcript_reader::same_assistant_revision(&report.revision, previous))
     }) {
         return Some(report.text);
     }
@@ -2692,17 +2716,36 @@ pub(super) fn execute_effects(
                         // and that echo only proves *this* submission if the
                         // record already exists when the hook is handled
                         // (issue #1898).
-                        if let Err(error) = db::circuit::evidence::record_prompt_submission(
+                        match db::circuit::evidence::record_prompt_submission(
                             active.run.id, node_id, attempt, target, prompt,
                         ) {
-                            tracing::warn!("circuits: run {}: could not record prompt submission: {}", active.run.id, error);
-                            outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt submission could not be recorded for correlation: {error}") });
-                            continue;
+                            Ok(revision) => view.context.set("evidence.revision", revision.to_string()),
+                            Err(error) => {
+                                tracing::warn!("circuits: run {}: could not record prompt submission: {}", active.run.id, error);
+                                outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt submission could not be recorded for correlation: {error}") });
+                                continue;
+                            }
                         }
                         crate::autopilot::evaluator::note_turn_start(target);
-                        if let Err(error) = crate::autopilot::pipeline::write_prompt_to_pty(target, prompt, app) {
-                            outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt, reason: format!("Prompt delivery is unverified: {error}") });
-                            continue;
+                        let delivered = dispatch_prompt_and_acknowledge(
+                            || {
+                                let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(target)
+                                    .ok_or("Terminal input is already owned; prompt was not sent")?;
+                                crate::autopilot::pipeline::write_prompt_to_pty_guarded(
+                                    &crate::agent::process::PROCESS_REGISTRY, target, prompt, app, Some(&input),
+                                )
+                            },
+                            || db::circuit::evidence::acknowledge_prompt_delivery(active.run.id, node_id, attempt)
+                                .map_err(|error| format!("Prompt was submitted but acknowledgement could not be recorded: {error}")),
+                        );
+                        match delivered {
+                            Ok(Some(revision)) => view.context.set("evidence.revision", revision.to_string()),
+                            Ok(None) => continue,
+                            Err(error) => {
+                                outcome_events.push(CircuitEvent::EffectUncertain { node_id: node_id.clone(), attempt,
+                                    reason: format!("Prompt delivery is unverified: {error}") });
+                                continue;
+                            }
                         }
                         let _ = db::update_agent_node_status(target, SessionStatus::Running);
                         outcome_events.push(CircuitEvent::PromptDelivered { node_id: node_id.clone(), attempt });
@@ -3488,6 +3531,74 @@ mod tests {
                 status: crate::models::SessionStatus::Completed,
             }]
         );
+    }
+
+    #[test]
+    fn prompt_submission_revision_allows_delivery_commit_without_weakening_fences() {
+        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
+        for (stale_revision, cancelled) in [(true, false), (false, false), (false, true)] {
+            let mut conn = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            let graph = CircuitGraph {
+                version: CIRCUIT_GRAPH_VERSION, blueprint: None, edges: vec![],
+                nodes: vec![CircuitNode { id: "feedback".into(), kind: CircuitNodeKind::InjectPty {
+                    target_node_id: Some("$source".into()), prompt: "Apply the review findings".into(),
+                } }],
+            };
+            conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'source','/repo','ready');
+                INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'review');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+                INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'feedback',1,'running');
+                INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','possible_dispatch');").unwrap();
+            conn.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
+            let mut view = RunView { run_id: 1, state: RunState::Running, graph,
+                context: CircuitContext::default(), steps: vec![StepView {
+                    node_id: "feedback".into(), status: StepStatus::Running, attempt: 1,
+                    outcome: None, error: None, agent_node_id: None,
+                }] };
+            view.context.set("source.agent_id", "9");
+            view.context.set("node.feedback.prompt_delivery.1", "intent");
+            let revision = db::circuit::evidence::record_prompt_submission_locked(
+                &conn, 1, "feedback", 1, 9, "Apply the review findings",
+            ).unwrap();
+            assert!(revision > 0);
+            view.context.set("evidence.revision", if stale_revision { 0 } else { revision }.to_string());
+            if cancelled {
+                conn.execute("UPDATE autopilot_circuit_runs SET state='cancelled'", []).unwrap();
+            }
+            let event = CircuitEvent::PromptDelivered { node_id: "feedback".into(), attempt: 1 };
+            let result = advance_and_persist_observed_event(&mut view, &event, |view, transition| {
+                persist_transition_checked_with(1, view, transition, |run_id, state, context, steps, evidence| {
+                    db::circuit::evidence::commit_transition_locked(&mut conn, run_id, state, context, steps, evidence)
+                })
+            });
+            assert_eq!(result.is_ok(), !stale_revision && !cancelled);
+            let (status, effect): (String, String) = conn.query_row(
+                "SELECT s.status,e.state FROM autopilot_circuit_run_steps s JOIN circuit_effects e ON e.run_id=s.run_id",
+                [], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            if stale_revision || cancelled {
+                assert_eq!((status.as_str(), effect.as_str()), ("running", "possible_dispatch"));
+            } else {
+                assert_eq!((status.as_str(), effect.as_str()), ("completed", "acknowledged"));
+                assert_eq!(view.context.get("node.feedback.prompt_delivery.1"), Some("acknowledged"));
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_acknowledgement_requires_completed_submission() {
+        for result in [Ok(false), Err("Enter write failed".to_string())] {
+            let delivered = dispatch_prompt_and_acknowledge(|| result, || {
+                panic!("an unsent or failed submission must never write a delivery receipt")
+            });
+            assert!(delivered.is_err());
+        }
+        let result = dispatch_prompt_and_acknowledge(|| Ok(true), || Err("receipt commit failed".into()));
+        assert_eq!(result, Err("receipt commit failed".into()));
+        assert_eq!(dispatch_prompt_and_acknowledge(|| Ok(true), || Ok(None)).unwrap(), None,
+            "a cancelled or superseded attempt does not emit a delivery event");
     }
 
     #[test]

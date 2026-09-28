@@ -53,7 +53,8 @@ pub(crate) fn prepare(
     let status = if finished { SessionStatus::Ready } else { agent.status };
     if let Ok(report) = &report {
         if report.published_at_ms < incarnation_ms
-            || view.context.get(&format!("agent.{}.previous_report_revision", agent.id)) == Some(report.revision.as_str()) {
+            || view.context.get(&format!("agent.{}.previous_report_revision", agent.id)).is_some_and(|previous|
+                crate::services::transcript_reader::same_assistant_revision(&report.revision, previous)) {
             return Err(Blocker::ReportSuperseded);
         }
         if !report.is_current() { return Err(Blocker::ReportUnavailable { reason: ReportReadError::ChangedDuringRead.reason().into() }); }

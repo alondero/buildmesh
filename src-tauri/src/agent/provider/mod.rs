@@ -515,6 +515,13 @@ pub trait AgentProvider: Send + Sync {
         false
     }
 
+    /// Whether startup output proves the initial PTY prompt can be accepted.
+    /// Most harnesses buffer early input; adapters that lose it during boot
+    /// must require their own ready marker instead of treating redraws as ACKs.
+    fn ready_for_initial_prompt(&self, _tail: &str) -> bool {
+        true
+    }
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 

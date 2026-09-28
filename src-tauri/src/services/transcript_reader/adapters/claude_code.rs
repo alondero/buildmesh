@@ -25,9 +25,9 @@ use crate::services::transcript_reader::adapter::{
     HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
 };
 use crate::services::transcript_reader::types::{
-    cap_tool_calls, merge_into, push_bounded, truncate,
+    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate,
     truncate_json_strings, Parsed, ToolCall, Turn,
-    MAX_TOOL_STRING, MAX_TURN_TEXT,
+    MAX_TOOL_STRING,
 };
 use crate::services::transcript_paths::{concat_text_blocks, encode_path, is_synthetic_message};
 
@@ -44,8 +44,8 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
         transcript_path(ctx.session_id, ctx.node_path)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -142,9 +142,18 @@ pub(crate) fn extract_tool_calls(content: Option<&serde_json::Value>) -> Vec<Too
 /// Consecutive assistant lines sharing a `message.id` are coalesced into
 /// one turn (Claude Code splits one assistant message — thinking / text
 /// / tool_use — across several lines).
+#[cfg(test)]
 pub(crate) fn parse_turns(
     lines: impl Iterator<Item = String>,
     keep: usize,
+) -> Parsed {
+    parse_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
 ) -> Parsed {
     // Always retain at least the open turn so a split assistant message
     // can still coalesce its continuation lines (the open turn is never
@@ -192,7 +201,7 @@ pub(crate) fn parse_turns(
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
+                    text: truncate(&text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,
@@ -218,7 +227,7 @@ pub(crate) fn parse_turns(
         if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
             if id == open {
                 if let Some(last) = turns.back_mut() {
-                    merge_into(last, &text, extract_tool_calls(raw_content));
+                    merge_into_with_text_limit(last, &text, extract_tool_calls(raw_content), max_text);
                     if !last.text.is_empty() {
                         last_assistant_message = Some(last.text.clone());
                     }
@@ -231,7 +240,7 @@ pub(crate) fn parse_turns(
         cap_tool_calls(&mut tool_calls);
         let turn = Turn {
             role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
+            text: truncate(&text, max_text),
             tool_calls,
         };
         if !turn.text.is_empty() {

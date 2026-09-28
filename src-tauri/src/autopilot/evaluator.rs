@@ -60,6 +60,7 @@ struct NodeEvaluatorState {
     circuit_owned: bool,
     tail: String,
     output_generation: u64,
+    output_bytes: u64,
     last_output: Option<std::time::Instant>,
     last_evaluation: Option<std::time::Instant>,
     turn_start: Option<usize>,
@@ -229,6 +230,7 @@ pub fn on_output(node_id: i64, data: &str) {
         return;
     };
     state.output_generation = state.output_generation.saturating_add(1);
+    state.output_bytes = state.output_bytes.saturating_add(data.len() as u64);
     state.last_output = Some(std::time::Instant::now());
     let tail = &mut state.tail;
     tail.push_str(data);
@@ -248,6 +250,39 @@ pub fn on_output(node_id: i64, data: &str) {
     // Cheap notify; redundant classifications are prevented by the
     // fresh-output guards in the circuit worker's observation pass.
     crate::services::circuit_worker::wake_circuit_worker();
+}
+
+/// Snapshot the PTY output position before writing input. Unlike a turn
+/// boundary, this does not change classifier state if a guarded write fails.
+pub(crate) fn output_cursor(node_id: i64) -> Option<u64> {
+    NODES
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .map(|state| state.output_bytes)
+}
+
+/// Read only output received after `cursor`, even when the bounded tail has
+/// dropped earlier bytes. The cursor is captured before the PTY stdin write.
+pub(crate) fn cleaned_output_since(node_id: i64, cursor: u64) -> String {
+    let raw = NODES
+        .lock()
+        .unwrap()
+        .get(&node_id)
+        .map(|state| {
+            let retained_from = state.output_bytes.saturating_sub(state.tail.len() as u64);
+            let mut offset = cursor
+                .saturating_sub(retained_from)
+                .min(state.tail.len() as u64) as usize;
+            while !state.tail.is_char_boundary(offset) {
+                offset += 1;
+            }
+            state.tail[offset..].to_string()
+        })
+        .unwrap_or_default();
+    crate::session_naming::ANSI_ESCAPE
+        .replace_all(&raw, "")
+        .to_string()
 }
 
 /// The current cleaned (ANSI-stripped, tail-capped) buffer for a node.
@@ -899,6 +934,21 @@ mod tests {
         );
         assert!(cleaned_tail(id).contains("turn 1 boot output"));
 
+        unregister(id);
+    }
+
+    #[test]
+    fn output_cursor_keeps_immediate_paste_output_without_moving_turn_start() {
+        let id = 910_019;
+        register(id);
+        on_output(id, "old [Pasted Content 20 chars]");
+        note_turn_start(id);
+        let cursor = output_cursor(id).unwrap();
+        on_output(id, "\x1b[32m[Pasted Content 30 chars]\x1b[0m");
+        assert_eq!(cleaned_output_since(id, cursor), "[Pasted Content 30 chars]");
+        assert_eq!(cleaned_turn_tail(id), "[Pasted Content 30 chars]");
+        on_output(id, &"x".repeat(MAX_TAIL_CHARS));
+        assert_eq!(cleaned_output_since(id, cursor), "x".repeat(MAX_TAIL_CHARS));
         unregister(id);
     }
 

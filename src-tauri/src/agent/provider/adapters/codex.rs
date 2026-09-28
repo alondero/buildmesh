@@ -296,6 +296,21 @@ fn wsl_runtime_identity(distro: &str, codex_home: &str) -> String {
     format!("wsl:{distro}:{codex_home}")
 }
 
+/// Log- and UI-safe runtime identity for diagnostics (issue #1937): the WSL
+/// identity is `wsl:{distro}:{codex_home}`, and the home path can carry the
+/// guest username — report `wsl:{distro}` so support logs and error surfaces
+/// never include filesystem paths. Native identities pass through unchanged.
+/// Built from the `wsl_distro` field (never by parsing the identity string),
+/// so the home path is structurally unreachable. The stored
+/// `runtime_identity` (DB keys, signatures) is untouched.
+pub fn log_safe_runtime_identity(install: &CodexInstall) -> String {
+    if let Some(distro) = install.wsl_distro.as_deref() {
+        format!("wsl:{distro}")
+    } else {
+        install.runtime_identity.clone()
+    }
+}
+
 pub fn stable_profile_name(harness_id: &str, provider_id: &str) -> String {
     let mut digest = Sha256::new();
     digest.update(harness_id.as_bytes());
@@ -1449,6 +1464,16 @@ impl AgentProvider for CodexAdapter {
             || trimmed.starts_with('+')
     }
 
+    fn ready_for_initial_prompt(&self, tail: &str) -> bool {
+        // Codex paints an input box while its model is still loading. Pasting
+        // then can lose Enter even though the boot redraw looks like an ACK.
+        // Use the most recent header, never an older ready banner in scrollback.
+        let Some((_, header)) = tail.rsplit_once("model:") else { return false; };
+        let Some((model, _)) = header.split_once("/model to change") else { return false; };
+        !model.trim().is_empty() && !model.trim().eq_ignore_ascii_case("loading")
+            && header.contains('›')
+    }
+
     fn available_on(&self) -> &'static [Platform] {
         &[Platform::Macos, Platform::Windows, Platform::Linux]
     }
@@ -1786,6 +1811,17 @@ mod tests {
     }
 
     #[test]
+    fn initial_prompt_waits_for_codex_loaded_model_and_input_box() {
+        let loading = "model: loading /model to change\n› Ask Codex to do anything";
+        let ready = "model: GPT-6-Luna xhigh /model to change\npermissions: YOLO mode\n› Ask Codex to do anything";
+        assert!(!CODEX.ready_for_initial_prompt(""));
+        assert!(!CODEX.ready_for_initial_prompt(loading));
+        assert!(!CODEX.ready_for_initial_prompt("model: GPT-6-Luna xhigh /model to change"));
+        assert!(CODEX.ready_for_initial_prompt(&format!("{loading}\n{ready}")));
+        assert!(!CODEX.ready_for_initial_prompt(&format!("{ready}\n{loading}")));
+    }
+
+    #[test]
     fn stable_profile_identity_survives_endpoint_and_model_edits() {
         let before = stable_profile_name("codex", "minimax");
         let after = stable_profile_name("codex", "minimax");
@@ -1823,6 +1859,38 @@ mod tests {
             wsl_runtime_identity("Ubuntu", "/home/user/.codex"),
             wsl_runtime_identity("Ubuntu", "/custom/codex")
         );
+    }
+
+    /// Issue #1937 review: a successful WSL probe resolves
+    /// `wsl:{distro}:{codex_home}` where the home carries the guest
+    /// username. The logged value must keep the distro (which host was
+    /// slow) and drop the path — this is the value-level coverage for the
+    /// successful-probe arm of the derivation log (driving a real probe
+    /// here would need a live Codex install per runtime).
+    #[test]
+    fn log_safe_runtime_identity_omits_wsl_codex_home() {
+        let wsl = CodexInstall {
+            executable: "/home/alice/.local/bin/codex".into(),
+            version: "1.2.3".into(),
+            runtime_identity: wsl_runtime_identity("Ubuntu", "/home/alice/.codex"),
+            codex_home: "/home/alice/.codex".into(),
+            wsl_distro: Some("Ubuntu".into()),
+        };
+        assert_eq!(wsl.runtime_identity, "wsl:Ubuntu:/home/alice/.codex");
+        let logged = log_safe_runtime_identity(&wsl);
+        assert_eq!(logged, "wsl:Ubuntu");
+        assert!(
+            !logged.contains("alice"),
+            "guest username must not reach logs: {logged}"
+        );
+        let native = CodexInstall {
+            executable: "codex".into(),
+            version: "1.2.3".into(),
+            runtime_identity: "native-windows".into(),
+            codex_home: String::new(),
+            wsl_distro: None,
+        };
+        assert_eq!(log_safe_runtime_identity(&native), "native-windows");
     }
 
     #[cfg(windows)]

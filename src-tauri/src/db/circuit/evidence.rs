@@ -297,7 +297,7 @@ pub(crate) fn record_prompt_submission(
     attempt: i32,
     agent_node_id: i64,
     prompt: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let db = crate::db::write_conn();
     record_prompt_submission_locked(&db, run_id, node_id, attempt, agent_node_id, prompt)
 }
@@ -309,7 +309,7 @@ pub(crate) fn record_prompt_submission_locked(
     attempt: i32,
     agent_node_id: i64,
     prompt: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     // The ordinal is per agent node, not per run: the fence that matters is
     // "has Buildmesh submitted to this terminal again", which is a property
     // of the PTY rather than of any one run. Allocating it under the same
@@ -331,7 +331,11 @@ pub(crate) fn record_prompt_submission_locked(
         Some(SOURCE_PROMPT_SUBMISSION),
         Some(DISPOSITION_RECORDED),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    // This history entry advances the same revision used by transition fences.
+    // Return it under the writer lock so the dispatcher's own write cannot
+    // invalidate its subsequent PromptDelivered transition.
+    revision_inner(db, run_id).map_err(|e| e.to_string())
 }
 
 fn newest_submission_seq(db: &Connection, agent_node_id: i64) -> Result<i64, String> {
@@ -1420,6 +1424,33 @@ fn acknowledge_spawn_attachment_locked(
 pub fn claim_effect(run_id: i64, intent: &EffectIntent) -> SqlResult<Option<i64>> {
     let mut db = crate::db::write_conn();
     claim_effect_locked(&mut db, run_id, intent)
+}
+
+pub(crate) fn acknowledge_prompt_delivery(run_id: i64, node_id: &str, attempt: i32) -> SqlResult<Option<i64>> {
+    let mut db = crate::db::write_conn();
+    acknowledge_prompt_delivery_locked(&mut db, run_id, node_id, attempt)
+}
+
+fn acknowledge_prompt_delivery_locked(db: &mut Connection, run_id: i64, node_id: &str, attempt: i32) -> SqlResult<Option<i64>> {
+    let tx = db.transaction()?;
+    let updated = tx.execute("UPDATE circuit_effects SET state='acknowledged'
+        WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt' AND state='possible_dispatch'
+        AND EXISTS(SELECT 1 FROM autopilot_circuit_runs r JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
+            WHERE r.id=?1 AND r.state IN ('running','paused') AND s.node_id=?2 AND s.attempt=?3 AND s.status='running')",
+        params![run_id, node_id, attempt])?;
+    if updated == 0 { return Ok(None); }
+    append_history(&tx, run_id, Some(node_id), Some(attempt), "effect_result", "acknowledged",
+        Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_ACKNOWLEDGED))?;
+    let revision = revision_inner(&tx, run_id)?;
+    tx.commit()?;
+    Ok(Some(revision))
+}
+
+pub(crate) fn prompt_delivery_acknowledged(run_id: i64, node_id: &str, attempt: i32) -> SqlResult<bool> {
+    let db = crate::db::read_conn();
+    db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects
+        WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt' AND state='acknowledged')",
+        params![run_id, node_id, attempt], |row| row.get(0))
 }
 
 pub(crate) fn record_effect_target(
@@ -3037,6 +3068,42 @@ mod tests {
         assert!(history_inner(&db,1).unwrap().last().unwrap().detail.contains("Prompt delivered to retained agent"));
         db.execute_batch("UPDATE autopilot_circuit_run_steps SET attempt=4").unwrap();
         assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",4,10,None,Some(10)).unwrap(),None,"missing dispatch claim");
+    }
+
+    #[test]
+    fn prompt_acknowledgement_survives_restart_and_fences_cancelled_or_retried_steps() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'feedback',1,'running');
+            INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','possible_dispatch');").unwrap();
+        assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 2).unwrap(), None);
+        db.execute_batch("CREATE TRIGGER reject_prompt_ack BEFORE INSERT ON circuit_run_history
+            WHEN NEW.kind='effect_result' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        assert!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).is_err());
+        assert_eq!(db.query_row("SELECT state FROM circuit_effects", [], |r| r.get::<_, String>(0)).unwrap(), "possible_dispatch");
+        db.execute_batch("DROP TRIGGER reject_prompt_ack").unwrap();
+        for state in ["cancelled", "failed", "completed"] {
+            db.execute("UPDATE autopilot_circuit_runs SET state=?1", [state]).unwrap();
+            assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(), None);
+        }
+        db.execute("UPDATE autopilot_circuit_runs SET state='paused'", []).unwrap();
+        let revision = acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap().unwrap();
+        assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(), None);
+        append_history(&db, 1, Some("feedback"), Some(1), "native_hook", "{}", None, None).unwrap();
+        assert!(revision_inner(&db, 1).unwrap() > revision, "later receipts may invalidate the projection commit");
+        drop(db);
+        let mut db = Connection::open(file.path()).unwrap();
+        assert_eq!(db.query_row("SELECT state FROM circuit_effects", [], |r| r.get::<_, String>(0)).unwrap(), "acknowledged");
+        assert_eq!(db.query_row("SELECT status FROM autopilot_circuit_run_steps", [], |r| r.get::<_, String>(0)).unwrap(), "running",
+            "delivery receipt survives independently of step projection");
+        db.execute("UPDATE autopilot_circuit_runs SET state='running'", []).unwrap();
+        assert!(claim_effect_locked(&mut db, 1, &EffectIntent {
+            node_id: "feedback".into(), attempt: 1, kind: EffectKind::Prompt,
+        }).unwrap().is_none(), "recovery cannot dispatch the acknowledged prompt again");
     }
 
     #[test]

@@ -139,14 +139,14 @@ pub(crate) fn cap_tool_calls(tool_calls: &mut Vec<ToolCall>) {
 /// append any text (re-truncating the combined result) and add its tool calls
 /// (re-capping the combined list so a turn split across many lines still honours
 /// [`MAX_TURN_TOOL_CALLS`]).
-pub(crate) fn merge_into(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>) {
+pub(crate) fn merge_into_with_text_limit(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>, max_text: usize) {
     if !more_text.trim().is_empty() {
         let combined = if turn.text.is_empty() {
             more_text.to_string()
         } else {
             format!("{}\n{}", turn.text, more_text)
         };
-        turn.text = truncate(&combined, MAX_TURN_TEXT);
+        turn.text = truncate(&combined, max_text);
     }
     turn.tool_calls.append(&mut more_tools);
     cap_tool_calls(&mut turn.tool_calls);

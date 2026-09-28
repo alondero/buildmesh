@@ -263,13 +263,18 @@ pub(super) fn deliver_circuit_initial_prompt(
     node_id: i64,
     prompt: &str,
     delivery: crate::agent::launch::InitialPromptDelivery,
+    expected_input: Option<&str>,
 ) {
     use crate::agent::launch::InitialPromptDelivery;
 
     let result = match delivery {
         InitialPromptDelivery::Prefill => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
-            crate::autopilot::pipeline::write_prompt_to_pty(node_id, prompt, app)
+            crate::autopilot::pipeline::write_prompt_to_pty_guarded(
+                &crate::agent::process::PROCESS_REGISTRY, node_id, prompt, app, expected_input,
+            ).and_then(|submitted| {
+                submitted.then_some(()).ok_or_else(|| "Input ownership changed before initial prompt submission completed".into())
+            })
         }
         InitialPromptDelivery::Fresh => Ok(()),
     };
@@ -307,6 +312,32 @@ async fn run_accepts_effects_async(run_id: i64) -> bool {
 async fn abort_circuit_spawn_async(run_id: i64, node_id: i64) {
     let _ =
         tauri::async_runtime::spawn_blocking(move || abort_circuit_spawn(run_id, node_id)).await;
+}
+
+async fn wait_for_initial_prompt(run_id: i64, node_id: i64) -> Result<Option<String>, String> {
+    let provider = tauri::async_runtime::spawn_blocking(move || {
+        db::get_agent_node_by_id(node_id)
+            .map(|node| crate::preferences::resolve_harness_provider(&node.provider))
+    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+    let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(node_id)
+        .ok_or("Initial prompt deferred because the terminal input is already owned")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        if !run_accepts_effects_async(run_id).await { return Ok(None); }
+        if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+            return Err("Agent exited before accepting its initial prompt".into());
+        }
+        if crate::agent::process::PROCESS_REGISTRY.input_stamp(node_id).as_ref() != Some(&input) {
+            return Err("Terminal input changed during startup; initial prompt was not sent".into());
+        }
+        if provider.adapter().ready_for_initial_prompt(&crate::autopilot::evaluator::cleaned_tail(node_id)) {
+            return Ok(Some(input));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("Harness startup did not become ready for the initial prompt; inspect the terminal".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Inputs the background spawn task needs. Bundled to keep
@@ -371,12 +402,33 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
+        let expected_input = if delivery == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn {
+            match wait_for_initial_prompt(run_id, node_id).await {
+                Ok(Some(input)) => Some(input),
+                Ok(None) => {
+                    abort_circuit_spawn_async(run_id, node_id).await;
+                    return;
+                }
+                Err(error) => {
+                    tracing::warn!("circuits: initial prompt for agent {node_id} was not sent: {error}");
+                    let attention_app = app_for_spawn.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        crate::commands::attention::mark_attention(node_id, &attention_app);
+                    }).await;
+                    return;
+                }
+            }
+        } else { None };
         schedule_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
         if !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
-        deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            if run_accepts_effects(run_id).unwrap_or(false) {
+                deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery, expected_input.as_deref());
+            }
+        }).await;
     });
 }
 

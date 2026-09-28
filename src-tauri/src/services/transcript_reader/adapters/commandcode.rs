@@ -21,7 +21,7 @@ use crate::env;
 use crate::models::EnvType;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
-    cap_tool_calls, merge_into, push_bounded, truncate, Parsed, Turn, MAX_TURN_TEXT,
+    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, Parsed, Turn,
 };
 // Command Code's wire shape reuses Claude Code's content
 // primitives (same `tool_use` blocks, same `local-command-caveat`
@@ -46,8 +46,8 @@ impl TranscriptAdapter for CommandCodeAdapter {
         path.exists().then_some(path)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed {
-        parse_commandcode_turns(lines, keep)
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+        parse_commandcode_turns_with_text_limit(lines, keep, max_text)
     }
 
     fn line_has_assistant_text(&self, line: &str) -> bool {
@@ -172,9 +172,18 @@ fn contains_tool_result(content: &serde_json::Value) -> bool {
 /// buffer, assistant digest, malformed-shape signal, and assistant-id
 /// coalescing all follow the shared transcript-reader contract used by
 /// Claude Code/Cursor.
+#[cfg(test)]
 pub(crate) fn parse_commandcode_turns(
     lines: impl Iterator<Item = String>,
     keep: usize,
+) -> Parsed {
+    parse_commandcode_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
+}
+
+pub(crate) fn parse_commandcode_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
 ) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
@@ -232,7 +241,7 @@ pub(crate) fn parse_commandcode_turns(
                 &mut turns,
                 Turn {
                     role: "user".to_string(),
-                    text: truncate(&text, MAX_TURN_TEXT),
+                    text: truncate(&text, max_text),
                     tool_calls: Vec::new(),
                 },
                 keep,
@@ -255,7 +264,7 @@ pub(crate) fn parse_commandcode_turns(
         if let (Some(id), Some(open)) = (&id, &open_assistant_id) {
             if id == open {
                 if let Some(last) = turns.back_mut() {
-                    merge_into(last, &text, tool_calls);
+                    merge_into_with_text_limit(last, &text, tool_calls, max_text);
                     if !last.text.trim().is_empty() {
                         last_assistant_message = Some(last.text.clone());
                     }
@@ -268,7 +277,7 @@ pub(crate) fn parse_commandcode_turns(
         cap_tool_calls(&mut tool_calls);
         let turn = Turn {
             role: "assistant".to_string(),
-            text: truncate(&text, MAX_TURN_TEXT),
+            text: truncate(&text, max_text),
             tool_calls,
         };
         if !turn.text.trim().is_empty() {

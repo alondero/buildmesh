@@ -63,7 +63,9 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// object-safe — the catalog dispatches `&'static dyn TranscriptAdapter`.
     /// The Box allocation is per-parse-call; the parsers themselves are
     /// streaming.
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize) -> Parsed;
+    /// `max_text` caps display previews; circuit reports retain full text
+    /// from their bounded input window so a trailing verdict is not lost.
+    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed;
 
     /// Cheap per-line check: does this JSONL line carry assistant text?
     /// Used by the digest reader to find the latest assistant message in a

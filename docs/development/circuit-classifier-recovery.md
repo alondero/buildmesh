@@ -24,6 +24,13 @@ must retain evaluator ownership throughout finish, review, and feedback gates.
 
 ## Related boundaries
 
+- Circuit interpretation reads full assistant text from the bounded transcript
+  window, not the 4,000-byte display preview. Parser text limits are explicit;
+  display endpoints retain their existing cap. Long-report revisions retain
+  the legacy preview revision as a prefix and append the full-text hash, so
+  old saved pre-input boundaries still reject the same report after upgrade.
+  See the [September completion audit](circuit-run-audit-2026-09.md).
+
 - A classifier's consumed report belongs to that step and attempt. A global
   per-agent evaluation clock cannot identify which gate consumed a turn.
 - A transcript can recover a report produced before output capture resumed.
