@@ -33,9 +33,30 @@ evidence that admission capacity itself was broken.
   receipt history, cancellation, wrong attempts, and refusal to dispatch twice.
 - File-backed and OpenCode-store report tests retain long reports, keep display
   previews bounded, and distinguish equal-length changes after byte 4,000.
-- The Codex adapter checks loading, loaded, missing-input, and newer-loading
-  output sequences. Original stable runs are evidence of the defects, not a
-  live end-to-end validation of the changed binary.
+- The Codex adapter checks real Codex 0.158 startup frames: a bare
+  `>_ OpenAI Codex (v0.158.0)` / `loading` boot line (not ready), the painted
+  composer (ready), and a resumed composer placeholder (ready). Original stable
+  runs are evidence of the defects, not a live end-to-end validation of the
+  changed binary.
+
+## Follow-up: the Codex readiness gate never fired
+
+Reviewing run 261 (reviewer node 4618, circuit 6 "Review agent 3534") on
+2026-09-29 showed the corrected Codex readiness gate could not fire at all.
+Codex 0.158 paints its composer (`› Ask Codex to do anything`) in the TUI's
+first frame, but it never renders the `model: <name> /model to change` banner
+the gate keyed on: the model appears only as a bare `loading` boot line and,
+once resolved, a `GPT-6-Luna default · <dir>` status footer. The gate therefore
+spun for its full 300 s and dropped the review prompt, leaving the reviewer
+step Unverified ("Waiting for the harness session identity") with a live but
+idle Agent Node. Runs 255 (node 4603) and 261 (node 4618) both stalled this way,
+while the pre-gate run 252 (node 4588) completed.
+
+The gate now waits for the composer the paste actually lands in. The paste
+render check (`[Pasted Content N chars]`) and the Enter retry ladder remain the
+submission guarantee, so a paste that a half-booted TUI swallows still surfaces
+the node instead of stalling silently. Frames captured from a live Codex 0.158
+PTY pin the predicate.
 
 ## Recovery limits
 

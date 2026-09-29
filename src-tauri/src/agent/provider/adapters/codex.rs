@@ -1465,13 +1465,23 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn ready_for_initial_prompt(&self, tail: &str) -> bool {
-        // Codex paints an input box while its model is still loading. Pasting
-        // then can lose Enter even though the boot redraw looks like an ACK.
-        // Use the most recent header, never an older ready banner in scrollback.
-        let Some((_, header)) = tail.rsplit_once("model:") else { return false; };
-        let Some((model, _)) = header.split_once("/model to change") else { return false; };
-        !model.trim().is_empty() && !model.trim().eq_ignore_ascii_case("loading")
-            && header.contains('›')
+        // Codex paints its composer (the `›` chevron plus a one-line
+        // placeholder) in the TUI's first frame, and that painted input box is
+        // the only startup evidence that stdin is being read — the state a
+        // pasted prompt needs. Its earlier readiness banner
+        // (`model: <name> /model to change`) is gone: Codex 0.158 renders the
+        // model only as a bare `loading` line on boot and moves the resolved
+        // model into the bottom status footer, so keying on that banner (or on
+        // "not loading") never matched and the initial prompt was dropped after
+        // the 300s wait. Launch still passes `--dangerously-bypass-hook-trust`,
+        // so no review dialog can hold the composer back.
+        const COMPOSER_PLACEHOLDERS: [&str; 2] = [
+            "Ask Codex to do anything",
+            "Ask a follow-up question",
+        ];
+        COMPOSER_PLACEHOLDERS
+            .iter()
+            .any(|placeholder| tail.contains(placeholder))
     }
 
     fn available_on(&self) -> &'static [Platform] {
@@ -1811,14 +1821,24 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_waits_for_codex_loaded_model_and_input_box() {
-        let loading = "model: loading /model to change\n› Ask Codex to do anything";
-        let ready = "model: GPT-6-Luna xhigh /model to change\npermissions: YOLO mode\n› Ask Codex to do anything";
+    fn initial_prompt_waits_for_the_codex_composer() {
+        // Real frames captured from a live Codex 0.158 PTY. The model is only
+        // ever a bare `loading` line on boot and a `GPT-6-Luna default · <dir>`
+        // status footer once resolved — neither the old `model: <name>
+        // /model to change` banner nor a non-"loading" model header is ever
+        // rendered, so the previous gate never fired (run 261, node 4618).
+        let boot = ">_ OpenAI Codex (v0.158.0)\nloading\n\
+                    › Ask Codex to do anything\n? for shortcuts";
+        let loaded = ">_ OpenAI Codex (v0.158.0)\nloading\n\
+                      › Ask Codex to do anything\n? for shortcuts\nF:\\src\\nestlin\n\
+                      GPT-6-Luna default · F:\\src\\nestlin\nxhigh · F:\\src\\nestlin";
+        let resumed = "› Ask a follow-up question";
+        let pre_composer = ">_ OpenAI Codex (v0.158.0)\nloading";
         assert!(!CODEX.ready_for_initial_prompt(""));
-        assert!(!CODEX.ready_for_initial_prompt(loading));
-        assert!(!CODEX.ready_for_initial_prompt("model: GPT-6-Luna xhigh /model to change"));
-        assert!(CODEX.ready_for_initial_prompt(&format!("{loading}\n{ready}")));
-        assert!(!CODEX.ready_for_initial_prompt(&format!("{ready}\n{loading}")));
+        assert!(!CODEX.ready_for_initial_prompt(pre_composer));
+        assert!(CODEX.ready_for_initial_prompt(boot));
+        assert!(CODEX.ready_for_initial_prompt(loaded));
+        assert!(CODEX.ready_for_initial_prompt(resumed));
     }
 
     #[test]
