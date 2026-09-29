@@ -219,7 +219,7 @@ pub(crate) fn launch_autopilot_node(
     // harnesses start fresh and receive the prompt over the live PTY.
     let prefill = plan
         .intent
-        .initial_prompt_resolved()
+        .initial_prompt()
         .map(|p| p.into_string())
         .unwrap_or_default();
     let prompt_delivery =
@@ -323,6 +323,7 @@ mod tests {
                 repo: "r".into(),
                 number: 1,
                 title: "t".into(),
+                template: None,
             }),
             run: AutopilotRunIdentity::Issue { issue_number: 1 },
             worktree_policy: AutopilotWorktreePolicy::ForceWorktreeBranch,
@@ -367,6 +368,7 @@ mod tests {
                 repo: "r".into(),
                 number: 42,
                 title: "t".into(),
+                template: None,
             }),
             run: AutopilotRunIdentity::Issue { issue_number: 42 },
             worktree_policy: AutopilotWorktreePolicy::ForceWorktreeBranch,
@@ -480,6 +482,7 @@ mod tests {
                 repo: "buildmesh".into(),
                 number: 1178,
                 title: "Deepen the launch seam".into(),
+                template: None,
             }),
             run: AutopilotRunIdentity::Issue { issue_number: 1178 },
             worktree_policy: AutopilotWorktreePolicy::ForceWorktreeBranch,

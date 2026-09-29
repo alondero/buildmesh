@@ -289,10 +289,12 @@ the app-wide value when both exist.
 
 **Probe spawn prompts** (Settings → General) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
-Each template supports placeholders — `{{number}}`, `{{title}}`, `{{url}}`,
-`{{owner}}`, `{{repo}}`, plus `{{title_suffix}}` for issues and `{{policy}}`
-(the shared review policy) for PRs. Leave a template empty, or use **Reset
-to default**, to restore the built-in wording.
+Both templates offer `{{number}}`, `{{url}}`, `{{owner}}`, and `{{repo}}`.
+The Issues template additionally offers `{{title}}` and `{{title_suffix}}`
+(the latter renders " — title", or nothing when the title is blank),
+while the PR template additionally offers `{{policy}}` (the shared review
+policy). Leave a template empty, or use **Reset to default**, to restore
+the built-in wording.
 
 The **Sandbox agent processes** option is per Mesh and is off by default. It is
 an OS process boundary, not a VM or a promise that the agent cannot send data

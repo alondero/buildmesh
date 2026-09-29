@@ -241,7 +241,7 @@ pub(crate) async fn spawn_with_intent(
     // forwards the same string the user already saw on the draft
     // response (byte-identical).
     let prefill = intent
-        .initial_prompt_resolved()
+        .initial_prompt()
         .map(|prompt| prompt.into_string())
         .filter(|prefill| {
             if adapter.supports_prefill() {

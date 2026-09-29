@@ -124,7 +124,12 @@ export function ProbeSpawnPromptsSection({
     async (kind: ProbePromptKind) => {
       const current = drafts[kind];
       if (!current || !current.dirty) return;
-      const saved = current.draft;
+      // Normalise at the commit boundary: the backend trims before
+      // storing (blank collapses to "no override"), so the draft must be
+      // trimmed too — otherwise a padded draft would compare dirty
+      // against its own trimmed stored value forever.
+      const raw = current.draft;
+      const saved = raw.trim();
       const ok = await onSave(kind, saved);
       // Functional update: the textarea stays editable while the save is
       // in flight, so only settle a draft the user hasn't touched since.
@@ -133,11 +138,12 @@ export function ProbeSpawnPromptsSection({
         const cur = prev[kind];
         if (!cur) return prev;
         const next: Partial<Record<ProbePromptKind, PromptDraft>> = { ...prev };
-        if (cur.draft !== saved) {
+        if (cur.draft !== raw) {
           // Typed during the save: keep the newer text. On success only
-          // the baseline moves to what the backend stored; on failure
+          // the baseline moves to what the backend stored (compared
+          // trimmed, so padding-only differences settle); on failure
           // everything stays so no keystroke is lost either way.
-          if (ok) next[kind] = { ...cur, committed: saved, dirty: cur.draft !== saved };
+          if (ok) next[kind] = { ...cur, committed: saved, dirty: cur.draft.trim() !== saved };
           return next;
         }
         next[kind] = ok

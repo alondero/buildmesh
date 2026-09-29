@@ -301,6 +301,7 @@ pub async fn spawn_issue_agent(
         repo,
         number: issue_number,
         title: issue_title.clone(),
+        template: crate::preferences::issue_spawn_prompt(),
     });
     let initial_name = crate::session_naming::issue_node_name(issue_number, &issue_title);
 
@@ -536,6 +537,7 @@ pub fn create_issue_node(
         repo,
         number: issue_number,
         title: issue_title.clone(),
+        template: crate::preferences::issue_spawn_prompt(),
     });
     // Issue #1180 — `initial_prompt()` is the single source of truth for
     // the GitHub-issue prefill; the same intent is then passed to
@@ -543,8 +545,11 @@ pub fn create_issue_node(
     // byte-identical string. `Issue(...)` always has a prompt, so
     // `unwrap_or_default()` is unreachable in practice but kept as a
     // defensive fallback matching the wire-shape contract.
+    // The custom template (if any) was resolved once above and travels
+    // inside the intent, so this render and the background launch below
+    // cannot diverge.
     let prefill = intent
-        .initial_prompt_resolved()
+        .initial_prompt()
         .map(|p| p.into_string())
         .unwrap_or_default();
     // Issue #111: seed the node with a `gh{N}-{slug}` name (mirrors
@@ -929,9 +934,13 @@ pub(crate) fn create_pr_node_impl_configured(
         owner,
         repo,
         number: pr_number,
+        template: crate::preferences::pr_spawn_prompt(),
     });
+    // The custom template (if any) was resolved once above and travels
+    // inside the intent, so this render and the background launch below
+    // cannot diverge.
     let prefill = intent
-        .initial_prompt_resolved()
+        .initial_prompt()
         .map(|p| p.into_string())
         .unwrap_or_default();
 
@@ -1334,7 +1343,7 @@ mod tests {
         // here would mean the agent gets a different PR URL on the
         // desktop draft vs the background launch.
         let expected_prefill = intent
-            .initial_prompt_resolved()
+            .initial_prompt()
             .map(|p| p.into_string())
             .expect("PullRequest intent always has an initial prompt");
         assert_eq!(

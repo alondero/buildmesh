@@ -110,14 +110,15 @@ pub struct ProbeSpawnPromptDefaults {
     pub pr_template: String,
 }
 
-/// Read the built-in probe-spawn prompt templates. Pure read - no mesh
-/// context needed, so the App Settings modal calls it without one.
+/// Read the built-in probe-spawn prompt templates. Pure, infallible read
+/// (built from code constants, no disk or mesh context), so the App
+/// Settings modal calls it without either.
 #[command]
-pub fn get_probe_spawn_prompt_defaults() -> Result<ProbeSpawnPromptDefaults, String> {
-    Ok(ProbeSpawnPromptDefaults {
+pub fn get_probe_spawn_prompt_defaults() -> ProbeSpawnPromptDefaults {
+    ProbeSpawnPromptDefaults {
         issue_template: crate::agent::spawn::DEFAULT_ISSUE_SPAWN_TEMPLATE.to_string(),
         pr_template: crate::agent::spawn::DEFAULT_PR_SPAWN_TEMPLATE.to_string(),
-    })
+    }
 }
 
 /// Set the custom template for the initial prompt handed to agents

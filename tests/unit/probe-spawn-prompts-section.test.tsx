@@ -128,6 +128,18 @@ describe('ProbeSpawnPromptsSection', () => {
     await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(false));
   });
 
+  it('trims padding at the commit boundary so the banner clears', async () => {
+    const onSave = vi.fn(async (_kind: 'issue' | 'pr', _value: string) => true);
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: '  padded {{number}}  ' } });
+    fireEvent.blur(input);
+    // The backend stores the trimmed value, so the draft commits trimmed.
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('issue', 'padded {{number}}'));
+    await waitFor(() => expect(inputValue('probe-prompt-input-issue')).toBe('padded {{number}}'));
+    await waitFor(() => expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull());
+  });
+
   it('keeps keystrokes typed while a save is in flight', async () => {
     let resolveSave!: (ok: boolean) => void;
     const onSave = vi.fn(

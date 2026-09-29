@@ -1046,15 +1046,13 @@ export const getProbeSpawnPromptDefaults = () =>
   _invoke<ProbeSpawnPromptDefaults>('get_probe_spawn_prompt_defaults');
 
 /** Custom template for the initial prompt of agents spawned from the
- *  Probe's GitHub Issues tab. Pass 
-ull (or blank, which the backend
+ *  Probe's GitHub Issues tab. Pass `null` (or blank, which the backend
  *  collapses) to clear the override and restore the built-in wording.*/
 export const setAppIssueSpawnPrompt = (prompt: string | null) =>
   _invoke('set_app_issue_spawn_prompt', { prompt });
 
 /** Custom template for the initial prompt of agents spawned from the
- *  Probe's Pull Requests tab. Pass 
-ull (or blank) to clear and
+ *  Probe's Pull Requests tab. Pass `null` (or blank) to clear and
  *  restore the built-in wording.*/
 export const setAppPrSpawnPrompt = (prompt: string | null) =>
   _invoke('set_app_pr_spawn_prompt', { prompt });
