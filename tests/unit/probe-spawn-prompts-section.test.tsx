@@ -79,20 +79,24 @@ describe('ProbeSpawnPromptsSection', () => {
 
   it('saves the draft on blur and commits the Custom badge on success', async () => {
     const onSave = vi.fn(async (_kind: 'issue' | 'pr', _value: string) => true);
-    renderSection({ onSave });
+    const { onDirtyChange } = renderSection({ onSave });
     const input = screen.getByTestId('probe-prompt-input-pr');
     fireEvent.change(input, { target: { value: 'Look at {{url}}' } });
     expect(screen.queryByTestId('probe-prompt-dirty-pr')).not.toBeNull();
+    // The edit marks the modal dirty so the discard banner can intercept.
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(true));
     fireEvent.blur(input);
     await waitFor(() => expect(onSave).toHaveBeenCalledWith('pr', 'Look at {{url}}'));
     await waitFor(() =>
       expect(screen.getByTestId('probe-prompt-badge-pr').textContent).toBe('Custom'),
     );
+    // The committed save clears the modal dirty signal again.
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(false));
   });
 
   it('rolls the draft back to the committed value when the save fails', async () => {
     const onSave = vi.fn(async (_kind: 'issue' | 'pr', _value: string) => false);
-    renderSection({
+    const { onDirtyChange } = renderSection({
       stored: { issue: 'Kept #{{number}}', pr: null },
       onSave,
     });
@@ -101,19 +105,48 @@ describe('ProbeSpawnPromptsSection', () => {
     fireEvent.blur(input);
     await waitFor(() => expect(onSave).toHaveBeenCalled());
     await waitFor(() => expect(inputValue('probe-prompt-input-issue')).toBe('Kept #{{number}}'));
+    // Rollback restores the committed value, so the dirty signal clears.
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(false));
   });
 
   it('clears the override through onReset', async () => {
     const onReset = vi.fn(async (_kind: 'issue' | 'pr') => true);
-    renderSection({
+    const { onDirtyChange } = renderSection({
       stored: { issue: 'Custom #{{number}}', pr: null },
       onReset,
     });
+    // Touch the draft first so the reset observably clears a dirty card.
+    fireEvent.change(screen.getByTestId('probe-prompt-input-issue'), {
+      target: { value: 'Edited #{{number}}' },
+    });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(true));
     fireEvent.click(screen.getByTestId('probe-prompt-reset-issue'));
     await waitFor(() => expect(onReset).toHaveBeenCalledWith('issue'));
     await waitFor(() =>
       expect(screen.getByTestId('probe-prompt-badge-issue').textContent).toBe('Using default'),
     );
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(false));
+  });
+
+  it('keeps keystrokes typed while a save is in flight', async () => {
+    let resolveSave!: (ok: boolean) => void;
+    const onSave = vi.fn(
+      (_kind: 'issue' | 'pr', _value: string) =>
+        new Promise<boolean>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'first' } });
+    fireEvent.blur(input);
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith('issue', 'first'));
+    // Type again before the save resolves: the settle must not clobber it.
+    fireEvent.change(input, { target: { value: 'second' } });
+    resolveSave(true);
+    await waitFor(() => expect(inputValue('probe-prompt-input-issue')).toBe('second'));
+    // The newer edit is still unsaved against the stored baseline.
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).not.toBeNull();
   });
 
   it('disables both inputs until the built-in defaults resolve', () => {

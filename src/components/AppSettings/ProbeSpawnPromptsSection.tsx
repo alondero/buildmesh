@@ -124,18 +124,27 @@ export function ProbeSpawnPromptsSection({
     async (kind: ProbePromptKind) => {
       const current = drafts[kind];
       if (!current || !current.dirty) return;
-      const ok = await onSave(kind, current.draft);
-      if (ok) {
-        setDrafts((prev) => ({
-          ...prev,
-          [kind]: { ...current, committed: current.draft, dirty: false },
-        }));
-      } else {
-        setDrafts((prev) => ({
-          ...prev,
-          [kind]: { ...current, draft: current.committed, dirty: false },
-        }));
-      }
+      const saved = current.draft;
+      const ok = await onSave(kind, saved);
+      // Functional update: the textarea stays editable while the save is
+      // in flight, so only settle a draft the user hasn't touched since.
+      // Newer keystrokes keep their text; only their baseline moves.
+      setDrafts((prev) => {
+        const cur = prev[kind];
+        if (!cur) return prev;
+        const next: Partial<Record<ProbePromptKind, PromptDraft>> = { ...prev };
+        if (cur.draft !== saved) {
+          // Typed during the save: keep the newer text. On success only
+          // the baseline moves to what the backend stored; on failure
+          // everything stays so no keystroke is lost either way.
+          if (ok) next[kind] = { ...cur, committed: saved, dirty: cur.draft !== saved };
+          return next;
+        }
+        next[kind] = ok
+          ? { committed: saved, draft: saved, dirty: false }
+          : { ...cur, draft: cur.committed, dirty: false };
+        return next;
+      });
     },
     [drafts, onSave],
   );
@@ -144,13 +153,18 @@ export function ProbeSpawnPromptsSection({
     async (kind: ProbePromptKind) => {
       const current = drafts[kind];
       if (!current) return;
+      const cleared = current.draft;
       const ok = await onReset(kind);
-      if (ok) {
-        setDrafts((prev) => ({
-          ...prev,
-          [kind]: { committed: '', draft: '', dirty: false },
-        }));
-      }
+      if (!ok) return;
+      // Same in-flight guard as `commit`: a draft typed after pressing
+      // Reset is newer than the clear and must survive it.
+      setDrafts((prev) => {
+        const cur = prev[kind];
+        if (!cur || cur.draft !== cleared) return prev;
+        const next: Partial<Record<ProbePromptKind, PromptDraft>> = { ...prev };
+        next[kind] = { committed: '', draft: '', dirty: false };
+        return next;
+      });
     },
     [drafts, onReset],
   );

@@ -327,6 +327,38 @@ pub const DEFAULT_ISSUE_SPAWN_TEMPLATE: &str =
 /// `default_pr_template_matches_legacy_prefill` below).
 pub const DEFAULT_PR_SPAWN_TEMPLATE: &str = "Review PR #{{number}}\n{{policy}}\n{{url}}";
 
+/// Substitute `{{name}}` placeholders in one left-to-right pass.
+/// Each placeholder is resolved against `vars` exactly once and the
+/// substituted value is emitted verbatim - never re-scanned - so a value
+/// that itself contains placeholder-shaped text (e.g. an issue titled
+/// `Fix {{url}} parsing`) cannot trigger secondary expansion. Unknown
+/// names and unterminated `{{` sequences pass through untouched, so a
+/// typo stays visible in the prompt instead of silently vanishing.
+fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let name = &after[..end];
+                match vars.iter().find(|(key, _)| *key == name) {
+                    Some((_, value)) => out.push_str(value),
+                    None => out.push_str(&rest[start..start + 2 + end + 2]),
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Render an Issues-probe spawn template. Placeholders:
 /// `{{number}}`, `{{title}}` (trimmed, may be empty), `{{title_suffix}}`
 /// (`" - <title>"` with an em dash, or empty when the title is blank, so
@@ -347,13 +379,18 @@ pub(crate) fn render_issue_spawn_prompt(
         format!(" \u{2014} {title}")
     };
     let url = format!("https://github.com/{owner}/{repo}/issues/{number}");
-    template
-        .replace("{{number}}", &number.to_string())
-        .replace("{{title_suffix}}", &title_suffix)
-        .replace("{{title}}", title)
-        .replace("{{url}}", &url)
-        .replace("{{owner}}", owner)
-        .replace("{{repo}}", repo)
+    let number = number.to_string();
+    render_template(
+        template,
+        &[
+            ("number", number.as_str()),
+            ("title_suffix", title_suffix.as_str()),
+            ("title", title),
+            ("url", url.as_str()),
+            ("owner", owner),
+            ("repo", repo),
+        ],
+    )
 }
 
 /// Render a PR-probe spawn template. Placeholders: `{{number}}`,
@@ -367,12 +404,17 @@ pub(crate) fn render_pr_spawn_prompt(
     number: i64,
 ) -> String {
     let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
-    template
-        .replace("{{number}}", &number.to_string())
-        .replace("{{policy}}", crate::review_contract::REVIEW_POLICY)
-        .replace("{{url}}", &url)
-        .replace("{{owner}}", owner)
-        .replace("{{repo}}", repo)
+    let number = number.to_string();
+    render_template(
+        template,
+        &[
+            ("number", number.as_str()),
+            ("policy", crate::review_contract::REVIEW_POLICY),
+            ("url", url.as_str()),
+            ("owner", owner),
+            ("repo", repo),
+        ],
+    )
 }
 
 impl SpawnIntent {
@@ -720,6 +762,41 @@ https://github.com/alondero/buildmesh/issues/7"
             "t",
         );
         assert_eq!(out, "#1 {{bogus}}");
+    }
+
+    /// A substituted value is emitted verbatim, never re-scanned: an
+    /// issue titled `Fix {{url}} parsing` must reach the prompt with its
+    /// braces intact instead of being expanded to the issue URL by the
+    /// later `{{url}}` pass. Regression for the cascading-`.replace()`
+    /// secondary expansion.
+    #[test]
+    fn substituted_values_are_never_rescanned() {
+        let out = render_issue_spawn_prompt(
+            DEFAULT_ISSUE_SPAWN_TEMPLATE,
+            "alondero",
+            "buildmesh",
+            7,
+            "Fix {{url}} and {{number}} parsing",
+        );
+        assert_eq!(
+            out,
+            "Please work on GitHub issue #7 \u{2014} Fix {{url}} and {{number}} parsing\n\
+             https://github.com/alondero/buildmesh/issues/7"
+        );
+    }
+
+    /// Unterminated `{{` sequences pass through untouched rather than
+    /// swallowing the rest of the template.
+    #[test]
+    fn unterminated_placeholder_passes_through() {
+        let out = render_issue_spawn_prompt(
+            "#{{number}} {{oops",
+            "alondero",
+            "buildmesh",
+            1,
+            "t",
+        );
+        assert_eq!(out, "#1 {{oops");
     }
 
     /// Test-only prefs setup: point this test thread's preference cache at
