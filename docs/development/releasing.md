@@ -131,6 +131,13 @@ scheduled run has no pull request to turn red. Its concurrency group is keyed
 by event name, so a push to `main` cannot cancel a weekly run and suppress the
 alert it would have raised.
 
+`WSL Codex profile contract (opt-in)` is `workflow_dispatch`-only. It runs a
+`#[ignore]`d test that needs a real WSL guest, and a hosted Windows image ships
+the feature without a distribution, so the job imports one itself. Without
+that step the job is red for want of a guest rather than for a contract
+breakage, and — because `Alert on failure` watches this job too — it opens a
+`ci-alert` issue describing a failure the weekly package smoke did not have.
+
 GitHub disables scheduled workflows after 60 days without repository activity.
 If the weekly packaging stops appearing, check the workflow is still `active`
 (re-enable it under **Actions → Build → … → Enable workflow**) rather than
