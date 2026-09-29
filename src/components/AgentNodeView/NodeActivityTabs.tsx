@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { UtilityMode } from '../../stores/nodeActivityStore';
 import { getStatusConfig } from '../../lib/status';
+import { activityMemberRole } from '../../lib/nodeActivities';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
@@ -32,8 +33,11 @@ export function NodeActivityTabs({ rootId, members, utilities, selectedId, showi
   const activationRef = useRef<'pointer' | 'keyboard'>('keyboard');
   const menuId = `activity-list-${rootId}`;
   const tabs = members.flatMap(member => {
-    const role = grouped ? member.name : member.id === rootId ? (members.length > 1 ? 'Implementation' : 'Agent')
-      : members.length > 2 ? `Review ${members.filter(n => n.id !== rootId).findIndex(n => n.id === member.id) + 1}` : 'Review';
+    // `activityMemberRole` is the shared vocabulary with the sidebar's cluster
+    // rail, so a member is never "Review 1" in one surface and something else
+    // in the other. `reviewerIndex` is the ordinal among non-root members.
+    const role = activityMemberRole(member, rootId, members.length,
+      members.filter(n => n.id !== rootId).findIndex(n => n.id === member.id), grouped);
     const agent = { key: `agent-${member.id}`, member, utility: false, label: role };
     const mode = utilities.get(member.id);
     return mode ? [agent, { key: `utility-${member.id}`, member, utility: true,

@@ -36,6 +36,7 @@ import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { SpawnOption } from '../../src/lib/groups';
+import type { NodeActivityCluster } from '../../src/lib/nodeActivities';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 // Per-file mocks (do not affect the sibling sidebar-*.test.tsx files).
@@ -199,9 +200,14 @@ function meshProps(overrides: Partial<MeshItemProps> = {}): MeshItemProps {
     isSpawning: false,
     providerList: PROVIDERS,
     ...stableMeshCallbacks(),
-    meshNodes: [],
+    nodeClusters: [],
     ...overrides,
   };
+}
+
+/** Two unpaired nodes as the clusters `Sidebar` hands down. */
+function clustersOf(...nodes: AgentNode[]): NodeActivityCluster[] {
+  return nodes.map(node => ({ root: node, members: [node], paired: false, handGrouped: false }));
 }
 
 /** Settle the async provider-list snapshot, then baseline both counters. */
@@ -223,19 +229,19 @@ describe('Sidebar render isolation (issue #1748)', () => {
   it('MeshItem skips a regroup that keeps identical node references', async () => {
     const n1 = A1();
     const n2 = A2();
-    const props = meshProps({ meshNodes: [n1, n2] });
+    const props = meshProps({ nodeClusters: clustersOf(n1, n2) });
     const { rerender } = renderMeshItem(props);
     expect(screen.getByText('alpha-two')).toBeTruthy();
     await act(async () => {});
     clearCounts();
 
-    // Fresh array, identical element references — what Sidebar's grouped map
-    // produces on every unrelated store update. Callbacks stay stable
-    // (Sidebar hoists them to `useCallback`).
+    // Fresh arrays, identical element references — what Sidebar's grouped map
+    // plus `clusterActivityNodes` produce on every unrelated store update.
+    // Callbacks stay stable (Sidebar hoists them to `useCallback`).
     rerender(
       <DndContext>
         <SortableContext items={SORTABLE_ITEMS}>
-          <MeshItem {...props} meshNodes={[n1, n2]} />
+          <MeshItem {...props} nodeClusters={clustersOf(n1, n2)} />
         </SortableContext>
       </DndContext>,
     );
@@ -246,16 +252,20 @@ describe('Sidebar render isolation (issue #1748)', () => {
   it('MeshItem still re-renders when one of its nodes changes', async () => {
     const n1 = A1();
     const n2 = A2();
-    const props = meshProps({ meshNodes: [n1, n2] });
+    const props = meshProps({ nodeClusters: clustersOf(n1, n2) });
     const { rerender } = renderMeshItem(props);
     await act(async () => {});
     clearCounts();
 
-    // Control: a genuinely changed member (new reference) must render.
+    // Control: a genuinely changed member (new reference) must render. Inside a
+    // paired cluster, not a lone one — the cluster comparator walks members, so
+    // this also proves a member change surfaces through the pairing wrapper.
+    const changed = { ...n2, status: 'awaiting_input' as const };
     rerender(
       <DndContext>
         <SortableContext items={SORTABLE_ITEMS}>
-          <MeshItem {...props} meshNodes={[n1, { ...n2, status: 'awaiting_input' }]} />
+          <MeshItem {...props} nodeClusters={[{ root: n1, members: [n1, changed],
+            paired: true, handGrouped: false }]} />
         </SortableContext>
       </DndContext>,
     );

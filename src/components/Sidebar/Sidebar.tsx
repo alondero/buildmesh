@@ -18,15 +18,16 @@ import {
   sortableKeyboardCoordinates,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
+import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivities';
 import { MeshItem } from './MeshItem';
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
 
-// Issue #1748 — shared empty list so meshes without visible nodes keep a
-// stable `meshNodes` reference instead of allocating a fresh `[]` per mesh
-// on every render (which would defeat the memoized `MeshItem` rows below).
-const EMPTY_NODES: AgentNode[] = [];
+// Shared empty cluster list so meshes without visible nodes keep a stable
+// `nodeClusters` reference instead of allocating a fresh `[]` per mesh on every
+// render (which would defeat the memoized `MeshItem` rows below — issue #1748).
+const EMPTY_CLUSTERS: NodeActivityCluster[] = [];
 
 // Issue #1748 — module-level keyboard-sensor options so `useSensors` below
 // returns a referentially stable array. An inline options literal would hand
@@ -35,7 +36,7 @@ const EMPTY_NODES: AgentNode[] = [];
 const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates };
 
 // Issue #1939 — stable empty identity for the sortable-id retention below,
-// so the band-empty initial state shares one reference like `EMPTY_NODES`.
+// so the band-empty initial state shares one reference like `EMPTY_CLUSTERS`.
 const EMPTY_SORTABLE_IDS: number[] = [];
 
 export function Sidebar() {
@@ -73,13 +74,32 @@ export function Sidebar() {
   // interpretation participates — so it holds for both the close path
   // (row deleted) and the archive path (status set, excluded above).
   const agentNodes = useAllAgentNodes();
-  const { nodesByMesh, activeMeshes, inactiveMeshes } = useMemo(() => {
+  const circuitOwnerships = useAgentNodeStore(state => state.circuitOwnerships);
+  const manualGroups = useNodeActivityStore(state => state.groups);
+  // Paired agents share one Node Activity card in the grid. The same pass that
+  // partitions nodes per mesh now also resolves each mesh's nodes into those
+  // cards, so the sidebar can cluster them under a connector rail instead of
+  // listing unpaired-looking rows. `clusterActivityNodes` reads the identical
+  // `activityRootId` resolver the grid uses, so the two surfaces cannot drift
+  // apart about who is paired with whom.
+  //
+  // Kept inside the existing single memo (issue #1748) rather than a per-mesh
+  // filter during render: that would cost O(M x N) work and hand every
+  // `MeshItem` a fresh array per render, defeating the memoized rows.
+  //
+  // The band split itself is unchanged and still tests emptiness on the flat
+  // per-mesh list — a paired cluster is as "active" as its members were.
+  const { clustersByMesh, activeMeshes, inactiveMeshes } = useMemo(() => {
     const grouped = new Map<number, AgentNode[]>();
     for (const node of agentNodes) {
       if (node.status === 'archived') continue;
       const list = grouped.get(node.mesh_id);
       if (list) list.push(node);
       else grouped.set(node.mesh_id, [node]);
+    }
+    const clusters = new Map<number, NodeActivityCluster[]>();
+    for (const [meshId, nodes] of grouped) {
+      clusters.set(meshId, clusterActivityNodes(nodes, circuitOwnerships, manualGroups));
     }
     const active: Mesh[] = [];
     const inactive: Mesh[] = [];
@@ -88,8 +108,8 @@ export function Sidebar() {
       if (group && group.length > 0) active.push(mesh);
       else inactive.push(mesh);
     }
-    return { nodesByMesh: grouped, activeMeshes: active, inactiveMeshes: inactive };
-  }, [meshes, agentNodes]);
+    return { clustersByMesh: clusters, activeMeshes: active, inactiveMeshes: inactive };
+  }, [meshes, agentNodes, circuitOwnerships, manualGroups]);
   // Issue #1748 — `Sidebar` no longer subscribes to `activeNodeId`: each
   // `NodeItem` owns its own active bit, so activating a node re-renders
   // only the rows whose bit flips instead of the whole sidebar.
@@ -288,7 +308,7 @@ export function Sidebar() {
       onOpenWorktreesProbe={handleOpenWorktreesProbe}
       onOpenIssuesProbe={handleOpenIssuesProbe}
       onOpenSessionHistoryProbe={handleOpenSessionHistoryProbe}
-      meshNodes={nodesByMesh.get(mesh.id) ?? EMPTY_NODES}
+      nodeClusters={clustersByMesh.get(mesh.id) ?? EMPTY_CLUSTERS}
       onActivateNode={activateNode}
       selectMesh={selectMesh}
       onDeleteNode={handleDeleteNode}

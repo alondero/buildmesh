@@ -75,6 +75,68 @@ function orderActivityCards(cards: AgentNode[], groups: readonly (readonly numbe
   return [...cards].sort((a, b) => a.mesh_id - b.mesh_id || a.position - b.position || a.id - b.id);
 }
 
+/** A card as the sidebar draws it: the representative node plus every agent
+ *  that shares its Node Activity, in the same order the grid's tab strip uses
+ *  (representative first, then reviewers). A lone agent is a cluster of one, so
+ *  callers never branch on "is this grouped?" to decide whether to render. */
+export interface NodeActivityCluster {
+  root: AgentNode;
+  members: AgentNode[];
+  /** True when more than one agent shares the card. */
+  paired: boolean;
+  /** True when the members were grouped by hand (persisted in
+   *  `buildmesh.node-groups`) rather than linked only by circuit lineage. Mirrors
+   *  the `grouped` flag `NodeCard` derives for its tab strip. */
+  handGrouped: boolean;
+}
+
+/** Group a mesh's ordered agent nodes into the Node Activity cards the grid
+ *  would render for them, so the sidebar's cluster rail and the grid's tab
+ *  strip can never disagree about membership.
+ *
+ *  `nodes` must be one mesh's non-archived nodes in canonical order. The
+ *  circuit walk in `circuitRootId` stops at a mesh boundary, so restricting the
+ *  index to this mesh yields the same roots the full-store walk produces;
+ *  groups spanning meshes resolve to one cluster per mesh (see
+ *  `resolveNodeGroups`).
+ *
+ *  Clusters are anchored at the REPRESENTATIVE's `(position, id)` — not the
+ *  first member's — so a hidden member with a lower position can never drag
+ *  the cluster to a different slot than the grid gives its card. Mirrors
+ *  `orderActivityCards`. */
+export function clusterActivityNodes(
+  nodes: readonly AgentNode[],
+  ownerships: NodeOwnerships,
+  manualGroups: NodeGroups = [],
+): NodeActivityCluster[] {
+  if (nodes.length === 0) return [];
+  const index = indexAgentNodes(nodes);
+  const resolved = resolveNodeGroups(manualGroups, index, ownerships);
+  const membersByRoot = activityMemberIds(nodes, ownerships, manualGroups);
+  const clusters: NodeActivityCluster[] = [];
+  for (const [rootId, memberIds] of Object.entries(membersByRoot)) {
+    const root = index[Number(rootId)];
+    // A root missing from the index means every member was filtered out
+    // between the two passes; skip rather than render a cluster with no header.
+    if (!root) continue;
+    // `activityMemberIds` yields store order, which for circuit lineage is
+    // plain `(position)` — a reviewer can sort BEFORE its implementer. Callers
+    // document `members` as "representative first, then reviewers" and index
+    // off `members[0]`, so normalise here instead of inheriting an order that
+    // can invert. Non-root members keep a deterministic `(position, id)`
+    // sequence so a cluster's sub-rows never reshuffle between renders.
+    const rest = memberIds
+      .filter(id => id !== root.id)
+      .map(id => index[id])
+      .filter((node): node is AgentNode => !!node)
+      .sort((a, b) => a.position - b.position || a.id - b.id);
+    const members = [root, ...rest];
+    clusters.push({ root, members, paired: members.length > 1,
+      handGrouped: resolved.some(ids => ids.includes(root.id)) });
+  }
+  return clusters.sort((a, b) => a.root.position - b.root.position || a.root.id - b.root.id);
+}
+
 /** Build card membership once per view update, rather than scanning every
  * node from every card selector. */
 export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeOwnerships, manualGroups: NodeGroups = []): Record<number, number[]> {
@@ -97,6 +159,29 @@ export function activityMemberIds(nodes: readonly AgentNode[], ownerships: NodeO
     });
   }
   return groups;
+}
+
+/** The role label a surface shows for one member of a Node Activity. Single
+ *  source for the grid's tab strip and the sidebar's cluster rail, so a member
+ *  is never "Review 1" in one surface and "Reviewer" in the other.
+ *
+ *  A hand-grouped card has no implementer/reviewer semantics — the user just
+ *  put two unrelated agents on one card — so those keep their own names. Circuit
+ *  lineage does have the semantics, hence Implementation/Review.
+ *
+ *  `reviewerIndex` is the member's 0-based ordinal among the non-root members,
+ *  in the cluster's display order. Only consumed once the card has more than
+ *  two members, where "Review" alone would be ambiguous. */
+export function activityMemberRole(
+  member: AgentNode,
+  rootId: number,
+  memberCount: number,
+  reviewerIndex: number,
+  handGrouped: boolean,
+): string {
+  if (handGrouped) return member.name;
+  if (member.id === rootId) return memberCount > 1 ? 'Implementation' : 'Agent';
+  return memberCount > 2 ? `Review ${reviewerIndex + 1}` : 'Review';
 }
 
 /** Candidates for a node's "Handover to node" picker, split so the agents that
