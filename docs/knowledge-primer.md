@@ -472,8 +472,10 @@ delivered `Stop` from the installed 0.4.12 TUI. mcode 0.4.0+ reads
 `hooks/hooks.json` document is ignored, and a directory with no manifest is
 skipped silently), runs `command` + `args` with no shell interpretation, and
 `env_clear()`s `BUILDMESH_*` — so the callback URL bakes the port and node id.
-Only `TurnCompleted` is advertised: the launch auto-approves
-(`"permission_mode": "auto"`), so no permission signal is claimed. Its
+Only `TurnCompleted` is advertised: the launch pins Full Access
+(`permissionMode: bypassPermissions`, a surgical one-line edit to
+`<dataDir>/config.yaml` — the TUI has no permission flag), so no permission
+signal is claimed. Its
 `messages.jsonl` transcript is wired too (`TranscriptFormat::Mcode`); see
 `docs/learning/mcode-harness-capabilities.md`. Muse's interactive TUI exposes
 no hook/event flag, so its turn signal comes from `services::muse_watcher`,

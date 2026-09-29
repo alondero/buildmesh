@@ -128,7 +128,7 @@ Non-boolean detail for the nine harnesses with a native attention hook
 | OpenCode | Permission ask | Turn completed, question, permission | — | — |
 | Kimi Code | Permission ask | Turn completed, input required, question, permission | 0.27.0 | — |
 | Grok Code | Permission ask | Turn completed, input required, question, permission | 1.0.5 | Global hook directory |
-| MiniMax Code | Skip permissions | Turn completed | 0.4.12 | — |
+| MiniMax Code | Skip permissions (pinned: `permissionMode: bypassPermissions`) | Turn completed | 0.4.12 | — |
 | Cline | Skip permissions | Turn completed | 3.0.62 | — |
 
 Launch mode is a real boundary, not a label. Under **Skip permissions** the

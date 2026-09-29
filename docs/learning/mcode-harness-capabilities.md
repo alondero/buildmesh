@@ -176,11 +176,53 @@ Buildmesh restart onto a different port (see Known limits).
 `min_version: "0.4.12"`, `trust: None`.
 
 `PermissionRequest` is provisioned but **not advertised**. Buildmesh launches
-mcode with its default permission policy, which auto-approves — every observed
-hook envelope reports `"permission_mode": "auto"`, and even a shell command ran
-without a prompt — so a permission signal is impossible by construction under
-our launch, exactly like Cursor under `--force`. If a future launch enables ask
-mode, the handler is already provisioned.
+mcode in **Full Access** (`permissionMode: bypassPermissions`, pinned into
+`<dataDir>/config.yaml` on every spawn), which auto-approves — every observed
+hook envelope reports `"permission_mode": "auto"` under the old default launch,
+and even a shell command ran without a prompt — so a permission signal is
+impossible by construction under our launch, exactly like Cursor under
+`--force`. The contract used to hold only by coincidence of mcode's compiled
+default; it is now true by construction, and MiniMax's own recommendation for
+unattended runs. If a future launch enables ask mode, the handler is already
+provisioned.
+
+### Pinning Full Access
+
+The TUI accepts no permission flag — `mcode --help` offers `--model`, `--lane`,
+`--session`, `--continue` and `--tui-mode` and nothing else. `--permission`
+exists on `mcode exec` only, which Buildmesh never spawns, and mcode reads no
+environment variable for the mode (enumerated across the installed 0.5.5
+bundle). The sole lever is the top-level `permissionMode` key in
+`<dataDir>/config.yaml`, validated against
+`default | bypassPermissions | auto | off` with a compiled default of `auto`.
+
+`pin_permission_mode` therefore edits that key on every spawn, next to the
+attention plugin provisioning, resolving the data dir through the same
+WSL-aware path so a guest mcode is configured from the guest's config.
+
+- **The edit is surgical, one line at a time.** A parse-and-re-serialise
+  round-trip would strip every comment and reflow the file; this rewrites only
+  the `permissionMode` line (preserving its trailing comment and column
+  alignment) or appends one. No YAML dependency is needed.
+- **It never fabricates a config.** mcode bootstraps its own config on first
+  run and *skips* that bootstrap when the file already exists, so creating a
+  file containing only this key would suppress the bootstrap and leave the CLI
+  with no `provider` block at all. An absent config is left absent; the next
+  spawn (or the user's first run) finds the file and pins it.
+- **Only the top-level key.** An indented `permissionMode` belongs to another
+  mapping and is left alone, as are `permissionModes:`-style longer siblings
+  and commented-out keys.
+- **It is idempotent.** A config already at Full Access is not rewritten, so a
+  steady-state spawn does no I/O.
+- **Failures never fail a launch.** An unreadable config is logged and skipped;
+  the node starts in mcode's own default mode rather than aborting.
+
+**Known limit — machine-global.** Unlike the node-scoped `node_id` baked into
+the plugin manifest, this key is shared with the user's own standalone `mcode`
+sessions, which will also run in Full Access until the key is edited back. It
+is the only scope the CLI allows: scoping per node would need
+`MINIMAX_DATA_DIR` redirected at a Buildmesh-owned dir, which relocates auth
+and sessions too and breaks the transcript reader.
 
 `MissingAttentionHook` no longer fires for mcode, so
 `autopilot::compatibility::evaluate` allows it (with worktrees on); pinned by

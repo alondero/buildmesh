@@ -102,6 +102,28 @@ Check these in order:
 Never work around a certificate warning by disabling browser security on a
 shared network. Remote access exposes terminal content and input.
 
+## My standalone `mcode` sessions now run in Full Access
+
+Expected. When you launch a MiniMax Code node, Buildmesh sets
+`permissionMode: bypassPermissions` in mcode's own settings file
+(`<dataDir>/config.yaml` — `%USERPROFILE%\.minimax` on Windows,
+`$HOME/.minimax` on macOS/Linux). The interactive `mcode` TUI has no
+permission flag, so that file is the only lever the CLI offers.
+
+That file is shared with `mcode` sessions you start yourself, so those run
+in Full Access too until you edit the key back:
+
+```yaml
+# %USERPROFILE%\.minimax\config.yaml  (or ~/.minimax/config.yaml)
+permissionMode: bypassPermissions   # full | ask | auto | off
+```
+
+Buildmesh re-applies the setting on the next node launch, so editing it
+only helps for sessions started outside Buildmesh. Buildmesh rewrites only
+that one line — your comments, ordering, API key and model catalog are left
+as they were. See
+[the MiniMax Code capability notes](learning/mcode-harness-capabilities.md).
+
 ## Muse fails to start with `os error 267` or `Not a directory`
 
 `AGENTS.md` and `.agents/skills` are Git symlinks. On Windows checkouts
