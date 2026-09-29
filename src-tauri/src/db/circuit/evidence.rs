@@ -5,6 +5,32 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
 
+pub(crate) fn restore_projection_conflicts(
+    run_id: i64, node_id: &str, attempt: i32,
+    evidence: &mut crate::autopilot::circuit::observation::WorkEvidence,
+) -> SqlResult<bool> {
+    restore_projection_conflicts_inner(&crate::db::read_conn(), run_id, node_id, attempt, evidence)
+}
+
+fn restore_projection_conflicts_inner(
+    db: &Connection, run_id: i64, node_id: &str, attempt: i32,
+    evidence: &mut crate::autopilot::circuit::observation::WorkEvidence,
+) -> SqlResult<bool> {
+    let mut query = db.prepare("SELECT detail FROM circuit_run_history
+        WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='observation'
+          AND source='agent_status_projection' AND disposition='conflicting'")?;
+    let rows = query.query_map(params![run_id, node_id, attempt], |row| row.get::<_, String>(0))?;
+    let mut changed = false;
+    for row in rows {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&row?) else { continue; };
+        if let Some(observation) = value.get("observation").cloned()
+            .and_then(|value| serde_json::from_value(value).ok()) {
+            changed |= evidence.restore_projection_conflict(&observation);
+        }
+    }
+    Ok(changed)
+}
+
 // ---------------------------------------------------------------------------
 // Circuit Run History provenance vocabulary (issue #1909 / #1847).
 //
@@ -1581,6 +1607,35 @@ fn claim_effect_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_projection_conflicts_restore_only_from_matching_history_and_attempt() {
+        use crate::autopilot::circuit::observation::*;
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');").unwrap();
+        let identity = ObservationIdentity { run_id: 1, step_id: "gate".into(), attempt: 1,
+            agent_node_id: 9, session_incarnation: Some("old".into()), session_id: None,
+            turn_id: None, report_revision: None };
+        let current = ObservationIdentity { session_incarnation: Some("new".into()), ..identity.clone() };
+        let observation = CircuitObservation { identity: current.clone(), source: "agent_status_projection".into(),
+            source_id: Some("current".into()), observed_at_ms: 100, authoritative: false, fact: ObservedWorkFact::Working };
+        let mut evidence = WorkEvidence { identity: Some(identity), conflicted: true, ..Default::default() };
+        evidence.observe(&current, &observation);
+        evidence.conflicts.retain(|conflict| conflict.kind == EvidenceConflictKind::Identity);
+        evidence.conflicts[0].status_projection = None;
+        let detail = serde_json::json!({"observation":observation,"disposition":"conflicting"}).to_string();
+        append_history(&db, 1, Some("gate"), Some(2), "observation", &detail,
+            Some("agent_status_projection"), Some("conflicting")).unwrap();
+        assert!(!restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
+        append_history(&db, 1, Some("gate"), Some(1), "observation", &detail,
+            Some("agent_status_projection"), Some("conflicting")).unwrap();
+        assert!(restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
+        assert_eq!(evidence.conflicts[0].status_projection, Some(true));
+        assert!(!restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap(), "idempotent");
+    }
 
     /// The persisted native receipt carrying this exact `source_id`.
     ///
