@@ -5,6 +5,7 @@ import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
 import './launchConfigurations.css';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { EffortGuidance } from '../shared/EffortGuidance';
 import { Spinner } from '../shared/Spinner';
 
 // Verify, save, and delete share the fieldset lock; status text is derived separately.
@@ -97,9 +98,12 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         </select>}
       </label>}
       {customModel && <label>Custom model<input required value={draft.model ?? ''} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label>}
-      {efforts.length > 0 && <label>Effort<select value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
-        <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-      </select></label>}
+      {efforts.length > 0 && <>
+        <label>Effort<select aria-describedby={efforts.includes('max') ? 'launch-config-effort-help' : undefined} value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
+          <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+        </select></label>
+        <EffortGuidance id="launch-config-effort-help" efforts={efforts} selectedEffort={draft.effort} />
+      </>}
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
       {target?.verification_required && onVerify && <>
         <p>Verify the selected endpoint and model before launching. Verification sends a small tool-call request using your provider credential.</p>

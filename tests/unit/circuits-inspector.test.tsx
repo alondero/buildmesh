@@ -228,7 +228,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     // #1219: timeout always renders (orchestrator policy), independent
     // of harness selection.
     expect(screen.getByTestId('inspector-timeout')).toBeTruthy();
-    // Closed vocabulary: low / medium / high
+    // Claude Code's five-level closed vocabulary.
     const effortSelect = screen.getByTestId(
       'inspector-effort-select',
     ) as HTMLSelectElement;

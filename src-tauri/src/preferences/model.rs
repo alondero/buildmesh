@@ -329,7 +329,7 @@ pub struct HarnessConfigValue {
     /// supplied it (issue #1148 acceptance criteria 5).
     #[serde(default)]
     pub model: Option<String>,
-    /// Optional effort / reasoning value for this harness (e.g. `"high"` for
+    /// Optional effort / reasoning value for this harness (e.g. `"max"` for
     /// Claude Code, `"xhigh"` for Codex). `None` means "no effort override at
     /// this layer". The resolver drops the value when the selected harness
     /// advertises `EffortControlKind::None` OR when the value isn't in the

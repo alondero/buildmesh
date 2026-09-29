@@ -123,7 +123,9 @@ export const HARNESS_CATALOG = {
         "allowed": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max"
         ],
         "kind": "closed"
       },
