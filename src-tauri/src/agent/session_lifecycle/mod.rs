@@ -93,13 +93,11 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use ts_rs::TS;
 
-/// Terminal statuses a recovery/error write must never resurrect (issue
-/// #654). Used by `on_resume_failed` and `on_error` — both write `Error`
-/// (or skip the write) when the node is already in this set, so the
-/// `status_changed_at` stamp doesn't double-bump and an `Archived` row
-/// can never be brought back to life by a racing orchestrator.
+/// Terminal statuses a recovery/error/input write must never resurrect
+/// (issue #654). Includes `Lost`, which is terminal for hook delivery even
+/// though it was added after the original error/archive fence.
 pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] =
-    &[SessionStatus::Error, SessionStatus::Archived];
+    &[SessionStatus::Error, SessionStatus::Archived, SessionStatus::Lost];
 
 /// Hook callbacks describe a live process and must not revive a stopped node.
 const FORBIDDEN_HOOK_TRANSITION: &[SessionStatus] = &[
@@ -460,7 +458,7 @@ pub struct AppSessionLifecycleSink<'a> {
 
 impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
-        db::agent_node::commit_agent_lifecycle_inner(&db::write_conn(), payload, forbidden).map_err(|error| error.to_string())
+        commit_lifecycle_with_logging(payload, forbidden)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -544,11 +542,24 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
 #[cfg(test)]
 pub mod testing;
 
+fn commit_lifecycle_with_logging(
+    payload: &mut LifecycleChangedPayload,
+    forbidden: &[SessionStatus],
+) -> Result<bool, String> {
+    match db::agent_node::commit_agent_lifecycle_inner(&db::write_conn(), payload, forbidden) {
+        Ok(committed) => Ok(committed),
+        Err(error) => {
+            tracing::error!(node_id = payload.session_id, %error, "failed to persist agent lifecycle observation");
+            Err(error.to_string())
+        }
+    }
+}
+
 pub struct DbOnlySink;
 
 impl SessionLifecycleSink for DbOnlySink {
     fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
-        db::agent_node::commit_agent_lifecycle_inner(&db::write_conn(), payload, forbidden).map_err(|error| error.to_string())
+        commit_lifecycle_with_logging(payload, forbidden)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -729,7 +740,11 @@ pub fn on_attention_with_signal(
     let detail = HookSignalDetail { semantic_turn: semantic_turn.clone(), ..detail.clone() };
     let kind = attention_kind(semantic_turn.as_ref(), &detail);
     let mut payload = LifecycleChangedPayload::new(node_id, kind, SessionStatus::AwaitingInput, &detail, "agent is waiting for input");
-    let forbidden = if detail.provider.is_some() || detail.provider_event.is_some() { FORBIDDEN_HOOK_TRANSITION } else { &[] };
+    let forbidden = if detail.provider.is_some() || detail.provider_event.is_some() {
+        FORBIDDEN_HOOK_TRANSITION
+    } else {
+        FORBIDDEN_TERMINAL
+    };
     if !sink.commit_lifecycle(&mut payload, forbidden)? { return Ok(false); }
     sink.emit_attention_needed_with_payload(node_id, semantic_turn);
     sink.emit_lifecycle_changed(payload);
@@ -962,10 +977,9 @@ fn recover_circuit_turn(
         crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, recovery.input, recovery.observed_at_ms, || {
             if recovery.cancelled.load(std::sync::atomic::Ordering::Acquire) { return Ok(false); }
             let transaction = conn.transaction().map_err(|error| error.to_string())?;
-            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, payload.status)
+            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, payload)
                 .map_err(|error| error.to_string())?;
             if committed {
-                db::agent_node::commit_agent_lifecycle_inner(&transaction, payload, &[]).map_err(|error| error.to_string())?;
                 transaction.commit().map_err(|error| error.to_string())?;
             }
             Ok(committed)

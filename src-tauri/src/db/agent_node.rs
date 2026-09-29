@@ -248,19 +248,18 @@ pub fn list_coordinator_node_rows_inner(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT {qualified}, m.name, a.status_changed_at \
+        "SELECT {qualified}, m.name \
          FROM agent_nodes a JOIN meshes m ON a.mesh_id = m.id \
          WHERE a.status != 'archived' \
          ORDER BY a.mesh_id ASC, a.position ASC, a.created_at ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..20, which match the
-        // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 21 and 22 (v16 added head_repo_owner +
-        // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
-        // added is_pinned at 13, v35 added signal_health at 19, v37 added
-        // worktree_path at 20 — see AGENT_NODE_COLUMNS).
+        // `AGENT_NODE_COLUMNS` occupies indices 0..23, including the
+        // lifecycle snapshot at 22 and status_changed_at at 23. The joined
+        // mesh name follows at index 24. Keep this projection derived from
+        // the shared column list so schema additions cannot duplicate or
+        // shift the coordinator-only fields.
         let node = map_agent_node_row(row)?;
         let mesh_name: String = row.get(24)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
@@ -268,7 +267,7 @@ pub fn list_coordinator_node_rows_inner(
         // stamping it (or via some other path) can be NULL. A non-Option read
         // would make rusqlite error the whole query on a single NULL row,
         // blanking the endpoint. Fall back to the node's creation time.
-        let status_changed_at: Option<String> = row.get(25)?;
+        let status_changed_at: Option<String> = row.get(23)?;
         let status_changed_at = status_changed_at
             .map(|s| parse_db_timestamp(&s))
             .unwrap_or(node.created_at);
@@ -735,16 +734,7 @@ pub(crate) fn commit_agent_lifecycle_inner(
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
     forbidden: &[SessionStatus],
 ) -> SqlResult<bool> {
-    use rusqlite::OptionalExtension;
-    if payload.provider_event.is_none() && payload.signal_health == crate::agent::session_lifecycle::SignalHealth::Ok {
-        use crate::agent::session_lifecycle::SignalHealth;
-        let health = conn.query_row("SELECT signal_health FROM agent_nodes WHERE id=?1", [payload.session_id],
-            |row| row.get::<_, Option<String>>(0)).optional()?;
-        let Some(health) = health else { return Ok(false); };
-        payload.signal_health = health.as_deref().and_then(SignalHealth::from_db_str).unwrap_or(SignalHealth::Unverified);
-    }
-    let snapshot = serde_json::to_string(payload)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
     let forbidden_json = serde_json::to_string(&forbidden.iter().map(SessionStatus::to_db_str).collect::<Vec<_>>())
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let changed = conn.execute(
@@ -756,6 +746,26 @@ pub(crate) fn commit_agent_lifecycle_inner(
             payload.signal_health.to_db_str(), payload.session_id, forbidden_json],
     )?;
     Ok(changed > 0)
+}
+
+/// Normalize local process observations with the node's current delivery
+/// health, then serialize the exact payload persisted alongside its status.
+/// `None` means the node row no longer exists.
+fn lifecycle_snapshot_inner(
+    conn: &Connection,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
+) -> SqlResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    use crate::agent::session_lifecycle::SignalHealth;
+    if payload.provider_event.is_none() && payload.signal_health == SignalHealth::Ok {
+        let health = conn.query_row("SELECT signal_health FROM agent_nodes WHERE id=?1", [payload.session_id],
+            |row| row.get::<_, Option<String>>(0)).optional()?;
+        let Some(health) = health else { return Ok(None); };
+        payload.signal_health = health.as_deref().and_then(SignalHealth::from_db_str).unwrap_or(SignalHealth::Unverified);
+    }
+    serde_json::to_string(payload)
+        .map(Some)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
 /// Conditional `update_agent_node_status`. Returns whether the row matched.
@@ -968,11 +978,15 @@ pub(crate) struct CircuitRecoveryFence {
 }
 
 pub(crate) fn recover_circuit_agent_turn_inner(
-    conn: &Connection, fence: &CircuitRecoveryFence, stamp: &str, status: SessionStatus,
+    conn: &Connection,
+    fence: &CircuitRecoveryFence,
+    stamp: &str,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
     use rusqlite::OptionalExtension;
     use crate::autopilot::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
-    if !matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
+    if payload.session_id != fence.agent_node_id { return Ok(false); }
+    if !matches!(payload.status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
     let Some((state, context)) = conn.query_row(
         "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1", [fence.run_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -990,11 +1004,14 @@ pub(crate) fn recover_circuit_agent_turn_inner(
         || step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) != Some(fence.agent_node_id) {
         return Ok(false);
     }
-    if status == SessionStatus::Ready { return complete_agent_turn_if_current_inner(conn, fence.agent_node_id, stamp); }
-    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
+    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4,lifecycle_snapshot=?5,
+            signal_health=CASE WHEN ?6 THEN ?7 ELSE signal_health END
         WHERE id=?1 AND status='running'
         AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at,'')=?2",
-        params![fence.agent_node_id, stamp, status.to_db_str(), chrono::Utc::now().to_rfc3339()])? == 1)
+        params![fence.agent_node_id, stamp, payload.status.to_db_str(), payload.timestamp, snapshot,
+            payload.provider_event.is_some() || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok,
+            payload.signal_health.to_db_str()])? == 1)
 }
 
 /// Parse an `agent_nodes.status_changed_at` value to epoch milliseconds.
