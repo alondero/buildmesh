@@ -417,8 +417,8 @@ pub fn start_circuit_worker(app: AppHandle) {
 /// Now does, and issue #1356 keeps that dry-run seam independent of
 /// the enabled flag. Interval/GitHub runs on a disabled circuit stay
 /// parked until the user opts in.
-fn should_drive_circuit_run(enabled: bool, trigger_identity: &str) -> bool {
-    enabled || trigger_identity.starts_with("manual:")
+fn should_drive_circuit_run(enabled: bool, trigger_identity: &str, review_extended: bool) -> bool {
+    enabled || trigger_identity.starts_with("manual:") || review_extended
 }
 
 /// Issue #1467 admission gate. Returns `true` if a fresh `pending` run
@@ -603,7 +603,9 @@ fn run_pass(app: &AppHandle) {
         // gate on the enabled flag (manual Trigger Now stays a dry-run seam
         // on drafts).
         if active.run.state == "pending"
-            && !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity)
+            && !should_drive_circuit_run(active.circuit_enabled, &active.run.trigger_identity,
+                CircuitContext::from_json(&active.run.context_json).ok()
+                    .is_some_and(|context| context.get("review.extended") == Some("1")))
         {
             record_queue_wait(active.run.id, db::circuit::evidence::QueueWaitReason::CircuitDisabled);
             continue;
@@ -4797,17 +4799,18 @@ mod tests {
 
     #[test]
     fn disabled_circuits_still_drive_manual_trigger_now_runs() {
-        assert!(should_drive_circuit_run(true, "interval:1"));
-        assert!(should_drive_circuit_run(true, "manual:1"));
+        assert!(should_drive_circuit_run(true, "interval:1", false));
+        assert!(should_drive_circuit_run(true, "manual:1", false));
         assert!(
-            should_drive_circuit_run(false, "manual:1724000000000"),
+            should_drive_circuit_run(false, "manual:1724000000000", false),
             "Trigger Now is the dry-run seam on a draft circuit"
         );
         assert!(
-            !should_drive_circuit_run(false, "interval:1"),
+            !should_drive_circuit_run(false, "interval:1", false),
             "background interval runs stay parked while disabled"
         );
-        assert!(!should_drive_circuit_run(false, "issue:42:buildmesh:run"));
+        assert!(!should_drive_circuit_run(false, "issue:42:buildmesh:run", false));
+        assert!(should_drive_circuit_run(false, "issue:42:buildmesh:run", true));
     }
 
     // ------------------------------------------------------------------

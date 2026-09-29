@@ -8,7 +8,7 @@ impl CircuitGraph {
     /// Changed control flow or additional actions need deliberate manual recovery.
     pub fn has_local_review_contract(&self) -> bool {
         let Some(K::RetryLimit { max_retries }) = self.node("retry").map(|node| &node.kind) else { return false; };
-        if !(1..=10).contains(max_retries) { return false; }
+        if !(1..=10000).contains(max_retries) { return false; }
         let expected = Self::agent_review(None, None, *max_retries);
         if self.nodes.len() != expected.nodes.len() || self.edges.len() != expected.edges.len() { return false; }
         for template in &expected.nodes {

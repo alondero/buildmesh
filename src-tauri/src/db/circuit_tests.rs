@@ -552,6 +552,105 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
 }
 
 #[test]
+fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
+    use super::circuit::recovery::extend_failed_review_locked;
+    use crate::autopilot::circuit::context::CircuitContext;
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "same review", "/tmp/same-review").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "work", EnvType::Windows,
+        "codex", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()), false).unwrap();
+    let before = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
+        error: Some(Some("Latest findings".into())), agent_node_id: None, attempt: 3, fresh_attempt: false,
+    }]).unwrap();
+    let prior_history: i64 = conn.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1", [run_id], |r| r.get(0)).unwrap();
+    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    let after = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+    assert_eq!(after.circuit_id, before.circuit_id);
+    assert_eq!(after.state, "pending");
+    assert_eq!(CircuitContext::from_json(&after.context_json).unwrap().get("retry.max_retries"), Some("4"));
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuits", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 0,
+        "a manually borrowed source is not an Autopilot pool agent");
+    let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
+    assert_eq!(steps.iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 4);
+    assert!(steps.iter().all(|s| s.node_id != "implementer" && s.node_id != "open_pr"));
+    let mut view = crate::autopilot::circuit::stepper::RunView {
+        run_id,
+        graph: CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+            [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap(),
+        state: crate::autopilot::circuit::stepper::RunState::Pending,
+        context: CircuitContext::from_json(&after.context_json).unwrap(),
+        steps: steps.into_iter().map(|step| crate::autopilot::circuit::stepper::StepView {
+            node_id: step.node_id,
+            status: crate::autopilot::circuit::stepper::StepStatus::from_db_str(&step.status),
+            outcome: step.outcome.as_deref().and_then(crate::autopilot::circuit::model::StepOutcome::from_db_str),
+            error: step.error_message,
+            agent_node_id: step.agent_node_id,
+            attempt: step.attempt,
+        }).collect(),
+    };
+    use crate::autopilot::circuit::stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus};
+    advance(&mut view, &CircuitEvent::Triggered);
+    let tick = advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 2 }));
+    assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running);
+    assert!(tick.effects.iter().any(|effect| matches!(effect, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+    assert_eq!(view.step("reviewer").unwrap().attempt, 4);
+    assert!(conn.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1", [run_id], |r| r.get::<_, i64>(0)).unwrap() > prior_history);
+    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    assert_eq!(CircuitContext::from_json(&get_circuit_run_inner(&conn, run_id).unwrap().unwrap().context_json).unwrap().get("retry.max_retries"), Some("4"));
+    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[CircuitStepOp {
+        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
+        error: Some(Some("More findings".into())), agent_node_id: None, attempt: 4, fresh_attempt: false,
+    }]).unwrap();
+    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    let final_context = CircuitContext::from_json(&get_circuit_run_inner(&conn, run_id).unwrap().unwrap().context_json).unwrap();
+    assert_eq!(final_context.get("retry.max_retries"), Some("5"));
+    assert_eq!(list_circuit_run_steps_inner(&conn, run_id).unwrap().iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 5);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    cancel_circuit_run_locked(&mut conn, run_id).unwrap();
+    assert!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap_err().contains("Cancelled reviews require a fresh review"));
+}
+
+#[test]
+fn extending_issue_review_replays_neither_implementation_nor_publication() {
+    use super::circuit::recovery::extend_failed_review_locked;
+    use crate::autopilot::circuit::model::{CircuitNodeKind, GithubActionKind};
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "issue extension", "/tmp/issue-extension").unwrap();
+    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "work", EnvType::Windows,
+        "codex", None, None, None, None, true, None, None, None).unwrap();
+    update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
+    let graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
+    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &graph.to_json().unwrap()).unwrap();
+    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:9",
+        r#"{"pr.number":"9","pr.url":"https://github.com/test/repo/pull/9"}"#).unwrap();
+    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[
+        CircuitStepOp { node_id: "implementer".into(), status: "completed".into(), outcome: Some(Some("completed".into())),
+            error: None, agent_node_id: Some(source.id), attempt: 1, fresh_attempt: false },
+        CircuitStepOp { node_id: "review_classifier".into(), status: "completed".into(), outcome: Some(Some("working".into())),
+            error: None, agent_node_id: None, attempt: 3, fresh_attempt: false },
+    ]).unwrap();
+    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
+    assert_eq!(run.circuit_id, circuit.id);
+    assert_eq!(run.source_agent_node_id, Some(source.id));
+    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 1,
+        "the borrowed former circuit agent still counts against the optional global pool");
+    assert!(run.context_json.contains("https://github.com/test/repo/pull/9"));
+    let snapshot = CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+        [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();
+    assert!(snapshot.node("implementer").is_none());
+    assert!(!snapshot.nodes.iter().any(|node| matches!(node.kind, CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. })));
+    assert_eq!(list_circuit_run_steps_inner(&conn, run_id).unwrap().iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 4);
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
 fn review_continuation_follows_failed_generations_and_reuses_success() {
     use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;

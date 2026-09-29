@@ -1085,7 +1085,12 @@ pub(super) fn run_graph(
     db: &Connection,
     run_id: i64,
 ) -> Result<crate::autopilot::circuit::model::CircuitGraph, String> {
-    let json: String = db
+    let json = run_graph_json(db, run_id)?;
+    crate::autopilot::circuit::model::CircuitGraph::from_json(&json)
+}
+
+pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, String> {
+    db
         .query_row(
             "SELECT COALESCE(s.graph_json,c.graph_json)
         FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id
@@ -1093,8 +1098,7 @@ pub(super) fn run_graph(
             [run_id],
             |r| r.get(0),
         )
-        .map_err(|e| e.to_string())?;
-    crate::autopilot::circuit::model::CircuitGraph::from_json(&json)
+        .map_err(|e| e.to_string())
 }
 
 /// Append one Circuit Run History event. `source` and `disposition` are the

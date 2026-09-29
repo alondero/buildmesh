@@ -217,6 +217,11 @@ export function CircuitRunCard({
           >
             {review?.label ?? runStateLabel(run.state)}
           </span>
+          {reviewCircuit && context['retry.attempt'] && context['retry.max_retries'] && (
+            <span className="text-2xs text-text-muted" data-testid={`run-review-rounds-${run.id}`}>
+              Round {context['retry.attempt']} of {context['retry.max_retries']}
+            </span>
+          )}
           {now !== undefined ? (
             <RunTimingSpans run={run} now={now} />
           ) : (
@@ -254,9 +259,9 @@ export function CircuitRunCard({
           <button type="button" disabled={busy} onClick={onContinueReview}
             data-testid={`run-continue-review-${run.id}`}
             className="px-1.5 py-1 text-2xs rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40">
-            Continue review · 1 round
+            Review again · +1 round
           </button>
-          <p className="mt-1 text-2xs text-text-muted break-words">Resumes the saved implementation agent if needed. Starts a linked follow-up; this run and its findings stay in History.</p>
+          <p className="mt-1 text-2xs text-text-muted break-words">Adds one round to this run and resumes the saved implementation agent if needed. Earlier findings remain in Run History.</p>
         </div>
       )}
       {context['recovery.from_run_id'] && <p className="px-2 pb-1.5 text-2xs text-text-secondary">Continues run #{context['recovery.from_run_id']} on the same worktree.</p>}
