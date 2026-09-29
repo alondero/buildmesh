@@ -1,4 +1,5 @@
 import type { FileDiffStatus } from './tauri';
+import type { AgentNode } from '../types/generated/AgentNode';
 
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
@@ -117,6 +118,25 @@ export const STATUS_CONFIG = {
 export function getStatusConfig(status: string | undefined | null) {
   if (!status) return STATUS_CONFIG.idle;
   return STATUS_CONFIG[status as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.idle;
+}
+
+/** One vocabulary for live events and reconnect snapshots on both clients. */
+export function getNodeStatusConfig(node: Pick<AgentNode, 'status' | 'lifecycle'>) {
+  const config = getStatusConfig(node.status);
+  const observation = node.lifecycle;
+  if (!observation || observation.status !== node.status) return { ...config, title: config.label };
+  const labels: Partial<Record<typeof observation.kind, string>> = {
+    background_running: 'Waiting for background work',
+    question_requested: 'Needs an answer',
+    permission_requested: 'Needs permission',
+  };
+  const label = labels[observation.kind] ?? config.label;
+  return { ...config, label, title: `${label}. Last observed ${observation.timestamp}${observation.provider_event ? ` (${observation.provider_event})` : ''}` };
+}
+
+export function nodeInputContext(node: Pick<AgentNode, 'status' | 'lifecycle'>): string | undefined {
+  if (node.status !== 'awaiting_input' || node.lifecycle?.status !== node.status) return undefined;
+  return node.lifecycle.semantic_turn?.description ?? node.lifecycle.message ?? undefined;
 }
 
 // ---------------------------------------------------------------------------

@@ -416,14 +416,19 @@ pub struct AgentNode {
     /// fallback introduced in #420.
     pub source_pr_pinned_sha: Option<String>,
     /// Hook/attention signal health (issue #1364 §3). Layered on top of
-    /// `status`, never a status itself: `Some(Ok)` once provisioning
-    /// succeeded or the first hook callback arrived, `Some(Degraded)` for
+    /// `status`, never a status itself: `Some(Unverified)` after installation,
+    /// `Some(Ok)` after an accepted observation, `Some(Degraded)` for
     /// an unparseable/unknown payload, `Some(Unavailable)` when the
     /// attention hook could not be installed/trusted/reached, and `None`
     /// before the first provisioning outcome or callback. Lets the UI
     /// distinguish "the harness has not produced an event yet" from "the
     /// hook is broken".
     pub signal_health: Option<crate::agent::session_lifecycle::SignalHealth>,
+    /// Latest normalized observation, valid only for the current status revision.
+    /// Survives client reconnects; absent after an unobserved process transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lifecycle: Option<crate::agent::session_lifecycle::LifecycleChangedPayload>,
     #[ts(as = "i32")]
     pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,

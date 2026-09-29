@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentNode, isAuthError, listNodes, sendNodeKeys } from "../api";
-import { getStatusConfig } from "../../lib/status";
+import { getNodeStatusConfig, nodeInputContext } from "../../lib/status";
 import { AppBar } from "../ui";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
@@ -57,7 +57,7 @@ export default function NodeOverview({
   const notice = savedReplyNotice ?? localNotice;
   const [error, setError] = useState("");
   const [missing, setMissing] = useState(false);
-  const [context, setContext] = useState(prompt);
+  const [context, setContext] = useState(prompt ?? nodeInputContext(initial));
   const updateDraft = (next: string) => {
     if (onDraftChange) onDraftChange(next, initial.id, visitId);
     else if (active.current) setLocalDraft(next);
@@ -98,8 +98,7 @@ export default function NodeOverview({
         const current = nodes.find((n) => n.id === initial.id);
         setMissing(!current);
         if (current) setNode(current);
-        if (!current || current.status !== "awaiting_input")
-          updateContext(undefined);
+        updateContext(current ? nodeInputContext(current) : undefined);
         setError("");
       } catch (e) {
         if (!active.current || !isLatest()) return;
@@ -116,9 +115,10 @@ export default function NodeOverview({
       eventVersion.current += 1;
       setNode((current) => ({
         ...current,
-        status: msg.status,
+        ...(msg.kind === 'signal_unavailable' ? {} : { status: msg.status, lifecycle: msg }),
         signal_health: msg.signal_health,
       }));
+      if (msg.kind === 'signal_unavailable') return;
       updateContext(
         msg.status === "awaiting_input"
           ? (msg.semantic_turn?.description ?? msg.message ?? undefined)
@@ -130,7 +130,7 @@ export default function NodeOverview({
       updateContext(undefined);
     }
   }, onAuthFailed);
-  const status = getStatusConfig(node.status);
+  const status = getNodeStatusConfig(node);
   // The HTTP input endpoint caps the entire encoded JSON body at 1 KiB.
   const seq = `${draft.trim()}\r`;
   const fits = new TextEncoder().encode(JSON.stringify({ seq })).length <= 1024;
@@ -186,7 +186,7 @@ export default function NodeOverview({
           <section className="agent-request">
             <h2>Agent request</h2>
             <p>
-              {context ||
+              {context || nodeInputContext(node) ||
                 "No request text received yet. Open the terminal to inspect what the agent needs."}
             </p>
           </section>
@@ -198,6 +198,11 @@ export default function NodeOverview({
           </p>
         )}
         <dl className="work-context">
+          {node.lifecycle?.status === node.status && <>
+            <dt>Last observation</dt>
+            <dd><time dateTime={node.lifecycle.timestamp}>{new Date(node.lifecycle.timestamp).toLocaleString()}</time>
+              {node.lifecycle.provider_event ? ` (${node.lifecycle.provider_event})` : ''}</dd>
+          </>}
           <dt>Agent</dt>
           <dd>{node.launch_configuration?.name ?? node.provider}</dd>
           <dt>Base reference</dt>

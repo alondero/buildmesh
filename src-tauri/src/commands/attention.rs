@@ -203,7 +203,8 @@ mod tests {
                 source_pr_pinned_sha TEXT,
                 signal_health TEXT,
                 worktree_path TEXT,
-                spawn_configuration TEXT
+                spawn_configuration TEXT,
+                lifecycle_snapshot TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

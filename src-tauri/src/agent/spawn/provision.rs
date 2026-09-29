@@ -587,6 +587,7 @@ pub(super) async fn provision_workspace(
     let provisioning_resolved = resolved.clone();
     let provisioning_runtime = launch_runtime.clone();
     let needs_attention_hook = adapter.requires_attention_hook();
+    let passive_observer = adapter.supports_passive_turn_watcher();
     let provisioning = crate::commands::run_blocking("provider_provisioning", move || {
         Ok(run_provider_provisioning(
             || adapter.ensure_workspace_trusted(&provisioning_resolved, &provisioning_runtime),
@@ -603,6 +604,7 @@ pub(super) async fn provision_workspace(
     .await;
     match provisioning {
         Ok((trust, hooks)) => {
+            let trust_ok = trust.is_ok();
             if let Err(e) = trust {
                 tracing::warn!(
                     "provision_workspace: workspace trust provisioning failed for session {}: {}",
@@ -633,10 +635,11 @@ pub(super) async fn provision_workspace(
                     Some(crate::agent::session_lifecycle::SignalHealth::Unavailable),
                 );
                 emit_signal_unavailable(&format!("attention hooks unavailable: {e}"));
-            } else if needs_attention_hook {
+            } else {
                 let _ = crate::db::update_agent_node_signal_health(
                     session_id,
-                    Some(crate::agent::session_lifecycle::SignalHealth::Ok),
+                    Some(if trust_ok && (needs_attention_hook || passive_observer) { crate::agent::session_lifecycle::SignalHealth::Unverified }
+                        else { crate::agent::session_lifecycle::SignalHealth::Unavailable }),
                 );
             }
         }

@@ -257,6 +257,29 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().semanticTurns[12]).toEqual(semanticTurn);
     });
 
+    it('never publishes an in-flight snapshot over a newer node lifecycle event', async () => {
+      const old = makeNode({ id: 7, status: 'running' });
+      const ready = makeNode({ id: 7, status: 'ready' });
+      useAgentNodeStore.setState({ nodesById: { 7: old }, nodeIds: [7] });
+      let resolveOld!: (nodes: AgentNode[]) => void;
+      let calls = 0;
+      const pending = new Promise<AgentNode[]>(resolve => { resolveOld = resolve; });
+      mockInvoke.mockImplementation((command: string) => command === 'list_agent_nodes'
+        ? (++calls === 1 ? pending : Promise.resolve([ready])) : Promise.resolve([]));
+      const fetching = useAgentNodeStore.getState().fetchAgentNodes();
+      await Promise.resolve();
+      useAgentNodeStore.getState().patchAgentNode(7, { status: 'ready' });
+      const seen: string[] = [];
+      const unsubscribe = useAgentNodeStore.subscribe(state => seen.push(state.nodesById[7].status));
+      resolveOld([old]);
+      await fetching;
+      await vi.waitFor(() => expect(calls).toBe(2));
+      unsubscribe();
+      expect(seen).not.toContain('running');
+      expect(useAgentNodeStore.getState().nodesById[7].status).toBe('ready');
+      expect(calls).toBe(2);
+    });
+
     it('does not let an older refresh overwrite a newer Circuit snapshot', async () => {
       const oldNode = makeNode({ id: 7, name: 'old' });
       const newNode = makeNode({ id: 7, name: 'new' });
@@ -480,7 +503,7 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('awaiting_input');
 
       await mockEmit('attention-cleared', { session_id: 10 });
-      expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('running');
+      expect(useAgentNodeStore.getState().nodesById[10]?.status).toBe('awaiting_input');
 
       await mockEmit('node-renamed', { node_id: 10, name: 'fix-auth-flow' });
       expect(useAgentNodeStore.getState().nodesById[10]?.name).toBe('fix-auth-flow');

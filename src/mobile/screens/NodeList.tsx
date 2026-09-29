@@ -23,7 +23,7 @@ import { groupByHarness } from "../../lib/groups";
 import { LaunchConfigurations } from "../../components/Providers/LaunchConfigurations";
 import { launchConfigurationApi } from "../api";
 import CaptureIdea from "./CaptureIdea";
-import { getStatusConfig } from "../../lib/status";
+import { getNodeStatusConfig, nodeInputContext } from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode, prompt?: string) => void;
@@ -72,18 +72,9 @@ export default function NodeList({
   const [meshActions, setMeshActions] = useState<Mesh | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
+  const refreshRevision = useRef(0);
 
-  // Triage deck (issue #1377): the last prompt / permission request per
-  // awaiting-input node, learned from `agent-lifecycle` WS events (the wire
-  // carries it as `semantic_turn.description`, with `message` as fallback).
-  // There is no HTTP surface for it — /api/nodes returns bare AgentNode rows
-  // — so on a cold app load the cards render the placeholder line until the
-  // node's next lifecycle event arrives. Cleared the moment the node leaves
-  // `awaiting_input` (or an `attention-cleared` lands) so a stale prompt
-  // never outlives its card.
-  const [lastPrompts, setLastPrompts] = useState<Map<number, string>>(
-    new Map(),
-  );
+  // Request text comes from the same lifecycle snapshot as status.
   // Per-card quick-action state (issue #1377, post-review rewrite).
   // `keyBusy` = which chip is currently in flight ("approve"/"reject" maps
   //   to the tap that opened the POST /api/nodes/{id}/input).
@@ -93,7 +84,7 @@ export default function NodeList({
   //   *other* chip stays usable for a second-tap retraction… except the
   //   agent already saw the CR/LF, so a retraction would be confusing.
   //   The disable-after-send rule covers both chips with `sent !== undefined`
-  //   so a user can't double-fire. Cleared the same way `lastPrompts` is:
+  //   so a user can't double-fire. Cleared on status reconciliation:
   //   on any node reconciliation that drops the node out of
   //   `awaiting_input` AND on a fresh `agent-lifecycle` /
   //   `attention-cleared` event.
@@ -115,17 +106,18 @@ export default function NodeList({
 
   const refresh = useCallback(
     async (isLatest: () => boolean) => {
+      const revision = ++refreshRevision.current;
       try {
         const [m, n] = await Promise.all([listMeshes(), listNodes()]);
         // `isLatest()` is the sequence-token check from `useVisibilityPolling`:
         // if a newer refresh started while this fetch was in flight, drop
         // our setState so the hung-fetch-during-mobile-suspend case doesn't
         // clobber fresh data. `mountedRef` is the unmount check.
-        if (!isLatest() || !mountedRef.current) return;
+        if (!isLatest() || !mountedRef.current || revision !== refreshRevision.current) return;
         setMeshes(m);
         setNodes(n);
       } catch (e) {
-        if (!isLatest() || !mountedRef.current) return;
+        if (!isLatest() || !mountedRef.current || revision !== refreshRevision.current) return;
         // A 401 means the token was revoked/expired — bounce to Connect
         // instead of claiming the desktop is offline.
         if (isAuthError(e)) onAuthFailed();
@@ -162,35 +154,18 @@ export default function NodeList({
         prev
           ? prev.map((n) =>
               n.id === msg.session_id
-                ? { ...n, status: msg.status, signal_health: msg.signal_health }
+                ? msg.kind === 'signal_unavailable'
+                  ? { ...n, signal_health: msg.signal_health }
+                  : { ...n, status: msg.status, signal_health: msg.signal_health, lifecycle: msg }
                 : n,
             )
           : prev,
       );
       // Triage deck (issue #1377): remember what the node is waiting on
       // while it's awaiting input, forget it the moment it isn't.
-      setLastPrompts((prev) => {
-        if (msg.status === "awaiting_input") {
-          const text = msg.semantic_turn?.description ?? msg.message;
-          if (!text) return prev;
-          const next = new Map(prev);
-          next.set(msg.session_id, text);
-          return next;
-        }
-        if (!prev.has(msg.session_id)) return prev;
-        const next = new Map(prev);
-        next.delete(msg.session_id);
-        return next;
-      });
       if (msg.status !== "awaiting_input") clearSentMarker(msg.session_id);
     }
     if (msg.type === "attention-cleared" && mountedRef.current) {
-      setLastPrompts((prev) => {
-        if (!prev.has(msg.session_id)) return prev;
-        const next = new Map(prev);
-        next.delete(msg.session_id);
-        return next;
-      });
       clearSentMarker(msg.session_id);
     }
     void refresh(() => true);
@@ -289,7 +264,7 @@ export default function NodeList({
     (n) =>
       n.status === "error" ||
       (n.status !== "awaiting_input" &&
-        (n.signal_health === "degraded" || n.signal_health === "unavailable")),
+        (n.signal_health != null && n.signal_health !== "ok")),
   );
   const runningCount = visibleNodes.filter(
     (n) => n.status === "running",
@@ -317,7 +292,7 @@ export default function NodeList({
     .sort((a, b) => a.id - b.id);
 
   // Triage-deck zombie-state reconciliation (issue #1377, post-review,
-  // round-2): the WS handler clears `lastPrompts`/`keySent` on
+  // round-2): the WS handler clears `keySent` on
   // `agent-lifecycle` transitions and `attention-cleared` events, but a
   // node can leave `awaiting_input` via plain polling too (reconnect,
   // missed event, refetch on tab return). Without this sweep, a card
@@ -348,16 +323,6 @@ export default function NodeList({
   useEffect(() => {
     setKeySent((prev) => {
       let next: Map<number, "approve" | "reject"> | null = null;
-      for (const id of prev.keys()) {
-        if (!awaitingIds.has(id)) {
-          if (next === null) next = new Map(prev);
-          next.delete(id);
-        }
-      }
-      return next ?? prev;
-    });
-    setLastPrompts((prev) => {
-      let next: Map<number, string> | null = null;
       for (const id of prev.keys()) {
         if (!awaitingIds.has(id)) {
           if (next === null) next = new Map(prev);
@@ -537,7 +502,7 @@ export default function NodeList({
                             }
                             providers={providers}
                             onClick={() =>
-                              onOpenNode(node, lastPrompts.get(node.id))
+                              onOpenNode(node, nodeInputContext(node))
                             }
                           />
                           <p>
@@ -603,7 +568,7 @@ export default function NodeList({
                         meshName={
                           meshes.find((m) => m.id === node.mesh_id)?.name
                         }
-                        prompt={lastPrompts.get(node.id)}
+                        prompt={nodeInputContext(node)}
                         providers={providers}
                         busy={keyBusy.get(node.id)}
                         sent={keySent.get(node.id)}
@@ -612,7 +577,7 @@ export default function NodeList({
                         }
                         onReject={() => void sendQuickAction(node.id, "reject")}
                         onFocus={() =>
-                          onOpenNode(node, lastPrompts.get(node.id))
+                          onOpenNode(node, nodeInputContext(node))
                         }
                       />
                     ))}
@@ -729,7 +694,7 @@ export default function NodeList({
                           node={node}
                           meshName={mesh.name}
                           onClick={() =>
-                            onOpenNode(node, lastPrompts.get(node.id))
+                            onOpenNode(node, nodeInputContext(node))
                           }
                           providers={providers}
                         />
@@ -1085,10 +1050,10 @@ export function NodeRow({
   providers?: Provider[];
   meshName?: string;
 }) {
-  // getStatusConfig (src/lib/status.ts) is total over the SessionStatus union
+  // getNodeStatusConfig (src/lib/status.ts) is total over the SessionStatus union
   // — `archived` included (#788) — and safely falls back to idle on unknown
   // or missing statuses.
-  const meta = getStatusConfig(node.status);
+  const meta = getNodeStatusConfig(node);
   const needsInput = node.status === "awaiting_input";
   // Single source of truth for the badge + label: the live `listProviders()`
   // payload (issue #328). The fallback (`'?' / '#555'` + raw id) fires when:

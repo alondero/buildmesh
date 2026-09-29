@@ -109,6 +109,7 @@ const FORBIDDEN_HOOK_TRANSITION: &[SessionStatus] = &[
     SessionStatus::Suspended,
     SessionStatus::Pending,
     SessionStatus::Completed,
+    SessionStatus::Lost,
 ];
 
 // ---------------------------------------------------------------------------
@@ -236,9 +237,9 @@ pub enum LifecycleKind {
 }
 
 /// Hook delivery health for a node (issue #1364 §3). A layered field on the
-/// node, not a status: `Ok` once provisioning succeeded or the first hook
-/// callback arrived; `Degraded` for an unparseable/unknown payload; 
-/// `Unavailable` when provisioning or delivery failed.
+/// node, not a status: `Unverified` after installation, `Ok` after an accepted
+/// observation, `Degraded` for an unparseable/unknown payload, and `Unavailable`
+/// when provisioning failed or no supported observer exists.
 ///
 /// Generated to `src/types/generated/SignalHealth.ts`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
@@ -249,6 +250,8 @@ pub enum SignalHealth {
     Ok,
     Degraded,
     Unavailable,
+    /// Configuration exists, but this process has not delivered an observation.
+    Unverified,
 }
 
 impl SignalHealth {
@@ -259,6 +262,7 @@ impl SignalHealth {
             "ok" => Some(SignalHealth::Ok),
             "degraded" => Some(SignalHealth::Degraded),
             "unavailable" => Some(SignalHealth::Unavailable),
+            "unverified" => Some(SignalHealth::Unverified),
             _ => None,
         }
     }
@@ -269,6 +273,7 @@ impl SignalHealth {
             SignalHealth::Ok => "ok",
             SignalHealth::Degraded => "degraded",
             SignalHealth::Unavailable => "unavailable",
+            SignalHealth::Unverified => "unverified",
         }
     }
 }
@@ -322,7 +327,7 @@ pub struct HookSignalDetail {
 /// `/ws/events` handler serializes the whole enum, so the shapes match).
 ///
 /// Generated to `src/types/generated/LifecycleChangedPayload.ts`.
-#[derive(Debug, Clone, serde::Serialize, TS)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export, export_to = "LifecycleChangedPayload.ts")]
 pub struct LifecycleChangedPayload {
     /// Buildmesh node id (issue #490 wire convention: `session_id`).
@@ -425,6 +430,8 @@ pub trait SessionLifecycleSink {
     ) -> Result<bool, String>;
 
     fn emit_attention_needed(&self, node_id: i64);
+    /// Persist the observation before either transport or passive consumers see it.
+    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String>;
     fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
         let _ = semantic_turn;
         self.emit_attention_needed(node_id);
@@ -452,6 +459,9 @@ pub struct AppSessionLifecycleSink<'a> {
 }
 
 impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
+    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+        db::agent_node::commit_agent_lifecycle_inner(&db::write_conn(), payload, forbidden).map_err(|error| error.to_string())
+    }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
     }
@@ -537,6 +547,9 @@ pub mod testing;
 pub struct DbOnlySink;
 
 impl SessionLifecycleSink for DbOnlySink {
+    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+        db::agent_node::commit_agent_lifecycle_inner(&db::write_conn(), payload, forbidden).map_err(|error| error.to_string())
+    }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
     }
@@ -655,14 +668,14 @@ pub fn on_pty_eof_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::Idle)?;
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    let mut payload = LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::SessionExited,
         SessionStatus::Idle,
         detail,
         "agent process exited cleanly",
-    ));
+    );
+    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
     Ok(())
 }
 
@@ -713,41 +726,21 @@ pub fn on_attention_with_signal(
     semantic_turn: Option<SemanticTurnPayload>,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    if detail.provider.is_some() || detail.provider_event.is_some() {
-        if !sink.write_status_unless_in(node_id, SessionStatus::AwaitingInput, FORBIDDEN_HOOK_TRANSITION)? {
-            return Ok(false);
-        }
-    } else {
-        sink.write_status(node_id, SessionStatus::AwaitingInput)?;
-    }
-    emit_attention(sink, node_id, semantic_turn, detail);
+    let detail = HookSignalDetail { semantic_turn: semantic_turn.clone(), ..detail.clone() };
+    let kind = attention_kind(semantic_turn.as_ref(), &detail);
+    let mut payload = LifecycleChangedPayload::new(node_id, kind, SessionStatus::AwaitingInput, &detail, "agent is waiting for input");
+    let forbidden = if detail.provider.is_some() || detail.provider_event.is_some() { FORBIDDEN_HOOK_TRANSITION } else { &[] };
+    if !sink.commit_lifecycle(&mut payload, forbidden)? { return Ok(false); }
+    sink.emit_attention_needed_with_payload(node_id, semantic_turn);
+    sink.emit_lifecycle_changed(payload);
     Ok(true)
 }
 
-fn emit_attention(sink: &dyn SessionLifecycleSink, node_id: i64,
-    semantic_turn: Option<SemanticTurnPayload>, detail: &HookSignalDetail,
-) {
-    sink.emit_attention_needed_with_payload(node_id, semantic_turn.clone());
-    let kind = detail
-        .kind
-        .unwrap_or(match semantic_turn.as_ref().map(|t| t.kind) {
-            Some(SemanticTurnKind::PermissionRequest)
-            | Some(SemanticTurnKind::CommandConfirmation) => LifecycleKind::PermissionRequested,
-            _ => LifecycleKind::InputRequired,
-        });
-    let detail = HookSignalDetail {
-        semantic_turn,
-        signal_health: detail.signal_health,
-        ..detail.clone()
-    };
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
-        node_id,
-        kind,
-        SessionStatus::AwaitingInput,
-        &detail,
-        "agent is waiting for input",
-    ));
-    tracing::info!("Node {node_id} awaiting user input (Node Turn)");
+fn attention_kind(semantic_turn: Option<&SemanticTurnPayload>, detail: &HookSignalDetail) -> LifecycleKind {
+    detail.kind.unwrap_or(match semantic_turn.map(|turn| turn.kind) {
+        Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation) => LifecycleKind::PermissionRequested,
+        _ => LifecycleKind::InputRequired,
+    })
 }
 
 /// The user typed into the node (or the autoclear safety net, or
@@ -760,9 +753,7 @@ pub fn on_attention_cleared(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
 ) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::Running)?;
-    sink.emit_attention_cleared(node_id);
-    tracing::info!("Node {node_id} attention cleared");
+    on_hook_running(sink, node_id)?;
     Ok(())
 }
 
@@ -782,16 +773,23 @@ pub fn on_hook_running_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    if !sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_HOOK_TRANSITION)? {
-        return Ok(false);
-    }
-    sink.disarm_attention_autoclear(node_id);
-    sink.emit_attention_cleared(node_id);
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    commit_settled_signal(sink, LifecycleChangedPayload::new(
         node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
         detail, "agent resumed work",
-    ));
+    ))
+}
+
+fn commit_settled_signal(sink: &dyn SessionLifecycleSink, mut payload: LifecycleChangedPayload) -> Result<bool, String> {
+    payload.semantic_turn = None;
+    if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? { return Ok(false); }
+    emit_settled_signal(sink, payload);
     Ok(true)
+}
+
+fn emit_settled_signal(sink: &dyn SessionLifecycleSink, payload: LifecycleChangedPayload) {
+    sink.disarm_attention_autoclear(payload.session_id);
+    sink.emit_attention_cleared(payload.session_id);
+    sink.emit_lifecycle_changed(payload);
 }
 
 /// A node is being marked `Idle`. Two distinct callers share this
@@ -818,14 +816,14 @@ pub fn on_idle_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::Idle)?;
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    let mut payload = LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::ProcessIdle,
         SessionStatus::Idle,
         detail,
         "no live agent process",
-    ));
+    );
+    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
     Ok(())
 }
 
@@ -844,16 +842,14 @@ pub fn on_error_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<(), String> {
-    let wrote = sink.write_status_unless_in(node_id, SessionStatus::Error, FORBIDDEN_TERMINAL)?;
-    if wrote {
-        sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    let mut payload = LifecycleChangedPayload::new(
             node_id,
             LifecycleKind::Error,
             SessionStatus::Error,
             detail,
             "agent process error",
-        ));
-    }
+        );
+    if sink.commit_lifecycle(&mut payload, FORBIDDEN_TERMINAL)? { sink.emit_lifecycle_changed(payload); }
     Ok(())
 }
 
@@ -892,14 +888,14 @@ pub fn on_error_if_pending(
 /// normalized kind, so "terminal PR-opened" is never confused with an
 /// ordinary `TurnCompleted` (issue #1364 review).
 pub fn on_completed(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
-    sink.write_status(node_id, SessionStatus::Completed)?;
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    let mut payload = LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::AutopilotCompleted,
         SessionStatus::Completed,
         &HookSignalDetail::default(),
         "Autopilot wrap-up verified and PR opened",
-    ));
+    );
+    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
     Ok(())
 }
 
@@ -915,11 +911,10 @@ pub fn on_turn_completed(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    if !sink.write_status_unless_in(node_id, SessionStatus::Ready, FORBIDDEN_HOOK_TRANSITION)? {
-        return Ok(false);
-    }
-    emit_turn_completed(sink, node_id, detail);
-    Ok(true)
+    commit_settled_signal(sink, LifecycleChangedPayload::new(
+        node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready, detail,
+        "turn finished - agent is ready for another prompt",
+    ))
 }
 
 pub(crate) struct CircuitTurnRecovery<'a> {
@@ -934,8 +929,11 @@ pub(crate) fn recover_turn_completed(
     sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail,
     recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
-    let committed = recover_circuit_turn(node_id, SessionStatus::Ready, recovery)?;
-    if committed { emit_turn_completed(sink, node_id, detail); }
+    let mut payload = LifecycleChangedPayload::new(node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready,
+        detail, "turn finished - agent is ready for another prompt");
+    payload.semantic_turn = None;
+    let committed = recover_circuit_turn(node_id, &mut payload, recovery)?;
+    if committed { emit_settled_signal(sink, payload); }
     Ok(committed)
 }
 
@@ -943,13 +941,18 @@ pub(crate) fn recover_attention(
     sink: &dyn SessionLifecycleSink, node_id: i64,
     recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
-    let committed = recover_circuit_turn(node_id, SessionStatus::AwaitingInput, recovery)?;
-    if committed { emit_attention(sink, node_id, None, &HookSignalDetail::default()); }
+    let mut payload = LifecycleChangedPayload::new(node_id, LifecycleKind::InputRequired, SessionStatus::AwaitingInput,
+        &HookSignalDetail::default(), "agent is waiting for input");
+    let committed = recover_circuit_turn(node_id, &mut payload, recovery)?;
+    if committed {
+        sink.emit_attention_needed_with_payload(node_id, None);
+        sink.emit_lifecycle_changed(payload);
+    }
     Ok(committed)
 }
 
 fn recover_circuit_turn(
-    node_id: i64, status: SessionStatus, recovery: &CircuitTurnRecovery<'_>,
+    node_id: i64, payload: &mut LifecycleChangedPayload, recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
     if recovery.fence.agent_node_id != node_id { return Ok(false); }
     let committed = {
@@ -959,27 +962,16 @@ fn recover_circuit_turn(
         crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, recovery.input, recovery.observed_at_ms, || {
             if recovery.cancelled.load(std::sync::atomic::Ordering::Acquire) { return Ok(false); }
             let transaction = conn.transaction().map_err(|error| error.to_string())?;
-            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, status)
+            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, payload.status)
                 .map_err(|error| error.to_string())?;
-            if committed { transaction.commit().map_err(|error| error.to_string())?; }
+            if committed {
+                db::agent_node::commit_agent_lifecycle_inner(&transaction, payload, &[]).map_err(|error| error.to_string())?;
+                transaction.commit().map_err(|error| error.to_string())?;
+            }
             Ok(committed)
         })?
     };
     Ok(committed)
-}
-
-fn emit_turn_completed(sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail) {
-    sink.disarm_attention_autoclear(node_id);
-    sink.emit_attention_cleared(node_id);
-    let detail = HookSignalDetail { semantic_turn: None, ..detail.clone() };
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
-        node_id,
-        LifecycleKind::TurnCompleted,
-        SessionStatus::Ready,
-        &detail,
-        "turn finished — agent is ready for another prompt",
-    ));
-    tracing::info!("Node {node_id} finished its turn (Ready)");
 }
 
 /// A turn ended but background work is still running (false yield, issue
@@ -993,20 +985,13 @@ pub fn on_background_running(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    if !sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_HOOK_TRANSITION)? {
-        return Ok(false);
-    }
-    sink.disarm_attention_autoclear(node_id);
-    sink.emit_attention_cleared(node_id);
-    let detail = HookSignalDetail { semantic_turn: None, ..detail.clone() };
-    sink.emit_lifecycle_changed(LifecycleChangedPayload::new(
+    commit_settled_signal(sink, LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::BackgroundRunning,
         SessionStatus::Running,
-        &detail,
+        detail,
         "agent busy on background work",
-    ));
-    Ok(true)
+    ))
 }
 
 /// Initial node creation — mark `Pending`. Used by
@@ -1051,6 +1036,28 @@ pub fn on_exit_sweep() -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn attention_clear_cannot_resurrect_a_terminal_node() {
+        for status in [SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
+            SessionStatus::Suspended, SessionStatus::Completed, SessionStatus::Lost] {
+            let sink = RecordingSink::with_status(status);
+            on_attention_cleared(&sink, 7).unwrap();
+            assert_eq!(sink.status(), Some(status));
+            assert!(sink.attention_cleared().is_empty());
+        }
+    }
+
+    #[test]
+    fn lost_node_rejects_all_late_hook_transitions() {
+        let sink = RecordingSink::with_status(SessionStatus::Lost);
+        let detail = HookSignalDetail { provider: Some("anthropic".into()), ..Default::default() };
+        assert!(!on_hook_running_with_detail(&sink, 7, &detail).unwrap());
+        assert!(!on_turn_completed(&sink, 7, &detail).unwrap());
+        assert!(!on_background_running(&sink, 7, &detail).unwrap());
+        assert!(!on_attention_with_signal(&sink, 7, None, &detail).unwrap());
+        assert!(sink.effects().is_empty());
+    }
+
     use super::*;
     // The shared `RecordingSink` fixture lives in `agent::session_lifecycle::
     // testing` so any test that needs to observe `SessionLifecycleSink`
@@ -1344,10 +1351,8 @@ mod tests {
     fn on_attention_cleared_writes_running_and_emits_attention_cleared() {
         let sink = RecordingSink::new();
         on_attention_cleared(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes(),
-            vec![(7, SessionStatus::Running)]
-        );
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
+        assert_eq!(sink.lifecycle_changed()[0].kind, LifecycleKind::WorkResumed);
         assert_eq!(*sink.attention_cleared(), vec![7]);
         assert!(
             sink.attention_needed().is_empty(),

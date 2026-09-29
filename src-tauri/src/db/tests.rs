@@ -24,6 +24,8 @@ fn suspended_recovery_schema() -> rusqlite::Connection {
         ALTER TABLE agent_nodes ADD COLUMN signal_health TEXT DEFAULT 'healthy';
         ALTER TABLE agent_nodes ADD COLUMN worktree_path TEXT;
         ALTER TABLE agent_nodes ADD COLUMN spawn_configuration TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN lifecycle_snapshot TEXT;
+        ALTER TABLE agent_nodes ADD COLUMN status_changed_at TEXT;
         ALTER TABLE agent_nodes ADD COLUMN session_started_at INTEGER;
         CREATE TABLE legacy_autopilot_retirements(node_id INTEGER PRIMARY KEY);
         UPDATE agent_nodes SET status = 'suspended';

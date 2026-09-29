@@ -145,7 +145,7 @@ use rusqlite::{Connection, Result as SqlResult, params};
 /// v45 adds nullable `circuit_run_history.source` / `.disposition` so every
 /// causal-trace event names its provenance and what Buildmesh did with it
 /// (issue #1909 / #1847).
-pub(crate) const SCHEMA_VERSION: u32 = 45;
+pub(crate) const SCHEMA_VERSION: u32 = 46;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -442,6 +442,7 @@ const SPECS: &[ColumnSpec] = &[
     ColumnSpec { version: 39, table: "agent_nodes", column: "session_started_at", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
     // v44 — immutable saved spawn configuration snapshot used by the node.
     ColumnSpec { version: 44, table: "agent_nodes", column: "spawn_configuration", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec { version: 46, table: "agent_nodes", column: "lifecycle_snapshot", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
 
     // ============================================================
     // autopilot_runs

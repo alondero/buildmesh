@@ -65,6 +65,7 @@ pub(crate) const MAX_HOOK_BODY: usize = 64 * 1024;
 /// compatibility with future AGY revisions, but are not decision inputs in `decide()`.
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
+    agent_id: Option<String>,
     #[serde(
         alias = "sessionId",
         alias = "sessionID",
@@ -382,6 +383,7 @@ enum Decision {
     /// correlation event, not a completion by itself: the route resolves it
     /// to `Ready` only after the foreground turn has stopped.
     BackgroundTaskCompleted,
+    ChildStarted,
     /// Capture any structured session id, then stop. SessionStart (and similar
     /// boot events) must not look like a turn completion.
     Ignore,
@@ -433,6 +435,15 @@ fn accept_hook(
             .session_id
             .as_deref()
             .is_some_and(|id| !id.trim().is_empty());
+    // Child work belongs to the session and can outlive its launching turn.
+    // The route already checked the session identity before entering here.
+    if event == "subagentstop" && classified.decision == Decision::BackgroundTaskCompleted {
+        let completed = payload.agent_id.as_deref().is_some_and(|id| state.finish_child(id));
+        return Accept {
+            accepted: completed && !state.has_children() && !state.has_questions(),
+            ..Accept::passthrough()
+        };
+    }
     // A boot event with no session identity is not safe to use as a
     // generation boundary: it could be a delayed callback from an older
     // process. The route's session-id fence handles identified events;
@@ -457,6 +468,11 @@ fn accept_hook(
     let starts_turn = event == "userpromptsubmit";
     if !state.accepts(payload.turn_id.as_deref(), starts_turn) {
         return Accept::rejected();
+    }
+    if event == "subagentstart" {
+        if let Some(id) = payload.agent_id.as_deref().filter(|id| !id.is_empty()) {
+            state.start_child(id);
+        }
     }
     let key = payload
         .request_id
@@ -534,6 +550,7 @@ fn accept_hook(
     // questions, including unresolved permissions, keep the turn active until
     // their explicit reply arrives; a dropped callback never mutates it.
     if ends_turn && !state.has_foreground_questions() {
+        state.note_background_snapshot(classified.decision == Decision::SuppressPendingBackground);
         state.end_turn();
     }
     // A real prompt is an explicit user action and must never be fenced by a
@@ -562,6 +579,7 @@ fn accept_hook(
                     | Decision::SuppressPendingBackground
                     | Decision::Running
                     | Decision::CodexToolResult
+                    | Decision::ChildStarted
             ));
     if !accepted {
         return Accept::rejected();
@@ -584,7 +602,14 @@ fn accept_hook(
 }
 
 fn effective_decision(decision: Decision, state: &crate::agent::hook_state::HookState) -> Decision {
-    if decision == Decision::BackgroundTaskCompleted && state.is_turn_active() {
+    if decision == Decision::ChildStarted {
+        if !state.has_children() { Decision::Ignore }
+        else if state.is_turn_active() { Decision::Running }
+        else { Decision::SuppressPendingBackground }
+    } else if decision == Decision::Ready && state.has_children() {
+        Decision::SuppressPendingBackground
+    } else if decision == Decision::BackgroundTaskCompleted
+        && (state.is_turn_active() || state.has_children() || state.has_other_background_work()) {
         Decision::Ignore
     } else if decision == Decision::BackgroundTaskCompleted {
         Decision::Ready
@@ -760,6 +785,10 @@ fn classify(
         .as_deref()
         .map(|value| value.to_ascii_lowercase().replace('_', ""));
     let event = event.as_deref();
+    if matches!(provider, "claude" | "claude_code" | "anthropic") && event == Some("subagentstart")
+        && payload.agent_id.as_deref().is_some_and(|id| !id.is_empty()) {
+        return Classified { decision: Decision::ChildStarted, detail };
+    }
     if provider == "kimi" && event == Some("notification") {
         let terminal_task = payload.source_kind.as_deref() == Some("background_task")
             && matches!(
@@ -821,7 +850,8 @@ fn classify(
             ..detail
         });
     }
-    if provider == "codex" && event == Some("posttooluse") {
+    if provider == "codex" && event == Some("posttooluse")
+        && payload.tool_name.as_deref() != Some("request_user_input") {
         return Classified {
             decision: Decision::CodexToolResult,
             detail,
@@ -864,10 +894,19 @@ fn classify(
     {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             kind: Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested),
+            message: payload.message.clone().or_else(|| {
+                let questions = payload.tool_input.as_ref()?.get("questions")?.as_array()?;
+                clean_description(&questions.iter().filter_map(|question| question.get("question")?.as_str())
+                    .collect::<Vec<_>>().join(" "))
+            }),
             // A question tool is not a permission to run a command.
             semantic_turn: None,
             ..detail
         });
+    }
+    if matches!(provider, "claude" | "claude_code" | "anthropic") && event == Some("subagentstop")
+        && payload.agent_id.as_deref().is_some_and(|id| !id.is_empty()) {
+        return Classified { decision: Decision::BackgroundTaskCompleted, detail };
     }
     if matches!(
         event,
@@ -1233,6 +1272,12 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     state.matches_turn(hook.turn_id.as_deref()),
                     state.mismatches_turn(hook.turn_id.as_deref()),
                 )?;
+                if let Some(payload) = hook_payload.as_ref() {
+                    let accepted = accept_hook(&mut state, payload, &classified);
+                    if accepted.accepted && lifecycle_decision(classified_decision, &state, false, accepted) == Decision::Ready {
+                        crate::node_turn::publish_ready(session_id, app, detail);
+                    }
+                }
                 return Ok(Applied::Applied);
             }
             let applied = apply_hook_after_turn_fence(
@@ -1267,18 +1312,6 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         codex_permission_pending,
                         accept,
                     );
-
-                    // A real, high-confidence callback proves hook delivery — persist
-                    // the node's signal health as Ok so a provisioning failure earlier
-                    // in the spawn doesn't linger. A degraded (unparseable/fieldless)
-                    // callback does NOT clear a failure: its event says Degraded and
-                    // the persisted health must agree (issue #1364 §3).
-                    if decision != Decision::Ignore {
-                        let _ = crate::db::update_agent_node_signal_health(
-                            session_id,
-                            Some(detail.signal_health),
-                        );
-                    }
 
                     match decision {
                         Decision::Running => {
@@ -1327,7 +1360,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                             );
                             crate::node_turn::publish_background(session_id, app, detail);
                         }
-                        Decision::BackgroundTaskCompleted => {
+                        Decision::BackgroundTaskCompleted | Decision::ChildStarted => {
                             // Keep the webhook fail-open if a future caller bypasses
                             // `effective_decision`; an unexpected correlation event
                             // must never panic the HTTP handler or kill its request
@@ -1425,6 +1458,56 @@ fn apply_hook_after_turn_fence(
 
 #[cfg(test)]
 mod tests {
+    fn apply_status_fixture(state: &mut crate::agent::hook_state::HookState, value: serde_json::Value) -> Decision {
+        let body = value.to_string();
+        let payload = HookPayload::parse(body.as_bytes()).unwrap();
+        let classified = classify(body.as_bytes(), "anthropic", |_| Some(0));
+        let accept = accept_hook(state, &payload, &classified);
+        if accept.accepted { lifecycle_decision(classified.decision, state, false, accept) }
+        else { Decision::Ignore }
+    }
+
+    #[test]
+    fn node_waits_for_native_children_after_foreground_stop() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"UserPromptSubmit", "prompt_id":"turn-1"})), Decision::Running);
+        for child in ["child-a", "child-b"] {
+            apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"SubagentStart", "agent_id":child, "prompt_id":"turn-1"}));
+        }
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"Stop", "prompt_id":"turn-1"})), Decision::SuppressPendingBackground);
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"SubagentStop", "agent_id":"child-a", "prompt_id":"turn-1"})), Decision::Ignore);
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"SubagentStop", "agent_id":"child-b", "prompt_id":"turn-1"})), Decision::Ready);
+    }
+
+    #[test]
+    fn old_child_completion_does_not_end_a_new_foreground_turn() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        for value in [
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "prompt_id":"turn-1"}),
+            serde_json::json!({"hook_event_name":"SubagentStart", "agent_id":"child", "prompt_id":"turn-1"}),
+            serde_json::json!({"hook_event_name":"Stop", "prompt_id":"turn-1"}),
+            serde_json::json!({"hook_event_name":"UserPromptSubmit", "prompt_id":"turn-2"}),
+        ] { apply_status_fixture(&mut state, value); }
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"SubagentStop", "agent_id":"child", "prompt_id":"turn-1"})), Decision::Ignore);
+        assert_eq!(apply_status_fixture(&mut state, serde_json::json!({"hook_event_name":"Stop", "prompt_id":"turn-2"})), Decision::Ready);
+    }
+
+    #[test]
+    fn codex_answer_resumes_after_question_tool_result() {
+        let mut state = crate::agent::hook_state::HookState::default();
+        for (event, expected) in [("PreToolUse", Decision::MarkInput), ("PostToolUse", Decision::Running)] {
+            let body = serde_json::json!({"hook_event_name":event,
+                "tool_name":"request_user_input", "tool_use_id":"question-1"}).to_string();
+            let payload = HookPayload::parse(body.as_bytes()).unwrap();
+            let classified = classify(body.as_bytes(), "codex", |_| Some(0));
+            let permission_pending = state.has_permission_requests();
+            let accepted = accept_hook(&mut state, &payload, &classified);
+            assert!(accepted.accepted);
+            assert_eq!(lifecycle_decision(classified.decision, &state, permission_pending, accepted), expected);
+        }
+        assert!(!state.has_questions());
+    }
+
     use super::*;
 
     #[test]

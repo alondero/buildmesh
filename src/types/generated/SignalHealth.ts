@@ -2,10 +2,10 @@
 
 /**
  * Hook delivery health for a node (issue #1364 §3). A layered field on the
- * node, not a status: `Ok` once provisioning succeeded or the first hook
- * callback arrived; `Degraded` for an unparseable/unknown payload; 
- * `Unavailable` when provisioning or delivery failed.
+ * node, not a status: `Unverified` after installation, `Ok` after an accepted
+ * observation, `Degraded` for an unparseable/unknown payload, and `Unavailable`
+ * when provisioning failed or no supported observer exists.
  *
  * Generated to `src/types/generated/SignalHealth.ts`.
  */
-export type SignalHealth = "ok" | "degraded" | "unavailable";
+export type SignalHealth = "ok" | "degraded" | "unavailable" | "unverified";

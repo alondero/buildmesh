@@ -30,6 +30,8 @@ pub(crate) struct HookState {
     /// memory for a later ask, not a flag the next unrelated callback reads.
     early_replies: VecDeque<String>,
     completed_tasks: VecDeque<String>,
+    children: HashSet<String>,
+    other_background_pending: bool,
     /// Whether the foreground harness turn is still executing. Background
     /// callbacks may arrive after the foreground turn has yielded; keeping
     /// this bit separate from `questions` prevents those callbacks from
@@ -145,6 +147,32 @@ impl HookState {
         !self.questions.is_empty()
     }
 
+    pub(crate) fn start_child(&mut self, id: &str) {
+        let key = format!("child:{id}");
+        if !self.completed_tasks.contains(&key) {
+            self.children.insert(key);
+        }
+    }
+
+    pub(crate) fn finish_child(&mut self, id: &str) -> bool {
+        let key = format!("child:{id}");
+        let existed = self.children.remove(&key);
+        self.finish_background_task(&key);
+        existed
+    }
+
+    pub(crate) fn has_children(&self) -> bool {
+        !self.children.is_empty()
+    }
+
+    pub(crate) fn note_background_snapshot(&mut self, pending: bool) {
+        self.other_background_pending = pending;
+    }
+
+    pub(crate) fn has_other_background_work(&self) -> bool {
+        self.other_background_pending
+    }
+
     pub(crate) fn has_foreground_questions(&self) -> bool {
         self.questions
             .values()
@@ -185,7 +213,8 @@ impl HookState {
     }
 
     fn is_quiescent(&self) -> bool {
-        !self.is_turn_active && self.questions.is_empty() && self.early_replies.is_empty()
+        !self.is_turn_active && self.questions.is_empty() && self.children.is_empty()
+            && !self.other_background_pending && self.early_replies.is_empty()
     }
 
     pub(crate) fn end_turn(&mut self) {
