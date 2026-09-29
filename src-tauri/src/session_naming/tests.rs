@@ -1,42 +1,8 @@
 use std::collections::HashSet;
 
 use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
+use crate::env::{with_env_vars, ENV_LOCK};
 use crate::models::AgentNode;
-
-/// Serialises tests that mutate process env (PATH, USERPROFILE,
-/// APPDATA) so two parallel tests can't observe each other's
-/// mid-flight values. Required because the env-mutating tests in
-/// this module read three different vars and a partial overlap
-/// would let the resolver's `is_file()` check silently return a
-/// real install path from a non-overridden var.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Run `f` with each `(name, value)` in `vars` set on the process
-/// env, restoring the originals (or unsetting) afterwards even on
-/// panic. Lets env-mutating tests stay under the `ENV_LOCK` and
-/// fail without leaking global state to other tests in the binary.
-fn with_env_vars<F: FnOnce()>(vars: &[(&str, Option<&std::ffi::OsStr>)], f: F) {
-    let saved: Vec<(&str, Option<String>)> = vars
-        .iter()
-        .map(|(k, _)| (*k, std::env::var(k).ok()))
-        .collect();
-    for (k, v) in vars {
-        match v {
-            Some(val) => std::env::set_var(k, val),
-            None => std::env::remove_var(k),
-        }
-    }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    for (k, saved_val) in saved {
-        match saved_val {
-            Some(v) => std::env::set_var(k, v),
-            None => std::env::remove_var(k),
-        }
-    }
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
-}
 
 /// Open the buffering gate for a node so `on_output` writes immediately.
 /// Real code opens the gate via `should_trigger_rename`; tests use this

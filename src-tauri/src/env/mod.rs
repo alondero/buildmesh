@@ -27,6 +27,41 @@ pub(crate) use windows_interop::*;
 pub use host_path::*;
 pub use mesh_row::mesh_row;
 
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) fn with_env_vars<T>(
+    vars: &[(&str, Option<&std::ffi::OsStr>)],
+    f: impl FnOnce() -> T,
+) -> T {
+    let saved = vars
+        .iter()
+        .map(|(key, _)| (*key, std::env::var_os(key)))
+        .collect::<Vec<_>>();
+    for (key, value) in vars {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    for (key, value) in saved {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+    match result {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 /// Shared test fixtures used by both `mod tests` (worktree / base_ref
 /// regression suites) and `fetch_origin_tests` (issue #213). Lifted
 /// out of `mod tests` so the sibling fetch_origin module can reach
@@ -261,6 +296,7 @@ mod tests {
     /// bare-env expectation matches every supported platform).
     #[test]
     fn agy_brain_dir_uses_the_current_environment_home() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let brain = agy_brain_dir();
         let dir = agy_dir();
         assert_eq!(
@@ -281,6 +317,38 @@ mod tests {
             "agy_brain_dir should end with `{expected_suffix}`, got `{}`",
             path_str
         );
+    }
+
+    #[test]
+    fn agy_summaries_database_sits_beside_the_brain_root() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let windows_summaries =
+            agy_summaries_db_for_env(crate::models::EnvType::Windows, "C:/repo").unwrap();
+        assert_eq!(
+            windows_summaries.file_name().and_then(|name| name.to_str()),
+            Some("conversation_summaries.db")
+        );
+
+        #[cfg(windows)]
+        {
+            let wsl_summaries = with_env_vars(
+                &[(
+                    "GEMINI_HOME",
+                    Some(std::ffi::OsStr::new("/home/test/.gemini")),
+                )],
+                || agy_summaries_db_for_env(crate::models::EnvType::Wsl, "/home/test/repo"),
+            );
+            let wsl_summaries = wsl_summaries.expect("explicit WSL home must resolve");
+            let host_path = wsl_summaries.to_string_lossy().replace('\\', "/");
+            assert!(
+                host_path.starts_with("//wsl$/") || host_path.starts_with("//wsl.localhost/"),
+                "WSL summaries path must be host-readable UNC: {host_path}"
+            );
+            assert!(
+                host_path.ends_with("/.gemini/antigravity-cli/conversation_summaries.db"),
+                "unexpected WSL summaries path: {host_path}"
+            );
+        }
     }
 
     /// Pin the Grok home directory resolution (issue #1281). When `GROK_HOME`

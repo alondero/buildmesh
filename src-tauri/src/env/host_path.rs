@@ -364,6 +364,15 @@ pub(crate) fn agy_brain_dir_for_env(env_type: EnvType, spawn_path: &str) -> Opti
     }
 }
 
+/// The host-accessible Antigravity summaries database beside its brain root.
+/// Keep the database's sibling path in the environment module so callers and
+/// tests pass the external store explicitly instead of deriving it from an
+/// assumed brain path shape.
+pub(crate) fn agy_summaries_db_for_env(env_type: EnvType, spawn_path: &str) -> Option<PathBuf> {
+    let brain_dir = agy_brain_dir_for_env(env_type, spawn_path)?;
+    Some(brain_dir.parent()?.join("conversation_summaries.db"))
+}
+
 /// Normalize a raw path that may be a WSL UNC path (`\\wsl$\<distro>\...` or
 /// the Windows 11+ canonical `\\wsl.localhost\<distro>\...`, and their
 /// forward-slash variants) into WSL spawn form (`/...`). Non-UNC paths are
