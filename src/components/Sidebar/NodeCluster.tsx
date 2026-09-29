@@ -1,5 +1,4 @@
 import { memo } from 'react';
-import type { AgentNode } from '../../stores/agentNodeStore';
 import type { SpawnOption } from '../../lib/groups';
 import type { NodeActivityCluster } from '../../lib/nodeActivities';
 import { activityMemberRole, activityStatus } from '../../lib/nodeActivities';
@@ -16,7 +15,10 @@ interface NodeClusterProps {
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
 }
 
-const EMPTY_MEMBERS: AgentNode[] = [];
+/// Indent of the sub-member rail from the sidebar's left edge. The header
+/// marker and the rail share it so the cluster reads as one connected tree
+/// rather than a disconnected step.
+const RAIL_INDENT = 'ml-2';
 
 /** One Node Activity drawn in the mesh sidebar.
  *
@@ -38,30 +40,45 @@ function NodeClusterView({ cluster, meshColor, providerList, onSelectNode, onDel
       onSelectNode={onSelectNode} onDeleteNode={onDeleteNode} />;
   }
   const status = activityStatus(root, members, true);
-  const rest = members.length > 1 ? members.slice(1) : EMPTY_MEMBERS;
+  // `clusterActivityNodes` normalises `members` to representative-first, but
+  // filter by identity rather than slicing `[1]` so a future caller that hands
+  // us a differently-ordered array can neither drop a member nor duplicate the
+  // header. Cheap enough to be unconditional.
+  const rest = members.filter(member => member.id !== root.id);
   // Hovering the marker names every member with its role, so the pairing stays
   // legible when the sub-rows are scrolled out of a short sidebar.
-  const roster = [root, ...rest]
+  const roster = members
     .map((member, index) => `${activityMemberRole(member, root.id, members.length, index - 1, handGrouped)}: ${member.name}`)
     .join('\n');
   return (
     <div data-node-cluster-id={root.id} data-paired="true" className="mb-0.5">
-      <div className="relative">
+      {/* Both the header marker and the sub-member rail sit at `ml-2`, so the
+          marker's edge lands exactly on the rail and the cluster reads as one
+          connected tree instead of a disconnected step. */}
+      <div className={`relative ${RAIL_INDENT}`}>
         {/* Paired marker on the header row. `role="img"` with an explicit label
-            carries the meaning to assistive tech, which a bare glyph would not,
-            and the aggregate status rides along for the same reason. */}
+            carries the meaning to assistive tech, which a bare glyph would not.
+            Its colour tracks the group's COMBINED tone — a crashed reviewer
+            repaints it red even while the implementer's own row looks healthy.
+            Tone→token mapping mirrors `GridNodeHeader`'s activity dot, per
+            DESIGN.md rule 3 ("colour means status"). */}
         <span
+          data-cluster-marker
           role="img"
           aria-label={`Paired group of ${members.length} agents — ${status.label}`}
           title={`Paired with ${members.length - 1} other agent${members.length === 2 ? '' : 's'} — ${status.label}\n\n${roster}`}
-          className="absolute left-0 top-0 h-full w-0.5 rounded-full bg-accent-cyan/40"
+          className={`absolute left-0 top-0 h-full w-0.5 rounded-full ${
+            status.tone === 'error' ? 'bg-status-error'
+              : status.tone === 'warning' ? 'bg-status-warning'
+                : status.tone === 'active' ? 'bg-accent-cyan'
+                  : 'bg-accent-cyan/40'}`}
         />
         <NodeItem node={root} meshColor={meshColor} providerList={providerList}
           onSelectNode={onSelectNode} onDeleteNode={onDeleteNode} />
       </div>
-      <ul className="relative ml-2 list-none border-l-2 border-border-subtle pl-0" aria-label="Paired agents">
+      <ul className={`relative list-none border-l-2 border-border-subtle pl-0 ${RAIL_INDENT}`} aria-label="Paired agents">
         {rest.map(member => (
-          <li key={member.id} className="relative">
+          <li key={member.id} className="relative pl-2">
             {/* Elbow joining this member to the rail. */}
             <span aria-hidden="true" className="absolute -left-px top-1/2 h-px w-2 bg-border-subtle" />
             <NodeItem node={member} meshColor={meshColor} providerList={providerList}

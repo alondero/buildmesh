@@ -178,6 +178,71 @@ describe('sidebar node-activity clusters', () => {
     expect(clusters.map(c => c.root.id)).toEqual([1, 3]);
   });
 
+  it('puts the representative first in members even when a reviewer sorts earlier', () => {
+    // Regression: `activityMemberIds` preserves store `(position)` order, and a
+    // reviewer can legitimately sort BEFORE its implementer. `members` is
+    // documented as "representative first, then reviewers", so it must be
+    // normalised here rather than inherited — `NodeCluster` slices off
+    // `members[0]` as the header, so an inverted array silently dropped the
+    // reviewer and rendered the implementer twice.
+    const root = makeNode(1, { position: 5 });
+    const reviewer = makeNode(2, { position: 1 });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
+
+    const [cluster] = clusterActivityNodes([reviewer, root], ownerships, []);
+    expect(cluster.members.map(m => m.id)).toEqual([1, 2]);
+    expect(cluster.members[0].id).toBe(cluster.root.id);
+  });
+
+  it('orders non-root members deterministically by (position, id)', () => {
+    const root = makeNode(1, { position: 0 });
+    const a = makeNode(2, { position: 3 });
+    const b = makeNode(3, { position: 2 });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1), 3: ownership(3, 1) };
+
+    const [cluster] = clusterActivityNodes([a, root, b], ownerships, []);
+    // root first, then ascending (position, id) — b(2) before a(3).
+    expect(cluster.members.map(m => m.id)).toEqual([1, 3, 2]);
+  });
+
+  it('renders every member exactly once when a reviewer sorts before its implementer', () => {
+    // The DOM-level consequence of the ordering guarantee: no dropped row, no
+    // duplicated implementer.
+    const root = makeNode(1, { name: 'implementer', position: 5 });
+    const reviewer = makeNode(2, { name: 'reviewer', position: 1 });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
+
+    const { container } = renderMeshItem(clusterActivityNodes([reviewer, root], ownerships, []));
+    const rows = container.querySelectorAll('[data-session-id]');
+    expect(rows).toHaveLength(2);
+    const ids = [...rows].map(row => row.getAttribute('data-session-id'));
+    expect(ids.sort()).toEqual(['1', '2']);
+    expect(container.querySelectorAll('[data-node-cluster-id="1"]')).toHaveLength(1);
+  });
+
+  it('paints the cluster marker with the combined status tone, not a fixed accent', () => {
+    // DESIGN.md rule 3 — colour means status. A crashed reviewer must repaint
+    // the marker red even though the implementer's own row looks healthy; a
+    // static accent would hide exactly the thing the marker exists to show.
+    const root = makeNode(1, { name: 'implementer', status: 'running' });
+    const reviewer = makeNode(2, { name: 'reviewer', status: 'error' });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
+
+    const { container } = renderMeshItem(clusterActivityNodes([root, reviewer], ownerships, []));
+    const marker = container.querySelector('[data-cluster-marker]');
+    expect(marker?.className).toContain('bg-status-error');
+  });
+
+  it('paints the marker with the running accent for a healthy pair', () => {
+    const root = makeNode(1, { name: 'implementer', status: 'running' });
+    const reviewer = makeNode(2, { name: 'reviewer', status: 'running' });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
+
+    const { container } = renderMeshItem(clusterActivityNodes([root, reviewer], ownerships, []));
+    const marker = container.querySelector('[data-cluster-marker]');
+    expect(marker?.className).toContain('bg-accent-cyan');
+  });
+
   it('splits a cross-mesh group into one cluster per mesh', () => {
     const a = makeNode(1, { mesh_id: 3 });
     const b = makeNode(2, { mesh_id: 4 });

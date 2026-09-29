@@ -119,7 +119,18 @@ export function clusterActivityNodes(
     // A root missing from the index means every member was filtered out
     // between the two passes; skip rather than render a cluster with no header.
     if (!root) continue;
-    const members = memberIds.map(id => index[id]).filter((node): node is AgentNode => !!node);
+    // `activityMemberIds` yields store order, which for circuit lineage is
+    // plain `(position)` — a reviewer can sort BEFORE its implementer. Callers
+    // document `members` as "representative first, then reviewers" and index
+    // off `members[0]`, so normalise here instead of inheriting an order that
+    // can invert. Non-root members keep a deterministic `(position, id)`
+    // sequence so a cluster's sub-rows never reshuffle between renders.
+    const rest = memberIds
+      .filter(id => id !== root.id)
+      .map(id => index[id])
+      .filter((node): node is AgentNode => !!node)
+      .sort((a, b) => a.position - b.position || a.id - b.id);
+    const members = [root, ...rest];
     clusters.push({ root, members, paired: members.length > 1,
       handGrouped: resolved.some(ids => ids.includes(root.id)) });
   }
