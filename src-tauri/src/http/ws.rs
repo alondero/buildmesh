@@ -1030,7 +1030,7 @@ mod tests {
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "y\r").expect("\\r writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"y\r");
-        assert_eq!(sink.writes(), vec![(1, SessionStatus::Running)]);
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
         assert_eq!(sink.attention_cleared(), vec![1]);
     }
 
@@ -1041,7 +1041,7 @@ mod tests {
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "n\n").expect("\\n writes");
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"n\n");
-        assert_eq!(sink.writes(), vec![(1, SessionStatus::Running)]);
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
         assert_eq!(sink.attention_cleared(), vec![1]);
     }
 
@@ -1081,7 +1081,7 @@ mod tests {
         }
         write_mobile_input_with_sink(registry.as_ref(), &sink, id, "\r").unwrap();
         assert_eq!(received.recv().unwrap(), b"\r");
-        assert_eq!(sink.writes(), vec![(id, SessionStatus::Running)]);
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
         assert_eq!(sink.attention_cleared(), vec![id]);
         assert_ne!(registry.input_stamp(id).unwrap(), original);
         registry.kill_session(id);

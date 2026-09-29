@@ -94,6 +94,14 @@ impl RecordingSink {
 }
 
 impl SessionLifecycleSink for RecordingSink {
+    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+        if forbidden.is_empty() {
+            self.write_status(payload.session_id, payload.status)?;
+            Ok(true)
+        } else {
+            self.write_status_unless_in(payload.session_id, payload.status, forbidden)
+        }
+    }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         self.writes.borrow_mut().push((node_id, new));
         Ok(())

@@ -79,6 +79,18 @@ any changes you need.
 
 ## The attention badge is missing or stale
 
+`Ready` means a turn finished and the agent can accept another instruction;
+`Completed` is an automation outcome. `Waiting for background work` means known
+child or background work is still pending. Questions and approvals have separate
+labels. These observations survive reconnects; the mobile agent overview shows
+the last observation time and event source.
+
+`Status unverified` means configuration exists but delivery has not yet been
+observed. `Signal degraded` means a callback could not be interpreted reliably.
+`Signal unavailable` means setup failed or the harness has no supported observer.
+An old observation is not a heartbeat. See the
+[status observation contract](development/node-status-observation.md) for limits.
+
 The terminal is the source of truth. Attention signals depend on the harness
 and its integration; some harnesses have no hook or passive watcher.
 

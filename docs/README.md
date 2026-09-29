@@ -38,6 +38,9 @@ the complete product manual.
 
 ## Circuit architecture
 
+[Agent Node status observation](development/node-status-observation.md) explains
+node state, signal confidence, background ownership and reconnect behavior.
+
 [Session observation and autonomous supervision](development/circuit-session-observation.md)
 explains lifecycle evidence, report handoff, inference scheduling, and the
 remaining acceptance work for supervising many sessions.

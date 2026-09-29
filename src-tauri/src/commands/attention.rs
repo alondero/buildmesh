@@ -158,10 +158,14 @@ mod tests {
         let sink = RecordingSink::new();
         crate::agent::session_lifecycle::on_attention(&sink, 42).unwrap();
         assert_eq!(
-            sink.writes(),
-            vec![(42, SessionStatus::AwaitingInput)],
+            sink.status(),
+            Some(SessionStatus::AwaitingInput),
             "on_attention must write AwaitingInput exactly once"
         );
+        let writes = sink.writes_unless();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 42);
+        assert_eq!(writes[0].1, SessionStatus::AwaitingInput);
         assert_eq!(
             sink.attention_needed(),
             vec![42],
@@ -203,7 +207,8 @@ mod tests {
                 source_pr_pinned_sha TEXT,
                 signal_health TEXT,
                 worktree_path TEXT,
-                spawn_configuration TEXT
+                spawn_configuration TEXT,
+                lifecycle_snapshot TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'core', '/tmp/core');
             INSERT INTO agent_nodes (id, mesh_id, name, path, status)

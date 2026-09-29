@@ -100,6 +100,7 @@ const AGENT_NODE_RECONCILE_SCHEMA: Record<ReconciledKey, true> = {
   head_repo_clone_url: true,
   source_pr_pinned_sha: true,
   signal_health: true,
+  lifecycle: true,
   worktree_path: true,
   launch_configuration: true,
 };
@@ -109,7 +110,7 @@ const AGENT_NODE_RECONCILE_FIELDS = Object.keys(
 
 function shallowEqualAgentNode(a: AgentNode, b: AgentNode): boolean {
   for (const k of AGENT_NODE_RECONCILE_FIELDS) {
-    if (k === 'launch_configuration') {
+    if (k === 'launch_configuration' || k === 'lifecycle') {
       if (JSON.stringify(a[k]) !== JSON.stringify(b[k])) return false;
       continue;
     }
@@ -494,6 +495,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // the newer event (spec `autopilot-node-indicators.md` step 7: "an older
   // response cannot overwrite newer event state").
   let circuitOwnershipsRevision = 0;
+  let nodeRevision = 0;
   // Wall-clock ms of the last successful `fetchAgentNodes` snapshot.
   // `refreshIfStale` reads it; only a success stamps it (a rejection
   // keeps the previous stamp so the next event retries). `0` until the
@@ -533,6 +535,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // look superseded and it would discard the newest state, leaving the stale
     // snapshot in place — the exact regression this guard exists to prevent.
     const ownershipRevision = circuitOwnershipsRevision;
+    const observedNodeRevision = nodeRevision;
     set({ loading: true, error: null });
     try {
       // Satellite reads fail independently. A transient failure preserves
@@ -543,6 +546,12 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         api.listCircuitAgentOwnerships().catch(() => null),
         api.listSemanticTurns().catch(() => null),
       ]);
+      if (observedNodeRevision !== nodeRevision) {
+        // A live lifecycle event superseded this read. Queue one fresh snapshot
+        // instead of briefly painting the old status and request over it.
+        void fetchAgentNodes();
+        return;
+      }
       const autopilotStates = !Array.isArray(autopilotRuns)
         ? get().autopilotStates
         : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
@@ -700,6 +709,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // now updates the single entry in `nodesById` (preserving identity for
   // every other node), rather than remapping the whole array.
   patchAgentNode: (id, patch) => {
+    nodeRevision += 1;
     set((state) => {
       const current = state.nodesById[id];
       if (!current) return state;

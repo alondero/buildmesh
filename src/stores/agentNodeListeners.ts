@@ -170,7 +170,7 @@ export async function attachAgentNodeListeners(
     await listen<AttentionClearedPayload>('attention-cleared', (event) => {
       const nodeId = event.payload[SESSION_ID_KEY];
       surface.setSemanticTurn(nodeId, null);
-      surface.patchAgentNode(nodeId, { status: 'running' });
+      // The normalized lifecycle event owns status; a late legacy clear has no revision.
     }),
   );
 
@@ -189,8 +189,13 @@ export async function attachAgentNodeListeners(
     await listen<LifecycleChangedPayload>('agent-lifecycle', (event) => {
       const nodeId = event.payload.session_id;
       const { signal_health } = event.payload;
+      if (event.payload.kind === 'signal_unavailable') {
+        surface.patchAgentNode(nodeId, { signal_health });
+        return;
+      }
       surface.patchAgentNode(nodeId, {
         status: event.payload.status,
+        lifecycle: event.payload,
         ...(signal_health ? { signal_health } : {}),
       });
       if (event.payload.semantic_turn) {
@@ -257,7 +262,9 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<NodeSpawnCompletedPayload>('node-spawn-completed', (event) => {
       const nodeId = event.payload.node_id;
-      surface.patchAgentNode(nodeId, { status: 'running' });
+      // A hook may already have marked Ready or a human request during launch.
+      // This event contains no status, so read the committed state.
+      void surface.fetchAgentNodes();
       const node = surface.findAgentNode(nodeId);
       if (node) {
         invalidateNodeCaches(nodeId, getNodeGitPath(node));

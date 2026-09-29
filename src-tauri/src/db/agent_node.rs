@@ -92,7 +92,57 @@ mod launch_migration_tests {
 }
 
 const AGENT_NODE_COLUMNS: &str =
-    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path, spawn_configuration";
+    "id, mesh_id, name, path, branch, env, provider, status, cli_session_id, worktree_name, created_at, source_issue, use_worktree, is_pinned, position, source_pr, head_repo_owner, head_repo_clone_url, source_pr_pinned_sha, signal_health, worktree_path, spawn_configuration, lifecycle_snapshot, status_changed_at";
+
+#[cfg(test)]
+mod lifecycle_snapshot_tests {
+    use super::*;
+    use crate::agent::session_lifecycle::{HookSignalDetail, LifecycleChangedPayload, LifecycleKind, SignalHealth};
+
+    #[test]
+    fn observation_round_trips_and_process_transition_invalidates_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
+        let detail = HookSignalDetail { provider_event: Some("Stop".into()), ..Default::default() };
+        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::BackgroundRunning, SessionStatus::Running, &detail, "waiting for child agents");
+        assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[SessionStatus::Lost]).unwrap());
+        let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.signal_health, Some(SignalHealth::Ok));
+        let snapshot = node.lifecycle.unwrap();
+        assert_eq!(snapshot.kind, LifecycleKind::BackgroundRunning);
+        assert_eq!(snapshot.timestamp, payload.timestamp);
+        assert_eq!(snapshot.message.as_deref(), Some("waiting for child agents"));
+        // Exercise the joined coordinator projection too: adding snapshot columns
+        // must not silently shift the mesh name or activity timestamp.
+        let rows = list_coordinator_node_rows_inner(&conn).unwrap();
+        assert_eq!(rows[0].1, "mesh");
+        update_agent_node_status_inner(&conn, 1, SessionStatus::Lost).unwrap();
+        assert!(get_agent_node_by_id_inner(&conn, 1).unwrap().lifecycle.is_none());
+        assert!(!commit_agent_lifecycle_inner(&conn, &mut payload, &[SessionStatus::Lost]).unwrap());
+        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().status, SessionStatus::Lost);
+    }
+
+    #[test]
+    fn local_process_observation_preserves_unavailable_delivery_health() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
+            VALUES (1,1,'node','C:/mesh','running','unavailable')", []).unwrap();
+        for (kind, status) in [(LifecycleKind::WorkResumed, SessionStatus::Running),
+            (LifecycleKind::SessionExited, SessionStatus::Idle),
+            (LifecycleKind::AutopilotCompleted, SessionStatus::Completed)] {
+            let mut payload = LifecycleChangedPayload::new(1, kind, status, &HookSignalDetail::default(), "local event");
+            assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
+            assert_eq!(payload.signal_health, SignalHealth::Unavailable);
+            let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
+            assert_eq!(node.signal_health, Some(SignalHealth::Unavailable));
+            assert_eq!(node.lifecycle.unwrap().kind, kind);
+        }
+    }
+}
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
     Ok(AgentNode {
@@ -110,6 +160,10 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
             .map_err(|error| rusqlite::Error::FromSqlConversionFailure(21, rusqlite::types::Type::Text, Box::new(error))))
             .transpose()?,
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
+        lifecycle: row.get::<_, Option<String>>(22)?
+            .and_then(|raw| serde_json::from_str::<crate::agent::session_lifecycle::LifecycleChangedPayload>(&raw).ok())
+            .filter(|snapshot| row.get::<_, Option<String>>(23).ok().flatten().as_deref() == Some(snapshot.timestamp.as_str())
+                && row.get::<_, String>(7).ok().as_deref() == Some(snapshot.status.to_db_str())),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
         use_worktree: row.get::<_, i32>(12)? != 0,
@@ -194,21 +248,20 @@ pub fn list_coordinator_node_rows_inner(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT {qualified}, m.name, a.status_changed_at \
+        "SELECT {qualified}, m.name \
          FROM agent_nodes a JOIN meshes m ON a.mesh_id = m.id \
          WHERE a.status != 'archived' \
          ORDER BY a.mesh_id ASC, a.position ASC, a.created_at ASC"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], |row| {
-        // map_agent_node_row reads positional indices 0..20, which match the
-        // AGENT_NODE_COLUMNS order we selected first; mesh name and
-        // status_changed_at follow at 21 and 22 (v16 added head_repo_owner +
-        // head_repo_clone_url at 16/17, source_pr_pinned_sha at 18, v29
-        // added is_pinned at 13, v35 added signal_health at 19, v37 added
-        // worktree_path at 20 — see AGENT_NODE_COLUMNS).
+        // `AGENT_NODE_COLUMNS` occupies indices 0..23, including the
+        // lifecycle snapshot at 22 and status_changed_at at 23. The joined
+        // mesh name follows at index 24. Keep this projection derived from
+        // the shared column list so schema additions cannot duplicate or
+        // shift the coordinator-only fields.
         let node = map_agent_node_row(row)?;
-        let mesh_name: String = row.get(22)?;
+        let mesh_name: String = row.get(24)?;
         // Read as Option: a DB migrated from a pre-v14 schema added the column
         // nullable, so any row inserted before `create_agent_node` started
         // stamping it (or via some other path) can be NULL. A non-Option read
@@ -674,6 +727,47 @@ pub fn update_agent_node_status_inner(
     Ok(())
 }
 
+/// Commit the public observation and its status as one SQLite write. A later
+/// process-only transition invalidates the snapshot by changing its revision.
+pub(crate) fn commit_agent_lifecycle_inner(
+    conn: &Connection,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
+    forbidden: &[SessionStatus],
+) -> SqlResult<bool> {
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
+    let forbidden_json = serde_json::to_string(&forbidden.iter().map(SessionStatus::to_db_str).collect::<Vec<_>>())
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3,
+            signal_health=CASE WHEN ?4 THEN ?5 ELSE signal_health END
+         WHERE id=?6 AND status NOT IN (SELECT value FROM json_each(?7))",
+        params![payload.status.to_db_str(), payload.timestamp, snapshot,
+            payload.provider_event.is_some() || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok,
+            payload.signal_health.to_db_str(), payload.session_id, forbidden_json],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Normalize local process observations with the node's current delivery
+/// health, then serialize the exact payload persisted alongside its status.
+/// `None` means the node row no longer exists.
+fn lifecycle_snapshot_inner(
+    conn: &Connection,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
+) -> SqlResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    use crate::agent::session_lifecycle::SignalHealth;
+    if payload.provider_event.is_none() && payload.signal_health == SignalHealth::Ok {
+        let health = conn.query_row("SELECT signal_health FROM agent_nodes WHERE id=?1", [payload.session_id],
+            |row| row.get::<_, Option<String>>(0)).optional()?;
+        let Some(health) = health else { return Ok(None); };
+        payload.signal_health = health.as_deref().and_then(SignalHealth::from_db_str).unwrap_or(SignalHealth::Unverified);
+    }
+    serde_json::to_string(payload)
+        .map(Some)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 /// Conditional `update_agent_node_status`. Returns whether the row matched.
 ///
 /// Issue #654 — the orchestrator's delayed `Spawning → Running` promotion;
@@ -866,6 +960,7 @@ pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, stamp: &str) -> SqlResult<bool> {
     Ok(conn.execute("UPDATE agent_nodes SET status='ready', status_changed_at=?3
         WHERE id=?1 AND status='running'
@@ -884,11 +979,15 @@ pub(crate) struct CircuitRecoveryFence {
 }
 
 pub(crate) fn recover_circuit_agent_turn_inner(
-    conn: &Connection, fence: &CircuitRecoveryFence, stamp: &str, status: SessionStatus,
+    conn: &Connection,
+    fence: &CircuitRecoveryFence,
+    stamp: &str,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
     use rusqlite::OptionalExtension;
     use crate::autopilot::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
-    if !matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
+    if payload.session_id != fence.agent_node_id { return Ok(false); }
+    if !matches!(payload.status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
     let Some((state, context)) = conn.query_row(
         "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1", [fence.run_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -906,11 +1005,14 @@ pub(crate) fn recover_circuit_agent_turn_inner(
         || step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) != Some(fence.agent_node_id) {
         return Ok(false);
     }
-    if status == SessionStatus::Ready { return complete_agent_turn_if_current_inner(conn, fence.agent_node_id, stamp); }
-    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
+    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4,lifecycle_snapshot=?5,
+            signal_health=CASE WHEN ?6 THEN ?7 ELSE signal_health END
         WHERE id=?1 AND status='running'
         AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at,'')=?2",
-        params![fence.agent_node_id, stamp, status.to_db_str(), chrono::Utc::now().to_rfc3339()])? == 1)
+        params![fence.agent_node_id, stamp, payload.status.to_db_str(), payload.timestamp, snapshot,
+            payload.provider_event.is_some() || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok,
+            payload.signal_health.to_db_str()])? == 1)
 }
 
 /// Parse an `agent_nodes.status_changed_at` value to epoch milliseconds.

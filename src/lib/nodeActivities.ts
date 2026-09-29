@@ -223,6 +223,10 @@ export type ActivityStatus = { label: string; tone: ActivityStatusTone };
 export function activityStatus(root: AgentNode, members: readonly AgentNode[], grouped = false): ActivityStatus {
   if (members.some(n => n.status === 'error' || n.status === 'lost')) return { label: 'Needs attention', tone: 'error' };
   if (members.some(n => n.status === 'awaiting_input')) return { label: 'Needs input', tone: 'warning' };
+  const running = members.filter(n => n.status === 'running');
+  if (running.length > 0 && running.every(n => n.lifecycle?.status === 'running' && n.lifecycle.kind === 'background_running')) {
+    return { label: 'Waiting for background work', tone: 'active' };
+  }
   if (grouped && members.some(n => n.status === 'running')) return { label: 'Running', tone: 'active' };
   const implementing = root.status === 'running';
   const reviewing = members.some(n => n.id !== root.id && n.status === 'running');

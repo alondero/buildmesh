@@ -9,6 +9,22 @@ mod tests {
     use rusqlite::{Connection, Result as SqlResult};
 
     #[test]
+    fn lifecycle_snapshot_upgrade_preserves_existing_nodes_and_repeats() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','awaiting_input')", []).unwrap();
+        conn.execute_batch("ALTER TABLE agent_nodes DROP COLUMN lifecycle_snapshot;
+            UPDATE app_settings SET value='45' WHERE key='schema_version';").unwrap();
+        for _ in 0..2 {
+            crate::db::init_schema(&conn).unwrap();
+            let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
+            assert_eq!(node.status, crate::models::SessionStatus::AwaitingInput);
+            assert!(node.lifecycle.is_none());
+        }
+    }
+
+    #[test]
     fn spawn_configuration_column_upgrade_preserves_existing_nodes() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -988,6 +1004,7 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 signal_health TEXT,
                 worktree_path TEXT,
                 spawn_configuration TEXT,
+                lifecycle_snapshot TEXT,
                 pr_url TEXT
             );
             INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/m');
@@ -1162,7 +1179,9 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr_pinned_sha TEXT,
                 signal_health TEXT,
                 worktree_path TEXT,
-                spawn_configuration TEXT
+                spawn_configuration TEXT,
+                lifecycle_snapshot TEXT,
+                status_changed_at TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
@@ -1225,7 +1244,9 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 source_pr_pinned_sha TEXT,
                 signal_health TEXT,
                 worktree_path TEXT,
-                spawn_configuration TEXT
+                spawn_configuration TEXT,
+                lifecycle_snapshot TEXT,
+                status_changed_at TEXT
             );
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');

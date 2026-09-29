@@ -277,67 +277,35 @@ describe("NodeList", () => {
     ).toBeUndefined();
   });
 
-  it("shows the last prompt from agent-lifecycle events and clears it when attention clears (issue #1377)", async () => {
-    mockApi([makeNode(3, "awaiting_input")]);
-
-    render(
-      <NodeList
-        onOpenNode={noop}
-        onOpenAgentNodes={noop}
-        onOpenIssues={noop}
-        onOffline={noop}
-        onAuthFailed={noop}
-      />,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByTestId("attention-deck")).toBeTruthy();
-    });
-
+  it("keeps request text with its authoritative snapshot until the node resumes (issue #1377)", async () => {
+    const node = makeNode(3, "awaiting_input");
+    mockApi([node]);
+    render(<NodeList onOpenNode={noop} onOpenAgentNodes={noop} onOpenIssues={noop} onOffline={noop} onAuthFailed={noop} />);
+    await waitFor(() => expect(screen.getByTestId("attention-deck")).toBeTruthy());
     const eventsSocket = sockets.find((s) => s.url.includes("/ws/events"));
     expect(eventsSocket).toBeTruthy();
-
-    // The awaiting-input lifecycle event carries the semantic turn
-    // description — that is the "last prompt / permission request" line.
+    node.lifecycle = {
+      session_id: 3, provider: "anthropic", kind: "permission_requested",
+      status: "awaiting_input", message: "Allow npm install?", provider_event: "PermissionRequest",
+      provider_session_id: null, completion_reason: null, transcript_path: null,
+      timestamp: "2026-06-11T00:00:00Z", signal_health: "ok",
+      semantic_turn: { node_id: 3, kind: "permission_request", description: "Allow npm install?" },
+    };
     await act(async () => {
-      eventsSocket!.onmessage?.({
-        data: JSON.stringify({
-          type: "agent-lifecycle",
-          session_id: 3,
-          provider: "anthropic",
-          kind: "awaiting_input",
-          status: "awaiting_input",
-          message: null,
-          provider_event: "permission_request",
-          provider_session_id: null,
-          completion_reason: null,
-          transcript_path: null,
-          timestamp: "2026-06-11T00:00:00Z",
-          signal_health: "ok",
-          semantic_turn: {
-            node_id: 3,
-            kind: "needs_input",
-            description: "Allow npm install?",
-          },
-        }),
-      });
+      eventsSocket!.onmessage?.({ data: JSON.stringify({ type: "agent-lifecycle", ...node.lifecycle }) });
     });
-    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Allow npm install?",
-    );
-
-    // When attention clears, the prompt must not outlive the state — the
-    // card itself disappears (status left awaiting_input via the same
-    // event's optimistic patch + refetch), and a still-awaiting card that
-    // receives attention-cleared loses the line with it.
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain("Allow npm install?");
+    // A delayed legacy clear cannot erase the current authoritative request.
     await act(async () => {
-      eventsSocket!.onmessage?.({
-        data: JSON.stringify({ type: "attention-cleared", session_id: 3 }),
-      });
+      eventsSocket!.onmessage?.({ data: JSON.stringify({ type: "attention-cleared", session_id: 3 }) });
     });
-    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Waiting for the agent's prompt",
-    );
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain("Allow npm install?");
+    node.status = "running";
+    node.lifecycle = { ...node.lifecycle, status: "running", kind: "work_resumed", semantic_turn: null };
+    await act(async () => {
+      eventsSocket!.onmessage?.({ data: JSON.stringify({ type: "agent-lifecycle", ...node.lifecycle }) });
+    });
+    expect(screen.queryByTestId("attn-prompt-3")).toBeNull();
   });
 
   it("pull-to-refresh refetches the node list (issue #1377)", async () => {

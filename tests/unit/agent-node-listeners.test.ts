@@ -199,7 +199,7 @@ describe('attachAgentNodeListeners', () => {
   // listener would duplicate the state mutations. Marks are asserted via
   // the agent-lifecycle handler below.
 
-  it('attention-cleared dispatches patchAgentNode with status running', async () => {
+  it('legacy attention-cleared cannot overwrite normalized status', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -216,7 +216,6 @@ describe('attachAgentNodeListeners', () => {
 
     expect(surface.__calls).toEqual([
       { method: 'setSemanticTurn', args: [7, null] },
-      { method: 'patchAgentNode', args: [7, { status: 'running' }] },
     ]);
   });
 
@@ -252,7 +251,7 @@ describe('attachAgentNodeListeners', () => {
     // One batched patch per event (issue #1364 review) — never two
     // back-to-back patchAgentNode calls.
     expect(surface.__calls).toEqual([
-      { method: 'patchAgentNode', args: [42, { status: 'ready', signal_health: 'ok' }] },
+      { method: 'patchAgentNode', args: [42, { status: 'ready', signal_health: 'ok', lifecycle: expect.objectContaining({ status: 'ready' }) }] },
       { method: 'setSemanticTurn', args: [42, null] },
     ]);
   });
@@ -284,7 +283,7 @@ describe('attachAgentNodeListeners', () => {
     });
 
     expect(surface.__calls).toEqual([
-      { method: 'patchAgentNode', args: [42, { status: 'running', signal_health: 'ok' }] },
+      { method: 'patchAgentNode', args: [42, { status: 'running', signal_health: 'ok', lifecycle: expect.objectContaining({ status: 'running' }) }] },
       { method: 'setSemanticTurn', args: [42, null] },
     ]);
   });
@@ -325,7 +324,7 @@ describe('attachAgentNodeListeners', () => {
     const calls = surface.__calls;
     expect(calls[0]).toEqual({
       method: 'patchAgentNode',
-      args: [42, { status: 'awaiting_input', signal_health: 'ok' }],
+      args: [42, { status: 'awaiting_input', signal_health: 'ok', lifecycle: expect.objectContaining({ status: 'awaiting_input' }) }],
     });
     // The semantic turn flows to the banner; it is NOT cleared.
     expect(calls[1]).toEqual({
@@ -374,7 +373,7 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('node-spawn-completed dispatches patchAgentNode + invalidateNodeCaches (issue #1004)', async () => {
+  it('node-spawn-completed dispatches fetchAgentNodes + invalidateNodeCaches (issue #1004)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
     mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
@@ -391,14 +390,14 @@ describe('attachAgentNodeListeners', () => {
 
     capturedHandler!({ payload: { node_id: 50 } });
 
-    // Two surface calls: patch status + find the row for cache
+    // Two surface calls: refresh status + find the row for cache
     // invalidation. The `findAgentNode` happens unconditionally; the
     // invalidation itself is internal to the listener module.
     expect(surface.__calls.map(c => c.method)).toEqual([
-      'patchAgentNode',
+      'fetchAgentNodes',
       'findAgentNode',
     ]);
-    expect(surface.__calls[0].args).toEqual([50, { status: 'running' }]);
+    expect(surface.__calls[0].args).toEqual([]);
     expect(surface.__calls[1].args).toEqual([50]);
   });
 
@@ -420,7 +419,7 @@ describe('attachAgentNodeListeners', () => {
     capturedHandler!({ payload: { node_id: 999 } });
 
     expect(surface.__calls.map(c => c.method)).toEqual([
-      'patchAgentNode',
+      'fetchAgentNodes',
       'findAgentNode',
     ]);
   });

@@ -100,7 +100,8 @@ CREATE TABLE agent_nodes (
             source_pr_pinned_sha TEXT,
             signal_health TEXT,
             worktree_path TEXT,
-            spawn_configuration TEXT
+            spawn_configuration TEXT,
+            lifecycle_snapshot TEXT
         , source_issue INTEGER)
 
 table:app_settings

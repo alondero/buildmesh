@@ -44,6 +44,12 @@ let useOpenPr: typeof UseOpenPr;
 let useGitSummary: typeof UseGitSummary;
 let useAgentNodeStore: typeof UseAgentNodeStore;
 
+function replyWith(value: unknown) {
+  mockInvoke.mockImplementation(async (command: string) => command === 'list_agent_nodes'
+    ? Object.values(useAgentNodeStore.getState().nodesById)
+    : command.startsWith('list_') ? [] : value);
+}
+
 beforeEach(async () => {
   vi.resetModules();
   ({ useOpenPr } = await import('../../src/hooks/useOpenPr'));
@@ -79,7 +85,7 @@ describe('node cache invalidation (issue #1004)', () => {
     await attachListeners();
 
     // Stage-2 finished: the worktree exists and the branch now has a PR.
-    mockInvoke.mockResolvedValue(PR);
+    replyWith(PR);
     await act(async () => {
       await emit('node-spawn-completed', { node_id: 7 });
     });
@@ -95,7 +101,7 @@ describe('node cache invalidation (issue #1004)', () => {
 
     await attachListeners();
 
-    mockInvoke.mockResolvedValue(SUMMARY);
+    replyWith(SUMMARY);
     await act(async () => {
       await emit('node-spawn-completed', { node_id: 7 });
     });
@@ -112,7 +118,7 @@ describe('node cache invalidation (issue #1004)', () => {
     await attachListeners(makeNode({ status: 'running' }));
 
     // The autopilot wrap-up just opened the PR.
-    mockInvoke.mockResolvedValue(PR);
+    replyWith(PR);
     await act(async () => {
       await emit('autopilot-pr-created', { node_id: 7, pr_url: PR.url });
     });
@@ -127,17 +133,18 @@ describe('node cache invalidation (issue #1004)', () => {
 
     await attachListeners();
 
-    mockInvoke.mockResolvedValue(PR);
-    const callsBefore = mockInvoke.mock.calls.length;
+    replyWith(PR);
+    const prCalls = () => mockInvoke.mock.calls.filter(([command]) => command === 'get_open_pr_for_node').length;
+    const callsBefore = prCalls();
     await act(async () => {
       await emit('node-spawn-completed', { node_id: 7 });
     });
 
-    expect(mockInvoke.mock.calls.length).toBe(callsBefore);
+    expect(prCalls()).toBe(callsBefore);
     expect(other.result.current.pr).toBeNull();
   });
 
-  it('is a no-op when the completed node is not in the store', async () => {
+  it('does not invalidate a missing node cache while reconciling the node list', async () => {
     mockInvoke.mockResolvedValue(null);
     const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_open_pr_for_node', { nodeId: 7 }));
@@ -145,13 +152,14 @@ describe('node cache invalidation (issue #1004)', () => {
     useAgentNodeStore.setState({ nodesById: {}, nodeIds: []});
     await useAgentNodeStore.getState().initAttentionListeners();
 
-    mockInvoke.mockResolvedValue(PR);
-    const callsBefore = mockInvoke.mock.calls.length;
+    replyWith(PR);
+    const prCalls = () => mockInvoke.mock.calls.filter(([command]) => command === 'get_open_pr_for_node').length;
+    const callsBefore = prCalls();
     await act(async () => {
       await emit('node-spawn-completed', { node_id: 7 });
     });
 
-    expect(mockInvoke.mock.calls.length).toBe(callsBefore);
+    expect(prCalls()).toBe(callsBefore);
     expect(result.current.pr).toBeNull();
   });
 });

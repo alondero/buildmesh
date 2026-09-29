@@ -26,7 +26,9 @@ mod tests {
                 status TEXT NOT NULL DEFAULT 'idle',
                 cli_session_id TEXT,
                 session_started_at INTEGER,
-                status_changed_at TEXT NOT NULL DEFAULT (datetime('now'))
+                status_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                signal_health TEXT,
+                lifecycle_snapshot TEXT
             );
             CREATE TABLE app_settings (
                 key TEXT PRIMARY KEY,
@@ -68,6 +70,12 @@ mod tests {
         (conn, fence)
     }
 
+    fn recovery_payload(status: SessionStatus) -> crate::agent::session_lifecycle::LifecycleChangedPayload {
+        use crate::agent::session_lifecycle::{HookSignalDetail, LifecycleChangedPayload, LifecycleKind};
+        let kind = if status == SessionStatus::Ready { LifecycleKind::TurnCompleted } else { LifecycleKind::InputRequired };
+        LifecycleChangedPayload::new(77, kind, status, &HookSignalDetail::default(), "recovered circuit turn")
+    }
+
     #[test]
     fn circuit_recovery_waiting_for_writer_rechecks_paused_and_cancelled_borrowed_run() {
         use std::sync::{Arc, Mutex, mpsc};
@@ -85,8 +93,9 @@ mod tests {
                     waiting_tx.send(()).unwrap();
                     let mut conn = worker_writer.lock().unwrap();
                     let transaction = conn.transaction().unwrap();
+                    let mut payload = recovery_payload(recovery_status);
                     let committed = crate::db::agent_node::recover_circuit_agent_turn_inner(
-                        &transaction, &fence, "100:2000-01-01T00:00:00Z", recovery_status).unwrap();
+                        &transaction, &fence, "100:2000-01-01T00:00:00Z", &mut payload).unwrap();
                     transaction.commit().unwrap();
                     committed
                 });
@@ -107,16 +116,18 @@ mod tests {
             let (mut conn, fence) = circuit_recovery_fixture();
             conn.execute_batch(change).unwrap();
             let transaction = conn.transaction().unwrap();
+            let mut payload = recovery_payload(SessionStatus::Ready);
             assert!(!crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
-                "100:2000-01-01T00:00:00Z", SessionStatus::Ready).unwrap(), "{change}");
+                "100:2000-01-01T00:00:00Z", &mut payload).unwrap(), "{change}");
             transaction.commit().unwrap();
             assert_eq!(current_status(&conn, 77), "running");
         }
         for recovery_status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
             let (mut conn, fence) = circuit_recovery_fixture();
             let transaction = conn.transaction().unwrap();
+            let mut payload = recovery_payload(recovery_status);
             assert!(crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
-                "100:2000-01-01T00:00:00Z", recovery_status).unwrap());
+                "100:2000-01-01T00:00:00Z", &mut payload).unwrap());
             transaction.commit().unwrap();
             assert_eq!(current_status(&conn, 77), recovery_status.to_db_str());
         }

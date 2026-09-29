@@ -31,6 +31,46 @@ const response = (data: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
+it('restores a question from the node snapshot without waiting for a WebSocket event', async () => {
+  const waiting = { ...node, status: 'awaiting_input', lifecycle: {
+    session_id: 7, status: 'awaiting_input', kind: 'question_requested', message: 'Which branch should I use?',
+    semantic_turn: null, signal_health: 'ok', timestamp: '2026-09-29T12:00:00Z',
+  } } as AgentNode;
+  vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(response(
+    url === '/api/nodes' ? [waiting] : { ticket: 'test' },
+  ))));
+  render(<NodeOverview node={waiting} visitId={1} onBack={vi.fn()} onTerminal={vi.fn()}
+    onChanges={vi.fn()} onAuthFailed={vi.fn()} />);
+  expect(await screen.findByText('Which branch should I use?')).toBeTruthy();
+  expect(screen.getByText(/Needs an answer/)).toBeTruthy();
+});
+
+it('replaces a WebSocket request with the current request after reconnect polling', async () => {
+  const sockets: Array<{ onmessage?: (event: { data: string }) => void }> = [];
+  vi.stubGlobal('WebSocket', class {
+    onmessage?: (event: { data: string }) => void;
+    constructor() { sockets.push(this); }
+    close() {}
+  });
+  const lifecycle = { type: 'agent-lifecycle', session_id: 7, status: 'awaiting_input',
+    kind: 'question_requested', message: 'Request A', semantic_turn: null,
+    signal_health: 'ok', timestamp: '2026-09-29T12:00:00Z' };
+  let current = { ...node, status: 'awaiting_input', lifecycle };
+  vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(response(
+    url === '/api/nodes' ? [current] : url === '/api/meshes' ? [mesh]
+      : url === '/api/providers' ? [provider] : { ticket: 'test' },
+  ))));
+  render(<NodeList onOpenNode={vi.fn()} onOpenAgentNodes={vi.fn()} onOpenIssues={vi.fn()}
+    onOffline={vi.fn()} onAuthFailed={vi.fn()} />);
+  await waitFor(() => expect(sockets[0]?.onmessage).toBeTypeOf('function'));
+  act(() => sockets[0].onmessage?.({ data: JSON.stringify(lifecycle) }));
+  expect(await screen.findByText('Request A')).toBeTruthy();
+  current = { ...current, lifecycle: { ...lifecycle, message: 'Request B', timestamp: '2026-09-29T12:01:00Z' } };
+  act(() => window.dispatchEvent(new Event('online')));
+  expect(await screen.findByText('Request B')).toBeTruthy();
+  expect(screen.queryByText('Request A')).toBeNull();
+});
+
 beforeEach(() => {
   localStorage.clear();
   vi.stubGlobal(

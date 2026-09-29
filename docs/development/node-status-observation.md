@@ -1,0 +1,128 @@
+# Agent Node status observation
+
+## Contract
+
+Node status describes the last observed session state. It is not proof that the
+assigned task succeeded. A persistent terminal is not proof that its model is
+working, and terminal silence is not proof that it finished.
+
+| State | Meaning | Automation implication |
+| --- | --- | --- |
+| Starting | Provisioning or the process early-exit window | Wait for session evidence |
+| Running | Work resumed or a live process was launched | Launch alone does not prove model activity |
+| Waiting for background work | The foreground yielded with observed unfinished work | Do not infer task completion |
+| Ready | A clean foreground turn ended with no known outstanding work | Another instruction can be sent; task correctness is not established |
+| Needs an answer / Needs permission | A structured human request is outstanding | A matching reply is needed |
+| Needs attention | A generic yield, failure, or degraded observation needs review | Inspect its reason and signal health |
+| Completed | Automation recorded its completion outcome | Distinct from ordinary turn completion |
+| Idle / Suspended / Lost / Error | No live process, interrupted process, lost work, or a failure | A late hook cannot resurrect the node |
+
+Signal health is separate: `unverified` means provisioning has not yet been
+confirmed by an observation; `ok` means an accepted observation was received;
+`degraded` means its meaning could not be established; `unavailable` means
+provisioning failed or no supported observer exists. None of these is a delivery
+SLA. The observation timestamp is the last accepted observation, not a heartbeat.
+
+## Owners and seams
+
+1. The harness adapter provisions its native integration or advertises a passive
+   observer. Model-provider profiles inherit the selected harness contract.
+2. The attention route normalizes callbacks and fences session and turn identity.
+   It holds one node's hook state while correlating questions and owned children.
+   Passive watchers enter the same lifecycle publisher after their own identity
+   checks. The [harness audit](../learning/harness-attention-reliability.md)
+   records the supported contracts and their evidence levels.
+3. `SessionLifecycle` commits the normalized observation and resulting status in
+   one SQLite update before publishing it. `agent_nodes.lifecycle_snapshot`
+   contains the same envelope clients receive over Tauri and WebSocket events.
+   The snapshot's timestamp must equal the row's `status_changed_at`, and its
+   status must match. Process-only transitions invalidate old snapshots through
+   that revision check, including startup recovery and explicit stopping.
+4. Desktop and mobile derive labels from that envelope through the shared status
+   module. Node-list reads restore background state and human request text after
+   a reconnect. A legacy attention-clear notification only clears presentation;
+   it cannot invent `running`. In-flight list reads cannot overwrite a newer
+   lifecycle patch; desktop queues a fresh read and mobile rejects older refreshes.
+5. Circuits retain their separate, stronger
+   [session observation contract](circuit-session-observation.md). The display
+   snapshot is not new permission to advance a circuit. Native receipts, request
+   identities, submission fences, reports, and owned-work evidence still apply.
+
+All new harness integrations must name their observer and unsupported signals.
+They must not gain lifecycle capability merely by installing a binary, writing a
+configuration file, producing terminal output, or sharing another CLI's tool names.
+
+## Findings addressed
+
+- Codex question-tool results were classified through an approval-only branch.
+  Answering `request_user_input` removed the tracked question but did not resume
+  the node. Question results now follow their own existing request resolution.
+- `Lost` was absent from the hook transition fence. Generic attention clearing
+  also wrote `running` unconditionally. Both paths now preserve stopped states,
+  and accepted input produces a normalized `work_resumed` observation.
+- Claude child-agent hooks were already installed, but ordinary node status
+  ignored them while circuits consumed them. Node tracking now retains child
+  identities across foreground turns, waits for all known children, remembers
+  completion-before-start delivery, and keeps a child completion from ending a
+  newer foreground turn. A transcript-reported background wait remains a blocker
+  even when the last known child finishes.
+- Background and request reasons existed only in event delivery. The durable
+  observation closes that reconnect gap without introducing a second status
+  machine. Status and snapshot are one write; rejected transitions publish neither.
+- Hook installation success was presented as confirmed signal delivery, including
+  after failed trust setup. Provisioning now distinguishes unverified installation,
+  failure, and unsupported observation. Local input does not repair delivery health.
+- List refreshes could regress live state. Client request ownership now protects
+  lifecycle updates, and the legacy desktop clear cannot overwrite a ready/idle
+  lifecycle transition.
+
+## Validation boundaries
+
+The current adapter declarations have different coverage. This inventory describes
+the code contract, not a fresh validation of every installed CLI version. The
+`AgentProvider::attention_capability` and `supports_passive_turn_watcher` methods
+in `src-tauri/src/agent/provider/adapters/` remain the source of truth.
+
+| Harness | Observation path | Declared lifecycle coverage / limit |
+| --- | --- | --- |
+| Claude Code | Native hooks, plus transcript background evidence | Turn completion, input, questions, permissions, background work; native child identities now participate in node status |
+| Codex | Native hooks | Turn completion, input, questions, permissions, background work; question replies now resume the node |
+| OpenCode | Project plugin events | Turn completion, questions and permissions |
+| Kimi Code / Grok Code | Native hooks | Turn completion, input, questions and permissions; no general background capability advertised |
+| Antigravity / Cursor | Native hooks with background evidence | Turn completion and background work; launch policy suppresses ordinary permission prompts |
+| MiniMax Code / Cline | Plugin or native completion hook | Turn completion only is advertised; do not extrapolate request support |
+| Command Code / Meta Muse | Passive session-log watchers | Supported terminal-turn evidence; watcher activation is not proof that a record arrived |
+| DeepSeek Harness / Freebuff / Terminal | No supported lifecycle observer declared | Process lifecycle only; signal health remains unavailable |
+
+Regression tests exercise route normalization and request/child ordering, lifecycle
+transition effects, production SQLite writes and reads, schema upgrades, client
+refresh ordering, and mobile cold-load rendering. The original Codex answer and
+terminal-state regressions were observed failing before their fixes.
+
+This work does not establish measured delivery reliability for every installed
+CLI/version/platform. Existing adapters vary: Claude and Codex have native hooks;
+OpenCode has a plugin stream; Muse and Command Code use passive logs; several
+others expose only completion. Terminal, Freebuff, and unvalidated DeepSeek
+profiles cannot report all four AI states. Their capability gaps must remain
+visible. Older callbacks without optional identity fields remain best-effort;
+an explicit mismatch is rejected, but missing identity is not fabricated.
+
+Further work should validate real callback delivery across the supported fleet,
+including restart and shared-workspace races, and finish extracting harness-owned
+normalizers from the HTTP route. These are evidence and maintenance improvements,
+not reasons to weaken circuit completion gates or label uncertain observations
+as successful work.
+
+Tracked follow-ups: [real-runner delivery validation #1964](https://github.com/alondero/buildmesh/issues/1964),
+[durable observation revisions and incarnation fencing #1965](https://github.com/alondero/buildmesh/issues/1965),
+and [harness-owned normalizers #1879](https://github.com/alondero/buildmesh/issues/1879).
+Mobile reply controls also need to follow request semantics instead of offering
+Y/N approval for questions: [#1966](https://github.com/alondero/buildmesh/issues/1966).
+
+The real dev-backend driver `tests/integration/ui-shot-node-status.steps.mjs`
+sends synthetic native callbacks through HTTP, reads the committed observations,
+and checks desktop/mobile rendering plus mobile reload and final-child completion.
+It uses a short-lived pairing ticket for the mobile browser. This verifies the
+production delivery/read path; it does not launch a real model or prove a CLI's
+hook configuration. Synthetic nodes have no PTY, so opening their terminals can
+produce expected resize errors and adds no lifecycle evidence.
