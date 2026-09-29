@@ -50,6 +50,13 @@ npm run test:ci          # vitest unit + integration + Playwright e2e (needs the
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```
 
+CI runs the equivalent gates on every pull request. The checks and what each
+proves are listed in
+[docs/development/README.md](docs/development/README.md#verification-matrix),
+and the authoritative required-status-check names — plus the release gate and
+emergency bypass — live in
+[the release procedure](docs/development/releasing.md#required-checks-and-branch-protection).
+
 The `/verify` skill is the project-blessed verification flow — run it before
 requesting review. It calls `check.ps1`, launches the dev profile, and scans
 the debug log.
