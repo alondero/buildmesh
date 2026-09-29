@@ -837,8 +837,9 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     if parent.is_none() { original = Some(circuit_id); }
                 }
                 let Some(original_circuit_id) = original.filter(|id| *id != old_circuit_id) else { continue; };
-                let name: String = tx.query_row("SELECT name FROM autopilot_circuits WHERE id=?1",
-                    [original_circuit_id], |row| row.get(0))?;
+                let name: Option<String> = tx.query_row("SELECT name FROM autopilot_circuits WHERE id=?1",
+                    [original_circuit_id], |row| row.get(0)).optional()?;
+                let Some(name) = name else { continue; };
                 let mut context: serde_json::Value = serde_json::from_str(&context_json).unwrap_or_default();
                 context["circuit.id"] = original_circuit_id.to_string().into();
                 context["circuit.name"] = name.into();

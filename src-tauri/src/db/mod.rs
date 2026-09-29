@@ -788,6 +788,8 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             graph_json TEXT NOT NULL,
             behavior_revision INTEGER NOT NULL
         );
+        -- Preservation-only archive for manual/offline recovery. The Probe
+        -- currently reads the active snapshot, not this replaced-graph archive.
         CREATE TABLE IF NOT EXISTS circuit_run_snapshot_history (
             run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
             attempt INTEGER NOT NULL,

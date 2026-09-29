@@ -567,6 +567,8 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
         error: Some(Some("Latest findings".into())), agent_node_id: None, attempt: 3, fresh_attempt: false,
     }]).unwrap();
     let prior_history: i64 = conn.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1", [run_id], |r| r.get(0)).unwrap();
+    let original_graph: String = conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [run_id], |r| r.get(0)).unwrap();
+    conn.execute("DELETE FROM circuit_run_snapshots WHERE run_id=?1", [run_id]).unwrap();
     assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
     let after = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(after.circuit_id, before.circuit_id);
@@ -574,6 +576,11 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     assert_eq!(CircuitContext::from_json(&after.context_json).unwrap().get("retry.max_retries"), Some("4"));
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuits", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    let archived_graph: String = conn.query_row("SELECT graph_json FROM circuit_run_snapshot_history WHERE run_id=?1 AND attempt=4",
+        [run_id], |r| r.get(0)).unwrap();
+    assert_eq!(archived_graph, original_graph, "the replaced graph must survive without an existing snapshot row");
+    assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM circuit_run_snapshots WHERE run_id=?1)", [run_id], |r| r.get::<_, bool>(0)).unwrap(),
+        "the review-only snapshot must be upserted for legacy runs");
     assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 0,
         "a manually borrowed source is not an Autopilot pool agent");
     let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
@@ -641,6 +648,9 @@ fn extending_issue_review_replays_neither_implementation_nor_publication() {
     assert_eq!(run.source_agent_node_id, Some(source.id));
     assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 1,
         "the borrowed former circuit agent still counts against the optional global pool");
+    conn.execute("UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1", [run_id]).unwrap();
+    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 1,
+        "terminal extended runs still count their retained Circuit-owned source agent");
     assert!(run.context_json.contains("https://github.com/test/repo/pull/9"));
     let snapshot = CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
         [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();

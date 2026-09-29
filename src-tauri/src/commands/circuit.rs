@@ -793,7 +793,7 @@ pub async fn continue_circuit_review(app: AppHandle, run_id: i64, additional_rou
         crate::db::circuit::recovery::existing_review_target(run_id)
     }).await? { return Ok(existing); }
     let source_id = crate::commands::run_blocking("review_recovery_source", move || {
-        crate::db::circuit::recovery::review_recovery_source(run_id, additional_rounds)
+        crate::db::circuit::recovery::review_recovery_source(run_id)
     }).await?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
         use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};

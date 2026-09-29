@@ -18,16 +18,17 @@ pub(crate) enum ContinuationTarget {
     Failed(i64),
 }
 
-fn is_review_extension(state: &str, context_json: &str) -> Result<bool, String> {
-    Ok(matches!(state, "pending" | "running" | "paused" | "completed")
-        && CircuitContext::from_json(context_json)?.get("review.extended") == Some("1"))
+fn is_review_extension(state: &str, context_json: &str) -> bool {
+    matches!(state, "pending" | "running" | "paused" | "completed")
+        && CircuitContext::from_json(context_json).ok()
+            .is_some_and(|context| context.get("review.extended") == Some("1"))
 }
 
 pub fn existing_review_target(run_id: i64) -> Result<Option<i64>, String> {
     let db = crate::db::read_conn();
     let run = super::ledger::get_circuit_run_inner(&db, run_id).map_err(|e| e.to_string())?
         .ok_or("This run no longer exists.")?;
-    if is_review_extension(&run.state, &run.context_json)? {
+    if is_review_extension(&run.state, &run.context_json) {
         return Ok(Some(run_id));
     }
     Ok(match continuation_target_inner(&db, run_id)? {
@@ -75,19 +76,7 @@ pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -
     let context = CircuitContext::from_json(&run.context_json)?;
     let original = super::evidence::run_graph(db, run_id)?;
     let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
-    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
-    if !local && !original.is_issue_driven_autopilot_review() {
-        return Err("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.".into());
-    }
-    let source_id = if local {
-        run.source_agent_node_id
-    } else {
-        steps.iter().find(|s| s.node_id == "implementer").and_then(|s| s.agent_node_id)
-    }.ok_or("The implementation agent is no longer retained. Recover from the PR branch and start a new review." )?;
-    if !steps.iter().any(|s| original.node(&s.node_id).is_some_and(|n|
-        matches!(n.kind, CircuitNodeKind::ReviewVerdict { .. }))) {
-        return Err("This run stopped before review. Open the implementation agent and resolve its failure first.".into());
-    }
+    let (source_id, local) = review_source_id(&run, &original, &steps)?;
     let source = crate::db::agent_node::get_agent_node_by_id_inner(db, source_id)
         .map_err(|_| "The implementation agent is no longer retained. Recover from the PR branch and start a new review.".to_string())?;
     if source.mesh_id != run.mesh_id {
@@ -127,10 +116,41 @@ pub(crate) fn review_recovery_inner(db: &Connection, run_id: i64, rounds: i32) -
     Ok(ReviewRecovery { run_id, source_id, graph, name: "Continued review".into(), frozen_launches })
 }
 
-pub fn review_recovery_source(run_id: i64, rounds: i32) -> Result<i64, String> {
+fn review_source_id(
+    run: &crate::models::AutopilotCircuitRun,
+    original: &CircuitGraph,
+    steps: &[crate::models::AutopilotCircuitRunStep],
+) -> Result<(i64, bool), String> {
+    if run.state != "failed" {
+        return Err("Only failed reviews can be continued. Open the active run to resume or cancel it.".into());
+    }
+    let local = run.source_agent_node_id.is_some() && original.has_local_review_contract();
+    if !local && !original.is_issue_driven_autopilot_review() {
+        return Err("This custom circuit needs manual recovery. Open its implementation agent and inspect the failed step.".into());
+    }
+    let source_id = if local {
+        run.source_agent_node_id
+    } else {
+        steps.iter().find(|step| step.node_id == "implementer").and_then(|step| step.agent_node_id)
+    }.ok_or("The implementation agent is no longer retained. Recover from the PR branch and start a new review.")?;
+    if !steps.iter().any(|step| original.node(&step.node_id).is_some_and(|node|
+        matches!(node.kind, CircuitNodeKind::ReviewVerdict { .. }))) {
+        return Err("This run stopped before review. Open the implementation agent and resolve its failure first.".into());
+    }
+    if !matches!(original.node("reviewer").map(|node| &node.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })) {
+        return Err("The reviewer definition is unavailable.".into());
+    }
+    let feedback_id = if local { "feedback" } else { "follow_feedback" };
+    if !matches!(original.node(feedback_id).map(|node| &node.kind), Some(CircuitNodeKind::InjectPty { .. })) {
+        return Err("The review feedback step has changed. Open the implementation agent to recover this custom circuit.".into());
+    }
+    Ok((source_id, local))
+}
+
+pub fn review_recovery_source(run_id: i64) -> Result<i64, String> {
     let db = crate::db::read_conn();
     if let Some(run) = super::ledger::get_circuit_run_inner(&db, run_id).map_err(|e| e.to_string())? {
-        if is_review_extension(&run.state, &run.context_json)? {
+        if is_review_extension(&run.state, &run.context_json) {
             return run.source_agent_node_id.ok_or("The implementation agent is no longer retained.".into());
         }
     }
@@ -138,7 +158,17 @@ pub fn review_recovery_source(run_id: i64, rounds: i32) -> Result<i64, String> {
         ContinuationTarget::Failed(id) => id,
         ContinuationTarget::Existing(_) => run_id,
     };
-    Ok(review_recovery_inner(&db, parent, rounds)?.source_id)
+    let run = super::ledger::get_circuit_run_inner(&db, parent).map_err(|e| e.to_string())?
+        .ok_or("This run no longer exists.")?;
+    let graph = super::evidence::run_graph(&db, parent)?;
+    let steps = super::ledger::list_circuit_run_steps_inner(&db, parent).map_err(|e| e.to_string())?;
+    let (source_id, _) = review_source_id(&run, &graph, &steps)?;
+    let source = crate::db::agent_node::get_agent_node_by_id_inner(&db, source_id)
+        .map_err(|_| "The implementation agent is no longer retained. Recover from the PR branch and start a new review.".to_string())?;
+    if source.mesh_id != run.mesh_id {
+        return Err("The implementation agent no longer belongs to this Mesh.".into());
+    }
+    Ok(source_id)
 }
 
 pub fn continue_failed_review(run_id: i64, rounds: i32) -> Result<i64, String> {
@@ -161,7 +191,7 @@ pub(crate) fn extend_failed_review_locked(db: &mut Connection, run_id: i64, addi
     }
     let tx = db.transaction().map_err(|e| e.to_string())?;
     if let Some(run) = super::ledger::get_circuit_run_inner(&tx, run_id).map_err(|e| e.to_string())? {
-        if is_review_extension(&run.state, &run.context_json)? {
+        if is_review_extension(&run.state, &run.context_json) {
             return Ok(run_id);
         }
     }
@@ -235,7 +265,9 @@ pub(crate) fn extend_failed_review_locked(db: &mut Connection, run_id: i64, addi
     tx.execute("INSERT OR IGNORE INTO circuit_run_snapshot_history (run_id,attempt,graph_json)
         VALUES (?1,?2,?3)", params![target, next_attempt, original_graph_json])
         .map_err(|e| e.to_string())?;
-    tx.execute("UPDATE circuit_run_snapshots SET graph_json=?2 WHERE run_id=?1", params![target, graph_json])
+    tx.execute("INSERT INTO circuit_run_snapshots (run_id,graph_json,behavior_revision) VALUES (?1,?2,1)
+        ON CONFLICT(run_id) DO UPDATE SET graph_json=excluded.graph_json,
+            behavior_revision=excluded.behavior_revision", params![target, graph_json])
         .map_err(|e| e.to_string())?;
     tx.execute("DELETE FROM autopilot_circuit_run_steps WHERE run_id=?1", [target]).map_err(|e| e.to_string())?;
     for node in ["trigger", "await_source", "source_ready"] {

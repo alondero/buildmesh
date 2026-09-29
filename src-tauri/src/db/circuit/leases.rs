@@ -175,8 +175,7 @@ pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) ->
            UNION \
            SELECT r.source_agent_node_id AS agent_id FROM autopilot_circuit_runs r \
            JOIN agent_nodes a ON a.id = r.source_agent_node_id \
-           WHERE r.state IN ('pending', 'running', 'paused') \
-             AND json_extract(CASE WHEN json_valid(r.context_json) THEN r.context_json ELSE '{}' END, \
+           WHERE json_extract(CASE WHEN json_valid(r.context_json) THEN r.context_json ELSE '{}' END, \
                '$.\"review.source_was_circuit_owned\"')='1' AND a.status != 'archived' \
          )",
         [],
