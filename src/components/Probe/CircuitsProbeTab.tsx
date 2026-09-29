@@ -84,6 +84,7 @@ import {
   circuitActivityStats,
   countActiveRuns,
   pendingAdmissionDetail,
+  reviewCircuitForRun,
   runBelongsToActivity,
   type CircuitProbeView,
 } from '../Circuits/runDiagnostics';
@@ -1075,7 +1076,7 @@ export function CircuitsProbeTab() {
                         <CircuitRunCard
                           key={detail.run.id}
                           detail={detail}
-                          reviewCircuit={reviewCircuit}
+                          reviewCircuit={reviewCircuitForRun(detail, reviewCircuit)}
                           nodeIndex={nodeIndex}
                           agentName={agentName}
                           onFocusAgent={handleFocusAgent}

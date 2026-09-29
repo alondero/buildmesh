@@ -1710,3 +1710,54 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         );
     }
 }
+#[test]
+fn historic_continued_review_circuits_collapse_into_the_original_circuit() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&conn).unwrap();
+    conn.execute("INSERT INTO meshes (id,name,path) VALUES (900,'review migration','/tmp/review-migration')", []).unwrap();
+    conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,graph_json,is_preset) VALUES (901,900,'Review','{}',1)", []).unwrap();
+    for id in [902, 903] {
+        conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,description,graph_json,is_preset)
+            VALUES (?1,900,'Continued review','Continue a failed review on its retained worktree','{}',0)", [id]).unwrap();
+    }
+    conn.execute("INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+        VALUES (911,901,900,'manual:root','failed','{}')", []).unwrap();
+    conn.execute("INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+        VALUES (912,902,900,'manual:second','failed',?1)",
+        [r#"{"recovery.from_run_id":"911"}"#]).unwrap();
+    conn.execute("INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+        VALUES (913,903,900,'manual:third','completed',?1)",
+        [r#"{"recovery.from_run_id":"912"}"#]).unwrap();
+    conn.execute("INSERT INTO circuit_run_snapshots (run_id,graph_json,behavior_revision) VALUES (913,'{\"frozen\":true}',1)", []).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    for id in [911, 912, 913] {
+        let circuit_id: i64 = conn.query_row("SELECT circuit_id FROM autopilot_circuit_runs WHERE id=?1", [id], |row| row.get(0)).unwrap();
+        assert_eq!(circuit_id, 901);
+    }
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id=900", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=913", [], |row| row.get::<_, String>(0)).unwrap(), "{\"frozen\":true}");
+    let context: String = conn.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id=913", [], |row| row.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&context).unwrap()["recovery.from_run_id"], "912");
+}
+
+#[test]
+fn continued_review_migration_skips_runs_with_a_missing_original_circuit() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&conn).unwrap();
+    conn.execute("INSERT INTO meshes (id,name,path) VALUES (920,'orphaned review','/tmp/orphaned-review')", []).unwrap();
+    conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,description,graph_json,is_preset)
+        VALUES (921,920,'Continued review','Continue a failed review on its retained worktree','{}',0)", []).unwrap();
+    conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    conn.execute("INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+        VALUES (922,999,920,'manual:orphaned-root','failed','{}')", []).unwrap();
+    conn.execute("INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+        VALUES (923,921,920,'manual:orphaned-review','failed',?1)",
+        [r#"{"recovery.from_run_id":"922"}"#]).unwrap();
+
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+    crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+    let circuit_id: i64 = conn.query_row("SELECT circuit_id FROM autopilot_circuit_runs WHERE id=923", [], |row| row.get(0)).unwrap();
+    assert_eq!(circuit_id, 921, "the run stays on its legacy circuit when the original circuit row is gone");
+}
