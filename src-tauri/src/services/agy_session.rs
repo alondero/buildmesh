@@ -21,12 +21,18 @@
 //!   is used only as a cheap prefilter before opening a file (creation can
 //!   never be newer than modification, so the gate cannot exclude a genuinely
 //!   fresh conversation) to avoid parsing hundreds of stale transcripts.
-//! - **Workspace anchor when provable.** Model steps carry
-//!   `tool_calls[].args.Cwd` (e.g. `"Cwd":"\"F:/src/repo\""` — note the
-//!   embedded quotes). When a candidate carries a `Cwd`, it must match the
-//!   node's spawn path or the candidate is excluded. Step 0 itself has no
-//!   `tool_calls`, so a transcript that has not made a tool call yet has an
-//!   *unknown* workspace and is judged on timing alone.
+//! - **Launch workspace when available.** The harness's read-only
+//!   `conversation_summaries.db` records `workspace_uris` by conversation ID.
+//!   A single distinct decodable file URI can anchor the conversation, even
+//!   when review commands run in another worktree. Unsupported URI members are
+//!   ignored; multiple distinct file roots are ambiguous and fall back to
+//!   transcript Cwd. Matching still uses the existing directory comparison,
+//!   so WSL guest paths and host UNC paths are not reconciled here. Missing or
+//!   unreadable summary metadata, or a row with no unambiguous file root, falls
+//!   back to transcript `tool_calls[].args.Cwd`
+//!   (e.g. `"Cwd":"\"F:/src/repo\""`); malformed row encoding for a matched
+//!   conversation remains unverified. Without either source, workspace is
+//!   unknown and only timing can qualify a fresh candidate.
 //! - **Single-fresh binding.** A candidate created inside this spawn's time
 //!   window is bound only when it is the single viable candidate: an
 //!   anchored match wins outright, otherwise exactly one viable (anchored or
@@ -45,9 +51,10 @@
 //! with the real step shape (`step_index`/`source`/`type`/`status`/
 //! `created_at`/`content`/`tool_calls`).
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::models::EnvType;
@@ -66,10 +73,10 @@ pub struct Candidate {
     pub id: String,
     /// Step-0 `created_at` as epoch ms — the conversation's true start.
     pub created_ms: i64,
-    /// Workspace from `tool_calls[].args.Cwd` when any scanned step carried
-    /// one; `None` means unknown (e.g. no tool call yet), not "matches
-    /// anywhere".
-    pub workspace: Option<String>,
+    /// One unambiguous decoded launch workspace, or transcript Cwd when
+    /// summary metadata is absent, unreadable, blank, or ambiguous. Empty
+    /// means unknown, not a match anywhere.
+    pub workspaces: Vec<String>,
 }
 
 /// Antigravity conversation IDs are UUIDs (the same UUID the `Stop` hook
@@ -167,17 +174,171 @@ fn transcript_mtime_ms(path: &Path) -> Option<i64> {
         .map(|d| d.as_millis() as i64)
 }
 
-/// Build a candidate from a conversation directory. Returns `None` for
-/// anything that cannot be proven fresh: non-UUID names, missing transcripts,
-/// transcripts untouched since before this spawn's window (cheap mtime gate —
-/// creation never postdates modification), and transcripts with no parsable
-/// creation timestamp.
-fn read_conversation_candidate(
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceSummary {
+    Blank,
+    Encoded(String),
+    Invalid(String),
+}
+
+type WorkspaceSummaries = HashMap<String, WorkspaceSummary>;
+
+const SUMMARY_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
+const SUMMARY_QUERY_CHUNK_SIZE: usize = 500;
+
+/// Fetch only summaries for transcripts that passed the cheap mtime gate.
+/// The connection and statement are dropped before the caller reads files.
+fn read_workspace_summaries(
+    summary_db_path: &Path,
+    candidate_ids: &[String],
+) -> Result<Option<WorkspaceSummaries>, String> {
+    if candidate_ids.is_empty() {
+        return Ok(None);
+    }
+    match fs::symlink_metadata(summary_db_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = summary_db_path
+                .parent()
+                .ok_or("summary database path has no parent")?
+                .metadata()
+                .map_err(|error| error.to_string())?;
+            return if parent.is_dir() {
+                Ok(None)
+            } else {
+                Err("summary database parent is not a directory".into())
+            };
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        summary_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| error.to_string())?;
+    conn.busy_timeout(SUMMARY_BUSY_TIMEOUT)
+        .map_err(|error| error.to_string())?;
+
+    let mut summaries = HashMap::new();
+    for id_chunk in candidate_ids.chunks(SUMMARY_QUERY_CHUNK_SIZE) {
+        let placeholders = vec!["?"; id_chunk.len()].join(", ");
+        let query = format!(
+            "SELECT conversation_id, workspace_uris FROM conversation_summaries \
+             WHERE conversation_id IN ({placeholders})"
+        );
+        let mut statement = conn
+            .prepare(&query)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(id_chunk.iter()), |row| {
+                let conversation_id: String = row.get(0)?;
+                let workspace = match row.get_ref(1)? {
+                    rusqlite::types::ValueRef::Null => WorkspaceSummary::Blank,
+                    rusqlite::types::ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+                        Ok(raw) if raw.trim().is_empty() => WorkspaceSummary::Blank,
+                        Ok(raw) => WorkspaceSummary::Encoded(raw.to_owned()),
+                        Err(error) => WorkspaceSummary::Invalid(format!(
+                            "workspace_uris is not UTF-8: {error}"
+                        )),
+                    },
+                    value => WorkspaceSummary::Invalid(format!(
+                        "workspace_uris has unexpected SQLite type {:?}",
+                        value.data_type()
+                    )),
+                };
+                Ok((conversation_id, workspace))
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            let (conversation_id, workspace) = row.map_err(|error| error.to_string())?;
+            summaries.insert(conversation_id, workspace);
+        }
+    }
+    Ok(Some(summaries))
+}
+
+fn workspace_uri_paths(raw: &str) -> Result<Vec<String>, String> {
+    let uris: Vec<String> = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    // Unsupported members cannot provide an anchor. The observed schema does
+    // not establish that multiple file roots are all launch-scoped, so use
+    // transcript Cwd instead of allowing an unverified root to claim a node.
+    let mut roots = Vec::new();
+    for uri in &uris {
+        if let Ok(path) = workspace_uri_path(uri) {
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+    }
+    if roots.len() > 1 {
+        return Ok(Vec::new());
+    }
+    Ok(roots)
+}
+
+fn workspace_uri_path(uri: &str) -> Result<String, ()> {
+    if !valid_percent_escapes(uri) {
+        return Err(());
+    }
+    let url = reqwest::Url::parse(uri).map_err(|_| ())?;
+    if url.scheme() != "file" || url.query().is_some() || url.fragment().is_some() {
+        return Err(());
+    }
+    // Keep CLI path syntax: host-native to_file_path rejects WSL /home URIs
+    // on Windows. Decode escapes without treating literal '+' as a space.
+    let mut bytes = url.path().bytes();
+    let mut decoded = Vec::new();
+    while let Some(byte) = bytes.next() {
+        decoded.push(if byte == b'%' {
+            let hi = char::from(bytes.next().ok_or(())?).to_digit(16).ok_or(())?;
+            let lo = char::from(bytes.next().ok_or(())?).to_digit(16).ok_or(())?;
+            (hi * 16 + lo) as u8
+        } else {
+            byte
+        });
+    }
+    let path = String::from_utf8(decoded).map_err(|_| ())?;
+    if path.contains('\0') {
+        return Err(());
+    }
+    if let Some(host) = url.host_str() {
+        return Ok(format!("//{host}{path}"));
+    }
+    let path_bytes = path.as_bytes();
+    if path_bytes.len() >= 4 && path_bytes[1].is_ascii_alphabetic() && path_bytes[2..4] == *b":/" {
+        Ok(path[1..].to_owned())
+    } else {
+        Ok(path)
+    }
+}
+
+fn valid_percent_escapes(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else {
+            index += 1;
+        }
+    }
+    true
+}
+
+/// Find a transcript that could have been created in this scan's time window.
+/// The mtime gate is deliberately before database lookup and transcript parse.
+fn candidate_transcript_path(
     brain_dir: &Path,
     conv_dir: &Path,
     conv_id: &str,
     created_not_before_ms: i64,
-) -> Option<Candidate> {
+) -> Option<PathBuf> {
     if !is_agy_conversation_id(conv_id) {
         return None;
     }
@@ -195,21 +356,48 @@ fn read_conversation_candidate(
     if transcript_mtime_ms(&transcript)? < created_not_before_ms {
         return None;
     }
-    let (created_ms, workspace) = read_conversation_meta(&transcript)?;
+    Some(transcript)
+}
+
+/// Build a candidate after the mtime gate. A valid native launch workspace
+/// set takes precedence over transcript Cwd; missing or unreadable database
+/// metadata uses Cwd, while malformed metadata for this row rejects it.
+fn read_conversation_candidate(
+    conv_id: &str,
+    transcript: &Path,
+    created_not_before_ms: i64,
+    summaries: Option<&WorkspaceSummaries>,
+) -> Option<Candidate> {
+    let (created_ms, transcript_workspace) = read_conversation_meta(transcript)?;
     if created_ms < created_not_before_ms {
         return None;
     }
+    let workspaces = match summaries.and_then(|summaries| summaries.get(conv_id)) {
+        Some(WorkspaceSummary::Encoded(raw)) => match workspace_uri_paths(raw) {
+            Ok(workspaces) if !workspaces.is_empty() => workspaces,
+            Ok(_) => transcript_workspace.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!("agy session discovery: unusable workspace metadata for conversation {conv_id}: {error}");
+                return None;
+            }
+        },
+        Some(WorkspaceSummary::Invalid(error)) => {
+            tracing::warn!("agy session discovery: unusable workspace metadata for conversation {conv_id}: {error}");
+            return None;
+        }
+        Some(WorkspaceSummary::Blank) | None => transcript_workspace.into_iter().collect(),
+    };
     Some(Candidate {
         id: conv_id.to_string(),
         created_ms,
-        workspace,
+        workspaces,
     })
 }
 
 /// Pick the conversation ID to store for a freshly spawned node.
 ///
 /// Candidates passed in must already be proven fresh (creation inside the
-/// spawn window). A candidate whose `Cwd` anchor provably belongs elsewhere
+/// spawn window). A candidate whose recorded roots exclude this directory
 /// is excluded. An anchored match for `spawn_directory` wins outright;
 /// otherwise binding requires exactly one viable candidate — two viable
 /// fresh conversations (a sibling spawn, a standalone `agy` run) bind
@@ -218,26 +406,30 @@ pub fn select_id_for_directory<'a>(
     candidates: &'a [Candidate],
     spawn_directory: &str,
 ) -> Option<&'a str> {
-    // A candidate with a non-empty, non-matching workspace provably belongs
-    // elsewhere and is excluded. Unknown workspaces stay viable.
+    // Candidates with more than one root are ambiguous and cannot bind. A
+    // summary with that shape should already have fallen back to transcript
+    // Cwd; keep this guard so a future caller cannot bypass that rule. Known
+    // single roots that do not include this directory are excluded.
     let viable: Vec<&Candidate> = candidates
         .iter()
         .filter(|c| is_agy_conversation_id(&c.id))
-        .filter(|c| match &c.workspace {
-            Some(dir) if !dir.trim().is_empty() => {
-                crate::env::directories_match(dir, spawn_directory)
-            }
-            _ => true,
+        .filter(|candidate| candidate.workspaces.len() <= 1)
+        .filter(|candidate| {
+            candidate.workspaces.is_empty()
+                || candidate
+                    .workspaces
+                    .iter()
+                    .any(|dir| crate::env::directories_match(dir, spawn_directory))
         })
         .collect();
-    // A proven anchor for this directory wins outright — unless two different
-    // conversations both claim it, in which case nothing binds.
+    // A proven root match for this directory wins outright — unless two
+    // different conversations both claim it, in which case nothing binds.
     let claims: Vec<&Candidate> = viable
         .iter()
         .filter(|c| {
-            c.workspace
-                .as_deref()
-                .is_some_and(|dir| crate::env::directories_match(dir, spawn_directory))
+            c.workspaces
+                .iter()
+                .any(|dir| crate::env::directories_match(dir, spawn_directory))
         })
         .copied()
         .collect();
@@ -254,29 +446,71 @@ pub fn select_id_for_directory<'a>(
     None
 }
 
-pub(crate) fn collect_candidates(brain_dir: &Path, created_not_before_ms: i64) -> Vec<Candidate> {
+pub(crate) fn collect_candidates(
+    brain_dir: &Path,
+    summary_db_path: &Path,
+    created_not_before_ms: i64,
+) -> Vec<Candidate> {
+    if !brain_dir.is_dir() {
+        return Vec::new();
+    }
     let Ok(entries) = fs::read_dir(brain_dir) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    let mut transcript_candidates = Vec::new();
     for entry in entries.flatten() {
         let conv_dir = entry.path();
         if !conv_dir.is_dir() {
             continue;
         }
         let conv_id = entry.file_name().to_string_lossy().to_string();
-        if let Some(candidate) =
-            read_conversation_candidate(brain_dir, &conv_dir, &conv_id, created_not_before_ms)
-        {
+        if let Some(transcript) = candidate_transcript_path(
+            brain_dir,
+            &conv_dir,
+            &conv_id,
+            created_not_before_ms,
+        ) {
+            transcript_candidates.push((conv_id, transcript));
+        }
+    }
+    let candidate_ids = transcript_candidates
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let summaries = match read_workspace_summaries(summary_db_path, &candidate_ids) {
+        Ok(summaries) => summaries,
+        Err(error) => {
+            tracing::warn!(
+                summary_db_path = %summary_db_path.display(),
+                candidate_count = candidate_ids.len(),
+                "agy session discovery: summary lookup failed; falling back to transcript Cwd: {error}"
+            );
+            None
+        }
+    };
+    tracing::debug!(
+        summary_db_path = %summary_db_path.display(),
+        candidate_count = candidate_ids.len(),
+        summary_row_count = summaries.as_ref().map_or(0, HashMap::len),
+        "agy session discovery: queried launch workspace summaries"
+    );
+    let mut out = Vec::new();
+    for (conv_id, transcript) in transcript_candidates {
+        if let Some(candidate) = read_conversation_candidate(
+            &conv_id,
+            &transcript,
+            created_not_before_ms,
+            summaries.as_ref(),
+        ) {
             out.push(candidate);
         }
     }
     out
 }
 
-/// Historic startup recovery entry point used by the AGY adapter. Workspace
-/// matching remains provider-owned because AGY records it inside tool-call
-/// metadata rather than in the conversation directory name.
+/// Historic startup recovery entry point used by the AGY adapter. Launch roots
+/// come from the summaries database when readable, with transcript Cwd as the
+/// legacy fallback; historic recovery still requires a matching known root.
 pub(crate) fn find_historic_id_for_directory(
     env_type: EnvType,
     spawn_directory: &str,
@@ -284,8 +518,10 @@ pub(crate) fn find_historic_id_for_directory(
     recorded_start: bool,
 ) -> Option<String> {
     let brain_dir = crate::env::agy_brain_dir_for_env(env_type, spawn_directory)?;
+    let summary_db_path = crate::env::agy_summaries_db_for_env(env_type, spawn_directory)?;
     find_historic_id_for_directory_in(
         &brain_dir,
+        &summary_db_path,
         spawn_directory,
         anchor_ms,
         recorded_start,
@@ -294,18 +530,19 @@ pub(crate) fn find_historic_id_for_directory(
 
 pub(crate) fn find_historic_id_for_directory_in(
     brain_dir: &Path,
+    summary_db_path: &Path,
     spawn_directory: &str,
     anchor_ms: i64,
     recorded_start: bool,
 ) -> Option<String> {
     let cutoff = anchor_ms.saturating_sub(crate::services::session_recovery::CLOCK_SKEW_MS);
-    let candidates = collect_candidates(brain_dir, cutoff)
+    let candidates = collect_candidates(brain_dir, summary_db_path, cutoff)
         .into_iter()
         .filter(|candidate| {
             candidate
-                .workspace
-                .as_deref()
-                .is_some_and(|cwd| crate::env::directories_match(cwd, spawn_directory))
+                .workspaces
+                .iter()
+                .any(|root| crate::env::directories_match(root, spawn_directory))
         });
     crate::services::session_recovery::select_recovery_identity(
         candidates.map(|candidate| (candidate.id, candidate.created_ms)),
@@ -319,13 +556,14 @@ pub(crate) fn find_historic_id_for_directory_in(
 /// single viable candidate (see `select_id_for_directory`).
 pub fn find_fresh_id_for_directory_in(
     brain_dir: &Path,
+    summary_db_path: &Path,
     spawn_directory: &str,
     created_not_before_ms: i64,
 ) -> Option<String> {
     if !brain_dir.is_dir() {
         return None;
     }
-    let candidates = collect_candidates(brain_dir, created_not_before_ms);
+    let candidates = collect_candidates(brain_dir, summary_db_path, created_not_before_ms);
     select_id_for_directory(&candidates, spawn_directory).map(str::to_string)
 }
 
@@ -355,7 +593,14 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 tracing::warn!("agy session capture: no brain directory for env {env_type:?}");
                 return;
             };
+            let Some(summary_db_path) =
+                crate::env::agy_summaries_db_for_env(env_type, &spawn_directory)
+            else {
+                tracing::warn!("agy session capture: no summaries database path for env {env_type:?}");
+                return;
+            };
             let path = brain_dir.clone();
+            let summary_path = summary_db_path.clone();
             let directory = spawn_directory.clone();
             // Keep the DB predicate, disk scan, and conditional write in one
             // blocking task. Splitting these into three dispatches on every
@@ -367,8 +612,12 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
                 {
                     return Ok(CaptureAttempt::AlreadyStored);
                 }
-                let Some(id) =
-                    find_fresh_id_for_directory_in(&path, &directory, not_before)
+                let Some(id) = find_fresh_id_for_directory_in(
+                    &path,
+                    &summary_path,
+                    &directory,
+                    not_before,
+                )
                 else {
                     return Ok(CaptureAttempt::NotFound);
                 };
@@ -410,16 +659,57 @@ pub fn start_capture_poller(node_id: i64, spawn_directory: String, env_type: Env
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::time::Instant;
 
     const UUID_A: &str = "550e8400-e29b-41d4-a716-446655440000";
     const UUID_B: &str = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 
     fn cand(id: &str, created_ms: i64, workspace: Option<&str>) -> Candidate {
+        cand_with_workspaces(id, created_ms, workspace.into_iter().collect())
+    }
+
+    fn cand_with_workspaces(id: &str, created_ms: i64, roots: Vec<&str>) -> Candidate {
         Candidate {
             id: id.into(),
             created_ms,
-            workspace: workspace.map(str::to_string),
+            workspaces: roots.into_iter().map(str::to_string).collect(),
         }
+    }
+
+    fn test_summaries_db_path(temp_root: &Path) -> PathBuf {
+        temp_root.join("conversation_summaries.db")
+    }
+
+    fn find_fresh_id_in_test_root(
+        temp_root: &Path,
+        brain_dir: &Path,
+        spawn_directory: &str,
+        created_not_before_ms: i64,
+    ) -> Option<String> {
+        let summary_db_path = test_summaries_db_path(temp_root);
+        find_fresh_id_for_directory_in(
+            brain_dir,
+            &summary_db_path,
+            spawn_directory,
+            created_not_before_ms,
+        )
+    }
+
+    fn find_historic_id_in_test_root(
+        temp_root: &Path,
+        brain_dir: &Path,
+        spawn_directory: &str,
+        anchor_ms: i64,
+        recorded_start: bool,
+    ) -> Option<String> {
+        let summary_db_path = test_summaries_db_path(temp_root);
+        find_historic_id_for_directory_in(
+            brain_dir,
+            &summary_db_path,
+            spawn_directory,
+            anchor_ms,
+            recorded_start,
+        )
     }
 
     /// Real step shape (see `tests/fixtures/agy_transcript.jsonl`): flat
@@ -465,6 +755,324 @@ mod tests {
         file.write_all(body.as_bytes()).unwrap();
         file.sync_all().unwrap();
         brain.join(conv_id)
+    }
+
+    #[test]
+    fn reviewer_recovery_uses_launch_workspace_not_tool_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let brain = temp.path().join("brain");
+        let reviewer = temp.path().join("reviewer");
+        let summary_db_path = test_summaries_db_path(temp.path());
+        let start = "2026-09-29T06:19:46Z";
+        write_conv(
+            &brain,
+            UUID_A,
+            &format!(
+                "{}\n{}\n",
+                user_step(start, "Review the source worktree"),
+                tool_step(start, "/repo/source")
+            ),
+        );
+        let anchor = parse_rfc3339_ms(start).unwrap() - 12_000;
+        assert_eq!(
+            find_historic_id_in_test_root(
+                temp.path(),
+                &brain,
+                "/repo/source",
+                anchor,
+                true
+            ),
+            Some(UUID_A.into()),
+            "a missing summary database retains legacy transcript matching"
+        );
+        let conn = rusqlite::Connection::open(&summary_db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT);",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO conversation_summaries VALUES ('d9428888-122b-11e1-b85c-61cd3cbb3210', X'FF');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversation_summaries VALUES (?1, ?2)",
+            rusqlite::params![
+                UUID_A,
+                serde_json::json!([
+                    "vscode-remote://ssh-remote+host/repo",
+                    reqwest::Url::from_directory_path(&reviewer).unwrap().as_str()
+                ])
+                .to_string()
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(
+                temp.path(),
+                &brain,
+                &reviewer.to_string_lossy(),
+                anchor,
+                true
+            ),
+            Some(UUID_A.into())
+        );
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            None
+        );
+        assert_eq!(
+            find_fresh_id_in_test_root(
+                temp.path(),
+                &brain,
+                &reviewer.to_string_lossy(),
+                anchor
+            ),
+            Some(UUID_A.into())
+        );
+        for (uri, directory) in [
+            (
+                "file:///home/user/reviewer%20space+plus",
+                "/home/user/reviewer space+plus",
+            ),
+            ("file:///F:/src/reviewer%20space", "F:/src/reviewer space"),
+        ] {
+            conn.execute(
+                "UPDATE conversation_summaries SET workspace_uris = ?1",
+                [serde_json::json!([uri]).to_string()],
+            )
+            .unwrap();
+            assert_eq!(
+                find_historic_id_in_test_root(temp.path(), &brain, directory, anchor, true),
+                Some(UUID_A.into())
+            );
+        }
+        conn.execute(
+            "UPDATE conversation_summaries SET workspace_uris = ?1",
+            ["not json"],
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            None,
+            "unparsable summary JSON must not fall back to tool Cwd"
+        );
+        assert_eq!(
+            find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", anchor),
+            None
+        );
+        conn.execute(
+            "UPDATE conversation_summaries SET workspace_uris = ?1",
+            [r#"["https://example.com"]"#],
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            Some(UUID_A.into()),
+            "an unsupported-only root list falls back to transcript Cwd"
+        );
+
+        // Multiple file roots are ambiguous, so the transcript Cwd remains
+        // the only anchor. An unrelated null row falls back only for itself.
+        write_conv(&brain, UUID_B, &tool_step(start, "/other/root"));
+        conn.execute(
+            "INSERT INTO conversation_summaries VALUES (?1, NULL)",
+            [UUID_B],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE conversation_summaries SET workspace_uris = ?1 WHERE conversation_id = ?2",
+            rusqlite::params![
+                serde_json::json!([
+                    reqwest::Url::from_directory_path(&reviewer)
+                        .unwrap()
+                        .as_str(),
+                    "file:///repo/source"
+                ])
+                .to_string(),
+                UUID_A,
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(
+                temp.path(),
+                &brain,
+                &reviewer.to_string_lossy(),
+                anchor,
+                true
+            ),
+            None,
+            "ambiguous file roots must not claim the reviewer worktree"
+        );
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            Some(UUID_A.into())
+        );
+        assert_eq!(
+            find_fresh_id_in_test_root(temp.path(), &brain, "/other/root", anchor),
+            Some(UUID_B.into()),
+            "a null workspace row falls back to that transcript's Cwd"
+        );
+        conn.execute(
+            "UPDATE conversation_summaries SET workspace_uris = ?1 WHERE conversation_id = ?2",
+            rusqlite::params!["not json", UUID_B],
+        )
+        .unwrap();
+        assert_eq!(
+            find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", anchor),
+            Some(UUID_A.into()),
+            "malformed metadata for another conversation does not veto this candidate"
+        );
+
+        conn.execute("UPDATE conversation_summaries SET workspace_uris = ''", [])
+            .unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            Some(UUID_A.into()),
+            "blank workspace metadata uses the transcript Cwd anchor"
+        );
+        conn.execute("DELETE FROM conversation_summaries", []).unwrap();
+        assert_eq!(
+            find_historic_id_in_test_root(temp.path(), &brain, "/repo/source", anchor, true),
+            Some(UUID_A.into())
+        );
+    }
+
+    #[test]
+    fn inaccessible_summary_path_is_reported_to_the_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let not_a_directory = temp.path().join("not-a-directory");
+        fs::write(&not_a_directory, "file").unwrap();
+        let summary_db_path = not_a_directory.join("conversation_summaries.db");
+        assert!(read_workspace_summaries(&summary_db_path, &[UUID_A.into()]).is_err());
+    }
+
+    #[test]
+    fn summary_schema_failure_falls_back_to_transcript_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let brain = temp.path().join("brain");
+        let now = chrono::Utc::now();
+        let created = (now - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        write_conv(
+            &brain,
+            UUID_A,
+            &format!("{}\n{}", user_step(&created, "legacy fallback"), tool_step(&created, "/repo/source")),
+        );
+        let conn = rusqlite::Connection::open(test_summaries_db_path(temp.path())).unwrap();
+        conn.execute_batch("CREATE TABLE different_schema (id TEXT);")
+            .unwrap();
+        drop(conn);
+
+        assert_eq!(
+            find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", not_before),
+            Some(UUID_A.into()),
+            "an unreadable external summary store cannot veto proven transcript Cwd"
+        );
+    }
+
+    #[test]
+    fn summary_lock_uses_short_timeout_then_falls_back_to_transcript_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let brain = temp.path().join("brain");
+        let now = chrono::Utc::now();
+        let created = (now - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        write_conv(
+            &brain,
+            UUID_A,
+            &format!("{}\n{}", user_step(&created, "lock fallback"), tool_step(&created, "/repo/source")),
+        );
+        let summary_db_path = test_summaries_db_path(temp.path());
+        let writer = rusqlite::Connection::open(&summary_db_path).unwrap();
+        writer
+            .execute_batch(
+                "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT); BEGIN EXCLUSIVE;",
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        let captured =
+            find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", not_before);
+        let elapsed = started.elapsed();
+        writer.execute_batch("ROLLBACK").unwrap();
+
+        assert_eq!(captured, Some(UUID_A.into()));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "summary DB lock stalled capture for {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_summary_symlink_falls_back_to_transcript_cwd() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let brain = temp.path().join("brain");
+        let now = chrono::Utc::now();
+        let created = (now - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let not_before = (now - chrono::Duration::seconds(30)).timestamp_millis();
+        write_conv(
+            &brain,
+            UUID_A,
+            &format!("{}\n{}", user_step(&created, "symlink fallback"), tool_step(&created, "/repo/source")),
+        );
+        symlink(
+            temp.path().join("missing-target.db"),
+            temp.path().join("conversation_summaries.db"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            find_fresh_id_in_test_root(temp.path(), &brain, "/repo/source", not_before),
+            Some(UUID_A.into())
+        );
+    }
+
+    #[test]
+    fn workspace_uris_reject_invalid_percent_escapes() {
+        for uri in [
+            "file:///repo/%",
+            "file:///repo/%2",
+            "file:///repo/%GG",
+            "file:///repo/%FF",
+            "file:///repo/%00",
+            "https:///repo",
+            "file:///repo?query",
+            "file:///repo#fragment",
+        ] {
+            assert!(
+                workspace_uri_path(uri).is_err(),
+                "accepted invalid workspace URI: {uri}"
+            );
+        }
+    }
+
+    #[test]
+    fn workspace_uri_paths_reject_ambiguous_roots_and_empty_sets() {
+        assert!(
+            workspace_uri_paths(r#"["file:///repo/primary", "file:///repo/shared"]"#)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            workspace_uri_paths(r#"["file:///repo/primary", "file:///repo/primary"]"#)
+                .unwrap(),
+            vec!["/repo/primary"]
+        );
+        assert_eq!(
+            workspace_uri_paths(
+                r#"["file:///repo/primary", "vscode-remote://ssh-remote+host/repo"]"#
+            )
+            .unwrap(),
+            vec!["/repo/primary"]
+        );
+        assert!(workspace_uri_paths("[]").unwrap().is_empty());
     }
 
     #[test]
@@ -545,6 +1153,56 @@ mod tests {
     }
 
     #[test]
+    fn multi_root_workspace_falls_back_to_transcript_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let brain = temp.path().join("brain");
+        let timestamp = "2026-09-29T00:00:00Z";
+        write_conv(&brain, UUID_A, &tool_step(timestamp, "/repo/cwd"));
+        let transcript = crate::services::transcript_reader::adapters::agy::agy_locator_in(
+            &brain, UUID_A,
+        )
+        .unwrap();
+        let summaries = HashMap::from([(
+            UUID_A.to_string(),
+            WorkspaceSummary::Encoded(
+                serde_json::json!(["file:///repo/primary", "file:///repo/shared"]).to_string(),
+            ),
+        )]);
+        let candidate = read_conversation_candidate(
+            UUID_A,
+            &transcript,
+            0,
+            Some(&summaries),
+        )
+        .unwrap();
+        assert_eq!(candidate.workspaces, vec!["/repo/cwd"]);
+
+        assert_eq!(
+            select_id_for_directory(std::slice::from_ref(&candidate), "/repo/primary"),
+            None
+        );
+        assert_eq!(
+            select_id_for_directory(std::slice::from_ref(&candidate), "/repo/shared"),
+            None
+        );
+        assert_eq!(
+            select_id_for_directory(std::slice::from_ref(&candidate), "/repo/cwd"),
+            Some(UUID_A)
+        );
+
+        let unverified = cand_with_workspaces(
+            UUID_A,
+            candidate.created_ms,
+            vec!["/repo/primary", "/repo/shared"],
+        );
+        assert_eq!(
+            select_id_for_directory(&[unverified], "/repo/primary"),
+            None,
+            "the selection seam must reject unverified multi-root candidates"
+        );
+    }
+
+    #[test]
     fn finds_single_fresh_session_with_real_shape() {
         let temp = tempfile::TempDir::new().unwrap();
         let now = chrono::Utc::now();
@@ -560,7 +1218,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", not_before),
             Some(UUID_A.to_string())
         );
     }
@@ -584,7 +1242,7 @@ mod tests {
         .join(".system_generated/logs/transcript.jsonl");
 
         assert_eq!(
-            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            find_historic_id_in_test_root(temp.path(), temp.path(), "F:/repo", CREATED, true),
             Some(UUID_A.to_string())
         );
 
@@ -594,7 +1252,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            find_historic_id_for_directory_in(temp.path(), "F:/repo", CREATED, true),
+            find_historic_id_in_test_root(temp.path(), temp.path(), "F:/repo", CREATED, true),
             None,
             "an AGY transcript without a workspace anchor must not be bound during historic recovery",
         );
@@ -613,7 +1271,7 @@ mod tests {
             &user_step("2020-01-01T00:00:00Z", "old conversation, touched today"),
         );
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", not_before),
             None
         );
     }
@@ -628,7 +1286,7 @@ mod tests {
         write_conv(temp.path(), UUID_A, &user_step(&fresh, "hi"));
         let future = (now + chrono::Duration::seconds(3600)).timestamp_millis();
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", future),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", future),
             None
         );
     }
@@ -645,7 +1303,7 @@ mod tests {
             r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"no clock"}"#,
         );
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", not_before),
             None
         );
     }
@@ -657,7 +1315,7 @@ mod tests {
         fs::create_dir_all(temp.path().join(UUID_A)).unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", now - 60_000),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", now - 60_000),
             None
         );
     }
@@ -673,7 +1331,7 @@ mod tests {
         fs::create_dir_all(&logs).unwrap();
         fs::write(logs.join("transcript_full.jsonl"), user_step(&fresh, "hi")).unwrap();
         assert_eq!(
-            find_fresh_id_for_directory_in(temp.path(), "/tmp/wt", not_before),
+            find_fresh_id_in_test_root(temp.path(), temp.path(), "/tmp/wt", not_before),
             Some(UUID_A.to_string())
         );
     }
@@ -692,6 +1350,9 @@ mod tests {
 
     #[test]
     fn wsl_brain_home_does_not_depend_on_workspace_location() {
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         // A Windows checkout and another user's checkout must resolve the
         // same CLI account. This fails the old /home/<workspace-owner> guess,
         // whether the runtime-home probe succeeds or is unavailable.

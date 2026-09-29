@@ -262,6 +262,9 @@ mod tests {
 
     #[test]
     fn agy_oauth_token_path_joins_agy_dir() {
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(
             agy_oauth_token_path(),
             crate::env::agy_dir().join(AGY_OAUTH_TOKEN_FILE)

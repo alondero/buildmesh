@@ -5,8 +5,8 @@ metadata:
   type: reference
   harness: agy
   min_version: 1.0.0
-  tested_version: 1.1.22
-  date: 2026-08-30
+  tested_version: 1.2.13
+  date: 2026-09-29
 ---
 
 # Antigravity (agy) harness capabilities vs Buildmesh
@@ -27,13 +27,46 @@ Review of Antigravity CLI (`agy`) integration with Buildmesh, covering lifecycle
 | **Native Sandbox** | **Active (#1287)** | Forwarded via `--sandbox` when mesh sandbox toggle is on |
 | **Transcript Reader** | **Active (#1283)** | `TranscriptFormat::Agy` reads `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl` |
 
+## Session discovery during review
+
+Session discovery first uses transcript mtimes to identify plausible
+conversations, then queries only those IDs from the read-only
+`conversation_summaries.db` beside `brain`. URI JSON is decoded only for matching
+transcripts, and SQLite closes before transcript reads. A single distinct
+decodable file URI can identify the launch workspace; unsupported URI members
+are ignored. More than one distinct decodable file root is ambiguous and falls
+back to transcript Cwd. Review commands can use the source agent's worktree, so
+their `Cwd` must not override an unambiguous recorded launch workspace. A
+missing or unreadable database, missing row, blank value, or row with no
+decodable file root also uses transcript Cwd; SQL NULL is handled defensively
+even though the observed schema declares the column NOT NULL. Unparsable JSON,
+non-UTF-8 text, or an unexpected SQLite type leaves a matching row unverified.
+Root matching still uses the existing directory comparison: WSL guest paths and
+host UNC paths are not reconciled here, including for the transcript Cwd
+fallback. Creation-time windows and unique-candidate checks still apply.
+
+Run 259 exposed this on 2026-09-29: reviewer 4613 had an approval report but no
+captured identity because its commands targeted the source worktree. Restoring
+only the proven session identity let the running worker complete the circuit.
+The native log also recorded a Stop-hook JSON response error; discovery recovery
+does not repair that hook or establish complete native lifecycle coverage.
+
 ## Primary Sources
 
-1. **AGY CLI Reference & Live Binary**: `agy 1.1.22` (`agy --help`, `agy changelog`).
+1. **AGY CLI Reference & Live Binary**: `agy 1.2.13` (`agy --version`, `agy --help`, `agy changelog`).
 2. **AGY Customization System**: `.agents/hooks.json`, `.agents/rules/`, progressive disclosure.
 3. **Buildmesh AGY Adapter**: `src-tauri/src/agent/provider/adapters/agy.rs`.
 4. **Attention Route**: `src-tauri/src/http/routes/attention.rs`.
 5. **Issues**: #1283 (transcripts), #1285 (hooks), #1286 (effort), #1287 (sandbox), #1367 (validation and hardening).
+6. **AGY Session Summary Store**: the local `conversation_summaries.db` was
+   inspected read-only alongside `agy 1.2.13` on 2026-09-29. The schema has a
+   TEXT primary-key `conversation_id` and NOT NULL TEXT `workspace_uris`.
+   Aggregate inspection found 637 rows, including 39 blank values and 598
+   single-root arrays; no multi-root arrays appeared in this sample. No
+   conversation IDs or paths were retained. Because this sample provides no
+   evidence that extra roots in a multi-root row are launch-scoped, the parser
+   treats multiple distinct decodable file roots as ambiguous and falls back
+   to transcript Cwd; no live multi-root behavior is claimed.
 
 ---
 
