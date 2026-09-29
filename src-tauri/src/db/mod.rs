@@ -788,6 +788,15 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             graph_json TEXT NOT NULL,
             behavior_revision INTEGER NOT NULL
         );
+        -- Preservation-only archive for manual/offline recovery. The Probe
+        -- currently reads the active snapshot, not this replaced-graph archive.
+        CREATE TABLE IF NOT EXISTS circuit_run_snapshot_history (
+            run_id INTEGER NOT NULL REFERENCES autopilot_circuit_runs(id) ON DELETE CASCADE,
+            attempt INTEGER NOT NULL,
+            graph_json TEXT NOT NULL,
+            captured_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            PRIMARY KEY (run_id, attempt)
+        );
         -- Append-only causal trace (issue #1847 / #1909). `source` names
         -- who/what produced the event and `disposition` what Buildmesh did
         -- with it; both are nullable so pre-v45 rows keep reading. Identity

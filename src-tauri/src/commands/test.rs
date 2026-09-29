@@ -304,18 +304,17 @@ fn handle_create_test_review_continuation_fixture(args: &serde_json::Value) -> S
     }
 }
 
-/// #1910: two genuinely overlapping invocations of the production
-/// `continue_circuit_review` command body. The UI serialises the button
-/// behind one busy flag, so the wire-level race the successor dedupe exists
-/// to survive cannot be produced from the Probe; this calls the same command
-/// body from two threads and returns both outcomes for comparison.
+/// Two overlapping invocations of the production `continue_circuit_review`
+/// command body. The UI serialises the button behind one busy flag, so this
+/// fixture exercises the race that must reuse the same run without adding the
+/// requested rounds twice.
 fn handle_concurrent_continue_review(args: &serde_json::Value, app: AppHandle) -> String {
     let run_id = args
         .get("runId")
         .and_then(|value| value.as_i64())
         .unwrap_or(0);
-    let max_rounds = args
-        .get("maxRounds")
+    let additional_rounds = args
+        .get("additionalRounds")
         .and_then(|value| value.as_i64())
         .unwrap_or(1) as i32;
     let threads: Vec<_> = (0..2)
@@ -325,7 +324,7 @@ fn handle_concurrent_continue_review(args: &serde_json::Value, app: AppHandle) -
                 tauri::async_runtime::block_on(crate::commands::circuit::continue_circuit_review(
                     app,
                     run_id,
-                    max_rounds,
+                    additional_rounds,
                 ))
                 .map_err(|error| format!("attempt {attempt}: {error}"))
             })

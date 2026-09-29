@@ -194,14 +194,9 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
     recovery: super::recovery::ReviewRecovery,
     max_rounds: i32,
 ) -> Result<i64, String> {
-    // Successor-dedupe fence. Re-resolving the lineage here — after the
-    // command's own `existing_review_successor` read, and under the same writer
-    // lock that mints the run — is what makes two overlapping continuation
-    // requests collapse onto one successor. Callers reach this through
-    // `continue_failed_review`, which takes the process-global writer, so the
-    // window between the first read and this one is serialized rather than
-    // racy. The per-source live-run check inside
-    // `create_node_circuit_run_with_recovery_locked` is the second fence.
+    // Legacy fixture path: re-resolve the lineage under the writer lock so
+    // overlapping fixture requests collapse onto one successor. The user
+    // command now extends the failed run instead of calling this helper.
     let recovery = match super::recovery::continuation_target_inner(db, recovery.run_id)? {
         super::recovery::ContinuationTarget::Existing(id) => return Ok(id),
         super::recovery::ContinuationTarget::Failed(id) if id != recovery.run_id =>
@@ -960,7 +955,7 @@ pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> S
     if get_autopilot_circuit_inner(&tx, id)?.is_some_and(|circuit| circuit.is_preset) {
         return Err(rusqlite::Error::InvalidParameterName("Built-in Review Blueprints are read-only".into()));
     }
-    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshots"] {
+    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshot_history", "circuit_run_snapshots"] {
         tx.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1)"), [id])?;
     }
     tx.execute(
@@ -982,7 +977,7 @@ pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> S
 /// Called from [`super::delete_mesh`] inside ITS mutex acquisition —
 /// `_inner(&Connection)` discipline, no second lock.
 pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) -> SqlResult<()> {
-    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshots"] {
+    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshot_history", "circuit_run_snapshots"] {
         conn.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE mesh_id=?1)"), [mesh_id])?;
     }
     conn.execute(

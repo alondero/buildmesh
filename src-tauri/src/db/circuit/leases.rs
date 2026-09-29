@@ -166,11 +166,18 @@ pub fn count_retained_circuit_agent_nodes_total() -> SqlResult<i64> {
 /// Per-test isolated variant of [`count_retained_circuit_agent_nodes_total`] (issue #1691).
 pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) -> SqlResult<i64> {
     db.query_row(
-        "SELECT COUNT(DISTINCT s.agent_node_id) FROM autopilot_circuit_run_steps s \
-         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         JOIN agent_nodes a ON a.id = s.agent_node_id \
-         WHERE r.state IN ('completed', 'failed', 'cancelled') \
-           AND s.agent_node_id IS NOT NULL AND a.status != 'archived'",
+        "SELECT COUNT(DISTINCT agent_id) FROM ( \
+           SELECT s.agent_node_id AS agent_id FROM autopilot_circuit_run_steps s \
+           JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+           JOIN agent_nodes a ON a.id = s.agent_node_id \
+           WHERE r.state IN ('completed', 'failed', 'cancelled') \
+             AND s.agent_node_id IS NOT NULL AND a.status != 'archived' \
+           UNION \
+           SELECT r.source_agent_node_id AS agent_id FROM autopilot_circuit_runs r \
+           JOIN agent_nodes a ON a.id = r.source_agent_node_id \
+           WHERE json_extract(CASE WHEN json_valid(r.context_json) THEN r.context_json ELSE '{}' END, \
+               '$.\"review.source_was_circuit_owned\"')='1' AND a.status != 'archived' \
+         )",
         [],
         |row| row.get(0),
     )
@@ -581,7 +588,7 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     conn: &Connection,
     days: i64,
 ) -> SqlResult<(usize, usize)> {
-    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshots"] {
+    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshot_history", "circuit_run_snapshots"] {
         conn.execute(&format!("DELETE FROM {table} WHERE run_id IN ({SWEEPABLE_RUNS})"), params![days])?;
         conn.execute(&format!("DELETE FROM {table} WHERE run_id IN (
             SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ('completed','failed')

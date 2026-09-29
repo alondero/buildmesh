@@ -783,16 +783,17 @@ pub fn list_circuit_runs(
 // Human-in-the-loop (#1207): graceful pause/resume + collaborator approval.
 // ---------------------------------------------------------------------------
 
-/// Start a bounded follow-up on the retained work. Resuming the source uses
+/// Add bounded review rounds to the failed run on its retained work. Resuming the source uses
 /// the same lifecycle lease as Archive, so cleanup and process launch cannot
 /// own the agent concurrently.
 #[command]
-pub async fn continue_circuit_review(app: AppHandle, run_id: i64, max_rounds: i32) -> Result<i64, String> {
-    if let Some(existing) = crate::commands::run_blocking("existing_review_successor", move || {
-        crate::db::circuit::recovery::existing_review_successor(run_id)
+pub async fn continue_circuit_review(app: AppHandle, run_id: i64, additional_rounds: i32) -> Result<i64, String> {
+    if !(1..=10).contains(&additional_rounds) { return Err("Additional review rounds must be between 1 and 10.".into()); }
+    if let Some(existing) = crate::commands::run_blocking("existing_review_target", move || {
+        crate::db::circuit::recovery::existing_review_target(run_id)
     }).await? { return Ok(existing); }
     let source_id = crate::commands::run_blocking("review_recovery_source", move || {
-        crate::db::circuit::recovery::review_recovery_source(run_id, max_rounds)
+        crate::db::circuit::recovery::review_recovery_source(run_id)
     }).await?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
         use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};
@@ -801,11 +802,11 @@ pub async fn continue_circuit_review(app: AppHandle, run_id: i64, max_rounds: i3
                 .with_lifecycle_lease()).await.map_err(|error|
                     format!("Could not resume the implementation agent: {error}. Open the agent to resolve this, or recover from the PR branch and start a new review."))?;
         if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
-            return Err("The implementation agent is still being stopped or resumed. Try Continue review again in a moment.".into());
+            return Err("The implementation agent is still being stopped or resumed. Try Review again in a moment.".into());
         }
     }
-    let (next_id, state) = crate::commands::run_blocking("continue_failed_review", move || {
-        let next_id = crate::db::circuit::recovery::continue_failed_review(run_id, max_rounds)?;
+    let (next_id, state) = crate::commands::run_blocking("extend_failed_review", move || {
+        let next_id = crate::db::circuit::recovery::extend_failed_review(run_id, additional_rounds)?;
         let state = crate::db::get_circuit_run(next_id).map_err(|e| e.to_string())?
             .map(|run| run.state).unwrap_or_else(|| "pending".into());
         Ok((next_id, state))
