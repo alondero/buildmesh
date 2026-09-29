@@ -198,6 +198,15 @@ Command Code's Ink TUI can swallow keys when xterm.js leaves an unmatched bracke
 
 Each `write_to_agent` call enqueues one buffer. The per-agent writer thread drains that buffer with a single `write_all`. xterm's paste is one data event, so a large or multi-line paste stays one write, including its bracketed-paste markers. Do not split or pace that write to work around a slow provider. The multi-second stall on a large Windows paste is the provider reading console input one record at a time; evidence and the upstream reader change are in [Large paste latency](learning/large-paste-latency.md).
 
+Desktop clipboard paste into native Windows Grok uses its Ctrl+V command
+instead of streaming clipboard text. `TerminalRegistry.pasteClipboard` owns
+keyboard and context-menu delivery; its persistent element captures browser
+paste before xterm. `Terminal` selects this policy only for Grok on a Windows
+host with a Windows node. WSL and mobile/remote paste must send their own text,
+since they do not share the desktop clipboard. Programmatic `term.paste(text)`
+and backend prompt injection retain their existing semantics. See the
+[Grok paste investigation](learning/grok-terminal-paste.md) for runtime evidence.
+
 ### PTY output streaming (issue #1385 / #1393)
 
 Windows builds ship a pinned Microsoft ConPTY DLL and its matching native console

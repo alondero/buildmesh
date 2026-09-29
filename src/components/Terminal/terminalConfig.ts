@@ -1,4 +1,5 @@
 import type { ITerminalOptions } from '@xterm/xterm';
+import type { EnvType } from '../../types/generated/EnvType';
 import { currentTheme, onThemeChange, type ThemeName } from '../../lib/theme';
 
 export const TERMINAL_FONT_SIZE_MIN = 8;
@@ -120,6 +121,12 @@ const BASE_TERMINAL_OPTIONS: Omit<ITerminalOptions, 'fontSize' | 'theme'> = {
 export function ignoreBracketedPasteForHarness(provider: string): boolean {
   const harness = provider.split(':')[0];
   return harness === 'commandcode';
+}
+
+export function prefersNativeClipboardPasteForHarness(provider: string, env: EnvType | undefined, windowsHost: boolean): boolean {
+  // Only a local Windows process shares this desktop's clipboard. WSL and
+  // mobile/remote clients must continue sending the clipboard text itself.
+  return windowsHost && env === 'windows' && provider.split(':')[0] === 'grok';
 }
 
 export function createTerminalOptions(): ITerminalOptions {

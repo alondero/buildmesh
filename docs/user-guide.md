@@ -146,6 +146,17 @@ archiving its last node returns it to its manual position. Dragging a mesh
 only changes your manual arrangement — it never changes which band the mesh
 is in.
 
+## Paste into a terminal
+
+Use the terminal's **Paste** context-menu action or your usual paste shortcut.
+For native Windows Grok sessions, Buildmesh asks Grok to read the desktop
+clipboard directly, keeping long, multiline text in one pasted block. This
+also applies to Ctrl+Shift+V and Shift+Insert. Pasting stages the text; press
+Enter when you are ready to send it.
+
+WSL sessions, other harnesses, and the mobile terminal continue to receive
+clipboard text through the terminal connection.
+
 ## Hand work over to another node
 
 Select text in an agent's terminal and right-click it to hand that selection on

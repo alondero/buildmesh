@@ -206,6 +206,62 @@ describe('TerminalRegistry', () => {
   });
 
   describe('getOrCreate', () => {
+    it('uses the shared clipboard action for context-menu paste', async () => {
+      const inst = (await registry.getOrCreate(1))!;
+      inst.useNativeClipboardPaste = true;
+      vi.mocked(invoke).mockClear();
+      await registry.pasteClipboard(1);
+      expect(invoke).toHaveBeenCalledExactlyOnceWith('write_to_agent', { sessionId: 1, data: '\x16' });
+      expect(inst.term.paste).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a failed native paste as fragmented text', async () => {
+      const inst = (await registry.getOrCreate(1))!;
+      inst.useNativeClipboardPaste = true;
+      vi.mocked(invoke).mockClear().mockRejectedValueOnce(new Error('PTY closed'));
+      await expect(registry.pasteClipboard(1)).rejects.toThrow('PTY closed');
+      expect(vi.mocked(invoke).mock.calls.filter(([command]) => command !== 'log_frontend'))
+        .toEqual([['write_to_agent', { sessionId: 1, data: '\x16' }]]);
+      expect(inst.term.paste).not.toHaveBeenCalled();
+    });
+
+    it('retains one complete xterm paste for other terminals', async () => {
+      const inst = (await registry.getOrCreate(1))!;
+      const text = 'first line\r\n\r\nlast line';
+      vi.mocked(invoke).mockResolvedValueOnce(text);
+      await registry.pasteClipboard(1);
+      expect(inst.term.paste).toHaveBeenCalledExactlyOnceWith(text);
+    });
+
+    it('retains the browser clipboard fallback when the platform reader fails', async () => {
+      const inst = (await registry.getOrCreate(1))!;
+      vi.mocked(invoke).mockRejectedValueOnce(new Error('unsupported'));
+      const readText = vi.fn().mockResolvedValue('first\nsecond');
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { readText } });
+      try {
+        await registry.pasteClipboard(1);
+        expect(readText).toHaveBeenCalledOnce();
+        expect(inst.term.paste).toHaveBeenCalledExactlyOnceWith('first\nsecond');
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it.each([false, true])('sends one native Grok paste command (shift=%s)', async (shiftKey) => {
+      const inst = (await registry.getOrCreate(1))!;
+      inst.useNativeClipboardPaste = true;
+      vi.mocked(invoke).mockClear();
+      const handler = vi.mocked(inst.term.attachCustomKeyEventHandler).mock.calls[0][0];
+      const event = new KeyboardEvent('keydown', { key: 'v', ctrlKey: true, shiftKey, cancelable: true });
+
+      expect(handler(event)).toBe(false);
+      await Promise.resolve();
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(invoke).toHaveBeenCalledExactlyOnceWith('write_to_agent', { sessionId: 1, data: '\x16' });
+      expect(inst.term.paste).not.toHaveBeenCalled();
+    });
+
     it('creates a new instance', async () => {
       const inst = await registry.getOrCreate(1);
       expect(inst).not.toBeNull();
