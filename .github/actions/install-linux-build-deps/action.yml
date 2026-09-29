@@ -5,7 +5,9 @@ description: >-
   libayatana-appindicator3, libxdo, and OpenSSL even when the code under test is
   a unit test, so every job that compiles or runs the Rust suite needs this —
   not just the one that produces the Cargo cache. Verified on Actions: a Rust
-  job without it fails to load the test binary.
+  job without it fails to load the test binary. `lld` backs the Rust jobs'
+  `RUSTFLAGS=-C link-arg=-fuse-ld=lld`, which links a Tauri-sized binary with
+  far less memory and time than GNU ld.
 
 runs:
   using: composite
@@ -23,5 +25,6 @@ runs:
           libssl-dev \
           libwebkit2gtk-4.1-dev \
           libxdo-dev \
+          lld \
           patchelf \
           wget

@@ -85,11 +85,23 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
-| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, vitest unit + integration, and a compile of every Rust test target. |
-| `Verification / Rust tests + TS bindings` | yes | The full Rust suite, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It also refuses to run unless every test shard below passed. |
+| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, and the vitest unit + integration suites. The fast frontend gate — it no longer compiles Rust. |
+| `Verification / Rust tests + TS bindings` | yes | The Rust export, doctest, and integration targets, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It also refuses to run unless the compile job and every test shard below passed. |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
 | `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
 | `Verification / Platform smoke (macos-latest)` | yes | The Tauri app compiles and links on macOS. |
+
+The jobs fan out rather than chain. `Quality (Linux)` (frontend) and the
+**non-required** `Rust build (compile)` job both start immediately, and both
+`Platform smoke` jobs start with them — they consume nothing from either. The
+seven `Rust tests (<group>)` shards start once `Rust build (compile)` has
+populated the shared Cargo cache, and `Rust tests + TS bindings` starts once the
+compile and every shard have passed. Nothing queues behind the frontend gate
+any more, so a slow or queue-delayed frontend job no longer pushes the required
+Rust and platform checks to the end of the run. `Rust build (compile)` compiles
+every Rust test binary once — with `lld` and a runner swapfile in place of the
+old single-threaded `CARGO_BUILD_JOBS=1` — and the shards restore that cache
+instead of rebuilding.
 
 The Rust unit target also runs as seven parallel `Rust tests (<group>)` jobs —
 `db`, `services`, `agent`, `commands-http`, `autopilot-coordinator`,
