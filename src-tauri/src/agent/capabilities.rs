@@ -391,10 +391,10 @@ pub fn capabilities_for(adapter: &dyn AgentProvider) -> HarnessCapabilities {
     adapter.capabilities()
 }
 
-/// The closed-vocabulary effort values Claude Code accepts (issue #1143
-/// research). Kept here (not in the adapter) so the resolver and the
-/// capability descriptor agree on the same vocabulary.
-pub const CLAUDE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high"];
+/// Claude Code's effort levels. Availability varies by model, but the CLI
+/// accepts these values through `--effort`. Kept here (not in the adapter) so
+/// the resolver and capability descriptor agree on the same vocabulary.
+pub const CLAUDE_EFFORT_ALLOWED: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 
 /// Codex's reasoning-effort config key. The Codex CLI reads
 /// `model_reasoning_effort` from `-c` overrides (issue #1143 research, the
@@ -1085,14 +1085,14 @@ mod tests {
     }
 
     /// Mask: Claude Code's closed vocabulary drops values outside
-    /// `low|medium|high` even when the layer supplied one. The frontend can
+    /// `low|medium|high|xhigh|max` even when the layer supplied one. The frontend can
     /// use the same vocabulary to gate the input control.
     #[test]
     fn resolver_drops_effort_outside_claude_vocabulary() {
         let inputs = AgentConfigInputs {
             model: FieldInputs::default(),
             effort: FieldInputs {
-                explicit: Some("xhigh"),
+                explicit: Some("ultra"),
                 mesh: None,
                 application: None,
             },
@@ -1105,11 +1105,10 @@ mod tests {
         );
     }
 
-    /// Mask: Codex's inline-config vocabulary (`none|low|medium|high|xhigh`)
-    /// is a superset of Claude's — `xhigh` passes Codex's mask but fails
-    /// Claude's. The capability contract is per-harness.
+    /// Mask: Codex and Claude have different effort vocabularies, though both
+    /// accept `xhigh`. Claude also accepts `max`; the contract is per-harness.
     #[test]
-    fn resolver_accepts_codex_xhigh_but_rejects_claude_xhigh() {
+    fn resolver_accepts_xhigh_for_both_and_max_for_claude() {
         let inputs = AgentConfigInputs {
             model: FieldInputs::default(),
             effort: FieldInputs {
@@ -1124,11 +1123,21 @@ mod tests {
             Some("xhigh"),
             "Codex accepts xhigh via its inline-config vocabulary"
         );
-        let claude = resolve_agent_config(&anthropic_caps(), inputs, None);
-        assert!(
-            claude.effort.is_none(),
-            "Claude's closed vocabulary rejects xhigh"
-        );
+        for effort in ["xhigh", "max"] {
+            let claude = resolve_agent_config(
+                &anthropic_caps(),
+                AgentConfigInputs {
+                    effort: FieldInputs {
+                        explicit: Some(effort),
+                        mesh: None,
+                        application: None,
+                    },
+                    ..inputs.clone()
+                },
+                None,
+            );
+            assert_eq!(claude.effort.as_deref(), Some(effort));
+        }
     }
 
     /// Mesh legacy contract (issue #1149 acceptance criteria 5): a non-empty

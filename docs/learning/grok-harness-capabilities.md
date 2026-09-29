@@ -206,7 +206,7 @@ Compared with existing `EffortControlKind::Closed` vocabularies:
 
 | Harness | Vocabulary |
 |---|---|
-| Claude Code | `low`, `medium`, `high` |
+| Claude Code | `low`, `medium`, `high`, `xhigh`, `max` |
 | Codex | `none`, `low`, `medium`, `high`, `xhigh` |
 | **Grok** | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
 

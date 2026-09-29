@@ -209,7 +209,7 @@ regardless of which harness does the reviewing.
 
 | Harness | Control kind | Accepted values |
 |---|---|---|
-| Claude Code | Closed flag | `low`, `medium`, `high` |
+| Claude Code | Closed flag | `low`, `medium`, `high`, `xhigh`, `max` |
 | Codex | Inline config key `model_reasoning_effort` | `none`, `low`, `medium`, `high`, `xhigh` |
 | Antigravity | Closed flag | `low`, `medium`, `high` |
 | Grok Code | Closed flag | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
@@ -217,8 +217,8 @@ regardless of which harness does the reviewing.
 | Cline | Closed flag (`--thinking`) | `none`, `low`, `medium`, `high`, `xhigh` |
 | All other harnesses | None | — (the resolver drops the effort layer) |
 
-Grok's seven-value list is the superset across models; a given model only
-honours the levels its menu advertises.
+Claude Code and Grok expose the union of their model-specific effort levels;
+availability depends on the selected model.
 
 ## Session identity and resume
 

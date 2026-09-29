@@ -103,10 +103,10 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
-    /// Claude Code's reasoning-effort knob is the closed-vocab
-    /// `--effort <low|medium|high>` flag. The vocabulary list lives in
-    /// `agent::capabilities::CLAUDE_EFFORT_ALLOWED` (issue #1143 research)
-    /// and is consumed by both this method and the resolver.
+    /// Claude Code's reasoning-effort knob is the closed-vocabulary
+    /// `--effort` flag. The accepted list lives in
+    /// `agent::capabilities::CLAUDE_EFFORT_ALLOWED` and is consumed by both
+    /// this method and the resolver.
     fn effort_control(&self) -> EffortControlKind {
         EffortControlKind::Closed {
             allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),

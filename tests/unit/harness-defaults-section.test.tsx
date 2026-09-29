@@ -77,7 +77,7 @@ function providerFixture(
 const CLAUDE_ROW = providerFixture(
   'claude',
   'claude',
-  capsFixture('claude', { supports_model: true, effortKind: 'closed', effortAllowed: ['low', 'medium', 'high'] }),
+  capsFixture('claude', { supports_model: true, effortKind: 'closed', effortAllowed: ['low', 'medium', 'high', 'xhigh', 'max'] }),
 );
 const CODEX_ROW = providerFixture(
   'codex',
@@ -196,14 +196,13 @@ describe('Settings — Agent Harness defaults', () => {
     expect(screen.queryByTestId('harness-default-effort-select-opencode')).toBeNull();
   });
 
-  it('effort choices match the harness\'s declared vocabulary — Codex includes xhigh, Claude does not', async () => {
+  it('effort choices match each harness\'s declared vocabulary, including Claude xhigh and max', async () => {
     mockBackend({ providers: [CLAUDE_ROW, CODEX_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
 
     const claudeSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-claude');
     const claudeOptions = Array.from(claudeSelect.querySelectorAll('option')).map((o) => o.value);
-    // Claude's vocabulary: low/medium/high only — no `xhigh`.
-    expect(claudeOptions).toEqual(['', 'low', 'medium', 'high']);
+    expect(claudeOptions).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max']);
 
     const codexSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-codex');
     const codexOptions = Array.from(codexSelect.querySelectorAll('option')).map((o) => o.value);

@@ -148,6 +148,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn claude_launch_target_exposes_every_supported_effort_level() {
+        let prefs = serde_json::from_value(serde_json::json!({})).unwrap();
+        let targets = targets_for(&prefs, vec![super::super::HarnessProfile {
+            id: "claude".into(), name: "Claude Code".into(), harness: "anthropic".into(),
+            runtime: None, wsl_distro: None, executable: None,
+        }]);
+        let claude = targets.iter().find(|target| target.id == "claude").unwrap();
+
+        assert_eq!(claude.efforts, ["low", "medium", "high", "xhigh", "max"]);
+    }
+
+    #[test]
     fn launch_targets_offer_unattached_keyed_providers_without_mutating_routes() {
         let prefs: super::super::AppPreferences = serde_json::from_value(serde_json::json!({
             "provider_accounts": [

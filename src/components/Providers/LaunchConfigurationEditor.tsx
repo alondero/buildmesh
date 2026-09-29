@@ -97,9 +97,14 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
         </select>}
       </label>}
       {customModel && <label>Custom model<input required value={draft.model ?? ''} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label>}
-      {efforts.length > 0 && <label>Effort<select value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
-        <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-      </select></label>}
+      {efforts.length > 0 && <>
+        <label>Effort<select aria-describedby={target?.harness_id === 'claude' ? 'claude-effort-help' : undefined} value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
+          <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+        </select></label>
+        {target?.harness_id === 'claude' && <p id="claude-effort-help" className="text-text-secondary">
+          Availability depends on the selected model; max applies to the launched session.
+        </p>}
+      </>}
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
       {target?.verification_required && onVerify && <>
         <p>Verify the selected endpoint and model before launching. Verification sends a small tool-call request using your provider credential.</p>
