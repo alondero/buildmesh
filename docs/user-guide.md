@@ -282,10 +282,17 @@ the app-wide value when both exist.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance, quit confirmation, global Autopilot capacity, and the default worktree directory |
+| General | Appearance, quit confirmation, global Autopilot capacity, the default worktree directory, and the Probe spawn prompts |
 | Providers | Credentials, provider routing, accounts, and custom compatible endpoints |
 | Launch Configurations | Named recipes, harness ordering, fallback defaults, and advanced provider routes |
 | Remote Access | LAN/VPN exposure, the Coordinator Read API, certificate management, and paired-device revocation |
+
+**Probe spawn prompts** (Settings → General) customise the initial prompt
+for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
+Each template supports placeholders — `{{number}}`, `{{title}}`, `{{url}}`,
+`{{owner}}`, `{{repo}}`, plus `{{title_suffix}}` for issues and `{{policy}}`
+(the shared review policy) for PRs. Leave a template empty, or use **Reset
+to default**, to restore the built-in wording.
 
 The **Sandbox agent processes** option is per Mesh and is off by default. It is
 an OS process boundary, not a VM or a promise that the agent cannot send data

@@ -312,6 +312,124 @@ pub(crate) fn format_pull_request_prefill(
     )
 }
 
+/// Default template for the Issues-probe spawn prompt, shown in Settings
+/// as the default and used whenever the user has no custom template
+/// stored. Rendered via [`render_issue_spawn_prompt`]; rendering this
+/// constant is byte-identical to [`format_issue_prefill`] (pinned by
+/// `default_issue_template_matches_legacy_prefill` below).
+pub const DEFAULT_ISSUE_SPAWN_TEMPLATE: &str =
+    "Please work on GitHub issue #{{number}}{{title_suffix}}\n{{url}}";
+
+/// Default template for the PR-probe spawn prompt, shown in Settings as
+/// the default and used whenever the user has no custom template stored.
+/// Rendered via [`render_pr_spawn_prompt`]; rendering this constant is
+/// byte-identical to [`format_pull_request_prefill`] (pinned by
+/// `default_pr_template_matches_legacy_prefill` below).
+pub const DEFAULT_PR_SPAWN_TEMPLATE: &str = "Review PR #{{number}}\n{{policy}}\n{{url}}";
+
+/// Render an Issues-probe spawn template. Placeholders:
+/// `{{number}}`, `{{title}}` (trimmed, may be empty), `{{title_suffix}}`
+/// (`" - <title>"` with an em dash, or empty when the title is blank, so
+/// a custom template built on the default keeps the no-dangling-dash
+/// contract), `{{url}}`, `{{owner}}`, `{{repo}}`. Unknown `{{...}}`
+/// placeholders are left in place.
+pub(crate) fn render_issue_spawn_prompt(
+    template: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    title: &str,
+) -> String {
+    let title = title.trim();
+    let title_suffix = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" \u{2014} {title}")
+    };
+    let url = format!("https://github.com/{owner}/{repo}/issues/{number}");
+    template
+        .replace("{{number}}", &number.to_string())
+        .replace("{{title_suffix}}", &title_suffix)
+        .replace("{{title}}", title)
+        .replace("{{url}}", &url)
+        .replace("{{owner}}", owner)
+        .replace("{{repo}}", repo)
+}
+
+/// Render a PR-probe spawn template. Placeholders: `{{number}}`,
+/// `{{url}}`, `{{owner}}`, `{{repo}}`, `{{policy}}` (the shared review
+/// policy from [`crate::review_contract::REVIEW_POLICY`]). Unknown
+/// `{{...}}` placeholders are left in place.
+pub(crate) fn render_pr_spawn_prompt(
+    template: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+) -> String {
+    let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
+    template
+        .replace("{{number}}", &number.to_string())
+        .replace("{{policy}}", crate::review_contract::REVIEW_POLICY)
+        .replace("{{url}}", &url)
+        .replace("{{owner}}", owner)
+        .replace("{{repo}}", repo)
+}
+
+impl SpawnIntent {
+    /// Build the initial prompt with the user's stored probe-spawn
+    /// templates applied. This is the seam every Issue / PullRequest
+    /// consumer must use (desktop draft, background launch, Autopilot
+    /// watcher prefill): [`initial_prompt`] stays the pure built-in
+    /// default, and this wrapper substitutes the stored custom template
+    /// (if any) via [`render_issue_spawn_prompt`] /
+    /// [`render_pr_spawn_prompt`]. All other variants pass through to
+    /// [`initial_prompt`] unchanged.
+    ///
+    /// A blank stored template collapses to the default (the
+    /// `preferences::issue_spawn_prompt` / `pr_spawn_prompt` accessors
+    /// normalise it to `None`), so clearing the Settings field restores
+    /// the built-in wording without a stale empty prompt.
+    pub(crate) fn initial_prompt_resolved(&self) -> Option<InitialPrompt> {
+        match self {
+            Self::Issue(context) => {
+                let prompt = match crate::preferences::issue_spawn_prompt() {
+                    Some(template) => render_issue_spawn_prompt(
+                        &template,
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                        &context.title,
+                    ),
+                    None => format_issue_prefill(
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                        &context.title,
+                    ),
+                };
+                Some(InitialPrompt(prompt))
+            }
+            Self::PullRequest(context) => {
+                let prompt = match crate::preferences::pr_spawn_prompt() {
+                    Some(template) => render_pr_spawn_prompt(
+                        &template,
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                    ),
+                    None => format_pull_request_prefill(
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                    ),
+                };
+                Some(InitialPrompt(prompt))
+            }
+            _ => self.initial_prompt(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,5 +622,228 @@ https://github.com/alondero/buildmesh/issues/7"
     #[test]
     fn terminal_size_default_is_24x80() {
         assert_eq!(TerminalSize::default(), TerminalSize { rows: 24, cols: 80 });
+    }
+
+    /// Rendering the default issue template must be byte-identical to the
+    /// legacy prefill - for titled, empty, and whitespace-only titles - so
+    /// "no custom template stored" can never drift from the historical
+    /// wording.
+    #[test]
+    fn default_issue_template_matches_legacy_prefill() {
+        for title in ["Deepen spawn pipeline", "", "   \t  "] {
+            assert_eq!(
+                render_issue_spawn_prompt(
+                    DEFAULT_ISSUE_SPAWN_TEMPLATE,
+                    "alondero",
+                    "buildmesh",
+                    247,
+                    title
+                ),
+                format_issue_prefill("alondero", "buildmesh", 247, title),
+                "title {title:?} must render identically"
+            );
+        }
+    }
+
+    /// Same byte-identity contract for the PR default template.
+    #[test]
+    fn default_pr_template_matches_legacy_prefill() {
+        assert_eq!(
+            render_pr_spawn_prompt(DEFAULT_PR_SPAWN_TEMPLATE, "alondero", "buildmesh", 420),
+            format_pull_request_prefill("alondero", "buildmesh", 420),
+        );
+    }
+
+    /// Custom issue templates substitute every placeholder; the title is
+    /// trimmed before substitution.
+    #[test]
+    fn custom_issue_template_substitutes_placeholders() {
+        let out = render_issue_spawn_prompt(
+            "Working {{owner}}/{{repo}}#{{number}}: {{title}} ({{url}})",
+            "alondero",
+            "buildmesh",
+            7,
+            "  Fix it  ",
+        );
+        assert_eq!(
+            out,
+            "Working alondero/buildmesh#7: Fix it \
+             (https://github.com/alondero/buildmesh/issues/7)"
+        );
+    }
+
+    /// A blank title empties both `{{title}}` and `{{title_suffix}}`, so a
+    /// custom template built on the default never leaves a dangling dash.
+    #[test]
+    fn custom_issue_template_blank_title_empties_title_suffix() {
+        let out = render_issue_spawn_prompt(
+            DEFAULT_ISSUE_SPAWN_TEMPLATE,
+            "alondero",
+            "buildmesh",
+            7,
+            "   ",
+        );
+        assert_eq!(
+            out,
+            "Please work on GitHub issue #7\nhttps://github.com/alondero/buildmesh/issues/7"
+        );
+    }
+
+    /// Custom PR templates get the shared review policy plus the PR URL.
+    #[test]
+    fn custom_pr_template_substitutes_policy_and_url() {
+        let out = render_pr_spawn_prompt(
+            "Look at {{owner}}/{{repo}}#{{number}}: {{url}}\n{{policy}}",
+            "alondero",
+            "buildmesh",
+            9,
+        );
+        assert!(
+            out.contains("https://github.com/alondero/buildmesh/pull/9"),
+            "PR URL must be substituted: {out:?}"
+        );
+        assert!(
+            out.contains(crate::review_contract::REVIEW_POLICY),
+            "shared review policy must be substituted"
+        );
+    }
+
+    /// Placeholders the renderer does not know are left in place rather
+    /// than silently deleted, so a typo stays visible in the prompt.
+    #[test]
+    fn unknown_placeholders_are_left_in_place() {
+        let out = render_issue_spawn_prompt(
+            "#{{number}} {{bogus}}",
+            "alondero",
+            "buildmesh",
+            1,
+            "t",
+        );
+        assert_eq!(out, "#1 {{bogus}}");
+    }
+
+    /// Test-only prefs setup: point this test thread's preference cache at
+    /// a scratch dir (mirrors `preferences::tests::with_temp_dir`, which
+    /// lives in another module tree). Returns the dir so the caller can
+    /// remove it after resetting.
+    #[cfg(test)]
+    fn with_scratch_prefs() -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "buildmesh-intent-prompt-test-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::preferences::storage::init_for_tests(dir.clone());
+        dir
+    }
+
+    #[cfg(test)]
+    fn reset_scratch_prefs(dir: std::path::PathBuf) {
+        crate::preferences::storage::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no custom template stored, the resolved prompt equals the
+    /// built-in default.
+    #[test]
+    fn resolved_issue_prompt_falls_back_to_default() {
+        let dir = with_scratch_prefs();
+        let intent = SpawnIntent::Issue(IssueContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 3,
+            title: "Hi".into(),
+        });
+        assert_eq!(
+            intent.initial_prompt_resolved().map(|p| p.into_string()),
+            intent.initial_prompt().map(|p| p.into_string()),
+        );
+        reset_scratch_prefs(dir);
+    }
+
+    /// A stored custom template is honoured by the resolved prompt.
+    #[test]
+    fn resolved_issue_prompt_uses_stored_template() {
+        let dir = with_scratch_prefs();
+        crate::preferences::update(|prefs| {
+            prefs.issue_spawn_prompt = Some("Custom #{{number}}: {{title}}".into());
+        })
+        .unwrap();
+        let intent = SpawnIntent::Issue(IssueContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 3,
+            title: "Hi".into(),
+        });
+        assert_eq!(
+            intent.initial_prompt_resolved().map(|p| p.into_string()),
+            Some("Custom #3: Hi".to_string()),
+        );
+        reset_scratch_prefs(dir);
+    }
+
+    /// A blank stored template collapses to the default (the accessor
+    /// normalises it to `None`).
+    #[test]
+    fn resolved_issue_prompt_treats_blank_template_as_default() {
+        let dir = with_scratch_prefs();
+        crate::preferences::update(|prefs| {
+            prefs.issue_spawn_prompt = Some("   ".into());
+        })
+        .unwrap();
+        let intent = SpawnIntent::Issue(IssueContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 3,
+            title: "Hi".into(),
+        });
+        assert_eq!(
+            intent.initial_prompt_resolved().map(|p| p.into_string()),
+            intent.initial_prompt().map(|p| p.into_string()),
+        );
+        reset_scratch_prefs(dir);
+    }
+
+    /// A stored custom PR template is honoured by the resolved prompt.
+    #[test]
+    fn resolved_pr_prompt_uses_stored_template() {
+        let dir = with_scratch_prefs();
+        crate::preferences::update(|prefs| {
+            prefs.pr_spawn_prompt = Some("Look at {{url}}".into());
+        })
+        .unwrap();
+        let intent = SpawnIntent::PullRequest(PullRequestContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 11,
+        });
+        assert_eq!(
+            intent.initial_prompt_resolved().map(|p| p.into_string()),
+            Some("Look at https://github.com/alondero/buildmesh/pull/11".to_string()),
+        );
+        reset_scratch_prefs(dir);
+    }
+
+    /// Non-probe variants pass through untouched.
+    #[test]
+    fn resolved_prompt_passes_other_variants_through() {
+        let dir = with_scratch_prefs();
+        crate::preferences::update(|prefs| {
+            prefs.issue_spawn_prompt = Some("Custom".into());
+            prefs.pr_spawn_prompt = Some("Custom".into());
+        })
+        .unwrap();
+        assert_eq!(SpawnIntent::Fresh.initial_prompt_resolved(), None);
+        let looped = SpawnIntent::Loop {
+            initial_prompt: "iterate".into(),
+        };
+        assert_eq!(
+            looped.initial_prompt_resolved().map(|p| p.into_string()),
+            Some("iterate".to_string()),
+        );
+        reset_scratch_prefs(dir);
     }
 }

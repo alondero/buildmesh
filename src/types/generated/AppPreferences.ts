@@ -170,4 +170,34 @@ worktree_directory: string | null,
  * Additive on disk — older `preferences.json` without it loads as
  * `true` via `#[serde(default = ...)]`.
  */
-confirm_before_quit: boolean, };
+confirm_before_quit: boolean, 
+/**
+ * Custom template for the initial prompt handed to an agent spawned
+ * from the Probe's GitHub Issues tab (`create_issue_node`).
+ * `None` (the default) keeps the built-in wording (see
+ * `agent::spawn::intent::DEFAULT_ISSUE_SPAWN_TEMPLATE`, rendered with
+ * the issue's number, title, and URL). A blank value collapses to
+ * `None` on read, so clearing the field restores the default.
+ * Supported placeholders: `{{number}}`, `{{title}}`,
+ * `{{title_suffix}}` (`" -- <title>"`-style suffix with an em dash,
+ * or empty when the title is blank), `{{url}}`, `{{owner}}`,
+ * `{{repo}}`. Unknown placeholders are left in place.
+ * Additive on disk - older `preferences.json` files without it load
+ * as `None`.
+ */
+issue_spawn_prompt: string | null, 
+/**
+ * Custom template for the initial prompt handed to an agent spawned
+ * from the Probe's Pull Requests tab (`create_pr_node`), including
+ * the PR pill's "Spawn reviewer agent" row.
+ * `None` (the default) keeps the built-in wording (see
+ * `agent::spawn::intent::DEFAULT_PR_SPAWN_TEMPLATE`: the shared
+ * review policy plus the PR URL). A blank value collapses to `None`
+ * on read, so clearing the field restores the default.
+ * Supported placeholders: `{{number}}`, `{{url}}`, `{{owner}}`,
+ * `{{repo}}`, `{{policy}}` (the shared review policy). Unknown
+ * placeholders are left in place.
+ * Additive on disk - older `preferences.json` files without it load
+ * as `None`.
+ */
+pr_spawn_prompt: string | null, };

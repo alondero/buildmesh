@@ -219,7 +219,7 @@ pub(crate) fn launch_autopilot_node(
     // harnesses start fresh and receive the prompt over the live PTY.
     let prefill = plan
         .intent
-        .initial_prompt()
+        .initial_prompt_resolved()
         .map(|p| p.into_string())
         .unwrap_or_default();
     let prompt_delivery =

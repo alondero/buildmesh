@@ -544,7 +544,7 @@ pub fn create_issue_node(
     // `unwrap_or_default()` is unreachable in practice but kept as a
     // defensive fallback matching the wire-shape contract.
     let prefill = intent
-        .initial_prompt()
+        .initial_prompt_resolved()
         .map(|p| p.into_string())
         .unwrap_or_default();
     // Issue #111: seed the node with a `gh{N}-{slug}` name (mirrors
@@ -931,7 +931,7 @@ pub(crate) fn create_pr_node_impl_configured(
         number: pr_number,
     });
     let prefill = intent
-        .initial_prompt()
+        .initial_prompt_resolved()
         .map(|p| p.into_string())
         .unwrap_or_default();
 
@@ -1334,7 +1334,7 @@ mod tests {
         // here would mean the agent gets a different PR URL on the
         // desktop draft vs the background launch.
         let expected_prefill = intent
-            .initial_prompt()
+            .initial_prompt_resolved()
             .map(|p| p.into_string())
             .expect("PullRequest intent always has an initial prompt");
         assert_eq!(

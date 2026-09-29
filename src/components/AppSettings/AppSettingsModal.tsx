@@ -8,6 +8,7 @@ import { getOrderableHarnesses } from './harnessOrder';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
+import { ProbeSpawnPromptsSection, type ProbePromptKind } from './ProbeSpawnPromptsSection';
 import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
 import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import { UpdateAboutSection } from './UpdateAboutSection';
@@ -61,13 +62,13 @@ const SETTINGS_TABS = [
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
 
 /** Which pane a dirty site belongs to, so its nav item can show the
- *  unsaved-changes dot. Site keys: `autopilot-pool` + `worktree-dir`
- *  (General), `harness-defaults` and the prefixed `harness-*` sites wired by
- *  HarnessConfigList (Harnesses), and `account-*` / `add-custom-form`
- *  (Providers). The default-provider / reviewer / auto-naming selects save
- *  immediately and are never dirty. */
+ *  unsaved-changes dot. Site keys: `autopilot-pool` + `worktree-dir` +
+ *  `probe-prompts` (General), `harness-defaults` and the prefixed
+ *  `harness-*` sites wired by HarnessConfigList (Harnesses), and
+ *  `account-*` / `add-custom-form` (Providers). The default-provider /
+ *  reviewer / auto-naming selects save immediately and are never dirty. */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool' || site === 'worktree-dir') return 'general';
+  if (site === 'autopilot-pool' || site === 'worktree-dir' || site === 'probe-prompts') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -721,6 +722,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       worktreeDirSavedRef.current = storedWorktreeDir;
       useExitPromptStore.getState().setConfirmBeforeQuit(prefs.confirm_before_quit ?? true);
       setHarnessDefaults(prefs.harness_defaults ?? {});
+      setProbePrompts({
+        issue: prefs.issue_spawn_prompt ?? null,
+        pr: prefs.pr_spawn_prompt ?? null,
+      });
     },
     onProvidersLoaded: (list) => {
       setProviders(list);
@@ -834,6 +839,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // backend normalise-on-write (e.g. clearing an all-blank value) is
   // reflected without a stale local cache.
   const [harnessDefaults, setHarnessDefaults] = useState<Record<string, HarnessConfigValue>>({});
+  // Probe spawn prompt templates. `probePrompts` holds the stored custom
+  // templates (`null` = no override, the built-in default is active);
+  // `probePromptDefaults` holds the built-in templates for display
+  // (`null` until the defaults IPC resolves — the section stays
+  // disabled until then).
+  const [probePrompts, setProbePrompts] = useState<{ issue: string | null; pr: string | null }>({
+    issue: null,
+    pr: null,
+  });
+  const [probePromptDefaults, setProbePromptDefaults] = useState<{
+    issue: string;
+    pr: string;
+  } | null>(null);
   // Mirrored here so the rename picker only enables after the
   // preferences load resolves (issue #1534).
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
@@ -946,6 +964,28 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // accepts the same `(key, options?)` signature the modal's call
   // sites use, and replaces the 7-case switch with a `Record`-based
   // dispatch.
+
+  // Built-in probe-spawn templates for the Settings display. Static per
+  // binary with no mesh context, so they load once outside the resource
+  // state machine; the section stays disabled until they resolve. A
+  // failure surfaces inline in the section (with Retry) rather than
+  // leaving the cards silently disabled.
+  const [probeDefaultsError, setProbeDefaultsError] = useState<string | null>(null);
+  const loadProbeDefaults = useCallback(() => {
+    setProbeDefaultsError(null);
+    return api
+      .getProbeSpawnPromptDefaults()
+      .then((d) => {
+        setProbePromptDefaults({ issue: d.issue_template, pr: d.pr_template });
+      })
+      .catch((err) => {
+        console.error('Failed to load probe prompt defaults:', err);
+        setProbeDefaultsError(formatError(err));
+      });
+  }, []);
+  useEffect(() => {
+    void loadProbeDefaults();
+  }, [loadProbeDefaults]);
 
   useEffect(() => {
     // Fan out the six independent initial loads concurrently.
@@ -1346,6 +1386,41 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       return false;
     }
   };
+
+  // Probe spawn prompt templates. One save path per side; the boolean
+  // return drives the section's optimistic commit/rollback, and the
+  // post-write `loadPreferences()` picks up the backend
+  // normalise-on-write (a blank draft clears the override) so the
+  // "Using default" badge flips without a stale snapshot.
+  const handleSetProbePrompt = async (kind: ProbePromptKind, value: string): Promise<boolean> => {
+    setError(null);
+    try {
+      if (kind === 'issue') await api.setAppIssueSpawnPrompt(value);
+      else await api.setAppPrSpawnPrompt(value);
+      await loadPreferences();
+      return true;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
+  };
+
+  const handleResetProbePrompt = async (kind: ProbePromptKind): Promise<boolean> => {
+    setError(null);
+    try {
+      if (kind === 'issue') await api.setAppIssueSpawnPrompt(null);
+      else await api.setAppPrSpawnPrompt(null);
+      await loadPreferences();
+      return true;
+    } catch (e) {
+      setError(formatError(e));
+      return false;
+    }
+  };
+  const probePromptsDirtyChange = useCallback(
+    (dirty: boolean) => siteDirtyChange('probe-prompts', dirty),
+    [siteDirtyChange],
+  );
 
   // Commit the worktree-directory draft (blur / Enter, issue #1519). `''`
   // (or whitespace-only) clears the app default so inheriting Meshes fall
@@ -1894,6 +1969,17 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             (UpdatePrompt) handles nag-style flow; Settings exposes
             current version + manual check + install progress for users
             who want to drive it themselves. */}
+        <ProbeSpawnPromptsSection
+          stored={probePrompts}
+          defaults={probePromptDefaults}
+          onSave={handleSetProbePrompt}
+          onReset={handleResetProbePrompt}
+          onDirtyChange={probePromptsDirtyChange}
+          defaultsError={probeDefaultsError}
+          onRetryDefaults={() => void loadProbeDefaults()}
+          disabled={!prefsLoaded}
+        />
+
         <UpdateAboutSection />
         </section>
 
