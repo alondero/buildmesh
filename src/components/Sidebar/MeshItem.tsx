@@ -4,7 +4,6 @@ import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
-import type { AgentNode } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
@@ -18,7 +17,8 @@ import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { dropdownId } from '../../lib/dropdownId';
-import { NodeItem } from './NodeItem';
+import { NodeCluster } from './NodeCluster';
+import type { NodeActivityCluster } from '../../lib/nodeActivities';
 import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
 import type { SpawnOption } from '../../lib/groups';
@@ -67,7 +67,13 @@ interface MeshItemProps {
   // for this mesh. Replaces the legacy `onToggleFileExplorer` prop, which
   // toggled the deleted SessionView left-pane `FileExplorerPanel`.
   onOpenFilesProbe: () => void;
-  meshNodes: AgentNode[];
+  /** Paired agents share one Node Activity card, and the sidebar clusters them
+   *  under a connector rail so the pairing is visible here too. Derived in
+   *  `Sidebar` from the same `activityRootId` resolver the grid uses (via
+   *  `clusterActivityNodes`), so the two surfaces cannot disagree about
+   *  membership. Replaces the flat `meshNodes` list; each cluster carries its
+   *  own ordered members. */
+  nodeClusters: NodeActivityCluster[];
   onActivateNode: (id: number) => void;
   selectMesh: (id: number | null) => void;
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
@@ -100,14 +106,21 @@ interface MeshItemProps {
 /// `Sidebar` maps all meshes on each store change, so without memo every
 /// `MeshItem` (and through it every `NodeItem`) re-rendered on any node
 /// patch. The comparator below bails out unless this mesh's own data
-/// changed. `meshNodes` is compared element-wise (not by array identity):
+/// changed. `nodeClusters` is compared element-wise (not by array identity):
 /// `Sidebar`'s grouped map rebuilds the per-mesh arrays on each store
 /// update while the store's shallow reconciliation (issue #1384) preserves
-/// per-node references, so identical element references mean "nothing in
+/// per-node references, so identical member references mean "nothing in
 /// this mesh changed". All callbacks come from `Sidebar`'s `useCallback`
 /// set, so reference equality on them holds in the steady state.
-function sameMeshNodeRefs(left: AgentNode[], right: AgentNode[]): boolean {
-  return left.length === right.length && left.every((node, index) => node === right[index]);
+function sameClusterLists(left: NodeActivityCluster[], right: NodeActivityCluster[]): boolean {
+  return left.length === right.length && left.every((cluster, index) => {
+    const other = right[index];
+    return cluster.root === other.root
+      && cluster.paired === other.paired
+      && cluster.handGrouped === other.handGrouped
+      && cluster.members.length === other.members.length
+      && cluster.members.every((node, memberIndex) => node === other.members[memberIndex]);
+  });
 }
 
 function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
@@ -118,7 +131,7 @@ function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): bo
     && previous.isSpawning === next.isSpawning
     && previous.dimmed === next.dimmed
     && previous.providerList === next.providerList
-    && sameMeshNodeRefs(previous.meshNodes, next.meshNodes)
+    && sameClusterLists(previous.nodeClusters, next.nodeClusters)
     && previous.onSelectMesh === next.onSelectMesh
     && previous.onNewNode === next.onNewNode
     && previous.onSelectProvider === next.onSelectProvider
@@ -147,7 +160,7 @@ function MeshItemView({
   onNewNode,
   onSelectProvider,
   onOpenFilesProbe,
-  meshNodes,
+  nodeClusters,
   onActivateNode,
   selectMesh,
   onDeleteNode,
@@ -493,11 +506,13 @@ function MeshItemView({
         </div>
       )}
 
-      {/* Agent nodes within this mesh */}
-      {meshNodes.map(node => (
-        <NodeItem
-          key={node.id}
-          node={node}
+      {/* Agent nodes within this mesh, clustered by Node Activity so paired
+          agents read as one card with sub-agents. A lone node renders as a
+          bare row with no rail — unchanged from the flat list. */}
+      {nodeClusters.map(cluster => (
+        <NodeCluster
+          key={cluster.root.id}
+          cluster={cluster}
           meshColor={meshColor}
           // Issue #774 — the Regenerate submenu shows every available
           // Spawn Option as a picker; threading `providerList` keeps the

@@ -20,6 +20,7 @@ import { MeshItem } from '../../src/components/Sidebar/MeshItem';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
 import type { SpawnOption } from '../../src/lib/groups';
+import type { NodeActivityCluster } from '../../src/lib/nodeActivities';
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS. Mock it
 // at file scope so the new "View on GitHub" click test (and any
@@ -65,6 +66,12 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
+/** A cluster of one — what `clusterActivityNodes` returns for an unpaired node,
+ *  and the shape the sidebar renders as a bare row (no rail, no indent). */
+function loneCluster(node: AgentNode): NodeActivityCluster {
+  return { root: node, members: [node], paired: false, handGrouped: false };
+}
+
 type Props = React.ComponentProps<typeof MeshItem>;
 
 function renderMeshItem(overrides: Partial<Props> = {}) {
@@ -86,7 +93,10 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     // modal components stay on disk but no consumer wires them up.
     onOpenIssuesProbe: vi.fn(),
     onOpenSessionHistoryProbe: vi.fn(),
-    meshNodes: [],
+    // Paired agents are clustered by Node Activity in `Sidebar` (via
+    // `clusterActivityNodes`) and handed down as clusters, so a mesh with no
+    // pairings passes an empty cluster list rather than a flat node list.
+    nodeClusters: [],
     onActivateNode: vi.fn(),
     selectMesh: vi.fn(),
     onDeleteNode: vi.fn(),
@@ -163,7 +173,7 @@ describe('MeshItem', () => {
   });
 
   it('renders a NodeItem per mesh node and selects it on click', async () => {
-    const { props } = renderMeshItem({ meshNodes: [makeNode()] });
+    const { props } = renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
     await userEvent.click(screen.getByText('node-a'));
     expect(props.onActivateNode).toHaveBeenCalledWith(10);
     expect(props.selectMesh).toHaveBeenCalledWith(3);
@@ -897,7 +907,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
                 onOpenWorktreesProbe={vi.fn()}
                 onOpenIssuesProbe={vi.fn()}
                 onOpenSessionHistoryProbe={vi.fn()}
-                meshNodes={[]}
+                nodeClusters={[]}
                 onActivateNode={vi.fn()}
                 selectMesh={vi.fn()}
                 onDeleteNode={vi.fn()}

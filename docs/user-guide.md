@@ -119,6 +119,20 @@ the layout: agents retain their own processes, worktrees, and close actions.
 If the group's title node is archived or deleted, surviving members remain
 accessible. Grouping does not combine nodes from different Meshes.
 
+### Groups in the sidebar
+
+The sidebar shows the same groups, so you can see a pairing from either side.
+Paired agents appear as one cluster: the group's title node on top, the other
+agents indented beneath it and joined by a connector rail. A slim marker on
+the left of the title row and a hover tooltip naming every member (with its
+role) make the pairing explicit. The marker's status is the group's combined
+status — if any member needs attention or errors, the group does too, even when
+the title node itself looks healthy.
+
+An agent that is not paired is drawn exactly as a single row, with no rail or
+indent. Every agent in a group stays individually clickable, renameable, and
+deletable; grouping is a view, not a merged node.
+
 ## Find open work in the sidebar
 
 Meshes that currently have at least one open agent node sit at the top of
