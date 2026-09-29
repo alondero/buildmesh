@@ -13,12 +13,13 @@ name: Verify
 # ruleset, so renaming one here is a policy change: update the ruleset and
 # docs/development/releasing.md in the same commit.
 #
-# The jobs form a fan-out, not a chain. `quality` (frontend) and `rust-build`
-# (the single Rust compile) both start at t=0; the seven `rust-tests` shards,
-# `rust-bindings`, and both `platform-smoke` jobs start as soon as the one
-# upstream job they actually consume is ready, instead of waiting behind one
-# ~10-minute monolith. A runner that takes a few minutes to be handed over then
-# delays only its own branch of the graph, not every job behind it.
+# The jobs form a fan-out, not a chain. `quality` (frontend), `rust-build` (the
+# single Rust compile), and both `platform-smoke` jobs start at t=0; the seven
+# `rust-tests` shards start as soon as `rust-build` is ready, and the
+# `rust-bindings` aggregate starts once `quality`, `rust-build`, and every shard
+# have finished. Nothing waits behind one ~10-minute monolith any more: a runner
+# that takes a few minutes to be handed over delays only its own branch of the
+# graph, not every job behind it.
 #
 # Job event guards use the *caller's* event name, which is what keeps the
 # weekly schedule off the browser job: a scheduled run skips `verify-smoke` and

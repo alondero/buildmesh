@@ -95,13 +95,15 @@ The jobs fan out rather than chain. `Quality (Linux)` (frontend) and the
 **non-required** `Rust build (compile)` job both start immediately, and both
 `Platform smoke` jobs start with them — they consume nothing from either. The
 seven `Rust tests (<group>)` shards start once `Rust build (compile)` has
-populated the shared Cargo cache, and `Rust tests + TS bindings` starts once the
-compile and every shard have passed. Nothing queues behind the frontend gate
-any more, so a slow or queue-delayed frontend job no longer pushes the required
-Rust and platform checks to the end of the run. `Rust build (compile)` compiles
-every Rust test binary once — with `lld` and a runner swapfile in place of the
-old single-threaded `CARGO_BUILD_JOBS=1` — and the shards restore that cache
-instead of rebuilding.
+populated the shared Cargo cache; the `Rust tests + TS bindings` aggregate then
+starts once `Quality (Linux)`, `Rust build (compile)`, and every shard have
+finished. It keeps `Quality (Linux)` in its `needs` so the authoritative pass
+only runs against a fully green tree — that dependency costs no wall-clock,
+because the frontend gate finishes in a few minutes, well before the shards.
+The old shape queued everything behind one ~10-minute frontend job; this one
+does not. `Rust build (compile)` compiles every Rust test binary once — with
+`lld` and a runner swapfile in place of the old single-threaded
+`CARGO_BUILD_JOBS=1` — and the shards restore that cache instead of rebuilding.
 
 The Rust unit target also runs as seven parallel `Rust tests (<group>)` jobs —
 `db`, `services`, `agent`, `commands-http`, `autopilot-coordinator`,
