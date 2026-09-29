@@ -50,6 +50,26 @@ responses do not change the input generation or invent a draft, including when
 packets span writes. Real text, edits, paste and submission retain their fences.
 Unknown input cannot be silently converted into permission to automate.
 
+A pending Escape or incomplete CSI keyboard sequence must not consume a later,
+separate Enter or Ctrl+C event as its final byte. Desktop IPC and mobile
+WebSocket input preserve complete xterm `onData` events; raw/programmatic byte
+writes have no such framing guarantee. Outside bracketed paste, a standalone
+control event re-establishes the boundary and invalidates older input stamps.
+Alt+Enter (Escape plus Enter in one event) remains uncertain, including when
+delivered as fragments through the raw byte API. Controls in
+paste or OSC string payloads remain literal/uncertain; they cannot authorize a
+handoff. An unfinished Escape alone remains uncertain, and no timeout converts
+it into an empty prompt.
+
+Run 265 (source agent 4636) recorded `input_uncertain` at `await_source` on
+September 29, 2026 at 17:38:20 UTC. Its history proves that input attribution
+blocked report binding, but does not retain the bytes that caused it. A replay
+against the production decoder reproduced Escape followed by Enter or Ctrl+C
+remaining uncertain, including across separate writes. The regression covers
+decoder recovery and registry report fencing; it is not a reconstruction of
+that run's keystrokes or proof that its live checkpoint has advanced. PR 1967's
+lifecycle observation changes do not modify this input decoder.
+
 Deterministic preflight precedes inference. A usable candidate carries its
 identity and stable report snapshot; an unusable candidate yields a typed blocker
 with precise text in step context/history. Do not spend classifier calls on a

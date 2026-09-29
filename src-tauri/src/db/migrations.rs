@@ -80,7 +80,7 @@
 //! `test_v8_to_v9_adds_source_issue_via_safety_net` and the new
 //! `evolve_to_handles_v6_to_current` test.
 
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 
 /// The schema version this build expects. Bumped per PR whenever a new
 /// migration entry is added to [`all_column_specs`].
@@ -240,6 +240,8 @@ pub(crate) struct OneShotBackfill {
 /// pure function — no state, no race window.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum AlwaysStep {
+    /// Group historic automatic review continuations under their original Circuit.
+    ConsolidateContinuedReviews,
     /// Re-apply the v19 Spawn Option composite-id rewrite (issue #575,
     /// first-class block). Idempotent (`WHERE provider NOT LIKE '%:%'`).
     RewriteAgentNodeProviderId,
@@ -598,6 +600,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnforceCircuitRunCapacityRange,
     AlwaysStep::DropLegacySessionRecoveryKeys,
     AlwaysStep::DeduplicateReviewPresets,
+    AlwaysStep::ConsolidateContinuedReviews,
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
 ];
 
@@ -803,6 +806,54 @@ fn run_one_shot(conn: &Connection, backfill: &OneShotBackfill) -> SqlResult<()> 
 
 fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
     match step {
+        AlwaysStep::ConsolidateContinuedReviews => {
+            if !table_present(conn, "autopilot_circuits")? || !table_present(conn, "autopilot_circuit_runs")? {
+                return Ok(());
+            }
+            let tx = conn.unchecked_transaction()?;
+            let candidates: Vec<(i64, i64, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT r.id,r.circuit_id,r.context_json FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuits c ON c.id=r.circuit_id
+                     WHERE c.name='Continued review' AND c.description='Continue a failed review on its retained worktree'"
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<SqlResult<_>>()?;
+                rows
+            };
+            for (run_id, old_circuit_id, context_json) in candidates {
+                let mut parent = serde_json::from_str::<serde_json::Value>(&context_json).ok()
+                    .and_then(|context| context.get("recovery.from_run_id")?.as_str()?.parse::<i64>().ok());
+                let mut visited = std::collections::HashSet::from([run_id]);
+                let mut original = None;
+                while let Some(parent_id) = parent {
+                    if !visited.insert(parent_id) { break; }
+                    let ancestor: Option<(i64, String)> = tx.query_row(
+                        "SELECT circuit_id,context_json FROM autopilot_circuit_runs WHERE id=?1",
+                        [parent_id], |row| Ok((row.get(0)?, row.get(1)?))
+                    ).optional()?;
+                    let Some((circuit_id, ancestor_context)) = ancestor else { break; };
+                    parent = serde_json::from_str::<serde_json::Value>(&ancestor_context).ok()
+                        .and_then(|context| context.get("recovery.from_run_id")?.as_str()?.parse::<i64>().ok());
+                    if parent.is_none() { original = Some(circuit_id); }
+                }
+                let Some(original_circuit_id) = original.filter(|id| *id != old_circuit_id) else { continue; };
+                let name: Option<String> = tx.query_row("SELECT name FROM autopilot_circuits WHERE id=?1",
+                    [original_circuit_id], |row| row.get(0)).optional()?;
+                let Some(name) = name else { continue; };
+                let mut context: serde_json::Value = serde_json::from_str(&context_json).unwrap_or_default();
+                context["circuit.id"] = original_circuit_id.to_string().into();
+                context["circuit.name"] = name.into();
+                tx.execute("UPDATE autopilot_circuit_runs SET circuit_id=?2,context_json=?3 WHERE id=?1",
+                    params![run_id, original_circuit_id, context.to_string()])?;
+            }
+            tx.execute(
+                "DELETE FROM autopilot_circuits WHERE name='Continued review'
+                 AND description='Continue a failed review on its retained worktree'
+                 AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs r WHERE r.circuit_id=autopilot_circuits.id)", []
+            )?;
+            tx.commit()?;
+        }
         AlwaysStep::DropCheckpoints => {
             // v12 — checkpoint feature was removed; the table is dead.
             // `DROP TABLE IF EXISTS` is fully idempotent. The runner

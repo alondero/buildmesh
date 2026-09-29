@@ -45,6 +45,24 @@ on new nodes. If an already-open node is stuck, press Ctrl+C once, then type.
 Downgrading the CLI to 1.55 with `COMMANDCODE_SKIP_UPDATES=1` also restores
 typing outside Buildmesh.
 
+## A Circuit says terminal input tracking is uncertain
+
+An **Unverified Checkpoint** at **Await task** means Buildmesh cannot yet bind
+the source agent's report to a known terminal input boundary. It does not mean
+the task failed. Keyboard navigation or an incomplete escape sequence can make
+the prompt contents uncertain, even when the terminal appears idle.
+
+Inspect the source agent's prompt. Submit it with Enter if you intend to send
+it, or use the harness's clear/cancel action (normally Ctrl+C; this can also
+interrupt running work). Buildmesh rechecks automatically. Clearing scrollback
+or dismissing attention does not clear the prompt. Other evidence requirements
+still apply before the Circuit can advance.
+
+Updated builds recognize separate Enter and Ctrl+C key events after an unfinished Escape/CSI
+keyboard sequence; older builds could consume that recovery key as part of the
+sequence and remain uncertain. Alt+Enter, paste contents and terminal string payloads
+cannot establish a submission boundary.
+
 ## An Agent Node will not resume
 
 Terminal nodes and agents that have not captured a session id are

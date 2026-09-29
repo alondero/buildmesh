@@ -125,6 +125,68 @@ const SMOKE_FIXTURES = {
   get_mesh_pool_count: 0,
 };
 
+test('Windows Grok clipboard gestures send one native paste command through real xterm', async ({ page }) => {
+  const writes: Array<{ sessionId: number; data: string }> = [];
+  await page.exposeFunction('recordGrokPaste', (args: { sessionId: number; data: string }) => writes.push(args));
+  await page.addInitScript({ content: buildInitScript({
+    ...SMOKE_FIXTURES,
+    list_agent_nodes: [{ ...SMOKE_FIXTURES.list_agent_nodes[0], provider: 'grok', env: 'windows' }],
+  }) });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'platform', { value: 'Win32' });
+    const host = window as unknown as {
+      recordGrokPaste(args: unknown): Promise<void>;
+      __BUILDMESH_MOCK__: { on(command: string, handler: (args: unknown) => unknown): void };
+    };
+    host.__BUILDMESH_MOCK__.on('write_to_agent', (args) => host.recordGrokPaste(args));
+    host.__BUILDMESH_MOCK__.on('read_clipboard', () => { throw new Error('Grok must read its own clipboard'); });
+  });
+  await page.goto('/');
+  await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+  const terminal = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`);
+  const textarea = terminal.locator('textarea');
+  await expect(terminal).toBeVisible();
+  await textarea.focus();
+  await page.keyboard.press('Control+v');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await page.keyboard.press('Control+Shift+v');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await page.keyboard.press('Shift+Insert');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await terminal.click({ button: 'right' });
+  await page.getByRole('button', { name: /^Paste/ }).click();
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+
+  // Browser paste must not also run xterm's handler.
+  writes.length = 0;
+  await textarea.evaluate((element) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData('text/plain', Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\r\n'));
+    element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  });
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+
+  // A normal Enter remains a separate user action, never appended to paste.
+  writes.length = 0;
+  await textarea.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\r' }]);
+
+  // File drops and other supplied text must not paste the desktop clipboard.
+  writes.length = 0;
+  await page.evaluate(async (id) => {
+    const term = window.__terminalManager!.getTerminal(id)!;
+    await new Promise<void>((resolve) => term.write('\x1b[?2004h', resolve));
+    term.paste('supplied\ntext');
+  }, SMOKE_NODE_ID);
+  await expect.poll(() => writes).toEqual([{
+    sessionId: SMOKE_NODE_ID, data: '\x1b[200~supplied\rtext\x1b[201~',
+  }]);
+});
+
 /**
  * Push a few lines of PTY bytes into the Tauri mock's `agent-output`
  * event. The mock fans out to every registered listener — including
@@ -284,6 +346,27 @@ test.describe('verify-smoke (issue #157)', () => {
     // the renderer-agnostic buffer model so this works under both xterm
     // renderers (DOM and WebGL).
     await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
+  });
+
+  test('agent input preserves separate recovery keys and a single Alt+Enter event', async ({ page }) => {
+    const writes: string[] = [];
+    await page.exposeFunction('recordTerminalInput', (data: string) => { writes.push(data); });
+    await page.goto('/');
+    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    const input = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm-helper-textarea`);
+    await input.focus();
+    await page.evaluate(() => {
+      const host = window as unknown as {
+        __BUILDMESH_MOCK__: { on(command: string, handler: (args: { data: string }) => void): void };
+        recordTerminalInput(data: string): void;
+      };
+      host.__BUILDMESH_MOCK__.on('write_to_agent', ({ data }) => host.recordTerminalInput(data));
+    });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Alt+Enter');
+    await page.keyboard.press('Control+c');
+    await expect.poll(() => writes).toEqual(['\x1b', '\r', '\x1b\r', '\x03']);
   });
 
   test('utility tabs fill the body and preserve terminal and keyboard state across switches', async ({ page }) => {
