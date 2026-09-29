@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { emit, listen } from '@tauri-apps/api/event';
+import { TERMINAL_RESIZE_QUIET_MS } from '../../src/components/Terminal/TerminalResizeScheduler';
 
 // jsdom doesn't ship ResizeObserver. Keep each observer instance so the
 // resize scheduler can be driven without a module-level callback singleton.
@@ -208,7 +209,7 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(closeCalls).toHaveLength(0);
   });
 
-  it('coalesces interactive terminal resize observations', async () => {
+  it('waits for interactive terminal resize observations to settle', async () => {
     vi.useFakeTimers();
     const originalRequestAnimationFrame = globalThis.requestAnimationFrame;
     const rafQueue: Array<() => void> = [];
@@ -225,13 +226,21 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
       vi.mocked(inst!.fitAddon.fit).mockClear();
       vi.mocked(invoke).mockClear();
 
-      for (let i = 0; i < 4; i++) {
+      const notificationIntervalMs = 25;
+      for (
+        let elapsed = 0;
+        elapsed < TERMINAL_RESIZE_QUIET_MS * 2;
+        elapsed += notificationIntervalMs
+      ) {
         resizeObservers[0].trigger();
-        vi.advanceTimersByTime(25);
+        vi.advanceTimersByTime(notificationIntervalMs);
       }
 
       expect(inst!.fitAddon.fit).not.toHaveBeenCalled();
-      vi.advanceTimersByTime(25); // max wait flushes at 100 ms
+      expect(rafQueue).toHaveLength(0);
+      vi.advanceTimersByTime(TERMINAL_RESIZE_QUIET_MS - notificationIntervalMs - 1);
+      expect(rafQueue).toHaveLength(0);
+      vi.advanceTimersByTime(1);
       expect(rafQueue).toHaveLength(1);
       rafQueue.shift()!();
       expect(inst!.fitAddon.fit).toHaveBeenCalledTimes(1);
