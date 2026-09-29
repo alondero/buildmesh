@@ -24,6 +24,11 @@ pub(crate) struct HookState {
     turn: Option<String>,
     questions: HashMap<String, QuestionKind>,
     permission_requests: HashSet<String>,
+    /// Replies that arrived before their ask. `--auto` publishes
+    /// `permission.replied` in the same turn as `permission.asked`, and the
+    /// two HTTP callbacks can be applied in either order. This is correlation
+    /// memory for a later ask, not a flag the next unrelated callback reads.
+    early_replies: VecDeque<String>,
     completed_tasks: VecDeque<String>,
     /// Whether the foreground harness turn is still executing. Background
     /// callbacks may arrive after the foreground turn has yielded; keeping
@@ -51,6 +56,7 @@ impl HookState {
                     .get(key)
                     .is_some_and(|kind| matches!(kind, QuestionKind::Detached))
             });
+            self.early_replies.clear();
             self.is_turn_active = true;
             return true;
         }
@@ -74,9 +80,23 @@ impl HookState {
     /// the request id on the reply; only fall back to the sole foreground
     /// request so multiple outstanding prompts are never resolved by guess.
     pub(crate) fn resolve_question(&mut self, key: Option<&str>) {
+        self.resolve_question_ex(key, false);
+    }
+
+    /// Same as [`Self::resolve_question`], but a reply that names a request
+    /// which is not pending yet is remembered. The matching ask must not
+    /// raise attention when it arrives later.
+    pub(crate) fn resolve_reply(&mut self, key: Option<&str>) {
+        self.resolve_question_ex(key, true);
+    }
+
+    fn resolve_question_ex(&mut self, key: Option<&str>, note_if_missing: bool) {
         if let Some(key) = key.filter(|key| !key.is_empty()) {
             if self.questions.remove(key).is_some() {
                 self.permission_requests.remove(key);
+                self.early_replies.retain(|pending| pending != key);
+            } else if note_if_missing {
+                self.note_early_reply(key);
             }
             // An identified reply for a different request cannot resolve the
             // sole outstanding question by guess. Only callbacks that truly
@@ -135,12 +155,45 @@ impl HookState {
         !self.permission_requests.is_empty()
     }
 
+    pub(crate) fn has_early_reply(&self, key: &str) -> bool {
+        self.early_replies.iter().any(|pending| pending == key)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_foreground_question(&self, key: &str) -> bool {
+        matches!(self.questions.get(key), Some(QuestionKind::Foreground))
+    }
+
+    /// Returns true when this ask was already satisfied by an earlier reply.
+    /// The caller decides whether this callback is the one that consumes it.
+    pub(crate) fn take_early_reply(&mut self, key: &str) -> bool {
+        let Some(index) = self.early_replies.iter().position(|pending| pending == key) else {
+            return false;
+        };
+        self.early_replies.remove(index);
+        true
+    }
+
+    fn note_early_reply(&mut self, key: &str) {
+        if self.early_replies.iter().any(|pending| pending == key) {
+            return;
+        }
+        if self.early_replies.len() == 32 {
+            self.early_replies.pop_front();
+        }
+        self.early_replies.push_back(key.to_owned());
+    }
+
     fn is_quiescent(&self) -> bool {
-        !self.is_turn_active && self.questions.is_empty()
+        !self.is_turn_active && self.questions.is_empty() && self.early_replies.is_empty()
     }
 
     pub(crate) fn end_turn(&mut self) {
         self.is_turn_active = false;
+        // OpenCode completes a turn with session.idle and never sends
+        // userpromptsubmit, so this is the boundary that drops a reply
+        // from the turn that just finished.
+        self.early_replies.clear();
     }
 
     /// Codex has no permission-result hook. Once its Stop callback arrives,
@@ -153,6 +206,13 @@ impl HookState {
     }
 
     pub(crate) fn mark_turn_active(&mut self) {
+        // session.busy activates a turn. A reply left over from a turn
+        // that was not active is not an answer to this one. A busy event
+        // inside an already-active turn must keep an in-flight reply so
+        // the matching ask can still find it.
+        if !self.is_turn_active {
+            self.early_replies.clear();
+        }
         self.is_turn_active = true;
     }
 
@@ -218,6 +278,32 @@ mod tests {
         assert!(!state.accepts(Some("old"), false));
         assert!(state.accepts(Some("new"), false));
         assert!(state.accepts(None, false));
+    }
+
+    #[test]
+    fn a_remembered_reply_is_not_quiescent_state() {
+        let mut state = HookState::default();
+        state.resolve_reply(Some("per_external"));
+        assert!(!state.is_quiescent());
+        state.end_turn();
+        assert!(
+            !state.has_early_reply("per_external"),
+            "a completed turn must not keep its unmatched reply"
+        );
+        assert!(state.is_quiescent());
+    }
+
+    #[test]
+    fn session_busy_clears_a_reply_only_when_it_activates_a_turn() {
+        let mut state = HookState::default();
+        state.resolve_reply(Some("per_external"));
+        state.mark_turn_active();
+        assert!(!state.has_early_reply("per_external"));
+
+        state.mark_turn_active();
+        state.resolve_reply(Some("per_external"));
+        state.mark_turn_active();
+        assert!(state.has_early_reply("per_external"));
     }
 
     #[test]

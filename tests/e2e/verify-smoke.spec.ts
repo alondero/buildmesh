@@ -174,7 +174,12 @@ async function pushAgentOutput(page: Page, nodeId: number, lines: string[]) {
  * call inside Playwright added an unnecessary IPC roundtrip per row.
  */
 async function assertXtermHasRenderedBytes(page: Page, nodeId: number, timeoutMs = 10000) {
-  const container = page.locator(`[data-node-id="${nodeId}"]`);
+  // `data-node-id` is set on both the grid node header and the terminal host,
+  // so the attribute alone is not a unique handle (Playwright strict mode
+  // rejects it). Select the host that actually contains a terminal — that
+  // keeps the "the AgentTerminal mounted and xterm attached inside it"
+  // assertion while tolerating the header sharing the attribute.
+  const container = page.locator(`[data-node-id="${nodeId}"]`).filter({ has: page.locator('.xterm') });
   await expect(container, `AgentTerminal container for node ${nodeId} should mount`).toBeVisible({ timeout: 10000 });
 
   const xterm = container.locator('.xterm');
@@ -244,7 +249,11 @@ test.describe('verify-smoke (issue #157)', () => {
     // installs the shim with fixture data so the sidebar renders the
     // smoke mesh + node without any backend round-trip.
     await page.goto('/');
-    await expect(page.locator('img[alt="Buildmesh"]')).toBeVisible({ timeout: 15000 });
+    // The lockup is an inline SVG behind `role="img"` + `aria-label`
+    // (TitleBar/Wordmark.tsx), not an `<img alt>` raster — it replaced the
+    // baked wordmark so it can follow the theme tokens. Assert the
+    // accessible name, which is stable across that change.
+    await expect(page.getByRole('img', { name: 'Buildmesh' })).toBeVisible({ timeout: 15000 });
 
     // The fixture node should appear in the sidebar (data-session-id
     // is set on the row by NodeItem.tsx:294).
@@ -287,7 +296,6 @@ test.describe('verify-smoke (issue #157)', () => {
     await expect(panel.locator('.xterm')).toHaveCount(1);
     await expect(panel.locator('.xterm')).toBeVisible();
     expect(await panel.locator(`[data-node-id="${SMOKE_NODE_ID}"]`).count()).toBe(0);
-    const utilityElement = await panel.locator('.xterm').elementHandle();
     const panelBounds = await panel.boundingBox();
     const terminalBounds = await panel.locator('.xterm').boundingBox();
     expect(terminalBounds!.height).toBeGreaterThan(panelBounds!.height * 0.9);
@@ -300,12 +308,34 @@ test.describe('verify-smoke (issue #157)', () => {
     await expect(agentTab).toBeFocused();
     await page.keyboard.press('ArrowRight');
     await expect(panel.locator('.xterm')).toHaveCount(1);
+    await expect(panel.locator('.xterm')).toBeVisible();
     await expect(utilityTab).toBeFocused();
-    expect(await panel.locator('.xterm').evaluate((element, previous) => element === previous, utilityElement)).toBe(true);
 
     await page.getByRole('button', { name: /^Close Terminal/ }).click();
     await expect(page.getByRole('tablist', { name: 'Node activities' })).toHaveCount(0);
     await expect(page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`)).toBeVisible();
+  });
+
+  // Issue #1947: switching away from a terminal tab detaches its view. When
+  // the tab is selected again, the existing terminal element and its buffer
+  // should be reused.
+  test('utility terminal reattaches the same .xterm element across a tab round trip', async ({ page }) => {
+    await page.goto('/');
+    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    await page.getByTestId('grid-node-header').getByRole('button', { name: 'Open build menu' }).click();
+    await page.getByRole('menuitem', { name: /^Terminal/ }).click();
+    const panel = page.getByRole('tabpanel');
+    await expect(panel.locator('.xterm')).toHaveCount(1);
+    const utilityElement = await panel.locator('.xterm').elementHandle();
+
+    const utilityTab = page.getByRole('tab', { name: /^Terminal/ });
+    await utilityTab.focus();
+    await page.keyboard.press('ArrowLeft');
+    await expect(panel.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`)).toBeVisible();
+    await page.keyboard.press('ArrowRight');
+    await expect(panel.locator('.xterm')).toHaveCount(1);
+    expect(await panel.locator('.xterm').evaluate((element, previous) => element === previous, utilityElement)).toBe(true);
+
     await utilityElement?.dispose();
   });
 });

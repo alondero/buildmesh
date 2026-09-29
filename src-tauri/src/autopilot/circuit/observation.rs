@@ -199,6 +199,14 @@ pub struct EvidenceConflict {
     pub kind: EvidenceConflictKind,
     pub identity: ObservationIdentity,
     pub observed_at_ms: i64,
+    #[serde(default)]
+    pub status_projection: Option<bool>,
+}
+
+fn conflict_id(kind: &EvidenceConflictKind, event: &CircuitObservation) -> String {
+    use sha2::{Digest, Sha256};
+    let key = serde_json::to_vec(&(&event.source, &event.source_id, &event.identity, event.observed_at_ms, kind)).expect("conflict identity");
+    hex::encode(Sha256::digest(key))
 }
 
 /// Persisted per attempt. An ownership item never disappears on parent yield.
@@ -225,17 +233,49 @@ pub struct WorkEvidence {
 }
 
 impl WorkEvidence {
+    /// Older conflicts lack provenance. Only the exact append-only history
+    /// observation that produced their digest can establish it retrospectively.
+    pub(crate) fn restore_projection_conflict(&mut self, event: &CircuitObservation) -> bool {
+        if event.source != "agent_status_projection" || event.authoritative { return false; }
+        let id = conflict_id(&EvidenceConflictKind::Identity, event);
+        let mut changed = false;
+        for conflict in &mut self.conflicts {
+            if conflict.kind == EvidenceConflictKind::Identity && conflict.id == id && conflict.status_projection.is_none() {
+                conflict.status_projection = Some(true);
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn has_only_status_projections(&self) -> bool {
+        let projection = "agent_status_projection";
+        self.latest.as_ref().is_some_and(|event| event.source == projection && !event.authoritative)
+            && !self.sources.is_empty()
+            && self.sources.keys().all(|key| serde_json::from_str::<serde_json::Value>(key)
+                .ok().is_some_and(|value| value.get(0).and_then(|source| source.as_str()) == Some(projection)))
+            && self.source_watermarks.keys().all(|source| source == projection)
+            && self.human_waits.is_empty()
+            && self.children.is_empty()
+            && self.report.is_none()
+            && !self.foreground_terminated
+            && !self.assignment_completed
+            && !self.ownership_covered
+            && !self.lifecycle_invalidated
+            && (!self.conflicted || !self.conflicts.is_empty())
+            && self.conflicts.iter().all(|conflict| conflict.kind == EvidenceConflictKind::Identity && conflict.status_projection == Some(true))
+    }
+
     fn record_conflict(&mut self, kind: EvidenceConflictKind, event: &CircuitObservation) {
-        use sha2::{Digest, Sha256};
         // Old persisted booleans carry no resolvable cause. Keep that uncertainty.
         if self.conflicted && self.conflicts.is_empty() {
             self.conflicts.push(EvidenceConflict { id: "legacy-unknown".into(), kind: EvidenceConflictKind::LegacyUnknown,
-                identity: event.identity.clone(), observed_at_ms: event.observed_at_ms });
+                identity: event.identity.clone(), observed_at_ms: event.observed_at_ms, status_projection: Some(false) });
         }
-        let key = serde_json::to_vec(&(&event.source, &event.source_id, &event.identity, event.observed_at_ms, &kind)).expect("conflict identity");
-        let id = hex::encode(Sha256::digest(key));
+        let id = conflict_id(&kind, event);
         if !self.conflicts.iter().any(|conflict| conflict.id == id) {
-            self.conflicts.push(EvidenceConflict { id, kind, identity: event.identity.clone(), observed_at_ms: event.observed_at_ms });
+            self.conflicts.push(EvidenceConflict { id, kind, identity: event.identity.clone(), observed_at_ms: event.observed_at_ms,
+                status_projection: Some(event.source == "agent_status_projection" && !event.authoritative) });
         }
         self.conflicted = true;
     }
@@ -346,8 +386,25 @@ impl WorkEvidence {
             .iter()
             .any(|(a, b)| a.as_ref().zip(b.as_ref()).is_some_and(|(a, b)| a != b))
         }) {
-            self.record_conflict(EvidenceConflictKind::Identity, event);
-            return ObservationDisposition::Conflicting;
+            // A current DB projection after Resume is not contradictory native
+            // evidence. Retire projection-only history (including old workers'
+            // identity conflicts); never discard real lifecycle or owned work.
+            if event.source == "agent_status_projection" && !event.authoritative
+                && self.has_only_status_projections()
+                && self.latest.as_ref().is_some_and(|latest| event.observed_at_ms >= latest.observed_at_ms)
+            {
+                *self = Self::default();
+                // Do not carry optional tokens from the retired process into
+                // the new projection while its session discovery is pending.
+                identity = expected.clone();
+                identity.session_incarnation = identity.session_incarnation.or_else(|| observed.session_incarnation.clone());
+                identity.session_id = identity.session_id.or_else(|| observed.session_id.clone());
+                identity.turn_id = identity.turn_id.or_else(|| observed.turn_id.clone());
+                identity.report_revision = identity.report_revision.or_else(|| observed.report_revision.clone());
+            } else {
+                self.record_conflict(EvidenceConflictKind::Identity, event);
+                return ObservationDisposition::Conflicting;
+            }
         }
         let key = event.source_id.as_ref().map(|id| {
             serde_json::to_string(&(
@@ -534,6 +591,84 @@ impl WorkEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restarted_session_replaces_only_status_projection_history() {
+        let mut projected = event(ObservedWorkFact::Working, 1);
+        projected.source = "agent_status_projection".into();
+        projected.authoritative = false;
+        let mut state = WorkEvidence::default();
+        state.observe(&projected.identity, &projected);
+        let mut restarted = projected.clone();
+        restarted.identity.session_incarnation = Some("replacement".into());
+        restarted.observed_at_ms = 2;
+        restarted.source_id = Some("replacement-projection".into());
+        // Reproduce persisted conflicts written by older workers after resume.
+        state.record_conflict(EvidenceConflictKind::Identity, &restarted);
+        let mut state: WorkEvidence = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(state.observe(&restarted.identity, &restarted), ObservationDisposition::ReducedConfidence);
+        assert_eq!(state.identity, Some(restarted.identity.clone()));
+        assert!(!state.conflicted);
+        assert!(!state.lifecycle_verified());
+        assert_eq!(state.observe(&restarted.identity, &projected), ObservationDisposition::Rejected);
+    }
+
+    #[test]
+    fn restarted_session_preserves_native_evidence_and_unknown_conflicts() {
+        for fact in [ObservedWorkFact::Working, ObservedWorkFact::PermissionRequested,
+            ObservedWorkFact::OwnedStarted { work_id: "child".into() }] {
+            let mut state = WorkEvidence::default();
+            state.observe(&identity(), &event(fact, 1));
+            let mut projected = event(ObservedWorkFact::Working, 2);
+            projected.source = "agent_status_projection".into();
+            projected.authoritative = false;
+            state.observe(&identity(), &projected);
+            projected.identity.session_incarnation = Some("replacement".into());
+            projected.observed_at_ms = 3;
+            assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::Conflicting);
+            assert!(state.conflicted);
+        }
+    }
+
+    #[test]
+    fn conflicting_native_request_cannot_be_erased_by_a_later_projection() {
+        let mut state = WorkEvidence::default();
+        let mut projected = event(ObservedWorkFact::Working, 1);
+        projected.source = "agent_status_projection".into();
+        projected.authoritative = false;
+        state.observe(&identity(), &projected);
+        let mut request = event(ObservedWorkFact::PermissionRequested, 2);
+        request.identity.session_incarnation = Some("replacement".into());
+        assert_eq!(state.observe(&request.identity, &request), ObservationDisposition::Conflicting);
+        assert!(!state.restore_projection_conflict(&request));
+        projected.identity = request.identity.clone();
+        projected.observed_at_ms = 3;
+        assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::Conflicting);
+        assert_eq!(state.conflicts[0].status_projection, Some(false));
+        assert!(state.conflicted);
+    }
+
+    #[test]
+    fn legacy_conflict_requires_its_exact_history_before_projection_recovery() {
+        let mut projected = event(ObservedWorkFact::Working, 1);
+        projected.source = "agent_status_projection".into();
+        projected.authoritative = false;
+        let mut state = WorkEvidence::default();
+        state.observe(&projected.identity, &projected);
+        projected.identity.session_incarnation = Some("replacement".into());
+        projected.observed_at_ms = 2;
+        state.record_conflict(EvidenceConflictKind::Identity, &projected);
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        legacy["conflicts"][0].as_object_mut().unwrap().remove("status_projection");
+        let mut state: WorkEvidence = serde_json::from_value(legacy).unwrap();
+        assert!(!state.has_only_status_projections());
+        let mut wrong = projected.clone();
+        wrong.observed_at_ms = 3;
+        assert!(!state.restore_projection_conflict(&wrong));
+        assert!(state.restore_projection_conflict(&projected));
+        assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::ReducedConfidence);
+        assert!(!state.conflicted);
+    }
 
     #[test]
     fn status_projection_is_not_an_indefinite_human_request() {

@@ -184,10 +184,7 @@ impl CodexInstallCache {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             match entries.get(runtime) {
                 Some(slot)
-                    if !slot.cell.get().is_some_and(|cached| {
-                        now.checked_duration_since(cached.resolved_at)
-                            .is_some_and(|age| age >= CODEX_INSTALL_CACHE_TTL)
-                    }) =>
+                    if slot.cell.get().is_none_or(|cached| is_entry_fresh(cached, now)) =>
                 {
                     Arc::clone(&slot.cell)
                 }
@@ -251,6 +248,24 @@ impl CodexInstallCache {
         result
     }
 
+    /// Whether the next [`CodexInstallCache::discover`] for this runtime
+    /// would reuse a cached install instead of probing (issue #1948).
+    /// Read-only: never inserts, never probes. An in-flight probe started
+    /// by another thread reports `false` — joining it still waits on
+    /// process work, so for timing attribution it is cold, not cached.
+    /// Same freshness predicate as `discover_at`, so the two never disagree
+    /// on what counts as cached.
+    fn is_fresh(&self, env_type: EnvType) -> bool {
+        self.is_fresh_at(env_type, Instant::now())
+    }
+
+    fn is_fresh_at(&self, env_type: EnvType, now: Instant) -> bool {
+        let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        entries.get(runtime_identity(env_type)).is_some_and(|slot| {
+            slot.cell.get().is_some_and(|cached| is_entry_fresh(cached, now))
+        })
+    }
+
     fn discard_failed_entry(&self, runtime: &'static str, cell: &Arc<OnceLock<CachedCodexInstall>>) {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if entries
@@ -260,6 +275,14 @@ impl CodexInstallCache {
             entries.remove(runtime);
         }
     }
+}
+
+/// Freshness predicate shared by [`CodexInstallCache::discover_at`] (cache
+/// reuse) and [`CodexInstallCache::is_fresh_at`] (cold-vs-warm reporting) so
+/// the two can never disagree on what counts as cached (issue #1948).
+fn is_entry_fresh(cached: &CachedCodexInstall, now: Instant) -> bool {
+    now.checked_duration_since(cached.resolved_at)
+        .is_some_and(|age| age < CODEX_INSTALL_CACHE_TTL)
 }
 
 fn resolve_codex_install_cell(
@@ -997,6 +1020,20 @@ pub fn discover_supported_install_fresh(env_type: EnvType) -> Result<CodexInstal
     CODEX_INSTALL_CACHE.discover_fresh(env_type, || discover_supported_install_uncached(env_type))
 }
 
+/// Whether [`discover_supported_install`] for this runtime currently serves
+/// from the short-lived install cache instead of spawning probes (issue
+/// #1948). Secret-free by construction (a bool per runtime) — the
+/// cold-vs-warm bit in the provider-menu timing log. Read-only: never
+/// inserts, never probes.
+///
+/// This mirrors the TTL reuse of [`discover_supported_install`] only:
+/// [`discover_supported_install_fresh`] keys off the in-flight `refreshing`
+/// flag and re-probes every completed entry, so reading this bit next to a
+/// `_fresh` call would misreport cold discovery as warm.
+pub fn codex_install_cached(env_type: EnvType) -> bool {
+    CODEX_INSTALL_CACHE.is_fresh(env_type)
+}
+
 fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall, String> {
     let wsl_distro = if env_type == EnvType::Wsl {
         Some(
@@ -1465,13 +1502,23 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn ready_for_initial_prompt(&self, tail: &str) -> bool {
-        // Codex paints an input box while its model is still loading. Pasting
-        // then can lose Enter even though the boot redraw looks like an ACK.
-        // Use the most recent header, never an older ready banner in scrollback.
-        let Some((_, header)) = tail.rsplit_once("model:") else { return false; };
-        let Some((model, _)) = header.split_once("/model to change") else { return false; };
-        !model.trim().is_empty() && !model.trim().eq_ignore_ascii_case("loading")
-            && header.contains('›')
+        // Codex paints its composer (the `›` chevron plus a one-line
+        // placeholder) in the TUI's first frame, and that painted input box is
+        // the only startup evidence that stdin is being read — the state a
+        // pasted prompt needs. Its earlier readiness banner
+        // (`model: <name> /model to change`) is gone: Codex 0.158 renders the
+        // model only as a bare `loading` line on boot and moves the resolved
+        // model into the bottom status footer, so keying on that banner (or on
+        // "not loading") never matched and the initial prompt was dropped after
+        // the 300s wait. Launch still passes `--dangerously-bypass-hook-trust`,
+        // so no review dialog can hold the composer back.
+        const COMPOSER_PLACEHOLDERS: [&str; 2] = [
+            "Ask Codex to do anything",
+            "Ask a follow-up question",
+        ];
+        COMPOSER_PLACEHOLDERS
+            .iter()
+            .any(|placeholder| tail.contains(placeholder))
     }
 
     fn available_on(&self) -> &'static [Platform] {
@@ -1789,6 +1836,54 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    /// Issue #1948: the cold-vs-warm bit in the provider-menu timing log
+    /// must agree with what `discover` would do — report cached only when a
+    /// fresh entry exists, without probing. A panicking probe proves the
+    /// warm path performs no process work.
+    #[test]
+    fn install_cache_freshness_reports_cold_and_warm_without_probing() {
+        let cache = CodexInstallCache::default();
+        assert!(!cache.is_fresh(EnvType::Windows), "an empty cache is cold");
+
+        cache
+            .discover(EnvType::Windows, || Ok(test_install("0.144.0")))
+            .unwrap();
+        assert!(cache.is_fresh(EnvType::Windows), "a resolved install is warm");
+        assert!(!cache.is_fresh(EnvType::Wsl), "freshness is per-runtime");
+
+        // The warm read must reuse the entry: a probe here would panic.
+        let warm = cache
+            .discover(EnvType::Windows, || {
+                panic!("a fresh install result must be reused without probing")
+            })
+            .unwrap();
+        assert_eq!(warm.version, "0.144.0");
+
+        let resolved_at = cache
+            .entries
+            .lock()
+            .unwrap()
+            .get(runtime_identity(EnvType::Windows))
+            .unwrap()
+            .cell
+            .get()
+            .unwrap()
+            .resolved_at;
+        assert!(cache.is_fresh_at(
+            EnvType::Windows,
+            resolved_at + CODEX_INSTALL_CACHE_TTL - Duration::from_nanos(1)
+        ));
+        assert!(
+            !cache.is_fresh_at(EnvType::Windows, resolved_at + CODEX_INSTALL_CACHE_TTL),
+            "an expired entry is cold again"
+        );
+
+        // Failures are discarded, never served warm: the next read probes.
+        let failures = CodexInstallCache::default();
+        let _ = failures.discover(EnvType::Windows, || Err::<CodexInstall, String>("Codex is unavailable".into()));
+        assert!(!failures.is_fresh(EnvType::Windows), "a failed probe leaves no warm entry");
+    }
+
     /// The probe bounds must stay generous enough for a cold WSL distro
     /// start (seconds) but finite. A zero/absurd value would make the
     /// timeout above a self-inflicted outage rather than a backstop.
@@ -1811,14 +1906,24 @@ mod tests {
     }
 
     #[test]
-    fn initial_prompt_waits_for_codex_loaded_model_and_input_box() {
-        let loading = "model: loading /model to change\n› Ask Codex to do anything";
-        let ready = "model: GPT-6-Luna xhigh /model to change\npermissions: YOLO mode\n› Ask Codex to do anything";
+    fn initial_prompt_waits_for_the_codex_composer() {
+        // Real frames captured from a live Codex 0.158 PTY. The model is only
+        // ever a bare `loading` line on boot and a `GPT-6-Luna default · <dir>`
+        // status footer once resolved — neither the old `model: <name>
+        // /model to change` banner nor a non-"loading" model header is ever
+        // rendered, so the previous gate never fired (run 261, node 4618).
+        let boot = ">_ OpenAI Codex (v0.158.0)\nloading\n\
+                    › Ask Codex to do anything\n? for shortcuts";
+        let loaded = ">_ OpenAI Codex (v0.158.0)\nloading\n\
+                      › Ask Codex to do anything\n? for shortcuts\nF:\\src\\nestlin\n\
+                      GPT-6-Luna default · F:\\src\\nestlin\nxhigh · F:\\src\\nestlin";
+        let resumed = "› Ask a follow-up question";
+        let pre_composer = ">_ OpenAI Codex (v0.158.0)\nloading";
         assert!(!CODEX.ready_for_initial_prompt(""));
-        assert!(!CODEX.ready_for_initial_prompt(loading));
-        assert!(!CODEX.ready_for_initial_prompt("model: GPT-6-Luna xhigh /model to change"));
-        assert!(CODEX.ready_for_initial_prompt(&format!("{loading}\n{ready}")));
-        assert!(!CODEX.ready_for_initial_prompt(&format!("{ready}\n{loading}")));
+        assert!(!CODEX.ready_for_initial_prompt(pre_composer));
+        assert!(CODEX.ready_for_initial_prompt(boot));
+        assert!(CODEX.ready_for_initial_prompt(loaded));
+        assert!(CODEX.ready_for_initial_prompt(resumed));
     }
 
     #[test]

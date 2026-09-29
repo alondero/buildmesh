@@ -372,7 +372,7 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(2);
   });
 
-  it('does not retain a registry instance when attach is aborted before lazy creation finishes', async () => {
+  it('cleans up lazy terminal creation when an explicit close races an aborted attach', async () => {
     let resolveOutputListener!: (unlisten: () => void) => void;
     const outputListenerPending = new Promise<() => void>((resolve) => { resolveOutputListener = resolve; });
     vi.mocked(listen).mockImplementationOnce(() => outputListenerPending as never);
@@ -391,6 +391,36 @@ describe('BuildRunTerminalRegistry — persistence across remount (issue: build-
     expect(buildRunTerminalManager.getInstance(82, 'terminal', true)).toBeUndefined();
     expect(terminalInstances[0].dispose).toHaveBeenCalled();
     expect(vi.mocked(invoke).mock.calls.some(([command]) => command === 'build_run')).toBe(false);
+  });
+
+  it('keeps an existing terminal alive when its reattach effect is cancelled', async () => {
+    const firstContainer = document.createElement('div');
+    await buildRunTerminalManager.attach(85, 'terminal', true, firstContainer);
+    const retainedTerminal = terminalInstances[0];
+    buildRunTerminalManager.detach(85, 'terminal', true);
+
+    const controller = new AbortController();
+    const cancelledAttach = buildRunTerminalManager.attach(
+      85,
+      'terminal',
+      true,
+      document.createElement('div'),
+      controller.signal,
+    );
+    // getOrCreate yields even when it finds this existing instance. React can
+    // cancel the mount before attach resumes; that consumer must not dispose
+    // the retained singleton or close its PTY.
+    controller.abort();
+    expect(await cancelledAttach).toBeNull();
+
+    expect(buildRunTerminalManager.getInstance(85, 'terminal', true)?.term).toBe(retainedTerminal);
+    expect(retainedTerminal.dispose).not.toHaveBeenCalled();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'close_build_run')).toHaveLength(0);
+
+    const reattached = await buildRunTerminalManager.attach(85, 'terminal', true, document.createElement('div'));
+    expect(reattached?.term).toBe(retainedTerminal);
+    expect(terminalInstances).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'build_run')).toHaveLength(1);
   });
 
   it('D: deduplicates concurrent attach() calls into one doCreate + one build_run', async () => {

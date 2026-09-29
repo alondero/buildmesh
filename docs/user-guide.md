@@ -182,7 +182,7 @@ The current built-in catalog is:
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | None | Use the terminal when no lifecycle signal is available |
-| MiniMax Code | Yes | Hook | Attention reports completed turns; the TUI rejects model/effort flags |
+| MiniMax Code | Yes | Hook | Attention reports completed turns; the TUI rejects model/effort flags and is launched in Full Access |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
@@ -232,6 +232,10 @@ keyed providers can be selected even before a pairing exists. New pairings colle
 their endpoint in the editor and are saved together with the configuration;
 cancelling creates neither. **Advanced Provider Routes** edits existing shared
 endpoints and model-tier overrides; **Providers** owns credentials and billing.
+While a configuration is saving, the editor shows progress and keeps its fields
+disabled. In the spawn menu, the status changes from **Saving configuration…**
+to **Refreshing availability…** while provider availability is fetched. A failed
+save shows an error and leaves the draft available to retry.
 
 Model choices belong to the selected provider and API surface; **Custom model**
 allows a model not yet in the catalogue. Effort choices are restricted to documented

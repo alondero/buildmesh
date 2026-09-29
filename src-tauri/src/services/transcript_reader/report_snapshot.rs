@@ -260,6 +260,30 @@ mod tests {
         for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft), (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {
             assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Err(input), Ok(report.clone())).err(), Some(blocker));
         }
+        let suspended = AgentNode { status: SessionStatus::Suspended, cli_session_id: None, ..agent.clone() };
+        assert_eq!(readiness::prepare(&run, "await_source", &suspended, Some("100:projection"),
+            Err(InputUnavailable::MissingProcess), Err(ReportReadError::NoTranscript)).err(), Some(B::ProcessUnavailable));
+
+        // A resumed process replaces a status-only identity without weakening
+        // the report/session/input fences used by the production handoff.
+        use crate::autopilot::circuit::observation::{CircuitObservation, ObservedWorkFact};
+        let owner = ObservationIdentity { run_id: 42, step_id: "await_source".into(), attempt: 1,
+            agent_node_id: 900, session_incarnation: Some("50".into()), session_id: Some("session".into()),
+            turn_id: None, report_revision: None };
+        for incarnation in ["50", "100"] {
+            let expected = ObservationIdentity { session_incarnation: Some(incarnation.into()), ..owner.clone() };
+            advance(&mut run, &CircuitEvent::Observed { expected: expected.clone(), observation: Box::new(CircuitObservation {
+                identity: expected, source: "agent_status_projection".into(), source_id: Some(incarnation.into()),
+                observed_at_ms: incarnation.parse().unwrap(), authoritative: false, fact: ObservedWorkFact::Working,
+            }) });
+        }
+        let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
+            Ok("1:0".into()), Ok(report.clone())).unwrap().unwrap();
+        let mut resumed = run.clone();
+        advance(&mut resumed, &CircuitEvent::TurnClassified { node_id: "await_source".into(),
+            classification: Some(crate::autopilot::evaluator::Classification::Completed),
+            output: Some(candidate.output), binding: Some(candidate.binding) });
+        assert_eq!(resumed.state, RunState::Completed);
         run.context.set("agent.900.previous_report_revision", &report.revision);
         assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(report)).err(), Some(B::ReportSuperseded));
         fs::write(&path, format!("{lines}{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"next\"}}}}\n")).unwrap();

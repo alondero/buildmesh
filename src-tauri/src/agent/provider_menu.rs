@@ -250,12 +250,26 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     // on a default install) with the total wall-clock and the per-runtime
     // Codex probe cost. Only the runtime identity and CLI version travel in
     // the fields - never credentials, keys, or endpoint URLs.
+    // Issue #1948: the same line now separates Codex discovery from the rest
+    // of the derivation (`menu_compose_duration_ms`) and reports per-runtime
+    // cache reuse (`*_codex_cached`), so a slow save-refresh can be
+    // attributed to cold discovery, warm discovery, or menu composition.
     let derivation_started = std::time::Instant::now();
     let accounts = crate::preferences::provider_accounts();
     let configured_pairings = crate::preferences::provider_pairings();
     let needs_codex = configured_pairings
         .iter()
         .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
+    let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
+    // Snapshot cache state before probing (issue #1948): `false` covers both
+    // a cold cache and "no probe ran" when `needs_codex` is false (the probe
+    // durations are 0 then, so the line still reads unambiguously).
+    let native_codex_cached = needs_codex
+        && crate::agent::provider::adapters::codex::codex_install_cached(
+            crate::models::EnvType::Windows,
+        );
+    let foreign_codex_cached = needs_codex
+        && crate::agent::provider::adapters::codex::codex_install_cached(foreign_runtime);
     let native_probe_started = std::time::Instant::now();
     let native_codex = needs_codex
         .then(|| {
@@ -265,7 +279,6 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         })
         .and_then(Result::ok);
     let native_probe_duration_ms = native_probe_started.elapsed().as_millis();
-    let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
     let foreign_probe_started = std::time::Instant::now();
     let wsl_codex = needs_codex
         .then(|| {
@@ -275,6 +288,11 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
         })
         .and_then(Result::ok);
     let foreign_probe_duration_ms = foreign_probe_started.elapsed().as_millis();
+    // Everything after the probes is menu composition (issue #1948): pairing
+    // filters, harness detection, row ordering, and Launch Configuration
+    // attachment. Timed separately so cold Codex discovery is never blamed on
+    // composition (or vice versa).
+    let compose_started = std::time::Instant::now();
     let pairings = configured_pairings
         .into_iter()
         .filter(|pairing| {
@@ -318,6 +336,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     tracing::info!(
         needs_codex,
         native_probe_duration_ms,
+        native_codex_cached,
         native_runtime_identity = native_codex
             .as_ref()
             .map(crate::agent::provider::adapters::codex::log_safe_runtime_identity)
@@ -328,6 +347,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             .unwrap_or("none"),
         foreign_env = %foreign_runtime,
         foreign_probe_duration_ms,
+        foreign_codex_cached,
         foreign_runtime_identity = wsl_codex
             .as_ref()
             .map(crate::agent::provider::adapters::codex::log_safe_runtime_identity)
@@ -337,6 +357,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             .map(|install| install.version.as_str())
             .unwrap_or("none"),
         menu_rows = menu.len(),
+        menu_compose_duration_ms = compose_started.elapsed().as_millis(),
         total_duration_ms = derivation_started.elapsed().as_millis(),
         "provider menu derivation completed"
     );
@@ -1543,6 +1564,9 @@ mod tests {
     /// acceptance test for the Settings -> Providers load work. The field
     /// allow-list pins the redaction discipline: only runtime identities and
     /// CLI versions travel, never credentials, keys, or endpoint URLs.
+    /// Issue #1948 extends the line with the compose-phase wall-clock and
+    /// the per-runtime cache-reuse bits, so a slow save-refresh reads as
+    /// cold discovery, warm discovery, or menu composition.
     ///
     /// A hand-rolled capturing subscriber (scoped via `with_default`, so no
     /// global state) keeps this parallel-safe without new dev-dependencies.
@@ -1644,11 +1668,14 @@ mod tests {
         assert_eq!(
             names,
             [
+                "foreign_codex_cached",
                 "foreign_codex_version",
                 "foreign_env",
                 "foreign_probe_duration_ms",
                 "foreign_runtime_identity",
+                "menu_compose_duration_ms",
                 "menu_rows",
+                "native_codex_cached",
                 "native_codex_version",
                 "native_probe_duration_ms",
                 "native_runtime_identity",
@@ -1676,6 +1703,30 @@ mod tests {
         value("foreign_probe_duration_ms")
             .parse::<u128>()
             .expect("foreign_probe_duration_ms must be a millisecond count");
+        // The phases must partition the derivation (issue #1948): the three
+        // fields must always sum within the total, so a future phase cannot
+        // be added without updating this budget. Limit of this guard: the bare
+        // test env skips both probes (needs_codex is false), so a `compose_started`
+        // misplaced above zero-length probes still passes here - clock placement
+        // is pinned by inspection; real cold/warm splits come from the log line.
+        // Millis truncation only rounds each phase down, so the sum of floors
+        // still cannot exceed the total.
+        let phase_total = value("native_probe_duration_ms")
+            .parse::<u128>()
+            .expect("native_probe_duration_ms must be a millisecond count")
+            + value("foreign_probe_duration_ms")
+            .parse::<u128>()
+            .expect("foreign_probe_duration_ms must be a millisecond count")
+            + value("menu_compose_duration_ms")
+            .parse::<u128>()
+            .expect("menu_compose_duration_ms must be a millisecond count");
+        assert!(
+            phase_total
+                <= value("total_duration_ms")
+                    .parse::<u128>()
+                    .expect("total_duration_ms must be a millisecond count"),
+            "phase timings must partition the derivation: probes + compose cannot exceed the total"
+        );
         assert_eq!(
             value("menu_rows")
                 .parse::<usize>()
@@ -1687,6 +1738,8 @@ mod tests {
         // Codex probes are skipped - and the line must say so explicitly
         // rather than reading as a genuinely fast probe (issue #1937).
         assert_eq!(value("needs_codex"), "false");
+        assert_eq!(value("native_codex_cached"), "false");
+        assert_eq!(value("foreign_codex_cached"), "false");
         assert_eq!(value("native_runtime_identity"), "none");
         assert_eq!(value("foreign_runtime_identity"), "none");
     }

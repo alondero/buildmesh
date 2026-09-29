@@ -135,6 +135,25 @@ pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, Strin
 }
 
 pub fn save_with_route(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<SpawnConfiguration, String> {
+    // Issue #1948: time persistence here rather than at the call sites so
+    // every save path (desktop command, mobile HTTP route) reports
+    // separately from the spawn-menu refresh the frontend runs next
+    // (`list_providers`, timed in `provider_menu`). Secret-free by
+    // construction: only the wall-clock, whether a route was attached, and
+    // success travel — never names, ids, URLs, models, or keys.
+    let persistence_started = std::time::Instant::now();
+    let has_route = route.is_some();
+    let result = save_with_route_inner(value, route);
+    tracing::info!(
+        has_route,
+        success = result.is_ok(),
+        persistence_duration_ms = persistence_started.elapsed().as_millis(),
+        "launch configuration save completed"
+    );
+    result
+}
+
+fn save_with_route_inner(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<SpawnConfiguration, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
     value.resolved = None;

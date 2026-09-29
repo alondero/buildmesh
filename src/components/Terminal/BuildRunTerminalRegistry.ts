@@ -233,14 +233,11 @@ export class BuildRunTerminalRegistry {
 
       const inst = await this.getOrCreate(sessionId, mode, useWorktree);
       if (!inst) return null;
-      // If the React effect already aborted during our await, bail out
-      // before opening the xterm into a deleted container or spawning a PTY
-      // that no one will display. The instance must be disposed here because
-      // `dispose()` may have run before lazy creation put it in the map.
+      // This React effect owns only its mount, not the singleton lifetime.
+      // Explicit close already marks pending creation for cancellation or
+      // disposes a published instance; a tab switch only detaches its consumer
+      // and must preserve scrollback for the next mount.
       if (signal?.aborted) {
-        if (this.instances.get(instanceKey(sessionId, mode, useWorktree)) === inst) {
-          await this.disposeInstanceInline(instanceKey(sessionId, mode, useWorktree));
-        }
         return null;
       }
       return this.attachToDOM(inst, container);

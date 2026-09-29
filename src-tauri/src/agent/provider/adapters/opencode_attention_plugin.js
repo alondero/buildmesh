@@ -174,36 +174,60 @@ function pickSessionId(event) {
   return undefined;
 }
 
-// Permission/question ids are distinct from session ids. In particular,
-// OpenCode's `permission.asked` uses `properties.id`, while its reply carries
-// that same value as `properties.requestID`; never let the former be mistaken
-// for a session id or the route cannot correlate the resolution.
+// Permission/question ids are distinct from session ids and from the bus
+// event id. OpenCode's plugin loader always delivers
+// `{ id: event.id, type, properties: event.data }`. `event.id` is the bus
+// event (`evt_…`); the permission or question id is `properties.id` on the
+// ask and `properties.requestID` on the reply. Prefer those. Falling back
+// to `event.id` makes every ask and its `--auto` reply look like different
+// requests, so the banner never clears.
 function pickRequestId(event) {
   if (!event || typeof event !== "object") return undefined;
   const props = event.properties;
   const data = event.data;
   const candidates = [
-    event.requestID,
-    event.requestId,
-    event.permissionID,
-    event.permissionId,
-    event.call_id,
-    event.callId,
-    event.id,
     props?.requestID,
     props?.requestId,
     props?.permissionID,
     props?.permissionId,
-    props?.call_id,
-    props?.callId,
     props?.id,
     data?.requestID,
     data?.requestId,
     data?.permissionID,
     data?.permissionId,
     data?.id,
+    event.requestID,
+    event.requestId,
+    event.permissionID,
+    event.permissionId,
+    event.call_id,
+    event.callId,
   ];
+  // A bare `{ id }` payload (no properties/data wrapper) is the request id.
+  // Once a wrapper is present, `event.id` is the bus event id and must not
+  // be used — it differs between the ask and the reply.
+  if (!props && !data) candidates.push(event.id);
   return candidates.find((value) => typeof value === "string" && value.length > 0);
+}
+
+function permissionSubject(event) {
+  const toolName = pickToolInfo(event);
+  if (toolName) return { toolName, label: toolName };
+  // Same wrapper tolerance as pickRequestId: the loader puts the payload on
+  // `properties`, and some revisions put it on `data`. Read both from one
+  // object so the name and the patterns cannot come from different shapes.
+  const source = event.properties || event.data;
+  const permission = source?.permission;
+  const patterns = Array.isArray(source?.patterns)
+    ? source.patterns.filter((pattern) => typeof pattern === "string" && pattern.length > 0)
+    : [];
+  if (typeof permission === "string" && permission.length > 0 && patterns.length > 0) {
+    return { toolName: undefined, label: `${permission} (${patterns.join(", ")})` };
+  }
+  if (typeof permission === "string" && permission.length > 0) {
+    return { toolName: undefined, label: permission };
+  }
+  return { toolName: undefined, label: undefined };
 }
 
 // Forward the permission event's tool info when OpenCode provides it.
@@ -276,8 +300,41 @@ async function postAttention(body) {
   }
 }
 
+// Hold a permission announcement only long enough for `--auto` to reply.
+// The event handler stores a timer and returns. It does not await the hold,
+// so a serial dispatcher can still deliver permission.replied in time to
+// cancel the post.
+const PERMISSION_ASK_HOLD_MS = 750;
+
 export const BuildmeshAttention = async () => {
   let cachedSessionId = null;
+  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
+  const pendingPermissionAsks = new Map();
+
+  function armPermissionAsk(requestId, body) {
+    if (!requestId) {
+      void postAttention(body);
+      return;
+    }
+    const previous = pendingPermissionAsks.get(requestId);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      pendingPermissionAsks.delete(requestId);
+      void postAttention(body);
+    }, PERMISSION_ASK_HOLD_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    pendingPermissionAsks.set(requestId, timer);
+  }
+
+  function cancelPermissionAsk(requestId) {
+    if (!requestId) return false;
+    const timer = pendingPermissionAsks.get(requestId);
+    if (!timer) return false;
+    clearTimeout(timer);
+    pendingPermissionAsks.delete(requestId);
+    return true;
+  }
+
   return {
     event: async ({ event }) => {
       if (!event || typeof event.type !== "string") return;
@@ -341,8 +398,9 @@ export const BuildmeshAttention = async () => {
         return;
       }
       if (["question.replied", "question.rejected", "permission.replied", "session.error"].includes(event.type)) {
-        const body = { hook_event_name: event.type };
         const requestId = pickRequestId(event);
+        if (event.type === "permission.replied" && cancelPermissionAsk(requestId)) return;
+        const body = { hook_event_name: event.type };
         if (requestId) body.request_id = requestId;
         const id = suppliedId ?? cachedSessionId;
         if (isValidSessionId(id)) body.sessionID = id;
@@ -401,18 +459,18 @@ export const BuildmeshAttention = async () => {
       // and dropping a permission prompt here means the user never
       // sees the approval dialog and the agent hangs indefinitely.
       if (event.type === "permission.asked") {
-        const toolName = pickToolInfo(event);
+        const subject = permissionSubject(event);
         const id = pickSessionId(event) ?? cachedSessionId;
         const body = {
           hook_event_name: "permission.asked",
           notification_type: "permission_prompt",
-          message: toolName
-            ? `OpenCode is asking for permission: ${toolName}`
+          message: subject.label
+            ? `OpenCode is asking for permission: ${subject.label}`
             : "OpenCode is asking for permission",
         };
         const requestId = pickRequestId(event);
         if (requestId) body.request_id = requestId;
-        if (toolName) body.tool_name = toolName;
+        if (subject.toolName) body.tool_name = subject.toolName;
         if (isValidSessionId(id)) {
           body.sessionID = id;
         } else {
@@ -420,7 +478,7 @@ export const BuildmeshAttention = async () => {
             "permission.asked missing or malformed id; posting without fencing token\n",
           );
         }
-        await postAttention(body);
+        armPermissionAsk(requestId, body);
         return;
       }
 

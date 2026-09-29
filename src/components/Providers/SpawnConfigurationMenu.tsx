@@ -140,12 +140,23 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       if (mounted.current && draftSession.current === session) setError(`Saved, but recipe availability could not be refreshed: ${String(e)}`);
     }
   };
-  const persistConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing) => {
+  const persistConfiguration = async (value: SpawnConfiguration, route?: ProviderPairing, onRefreshing?: () => void) => {
+    // Issue #1948: emit one `launch_config_timing:` checkpoint per save
+    // phase so a reader grepping `launch_config_timing:` across
+    // `buildmesh.log` (via the frontendLog `console.info` bridge) and the
+    // browser console gets the caller-side split — persistence IPC versus
+    // menu refresh — next to the backend's own phase timings. Elapsed only:
+    // never configuration names, ids, URLs, models, or credentials.
     const session = draftSession.current;
+    const saveStarted = performance.now();
     const saved = route ? await saveSpawnConfiguration(value, route) : await saveSpawnConfiguration(value);
+    console.info(`launch_config_timing: checkpoint=save elapsed=${Math.round(performance.now() - saveStarted)}ms`);
     if (!mounted.current) return;
     replaceConfiguration(saved, saved.harness_id ?? saved.spawn_option_id.split(':')[0]);
+    onRefreshing?.();
+    const refreshStarted = performance.now();
     await refreshAvailability(saved, session);
+    console.info(`launch_config_timing: checkpoint=refresh elapsed=${Math.round(performance.now() - refreshStarted)}ms`);
     if (mounted.current && draftSession.current === session) setDraft(null);
   };
   const menuClass = 'w-full px-3 py-1.5 text-left text-xs text-text-primary hover:bg-bg-selection focus:bg-bg-selection focus:outline-none';

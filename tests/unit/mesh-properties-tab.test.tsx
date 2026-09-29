@@ -200,6 +200,7 @@ beforeEach(() => {
 describe('MeshPropertiesTab (issue #375)', () => {
   it('renders the config form when the âš™ï¸ tab is open and a mesh is selected', async () => {
     openProbeDestination('properties');
+    const loadedFieldQuery = { timeout: 10_000 };
 
     // Config fields that the new tab must keep. The label regex anchors
     // at the start with `\b` because the Field component renders the
@@ -210,12 +211,12 @@ describe('MeshPropertiesTab (issue #375)', () => {
     // a rail click whose async settle used to cover the form's load, so
     // each control waits for its own mount (the Default provider picker
     // arrives with the async provider list).
-    expect(await screen.findByLabelText('Name')).toBeTruthy();
-    expect(await screen.findByLabelText('Directory')).toBeTruthy();
-    expect(await screen.findByLabelText('Default provider')).toBeTruthy();
-    expect(await screen.findByLabelText('Project preset')).toBeTruthy();
-    expect(await screen.findByLabelText(/^Build command/)).toBeTruthy();
-    expect(await screen.findByLabelText(/^Run command/)).toBeTruthy();
+    expect(await screen.findByLabelText('Name', {}, loadedFieldQuery)).toBeTruthy();
+    expect(await screen.findByLabelText('Directory', {}, loadedFieldQuery)).toBeTruthy();
+    expect(await screen.findByLabelText('Default provider', {}, loadedFieldQuery)).toBeTruthy();
+    expect(await screen.findByLabelText('Project preset', {}, loadedFieldQuery)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Build command/, {}, loadedFieldQuery)).toBeTruthy();
+    expect(await screen.findByLabelText(/^Run command/, {}, loadedFieldQuery)).toBeTruthy();
   });
 
   it('shows the active tab label in the probe header', async () => {
