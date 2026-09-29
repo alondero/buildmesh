@@ -46,12 +46,8 @@ fn base_flags_with_sandbox(sandbox: &str) -> Vec<String> {
         "never".into(),
         "--sandbox".into(),
         sandbox.into(),
-        // Buildmesh owns the terminal surface and persists its scrollback.
-        // Codex's inline mode keeps completed output in that scrollback instead
-        // of confining it to the alternate screen buffer (issue #1089). This
-        // flag is TUI-only; it must not be carried into a future `codex exec`
-        // recipe because that subcommand rejects it.
-        "--no-alt-screen".into(),
+        // Do not force `--no-alt-screen`: Codex's fullscreen transcript avoids
+        // rebuilding terminal scrollback after width changes.
         // Run the project-local `.codex/hooks.json` hooks without Codex's
         // interactive hook-review prompt (issue #884) — a headless spawn
         // must never block on a trust prompt. The adapter also provisions the
@@ -2306,14 +2302,14 @@ mod tests {
     }
 
     #[test]
-    fn spawn_recipes_preserve_buildmesh_terminal_scrollback() {
-        let inline = "--no-alt-screen".to_string();
+    fn spawn_recipes_allow_codex_fullscreen_transcript() {
+        let no_alt_screen = "--no-alt-screen".to_string();
         let fresh = CODEX.spawn_recipe(Platform::Linux, EnvType::Wsl);
-        assert!(fresh.base_args.contains(&inline), "fresh: {:?}", fresh.base_args);
+        assert!(!fresh.base_args.contains(&no_alt_screen), "fresh: {:?}", fresh.base_args);
         let resume = CODEX
             .spawn_recipe_for_resume(Platform::Linux, "sid-123")
             .expect("codex has a resume recipe");
-        assert!(resume.base_args.contains(&inline), "resume: {:?}", resume.base_args);
+        assert!(!resume.base_args.contains(&no_alt_screen), "resume: {:?}", resume.base_args);
     }
 
     #[test]

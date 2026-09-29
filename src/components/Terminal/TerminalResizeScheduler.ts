@@ -2,20 +2,17 @@
  * Owns the resize-observation policy shared by agent and build/run terminals.
  *
  * A ResizeObserver can fire once per layout frame while a split-pane handle
- * moves. The scheduler keeps the terminal visually current with a trailing
- * quiet period, but caps the delay so a long drag is not frozen. The actual
- * fit runs on the next animation frame after either timer, keeping DOM
- * measurement aligned with the browser render loop.
+ * moves. Wait for a trailing quiet period so the terminal and PTY resize only
+ * after the drag settles. The fit runs on the next animation frame, keeping
+ * DOM measurement aligned with the browser render loop.
  */
-export const TERMINAL_RESIZE_QUIET_MS = 50;
-export const TERMINAL_RESIZE_MAX_WAIT_MS = 100;
+export const TERMINAL_RESIZE_QUIET_MS = 200;
 
 type FrameScheduler = (callback: () => void) => void;
 
 export class TerminalResizeScheduler {
   private observer: ResizeObserver | null = null;
   private quietTimer: ReturnType<typeof setTimeout> | null = null;
-  private maxWaitTimer: ReturnType<typeof setTimeout> | null = null;
   private attached = false;
   private generation = 0;
 
@@ -51,9 +48,7 @@ export class TerminalResizeScheduler {
   }
 
   private scheduleFit(): void {
-    if (this.quietTimer === null) {
-      this.maxWaitTimer = setTimeout(() => this.flush(), TERMINAL_RESIZE_MAX_WAIT_MS);
-    } else {
+    if (this.quietTimer !== null) {
       clearTimeout(this.quietTimer);
     }
     this.quietTimer = setTimeout(() => this.flush(), TERMINAL_RESIZE_QUIET_MS);
@@ -74,10 +69,6 @@ export class TerminalResizeScheduler {
     if (this.quietTimer !== null) {
       clearTimeout(this.quietTimer);
       this.quietTimer = null;
-    }
-    if (this.maxWaitTimer !== null) {
-      clearTimeout(this.maxWaitTimer);
-      this.maxWaitTimer = null;
     }
   }
 }

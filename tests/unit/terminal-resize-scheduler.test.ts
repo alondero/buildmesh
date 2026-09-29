@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   TerminalResizeScheduler,
-  TERMINAL_RESIZE_MAX_WAIT_MS,
   TERMINAL_RESIZE_QUIET_MS,
 } from '../../src/components/Terminal/TerminalResizeScheduler';
 
@@ -62,20 +61,30 @@ describe('TerminalResizeScheduler', () => {
     expect(fit).toHaveBeenCalledTimes(1);
   });
 
-  it('flushes during a long drag at the maximum wait instead of freezing until release', () => {
+  it('waits for a long drag to settle before fitting', () => {
     const fit = vi.fn();
     const scheduler = new TerminalResizeScheduler(fit, (callback) => frames.push(callback));
     scheduler.attach(document.createElement('div'));
 
     observers[0].trigger();
-    for (let elapsed = 25; elapsed < TERMINAL_RESIZE_MAX_WAIT_MS; elapsed += 25) {
-      vi.advanceTimersByTime(25);
+    const notificationInterval = TERMINAL_RESIZE_QUIET_MS - 1;
+    for (
+      let elapsed = 0;
+      elapsed < TERMINAL_RESIZE_QUIET_MS * 3;
+      elapsed += notificationInterval
+    ) {
+      vi.advanceTimersByTime(notificationInterval);
       observers[0].trigger();
     }
-    vi.advanceTimersByTime(25);
 
-    expect(frames).toHaveLength(1);
+    expect(frames).toHaveLength(0);
     expect(fit).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(TERMINAL_RESIZE_QUIET_MS - 1);
+    expect(frames).toHaveLength(0);
+    vi.advanceTimersByTime(1);
+    expect(frames).toHaveLength(1);
+
     frames.shift()!();
     expect(fit).toHaveBeenCalledTimes(1);
   });

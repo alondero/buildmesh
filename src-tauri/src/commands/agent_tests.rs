@@ -1004,7 +1004,6 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
-                    "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
                     "codex-sess",
                 ]
@@ -1037,7 +1036,6 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
-                    "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
                 ]
             )
@@ -1071,7 +1069,6 @@ mod tests {
                     "never",
                     "--sandbox",
                     "danger-full-access",
-                    "--no-alt-screen",
                     "--dangerously-bypass-hook-trust",
                     "--model",
                     "gpt-5.6-sol",
