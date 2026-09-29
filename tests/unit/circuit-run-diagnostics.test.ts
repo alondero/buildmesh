@@ -28,6 +28,7 @@ import {
   runNeedsAttention,
   reviewResult,
   reviewCircuitMetadata,
+  reviewCircuitForRun,
   runStateLabel,
   runStepProgress,
   stepStatusLabel,
@@ -76,6 +77,14 @@ describe('run diagnostics', () => {
   });
 
   describe('Probe view model', () => {
+    it('reads an extended issue review through its review-only run snapshot', () => {
+      const extended = {
+        ...detail(49, 'failed'),
+        run: { ...detail(49, 'failed').run, context_json: '{"review.extended":"1"}' },
+      };
+      expect(reviewCircuitForRun(extended, { verdictNodeId: 'review_classifier', retryNodeIds: ['review_retry'] }))
+        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], supportsContinuation: true });
+    });
     it('keeps historically completed but exhausted reviews in History (not Activity) for recovery', () => {
       const run = detail(48, 'completed');
       const step = (node_id: string, outcome: string) => ({ id: 1, run_id: 48, node_id,

@@ -50,6 +50,14 @@ export function reviewCircuitMetadata(
   return circuitGraphFacts(circuit).reviewCircuit;
 }
 
+/** Extensions use the stock review-only snapshot even for issue circuits. */
+export function reviewCircuitForRun(detail: CircuitRunDetail, circuit: ReviewCircuitMetadata | null): ReviewCircuitMetadata | null {
+  const context = parseRunContext(detail.run.context_json);
+  return context['review.extended'] === '1' || context['recovery.from_run_id']
+    ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], supportsContinuation: true }
+    : circuit;
+}
+
 export interface CircuitGraphFacts {
   reviewCircuit: ReviewCircuitMetadata | null;
   /** Circuit `node_id` → blueprint node, for the run card's role/verdict
@@ -104,7 +112,7 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
       }
     : {
         label: exhausted ? 'Review limit reached' : 'Review needs attention',
-        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit) ? 'Inspect the latest findings. If the work is ready, continue with one more review on the same worktree. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
+        detail: `${exhausted && pass !== null ? `Ran out of review attempts after pass ${pass}. ` : ''}No final approval is recorded. ${canContinueReview(detail, reviewCircuit) ? 'Inspect the latest findings. If the work is ready, add one review round to this run on the same worktree. If the approach needs changing, open the implementation agent first.' : 'Open the implementation agent, or resume its saved session from Archive. Address the failed step and latest findings before starting a fresh review. If the session is unavailable, recover from the PR branch.'}`,
         needsAttention: true,
       };
 }
@@ -209,7 +217,7 @@ export function buildCircuitProbeRows(
           : [];
       if (view === 'history') {
         if (options.attentionOnly) {
-          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewCircuit));
+          visibleRuns = visibleRuns.filter((run) => runNeedsAttention(run, reviewCircuitForRun(run, reviewCircuit)));
         }
         if (needle !== '') {
           visibleRuns = visibleRuns.filter((run) =>
@@ -221,7 +229,7 @@ export function buildCircuitProbeRows(
         // Attention-first, then newest — so the 63-failure case reads as
         // actionable items on top, not an endless completed tail.
         visibleRuns.sort((a, b) =>
-          Number(runNeedsAttention(b, reviewCircuit)) - Number(runNeedsAttention(a, reviewCircuit)) ||
+          Number(runNeedsAttention(b, reviewCircuitForRun(b, reviewCircuit))) - Number(runNeedsAttention(a, reviewCircuitForRun(a, reviewCircuit))) ||
           compareRunsNewestFirst(a, b));
       } else {
         visibleRuns.sort(compareRunsNewestFirst);
@@ -229,7 +237,7 @@ export function buildCircuitProbeRows(
       return {
         ...row,
         visibleRuns,
-        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuit)),
+        hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuitForRun(run, reviewCircuit))),
         runningSteps: countRunningSteps(row.runs),
         reviewCircuit,
         nodeIndex: facts.nodeIndex,
@@ -279,14 +287,14 @@ export function circuitActivityStats(
     for (const detail of runs) {
       if (runBelongsToActivity(detail)) {
         activeCount += 1;
-        if (runNeedsAttention(detail, reviewCircuit)) {
+        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit))) {
           activeAttentionCount += 1;
           attentionCount += 1;
         }
       }
       if (runBelongsToHistory(detail)) {
         historyCount += 1;
-        if (runNeedsAttention(detail, reviewCircuit)) {
+        if (runNeedsAttention(detail, reviewCircuitForRun(detail, reviewCircuit))) {
           historyAttentionCount += 1;
           attentionCount += 1;
         }

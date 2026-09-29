@@ -12,6 +12,7 @@ import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
 const labels: Record<string, string> = {
   continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
   review_continuation: 'Continued a failed review', observation_readiness: 'Session observation',
+  review_extension: 'Review rounds added',
   run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
@@ -160,6 +161,10 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
       case 'evidence_window_changed': return <p className="text-text-secondary break-words">{evidenceWindowText(entry.detail)}</p>;
       case 'configuration_pinned': return <p className="text-text-secondary break-words">{configurationText(entry.detail)}</p>;
       case 'review_continuation': return <p className="text-text-secondary break-words">{reviewContinuationText(entry.detail)}</p>;
+      case 'review_extension': {
+        const extension = parseDetail<{ additional_rounds?: number; round_limit?: number; attempt?: number }>(entry.detail);
+        return <p className="text-text-secondary break-words">Added {extension?.additional_rounds ?? 1} review round; queued attempt {extension?.attempt ?? 'unknown'} of {extension?.round_limit ?? 'unknown'} on this run. Earlier findings remain in Run History.</p>;
+      }
       case 'operator_attestation': return <div className="space-y-1 text-text-secondary">
         <p className="break-words">{entry.detail}</p>
         <p>Attestation — does not grant permission or review approval.</p>

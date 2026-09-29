@@ -195,19 +195,19 @@ An independent editable Circuit copied from the Review Blueprint and selectable 
 _Avoid_: Review preset copy
 
 **Review Run Snapshot**:
-The immutable graph and effective reviewer configuration a run used, shown as read-only history; later graph or settings changes affect future runs only.
+The graph and effective reviewer configuration a run used, shown as read-only history. An explicit review extension replaces the executable graph with a review-only graph while retaining the earlier rounds in Circuit Run History; later preference changes do not alter the selected reviewer.
 _Avoid_: Current blueprint, live configuration
 
-**Review Successor**:
-A follow-up review run linked to a prior failed run. Requests reuse an active or successful successor; continuing after a failed successor creates the next generation, while cancellation requires a fresh review.
-_Avoid_: Review retry (when referring to a distinct follow-up run)
+**Review Extension**:
+An operator request that increases a failed Review Circuit Run's round allowance and queues the next reviewer attempt on that same run. Earlier findings remain in its history. A repeated request while that attempt is active returns the same run; cancellation requires a fresh review.
+_Avoid_: Review Successor, Continued Review Circuit
 
 **Review Behavior Revision**:
 A revision identifying a change to the built-in Review Blueprint's behavior, such as its flow, instructions, approval, or recovery rules. Storage-format changes do not change the behavior revision.
 _Avoid_: Graph schema version
 
 **Circuit Run History**:
-The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and recovery are diagnosable uniformly; a continued review records the run it follows in the successor's own history, leaving the failed predecessor's ledger immutable.
+The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and review extensions are diagnosable uniformly.
 _Avoid_: attempt snapshot, recovery session
 
 **Unverified Checkpoint**:

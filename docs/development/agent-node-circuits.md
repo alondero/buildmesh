@@ -250,13 +250,13 @@ first review run. Its graph, settings and history cannot be deleted or edited as
 an individual Circuit; deleting its entire Mesh remains a separate operation.
 
 Run History records pinned behavior/graph identity and effective reviewer selection,
-model and effort, evidence-window changes, run and step capacity waits, the run a
-continued review follows, and continuation prompt intent, possible dispatch and
-outcome. Unchanged polling results do not add repeated entries. Arguments,
-endpoints and prompts are excluded from the configuration history summary. The
-"continued a failed review" entry is a record for the operator; the successor
-dedupe itself reads the run's own context, and a retention sweep removes a run
-together with its history. Every entry additionally names its source (who/what
+model and effort, evidence-window changes, run and step capacity waits, added
+review rounds, and continuation prompt intent, possible dispatch and outcome.
+Unchanged polling results do not add repeated entries. Arguments, endpoints and
+prompts are excluded from the configuration history summary. Historic linked
+review runs retain their lineage entry after consolidation under the original
+Circuit. A retention sweep removes a run together with its history. Every entry
+additionally names its source (who/what
 produced the event) and disposition (what Buildmesh did with it) beside its
 identity and time, so waits, capacity waits, configuration pins and recovery are
 diagnosable uniformly; a cleared wait records `resolved` and keeps the attempt it
