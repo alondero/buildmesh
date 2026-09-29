@@ -10,20 +10,29 @@ const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', h
 const route: ProviderPairing = { harness_id: 'claude', provider_id: 'minimax', surface: 'anthropic', base_url: 'https://api.minimax.io/anthropic', model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
 
 describe('Launch Configuration editor', () => {
-  it('offers Claude Code xhigh and max in a new configuration', () => {
+  it('shows effort guidance for WSL profiles and scopes max guidance to the max selection', () => {
     const claude: LaunchTarget = {
-      id: 'claude', harness_id: 'claude', harness_name: 'Claude Code', provider_name: 'Native authentication',
+      id: 'claude-wsl-ubuntu', harness_id: 'claude-wsl-ubuntu', harness_name: 'Claude Code (WSL: Ubuntu)', provider_name: 'Native authentication',
       models: [], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], route_attached: false,
       manual_model: true, supports_model: true, supports_extra_args: true,
     };
     render(<LaunchConfigurationEditor
-      value={{ id: '', name: '', spawn_option_id: 'claude', model: null, effort: null, extra_args: null }}
+      value={{ id: '', name: '', spawn_option_id: 'claude-wsl-ubuntu', model: null, effort: null, extra_args: null }}
       targets={[claude]} onSave={vi.fn()} onCancel={vi.fn()}
     />);
-    expect(within(screen.getByLabelText('Effort')).getAllByRole('option').map((option) => option.textContent))
+    const effort = screen.getByLabelText('Effort');
+    expect(within(effort).getAllByRole('option').map((option) => option.textContent))
       .toEqual(['Default', 'low', 'medium', 'high', 'xhigh', 'max']);
-    expect(screen.getByLabelText('Effort').getAttribute('aria-describedby')).toBe('claude-effort-help');
-    expect(screen.getByText('Availability depends on the selected model; max applies to the launched session.')).toBeTruthy();
+    expect(effort.getAttribute('aria-describedby')).toBe('launch-config-effort-help');
+    expect(screen.getByText('Availability depends on the selected model.')).toBeTruthy();
+    expect(screen.queryByText('Availability depends on the selected model. Max applies to the launched session.')).toBeNull();
+
+    fireEvent.change(effort, { target: { value: 'max' } });
+    expect(screen.getByText('Availability depends on the selected model. Max applies to the launched session.')).toBeTruthy();
+
+    fireEvent.change(effort, { target: { value: 'high' } });
+    expect(screen.getByText('Availability depends on the selected model.')).toBeTruthy();
+    expect(screen.queryByText('Availability depends on the selected model. Max applies to the launched session.')).toBeNull();
   });
 
   it('saves an unattached pairing together with the configuration', async () => {

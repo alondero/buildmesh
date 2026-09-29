@@ -5,8 +5,7 @@
  *   * Capability gating — a harness with `supports_model_override = false`
  *     AND `EffortControlKind::None` renders the no-configurable-defaults
  *     state (no input, no select).
- *   * Effort choices match the harness's declared vocabulary (Codex
- *     accepts `xhigh`, Claude does not).
+ *   * Effort choices and guidance match each harness's declared vocabulary.
  *   * Save commits via `set_harness_default` on blur (mirrors the existing
  *     autopilot-pool commit pattern); a failed save rolls the draft back
  *     to the last confirmed value so the visible card never lies about
@@ -196,18 +195,26 @@ describe('Settings — Agent Harness defaults', () => {
     expect(screen.queryByTestId('harness-default-effort-select-opencode')).toBeNull();
   });
 
-  it('effort choices match each harness\'s declared vocabulary, including Claude xhigh and max', async () => {
+  it('effort choices and guidance match each harness\'s declared vocabulary', async () => {
     mockBackend({ providers: [CLAUDE_ROW, CODEX_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
 
     const claudeSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-claude');
     const claudeOptions = Array.from(claudeSelect.querySelectorAll('option')).map((o) => o.value);
     expect(claudeOptions).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max']);
+    const claudeHelpId = claudeSelect.getAttribute('aria-describedby');
+    expect(claudeHelpId).toBe('harness-default-effort-help-claude');
+    expect(document.getElementById(claudeHelpId!)?.textContent).toBe('Availability depends on the selected model.');
+    const user = userEvent.setup();
+    await user.selectOptions(claudeSelect, 'max');
+    await waitFor(() => expect(document.getElementById(claudeHelpId!)?.textContent)
+      .toBe('Availability depends on the selected model. Max applies to the launched session.'));
 
     const codexSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-codex');
     const codexOptions = Array.from(codexSelect.querySelectorAll('option')).map((o) => o.value);
     // Codex's vocabulary: superset that includes xhigh.
     expect(codexOptions).toEqual(['', 'none', 'low', 'medium', 'high', 'xhigh']);
+    expect(codexSelect.getAttribute('aria-describedby')).toBeNull();
   });
 
   it('hydrates the model + effort fields from the stored harness_defaults map', async () => {

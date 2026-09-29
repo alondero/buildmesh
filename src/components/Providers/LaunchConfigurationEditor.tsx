@@ -5,6 +5,7 @@ import type { ProviderPairing } from '../../types/generated/ProviderPairing';
 import type { PairingVerification } from '../../types/generated/PairingVerification';
 import './launchConfigurations.css';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
+import { EffortGuidance } from '../shared/EffortGuidance';
 import { Spinner } from '../shared/Spinner';
 
 // Verify, save, and delete share the fieldset lock; status text is derived separately.
@@ -98,12 +99,10 @@ export function LaunchConfigurationEditor({ value, targets, onSave, onCancel, on
       </label>}
       {customModel && <label>Custom model<input required value={draft.model ?? ''} onChange={(e) => setDraft({ ...draft, model: e.target.value || null, effort: null })} /></label>}
       {efforts.length > 0 && <>
-        <label>Effort<select aria-describedby={target?.harness_id === 'claude' ? 'claude-effort-help' : undefined} value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
+        <label>Effort<select aria-describedby={efforts.includes('max') ? 'launch-config-effort-help' : undefined} value={draft.effort ?? ''} onChange={(e) => setDraft({ ...draft, effort: e.target.value || null })}>
           <option value="">Default</option>{efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
         </select></label>
-        {target?.harness_id === 'claude' && <p id="claude-effort-help" className="text-text-secondary">
-          Availability depends on the selected model; max applies to the launched session.
-        </p>}
+        <EffortGuidance id="launch-config-effort-help" efforts={efforts} selectedEffort={draft.effort} />
       </>}
       {target?.route && efforts.length === 0 && <p>No configurable effort is documented for this model through this harness.</p>}
       {target?.verification_required && onVerify && <>
