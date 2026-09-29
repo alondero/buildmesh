@@ -7,9 +7,9 @@ import { useUIStore } from '../../stores/uiStore';
 import { handoverTargets, type HandoverTargets } from '../../lib/nodeActivities';
 import { getStatusConfig } from '../../lib/status';
 import * as api from '../../lib/tauri';
-import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS, ignoreBracketedPasteForHarness } from './terminalConfig';
+import { terminalFontSize, setTerminalFontSize, TERMINAL_FONT_SIZE_DEFAULT, SEARCH_DECORATIONS, ignoreBracketedPasteForHarness, prefersNativeClipboardPasteForHarness } from './terminalConfig';
 import { resolveZoomKeyAction } from './terminalKeyAction';
-import { isMac } from '../../lib/platform';
+import { isMac, isWindows } from '../../lib/platform';
 import { TerminalRegistry, type TerminalInstance } from './TerminalRegistry';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -172,19 +172,7 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
   };
 
   const handlePaste = () => {
-    const inst = terminalManager.getInstance(nodeId);
-    if (inst) {
-      // readClipboard uses pbpaste on macOS to bypass the WKWebView
-      // clipboard-permission popup (macOS 14+). On other platforms it errors and
-      // we fall back to the web clipboard API.
-      api.readClipboard().then(text => {
-        if (text) inst.term.paste(text);
-      }).catch(() => {
-        navigator.clipboard.readText().then(text => {
-          if (text) inst.term.paste(text);
-        }).catch(console.error);
-      });
-    }
+    terminalManager.pasteClipboard(nodeId).catch(console.error);
     setContextMenu(null);
   };
 
@@ -410,6 +398,9 @@ export function AgentTerminal({ nodeId, provider, focusOnAttach = true, focusReq
       inst.onFindRequest = () => setSearchOpen(true);
       const harness = providerRef.current ?? useAgentNodeStore.getState().nodesById[nodeId]?.provider ?? '';
       inst.term.options.ignoreBracketedPasteMode = ignoreBracketedPasteForHarness(harness);
+      inst.useNativeClipboardPaste = prefersNativeClipboardPasteForHarness(
+        harness, useAgentNodeStore.getState().nodesById[nodeId]?.env, isWindows,
+      );
 
       const updateAtBottom = () => {
         const buf = inst.term.buffer.active;

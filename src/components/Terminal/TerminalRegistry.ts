@@ -39,6 +39,7 @@ export interface TerminalInstance {
   resizeScheduler: TerminalResizeScheduler;
   attachedContainer: HTMLElement | null;
   onFindRequest: (() => void) | null;
+  useNativeClipboardPaste: boolean;
 }
 
 function terminalDataFromPayload(payload: AgentOutputPayload): TerminalWriteData | null {
@@ -165,6 +166,14 @@ export class TerminalRegistry {
     if (!inst.opened) {
       inst.opened = true;
       inst.term.open(container);
+      // Capture Shift+Insert/browser paste before xterm converts it to PTY text.
+      // This listener belongs to the persistent terminal element, not its pane.
+      inst.term.element?.addEventListener('paste', (event) => {
+        if (!inst.useNativeClipboardPaste) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.pasteClipboard(nodeId).catch(console.error);
+      }, true);
     } else {
       const termEl = inst.term.element;
       if (termEl && termEl.parentElement !== container) {
@@ -209,6 +218,20 @@ export class TerminalRegistry {
     terminalWebglPool.activate(`agent:${nodeId}`, inst.term);
 
     return inst;
+  }
+
+  async pasteClipboard(nodeId: number): Promise<void> {
+    const inst = this.instances.get(nodeId);
+    if (!inst) return;
+    if (inst.useNativeClipboardPaste) {
+      // Grok reads the Windows clipboard atomically. ConPTY text input loses
+      // paste boundaries in its Win32 reader and can fragment multiline text.
+      await api.writeToAgent(nodeId, '\x16');
+      return;
+    }
+    // pbpaste bypasses WKWebView's clipboard-permission popup on macOS.
+    const text = await api.readClipboard().catch(() => navigator.clipboard.readText());
+    if (text) inst.term.paste(text);
   }
 
   detach(nodeId: number): void {
@@ -381,6 +404,7 @@ export class TerminalRegistry {
         resizeScheduler: new TerminalResizeScheduler(() => measureAndFit(instance)),
         attachedContainer: null,
         onFindRequest: null,
+        useNativeClipboardPaste: false,
       };
 
       this.writer.register(nodeId, (data) => term.write(data));
@@ -422,7 +446,9 @@ export class TerminalRegistry {
       term.attachCustomKeyEventHandler((ev: KeyboardEvent) => {
         if (ev.type !== 'keydown') return true;
 
-        const action = resolveKeyAction({
+        const nativeShiftInsert = instance.useNativeClipboardPaste
+          && ev.key === 'Insert' && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+        const action = nativeShiftInsert ? 'paste' : resolveKeyAction({
           key: ev.key,
           ctrlKey: ev.ctrlKey,
           shiftKey: ev.shiftKey,
@@ -439,15 +465,7 @@ export class TerminalRegistry {
             return false;
           case 'paste':
             ev.preventDefault();
-            api.readClipboard().then(text => {
-              if (text) term.paste(text);
-            }).catch(() => {
-              navigator.clipboard.readText().then(text => {
-                if (text) term.paste(text);
-              }).catch(err => {
-                console.warn('[TerminalRegistry] Clipboard read failed:', err);
-              });
-            });
+            this.pasteClipboard(nodeId).catch(console.error);
             return false;
           case 'selectAll':
             term.selectAll();

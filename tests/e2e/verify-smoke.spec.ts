@@ -125,6 +125,68 @@ const SMOKE_FIXTURES = {
   get_mesh_pool_count: 0,
 };
 
+test('Windows Grok clipboard gestures send one native paste command through real xterm', async ({ page }) => {
+  const writes: Array<{ sessionId: number; data: string }> = [];
+  await page.exposeFunction('recordGrokPaste', (args: { sessionId: number; data: string }) => writes.push(args));
+  await page.addInitScript({ content: buildInitScript({
+    ...SMOKE_FIXTURES,
+    list_agent_nodes: [{ ...SMOKE_FIXTURES.list_agent_nodes[0], provider: 'grok', env: 'windows' }],
+  }) });
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'platform', { value: 'Win32' });
+    const host = window as unknown as {
+      recordGrokPaste(args: unknown): Promise<void>;
+      __BUILDMESH_MOCK__: { on(command: string, handler: (args: unknown) => unknown): void };
+    };
+    host.__BUILDMESH_MOCK__.on('write_to_agent', (args) => host.recordGrokPaste(args));
+    host.__BUILDMESH_MOCK__.on('read_clipboard', () => { throw new Error('Grok must read its own clipboard'); });
+  });
+  await page.goto('/');
+  await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+  const terminal = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`);
+  const textarea = terminal.locator('textarea');
+  await expect(terminal).toBeVisible();
+  await textarea.focus();
+  await page.keyboard.press('Control+v');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await page.keyboard.press('Control+Shift+v');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await page.keyboard.press('Shift+Insert');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+  writes.length = 0;
+  await terminal.click({ button: 'right' });
+  await page.getByRole('button', { name: /^Paste/ }).click();
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+
+  // Browser paste must not also run xterm's handler.
+  writes.length = 0;
+  await textarea.evaluate((element) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData('text/plain', Array.from({ length: 200 }, (_, i) => `line ${i}`).join('\r\n'));
+    element.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }));
+  });
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\x16' }]);
+
+  // A normal Enter remains a separate user action, never appended to paste.
+  writes.length = 0;
+  await textarea.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(() => writes).toEqual([{ sessionId: SMOKE_NODE_ID, data: '\r' }]);
+
+  // File drops and other supplied text must not paste the desktop clipboard.
+  writes.length = 0;
+  await page.evaluate(async (id) => {
+    const term = window.__terminalManager!.getTerminal(id)!;
+    await new Promise<void>((resolve) => term.write('\x1b[?2004h', resolve));
+    term.paste('supplied\ntext');
+  }, SMOKE_NODE_ID);
+  await expect.poll(() => writes).toEqual([{
+    sessionId: SMOKE_NODE_ID, data: '\x1b[200~supplied\rtext\x1b[201~',
+  }]);
+});
+
 /**
  * Push a few lines of PTY bytes into the Tauri mock's `agent-output`
  * event. The mock fans out to every registered listener — including
