@@ -29,6 +29,15 @@ pub(crate) struct IssueContext {
     pub(crate) repo: String,
     pub(crate) number: i64,
     pub(crate) title: String,
+    /// Custom spawn-prompt template resolved once, at construction, from
+    /// the stored `issue_spawn_prompt` preference (production sites read
+    /// it via `preferences::issue_spawn_prompt()`). `None` selects the
+    /// built-in default. Carrying the template inside the intent - rather
+    /// than re-reading global state at every `initial_prompt()` call -
+    /// keeps the desktop draft, the background launch, and the Autopilot
+    /// watcher byte-identical by construction: they all render the same
+    /// carried value.
+    pub(crate) template: Option<String>,
 }
 
 
@@ -41,6 +50,10 @@ pub(crate) struct PullRequestContext {
     pub(crate) owner: String,
     pub(crate) repo: String,
     pub(crate) number: i64,
+    /// Custom spawn-prompt template resolved once, at construction, from
+    /// the stored `pr_spawn_prompt` preference. Same carried-value
+    /// contract as [`IssueContext::template`].
+    pub(crate) template: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,24 +143,54 @@ impl SpawnIntent {
     /// | `Resume { .. }`                    | `None`                                          |
     /// | `Issue(context)` w/ title          | `Some("Please work on ... #N — title\n<url>")`  |
     /// | `Issue(context)` blank title       | `Some("Please work on ... #N\n<url>")`          |
+    /// | `Issue(context)` w/ `template`     | `Some(render_issue_spawn_prompt(template, ...))` |
     /// | `PullRequest(context)`             | `Some("Review PR #N\n<shared review policy>\n<url>")` |
+    /// | `PullRequest(context)` w/ `template` | `Some(render_pr_spawn_prompt(template, ...))` |
     /// | `Handover { selected_text }`       | `Some(selected_text)` verbatim                  |
     /// | `Loop { initial_prompt }`          | `Some(initial_prompt)` verbatim                 |
+    ///
+    /// The `template` is carried inside the context (resolved once, at
+    /// construction, from the stored preference), so every consumer that
+    /// holds the same intent renders the same string however many times
+    /// it asks - byte-identity by construction, not by convention.
     pub(crate) fn initial_prompt(&self) -> Option<InitialPrompt> {
         match self {
             Self::Fresh | Self::Resume { .. } => None,
             Self::Prompt { text } => Some(InitialPrompt(text.clone())),
-            Self::Issue(context) => Some(InitialPrompt(format_issue_prefill(
-                &context.owner,
-                &context.repo,
-                context.number,
-                &context.title,
-            ))),
-            Self::PullRequest(context) => Some(InitialPrompt(format_pull_request_prefill(
-                &context.owner,
-                &context.repo,
-                context.number,
-            ))),
+            Self::Issue(context) => {
+                let prompt = match context.template.as_deref() {
+                    Some(template) => render_issue_spawn_prompt(
+                        template,
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                        &context.title,
+                    ),
+                    None => format_issue_prefill(
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                        &context.title,
+                    ),
+                };
+                Some(InitialPrompt(prompt))
+            }
+            Self::PullRequest(context) => {
+                let prompt = match context.template.as_deref() {
+                    Some(template) => render_pr_spawn_prompt(
+                        template,
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                    ),
+                    None => format_pull_request_prefill(
+                        &context.owner,
+                        &context.repo,
+                        context.number,
+                    ),
+                };
+                Some(InitialPrompt(prompt))
+            }
             Self::Handover { selected_text } => Some(InitialPrompt(selected_text.clone())),
             Self::Loop { initial_prompt } => Some(InitialPrompt(initial_prompt.clone())),
         }
@@ -312,6 +355,162 @@ pub(crate) fn format_pull_request_prefill(
     )
 }
 
+/// Default template for the Issues-probe spawn prompt, shown in Settings
+/// as the default and used whenever the user has no custom template
+/// stored. Rendered via [`render_issue_spawn_prompt`]; rendering this
+/// constant is byte-identical to [`format_issue_prefill`] (pinned by
+/// `default_issue_template_matches_legacy_prefill` below).
+pub const DEFAULT_ISSUE_SPAWN_TEMPLATE: &str =
+    "Please work on GitHub issue #{{number}}{{title_suffix}}\n{{url}}";
+
+/// Default template for the PR-probe spawn prompt, shown in Settings as
+/// the default and used whenever the user has no custom template stored.
+/// Rendered via [`render_pr_spawn_prompt`]; rendering this constant is
+/// byte-identical to [`format_pull_request_prefill`] (pinned by
+/// `default_pr_template_matches_legacy_prefill` below).
+pub const DEFAULT_PR_SPAWN_TEMPLATE: &str = "Review PR #{{number}}\n{{policy}}\n{{url}}";
+
+/// Substitute `{{name}}` placeholders in one left-to-right pass.
+/// Each placeholder is resolved against `vars` exactly once and the
+/// substituted value is emitted verbatim - never re-scanned - so a value
+/// that itself contains placeholder-shaped text (e.g. an issue titled
+/// `Fix {{url}} parsing`) cannot trigger secondary expansion. Unknown
+/// names and unterminated `{{` sequences pass through untouched, so a
+/// typo stays visible in the prompt instead of silently vanishing.
+fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let name = &after[..end];
+                match vars.iter().find(|(key, _)| *key == name) {
+                    Some((_, value)) => out.push_str(value),
+                    None => out.push_str(&rest[start..start + 2 + end + 2]),
+                }
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Render an Issues-probe spawn template. Placeholders:
+/// `{{number}}`, `{{title}}` (trimmed, may be empty), `{{title_suffix}}`
+/// (`" - <title>"` with an em dash, or empty when the title is blank, so
+/// a custom template built on the default keeps the no-dangling-dash
+/// contract), `{{url}}`, `{{owner}}`, `{{repo}}`. Unknown `{{...}}`
+/// placeholders are left in place.
+pub(crate) fn render_issue_spawn_prompt(
+    template: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    title: &str,
+) -> String {
+    let title = title.trim();
+    let title_suffix = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" \u{2014} {title}")
+    };
+    let url = format!("https://github.com/{owner}/{repo}/issues/{number}");
+    let number = number.to_string();
+    render_template(
+        template,
+        &[
+            ("number", number.as_str()),
+            ("title_suffix", title_suffix.as_str()),
+            ("title", title),
+            ("url", url.as_str()),
+            ("owner", owner),
+            ("repo", repo),
+        ],
+    )
+}
+
+/// Render a PR-probe spawn template. Placeholders: `{{number}}`,
+/// `{{url}}`, `{{owner}}`, `{{repo}}`, `{{policy}}` (the shared review
+/// policy from [`crate::review_contract::REVIEW_POLICY`]). Unknown
+/// `{{...}}` placeholders are left in place.
+pub(crate) fn render_pr_spawn_prompt(
+    template: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+) -> String {
+    let url = format!("https://github.com/{owner}/{repo}/pull/{number}");
+    let number = number.to_string();
+    render_template(
+        template,
+        &[
+            ("number", number.as_str()),
+            ("policy", crate::review_contract::REVIEW_POLICY),
+            ("url", url.as_str()),
+            ("owner", owner),
+            ("repo", repo),
+        ],
+    )
+}
+
+/// Render an Issues-probe spawn template when the canonical issue URL is
+/// already available from a trigger payload (circuit `issue.*` namespace)
+/// instead of owner/repo parts. Same placeholders as
+/// [`render_issue_spawn_prompt`]; `{{owner}}` / `{{repo}}` are derived by
+/// parsing the canonical `https://github.com/{owner}/{repo}/issues/{n}`
+/// URL and fall back to empty strings when the URL does not parse (so a
+/// custom template still renders rather than failing the run).
+pub(crate) fn render_issue_spawn_prompt_with_url(
+    template: &str,
+    number: i64,
+    title: &str,
+    url: &str,
+) -> String {
+    let (owner, repo) = parse_github_issue_url(url);
+    let title = title.trim();
+    let title_suffix = if title.is_empty() {
+        String::new()
+    } else {
+        format!(" \u{2014} {title}")
+    };
+    let number = number.to_string();
+    render_template(
+        template,
+        &[
+            ("number", number.as_str()),
+            ("title_suffix", title_suffix.as_str()),
+            ("title", title),
+            ("url", url),
+            ("owner", owner.as_str()),
+            ("repo", repo.as_str()),
+        ],
+    )
+}
+
+/// Split a canonical `https://github.com/{owner}/{repo}/...` URL into its
+/// owner/repo parts. Returns empty strings when the URL does not have the
+/// expected shape; the caller decides how to handle the fallback.
+fn parse_github_issue_url(url: &str) -> (String, String) {
+    const PREFIX: &str = "https://github.com/";
+    let Some(path) = url.strip_prefix(PREFIX) else {
+        return (String::new(), String::new());
+    };
+    let mut segments = path.split('/');
+    match (segments.next(), segments.next()) {
+        (Some(owner), Some(repo)) if !owner.is_empty() && !repo.is_empty() => {
+            (owner.to_string(), repo.to_string())
+        }
+        _ => (String::new(), String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +527,7 @@ mod tests {
             repo: "buildmesh".into(),
             number: 247,
             title: "  Deepen spawn pipeline  ".into(),
+            template: None,
         });
 
         assert_eq!(
@@ -347,6 +547,7 @@ https://github.com/alondero/buildmesh/issues/247"
             owner: "alondero".into(),
             repo: "buildmesh".into(),
             number: 420,
+            template: None,
         });
 
         let expected = format!(
@@ -435,6 +636,7 @@ https://github.com/alondero/buildmesh/issues/247"
             repo: "buildmesh".into(),
             number: 7,
             title: String::new(),
+            template: None,
         });
         assert_eq!(
             intent.initial_prompt().as_ref().map(InitialPrompt::as_str),
@@ -455,6 +657,7 @@ https://github.com/alondero/buildmesh/issues/7"
             repo: "buildmesh".into(),
             number: 1,
             title: "   \t  ".into(),
+            template: None,
         });
         // Same shape as the empty-title case.
         let expected_issue = SpawnIntent::Issue(IssueContext {
@@ -462,6 +665,7 @@ https://github.com/alondero/buildmesh/issues/7"
             repo: "buildmesh".into(),
             number: 1,
             title: String::new(),
+            template: None,
         })
         .initial_prompt();
         assert_eq!(issue.initial_prompt(), expected_issue);
@@ -479,6 +683,7 @@ https://github.com/alondero/buildmesh/issues/7"
             repo: "buildmesh".into(),
             number: 42,
             title: "Fix the \"weird\" race in spawn".into(),
+            template: None,
         });
         let prefill = intent
             .initial_prompt()
@@ -504,5 +709,228 @@ https://github.com/alondero/buildmesh/issues/7"
     #[test]
     fn terminal_size_default_is_24x80() {
         assert_eq!(TerminalSize::default(), TerminalSize { rows: 24, cols: 80 });
+    }
+
+    /// Rendering the default issue template must be byte-identical to the
+    /// legacy prefill - for titled, empty, and whitespace-only titles - so
+    /// "no custom template stored" can never drift from the historical
+    /// wording.
+    #[test]
+    fn default_issue_template_matches_legacy_prefill() {
+        for title in ["Deepen spawn pipeline", "", "   \t  "] {
+            assert_eq!(
+                render_issue_spawn_prompt(
+                    DEFAULT_ISSUE_SPAWN_TEMPLATE,
+                    "alondero",
+                    "buildmesh",
+                    247,
+                    title
+                ),
+                format_issue_prefill("alondero", "buildmesh", 247, title),
+                "title {title:?} must render identically"
+            );
+        }
+    }
+
+    /// Same byte-identity contract for the PR default template.
+    #[test]
+    fn default_pr_template_matches_legacy_prefill() {
+        assert_eq!(
+            render_pr_spawn_prompt(DEFAULT_PR_SPAWN_TEMPLATE, "alondero", "buildmesh", 420),
+            format_pull_request_prefill("alondero", "buildmesh", 420),
+        );
+    }
+
+    /// Custom issue templates substitute every placeholder; the title is
+    /// trimmed before substitution.
+    #[test]
+    fn custom_issue_template_substitutes_placeholders() {
+        let out = render_issue_spawn_prompt(
+            "Working {{owner}}/{{repo}}#{{number}}: {{title}} ({{url}})",
+            "alondero",
+            "buildmesh",
+            7,
+            "  Fix it  ",
+        );
+        assert_eq!(
+            out,
+            "Working alondero/buildmesh#7: Fix it \
+             (https://github.com/alondero/buildmesh/issues/7)"
+        );
+    }
+
+    /// A blank title empties both `{{title}}` and `{{title_suffix}}`, so a
+    /// custom template built on the default never leaves a dangling dash.
+    #[test]
+    fn custom_issue_template_blank_title_empties_title_suffix() {
+        let out = render_issue_spawn_prompt(
+            DEFAULT_ISSUE_SPAWN_TEMPLATE,
+            "alondero",
+            "buildmesh",
+            7,
+            "   ",
+        );
+        assert_eq!(
+            out,
+            "Please work on GitHub issue #7\nhttps://github.com/alondero/buildmesh/issues/7"
+        );
+    }
+
+    /// Custom PR templates get the shared review policy plus the PR URL.
+    #[test]
+    fn custom_pr_template_substitutes_policy_and_url() {
+        let out = render_pr_spawn_prompt(
+            "Look at {{owner}}/{{repo}}#{{number}}: {{url}}\n{{policy}}",
+            "alondero",
+            "buildmesh",
+            9,
+        );
+        assert!(
+            out.contains("https://github.com/alondero/buildmesh/pull/9"),
+            "PR URL must be substituted: {out:?}"
+        );
+        assert!(
+            out.contains(crate::review_contract::REVIEW_POLICY),
+            "shared review policy must be substituted"
+        );
+    }
+
+    /// Placeholders the renderer does not know are left in place rather
+    /// than silently deleted, so a typo stays visible in the prompt.
+    #[test]
+    fn unknown_placeholders_are_left_in_place() {
+        let out = render_issue_spawn_prompt(
+            "#{{number}} {{bogus}}",
+            "alondero",
+            "buildmesh",
+            1,
+            "t",
+        );
+        assert_eq!(out, "#1 {{bogus}}");
+    }
+
+    /// A substituted value is emitted verbatim, never re-scanned: an
+    /// issue titled `Fix {{url}} parsing` must reach the prompt with its
+    /// braces intact instead of being expanded to the issue URL by the
+    /// later `{{url}}` pass. Regression for the cascading-`.replace()`
+    /// secondary expansion.
+    #[test]
+    fn substituted_values_are_never_rescanned() {
+        let out = render_issue_spawn_prompt(
+            DEFAULT_ISSUE_SPAWN_TEMPLATE,
+            "alondero",
+            "buildmesh",
+            7,
+            "Fix {{url}} and {{number}} parsing",
+        );
+        assert_eq!(
+            out,
+            "Please work on GitHub issue #7 \u{2014} Fix {{url}} and {{number}} parsing\n\
+             https://github.com/alondero/buildmesh/issues/7"
+        );
+    }
+
+    /// Unterminated `{{` sequences pass through untouched rather than
+    /// swallowing the rest of the template.
+    #[test]
+    fn unterminated_placeholder_passes_through() {
+        let out = render_issue_spawn_prompt(
+            "#{{number}} {{oops",
+            "alondero",
+            "buildmesh",
+            1,
+            "t",
+        );
+        assert_eq!(out, "#1 {{oops");
+    }
+
+    /// A carried custom template renders through `initial_prompt()` - the
+    /// same intent value the desktop draft, the background launch, and
+    /// the Autopilot watcher all share, so they agree by construction.
+    #[test]
+    fn carried_issue_template_renders_through_initial_prompt() {
+        let intent = SpawnIntent::Issue(IssueContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 3,
+            title: "Hi".into(),
+            template: Some("Custom #{{number}}: {{title}}".into()),
+        });
+        assert_eq!(
+            intent.initial_prompt().map(|p| p.into_string()),
+            Some("Custom #3: Hi".to_string()),
+        );
+    }
+
+    /// `template: None` selects the built-in default wording.
+    #[test]
+    fn missing_template_falls_back_to_default() {
+        let intent = SpawnIntent::Issue(IssueContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 3,
+            title: "Hi".into(),
+            template: None,
+        });
+        assert_eq!(
+            intent.initial_prompt().map(|p| p.into_string()),
+            Some(
+                "Please work on GitHub issue #3 \u{2014} Hi\n\
+                 https://github.com/alondero/buildmesh/issues/3"
+                    .to_string()
+            ),
+        );
+    }
+
+    /// A carried custom PR template renders the PR URL through
+    /// `initial_prompt()`.
+    #[test]
+    fn carried_pr_template_renders_through_initial_prompt() {
+        let intent = SpawnIntent::PullRequest(PullRequestContext {
+            owner: "alondero".into(),
+            repo: "buildmesh".into(),
+            number: 11,
+            template: Some("Look at {{url}}".into()),
+        });
+        assert_eq!(
+            intent.initial_prompt().map(|p| p.into_string()),
+            Some("Look at https://github.com/alondero/buildmesh/pull/11".to_string()),
+        );
+    }
+
+    /// The URL-variant renderer parses a canonical issue URL for
+    /// `{{owner}}` / `{{repo}}` so circuit `issue.*` prefills honour the
+    /// same custom template as Probe spawns.
+    #[test]
+    fn with_url_renderer_derives_owner_and_repo() {
+        let out = render_issue_spawn_prompt_with_url(
+            "{{owner}}/{{repo}}#{{number}}: {{title}} ({{url}})",
+            9,
+            "Fix it",
+            "https://github.com/alondero/buildmesh/issues/9",
+        );
+        assert_eq!(
+            out,
+            "alondero/buildmesh#9: Fix it (https://github.com/alondero/buildmesh/issues/9)"
+        );
+    }
+
+    /// A non-canonical URL degrades to empty owner/repo rather than
+    /// failing the render - the number, title, and URL still land.
+    #[test]
+    fn with_url_renderer_tolerates_unparseable_url() {
+        let out = render_issue_spawn_prompt_with_url("[{{owner}}/{{repo}}] #{{number}} {{url}}", 1, "t", "u");
+        assert_eq!(out, "[/] #1 u");
+    }
+
+    /// Rendering the default template through the URL variant matches the
+    /// legacy `format_issue_prefill_with_url` byte-for-byte.
+    #[test]
+    fn with_url_default_template_matches_legacy_prefill() {
+        let url = "https://github.com/alondero/buildmesh/issues/5";
+        assert_eq!(
+            render_issue_spawn_prompt_with_url(DEFAULT_ISSUE_SPAWN_TEMPLATE, 5, "T", url),
+            format_issue_prefill_with_url(5, "T", url),
+        );
     }
 }

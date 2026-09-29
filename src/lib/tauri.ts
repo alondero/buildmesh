@@ -39,6 +39,7 @@ import type { NetworkStatus } from '../types/generated/NetworkStatus';
 import type { PickedFolder } from '../types/generated/PickedFolder';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
+import type { ProbeSpawnPromptDefaults } from '../types/generated/ProbeSpawnPromptDefaults';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
 import type { RealizedBind } from '../types/generated/RealizedBind';
@@ -1035,6 +1036,26 @@ export const setTitlebarMaximizeMetrics = (metrics: {
  *  their persisted `worktree_path`. */
 export const setAppWorktreeDirectory = (directory: string | null) =>
   _invoke('set_app_worktree_directory', { directory });
+
+/** Built-in probe-spawn prompt templates (placeholders unrendered),
+ *  shown in Settings as the defaults. Generated from
+ *  commands::preferences::ProbeSpawnPromptDefaults.*/
+export type { ProbeSpawnPromptDefaults };
+
+export const getProbeSpawnPromptDefaults = () =>
+  _invoke<ProbeSpawnPromptDefaults>('get_probe_spawn_prompt_defaults');
+
+/** Custom template for the initial prompt of agents spawned from the
+ *  Probe's GitHub Issues tab. Pass `null` (or blank, which the backend
+ *  collapses) to clear the override and restore the built-in wording.*/
+export const setAppIssueSpawnPrompt = (prompt: string | null) =>
+  _invoke('set_app_issue_spawn_prompt', { prompt });
+
+/** Custom template for the initial prompt of agents spawned from the
+ *  Probe's Pull Requests tab. Pass `null` (or blank) to clear and
+ *  restore the built-in wording.*/
+export const setAppPrSpawnPrompt = (prompt: string | null) =>
+  _invoke('set_app_pr_spawn_prompt', { prompt });
 
 // ── Application-level Agent Harness defaults + per-Mesh overrides + ────────
 //    proxied-provider pairings + usage meters (issue #1150 / #1148 / #1151 /

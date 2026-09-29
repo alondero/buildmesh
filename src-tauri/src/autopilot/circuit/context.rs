@@ -101,7 +101,17 @@ impl CircuitContext {
         self.set("issue.author", author);
         self.set("issue.url", url);
         self.set("issue.labels", labels.join(", "));
-        let prefill = crate::agent::spawn::format_issue_prefill_with_url(number, title, url);
+        // The circuit InjectPty path honours the same stored Issues-probe
+        // template as every other Issue seam: with a custom template the
+        // trigger-supplied URL feeds `render_issue_spawn_prompt_with_url`
+        // (owner/repo are parsed from the canonical URL); without one the
+        // legacy formatter keeps the historical wording byte-identical.
+        let prefill = match crate::preferences::issue_spawn_prompt() {
+            Some(template) => crate::agent::spawn::render_issue_spawn_prompt_with_url(
+                &template, number, title, url,
+            ),
+            None => crate::agent::spawn::format_issue_prefill_with_url(number, title, url),
+        };
         self.set("issue.prefill", prefill);
         self
     }
@@ -281,6 +291,37 @@ mod tests {
             ctx.resolve("{{issue.prefill}}"),
             "Please work on GitHub issue #1208 — React to the world\nhttps://github.com/alondero/buildmesh/issues/1208"
         );
+    }
+
+    /// The circuit `issue.prefill` honours the stored Issues-probe
+    /// template: with one stored, the trigger-supplied URL feeds the
+    /// custom render instead of the legacy formatter.
+    #[test]
+    fn issue_prefill_applies_stored_probe_template() {
+        let dir = std::env::temp_dir().join(format!(
+            "buildmesh-circuit-prefill-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::preferences::storage::init_for_tests(dir.clone());
+        crate::preferences::update(|prefs| {
+            prefs.issue_spawn_prompt = Some("Circuit: {{owner}}/{{repo}}#{{number}}".into());
+        })
+        .unwrap();
+
+        let mut ctx = CircuitContext::new();
+        ctx.with_issue(
+            7,
+            "T",
+            "b",
+            "a",
+            "https://github.com/alondero/buildmesh/issues/7",
+            &[],
+        );
+        assert_eq!(ctx.resolve("{{issue.prefill}}"), "Circuit: alondero/buildmesh#7");
+
+        crate::preferences::storage::reset_for_tests();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

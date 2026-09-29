@@ -386,6 +386,50 @@ pub fn autopilot_pool_size() -> Option<u32> {
     }
 }
 
+/// Custom template for the initial prompt of agents spawned from the
+/// Probe's GitHub Issues tab. `None` means "use the built-in wording".
+/// A blank stored value collapses to `None` so clearing the Settings
+/// field restores the default. A load failure logs and falls back to
+/// `None` like [`default_provider`].
+pub fn issue_spawn_prompt() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs
+            .issue_spawn_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::issue_spawn_prompt load failed, falling back to default: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
+/// Custom template for the initial prompt of agents spawned from the
+/// Probe's Pull Requests tab. Same `None`/blank/load-failure semantics
+/// as [`issue_spawn_prompt`].
+pub fn pr_spawn_prompt() -> Option<String> {
+    match load() {
+        Ok(prefs) => prefs
+            .pr_spawn_prompt
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Err(e) => {
+            tracing::warn!(
+                "preferences::pr_spawn_prompt load failed, falling back to default: {}",
+                e
+            );
+            None
+        }
+    }
+}
+
 /// One-shot normalization of legacy bare `default_provider` values to
 /// the post-#575 composite form (`minimax` → `claude:minimax`).
 ///

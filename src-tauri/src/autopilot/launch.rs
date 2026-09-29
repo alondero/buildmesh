@@ -305,6 +305,7 @@ mod tests {
                 repo: "buildmesh".into(),
                 number: 358,
                 title: "Fix the login flow".into(),
+                template: None,
             },
         )
         .initial_prompt()

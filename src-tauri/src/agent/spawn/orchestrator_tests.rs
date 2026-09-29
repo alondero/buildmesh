@@ -82,6 +82,7 @@ fn issue_intent_builds_its_prefill_at_the_spawn_seam() {
         repo: "buildmesh".into(),
         number: 247,
         title: "Deepen spawn pipeline".into(),
+        template: None,
     });
 
     assert_eq!(

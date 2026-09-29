@@ -94,6 +94,58 @@ pub fn set_app_confirm_before_quit(confirm: bool) -> Result<(), String> {
     preferences::save(prefs)
 }
 
+/// The built-in probe-spawn prompt templates, shown in Settings as the
+/// defaults for the GitHub Issues / Pull Requests probe spawn prompts.
+/// Sourced from `agent::spawn::intent::DEFAULT_*_SPAWN_TEMPLATE` so the
+/// displayed defaults can never drift from the prompts a fresh install
+/// actually sends.
+///
+/// Generated to `src/types/generated/ProbeSpawnPromptDefaults.ts`.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "ProbeSpawnPromptDefaults.ts")]
+pub struct ProbeSpawnPromptDefaults {
+    /// Built-in Issues-probe template (placeholders unrendered).
+    pub issue_template: String,
+    /// Built-in PR-probe template (placeholders unrendered).
+    pub pr_template: String,
+}
+
+/// Read the built-in probe-spawn prompt templates. Pure, infallible read
+/// (built from code constants, no disk or mesh context), so the App
+/// Settings modal calls it without either.
+#[command]
+pub fn get_probe_spawn_prompt_defaults() -> ProbeSpawnPromptDefaults {
+    ProbeSpawnPromptDefaults {
+        issue_template: crate::agent::spawn::DEFAULT_ISSUE_SPAWN_TEMPLATE.to_string(),
+        pr_template: crate::agent::spawn::DEFAULT_PR_SPAWN_TEMPLATE.to_string(),
+    }
+}
+
+/// Set the custom template for the initial prompt handed to agents
+/// spawned from the Probe's GitHub Issues tab. Pass `None` (or blank,
+/// which collapses to `None`) to clear the override and restore the
+/// built-in wording.
+#[command]
+pub fn set_app_issue_spawn_prompt(prompt: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.issue_spawn_prompt = prompt
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    preferences::save(prefs)
+}
+
+/// Set the custom template for the initial prompt handed to agents
+/// spawned from the Probe's Pull Requests tab. Pass `None` (or blank)
+/// to clear the override and restore the built-in wording.
+#[command]
+pub fn set_app_pr_spawn_prompt(prompt: Option<String>) -> Result<(), String> {
+    let mut prefs = preferences::load()?;
+    prefs.pr_spawn_prompt = prompt
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    preferences::save(prefs)
+}
+
 /// Set the Buildmesh-wide default Worktree Node directory (issue #1519).
 /// `None` (or blank, which collapses to `None`) clears the override and
 /// restores the `.claude/worktrees` default under each Mesh root.

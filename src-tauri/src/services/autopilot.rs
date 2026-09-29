@@ -1083,6 +1083,7 @@ fn spawn_autopilot_node(
             repo: repo.to_string(),
             number: issue.number,
             title: issue.title.clone(),
+            template: crate::preferences::issue_spawn_prompt(),
         },
     );
     let initial_name = crate::session_naming::issue_node_name(issue.number, &issue.title);
