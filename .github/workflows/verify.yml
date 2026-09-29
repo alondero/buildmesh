@@ -13,9 +13,17 @@ name: Verify
 # ruleset, so renaming one here is a policy change: update the ruleset and
 # docs/development/releasing.md in the same commit.
 #
-# Job event guards use the *caller's* event name, which is what makes the
-# weekly schedule cheap: a scheduled run executes `quality` only, because
-# `verify-smoke` and `platform-smoke` are gated to push/pull_request.
+# The jobs form a fan-out, not a chain. `quality` (frontend), `rust-build` (the
+# single Rust compile), and both `platform-smoke` jobs start at t=0; the seven
+# `rust-tests` shards start as soon as `rust-build` is ready, and the
+# `rust-bindings` aggregate starts once `quality`, `rust-build`, and every shard
+# have finished. Nothing waits behind one ~10-minute monolith any more: a runner
+# that takes a few minutes to be handed over delays only its own branch of the
+# graph, not every job behind it.
+#
+# Job event guards use the *caller's* event name, which is what keeps the
+# weekly schedule off the browser job: a scheduled run skips `verify-smoke` and
+# `platform-smoke`, both gated to push/pull_request.
 on:
   workflow_call:
 
@@ -28,47 +36,26 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The fast, frontend-only gate — the first result a PR hears back from. It
+  # deliberately no longer compiles Rust: that moved to `rust-build`, so the
+  # Rust shards and both platform-smoke jobs no longer wait behind it. The
+  # required status-check name is owned by branch protection
+  # (docs/development/releasing.md), so this job keeps the `Quality (Linux)`
+  # name and its aggregate meaning.
   quality:
     name: Quality (Linux)
     runs-on: ubuntu-latest
-    # Without an explicit cap, a lost runner or a hung test runs to the 6-hour
-    # default and reports as an unexplained failure with no step conclusion and
-    # no retrievable log. Two attempts of issue #1520's first CI run died at
-    # 53m01s of job time with exactly that signature, so state the real budget:
-    # this job builds the frontend, installs a browser, runs the JS suites, and
-    # compiles and runs the full Rust suite.
-    # A backstop above the sum of the real work (frontend gates, Chromium,
-    # a cold one-codegen-unit compile, then the capped test run). The cap that
-    # matters is the per-step one on the test execution below; this only exists
-    # so a job cannot bill for six hours.
-    timeout-minutes: 150
-    env:
-      # Four runs of issue #1520's first CI execution lost the hosted runner at
-      # the same point in `cargo test` ("The hosted runner lost communication
-      # with the server"), which GitHub attributes to terminating the runner
-      # process, starving it for CPU/memory, or blocking its network. Disk is
-      # not the cause: the pre-build artifact reports 145 GB total with 85 GB
-      # free, so the remaining candidate is the build's memory peak. One
-      # codegen unit at a time trades wall-clock for a peak the runner can
-      # survive, and this job is not on an interactive path.
-      CARGO_BUILD_JOBS: "1"
-      # Debug symbols are the bulk of this crate's build output (the
-      # workspace's target/ is 64.9 GB, debug/ 55 GB of it) and buy a
-      # pass/fail test run nothing. They also cost memory and link time.
-      CARGO_PROFILE_DEV_DEBUG: "0"
-      CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_INCREMENTAL: "0"
+    # A backstop above the real work (npm ci, the static gates, the frontend
+    # build, Chromium, and the vitest suites). It no longer contains the Rust
+    # compile, so the old 150-minute floor — sized around a lost-runner hang in
+    # `cargo test` — is unnecessary: a hung step here is caught far sooner.
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
-      # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
-      # appindicator3, libxdo, and OpenSSL even when running the Rust tests, so
-      # every job that compiles or runs the Rust suite installs them.
-      - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -78,8 +65,8 @@ jobs:
 
       # `npm ci` must precede every step that loads a dependency. `test:lint`
       # runs the ESLint fixture verifier in-process, and on a clean runner it
-      # died with ERR_MODULE_NOT_FOUND for 'eslint' when this step sat below
-      # it (issue #1520). Cheap gates first, expensive compile after.
+      # died with ERR_MODULE_NOT_FOUND for 'eslint' when this step sat below it
+      # (issue #1520). Cheap gates first, expensive build after.
       - name: Install frontend dependencies
         run: npm ci
 
@@ -105,7 +92,7 @@ jobs:
       # count, supported-platforms claim, SmartScreen warning, and the
       # CLAUDE.md "no internal issue numbers in user-facing docs" rule.
       # Cheap (no build), runs in ~50ms; safe to add at the top of the
-      # job so a stale landing page fails before any compilation starts.
+      # job so a stale landing page fails before any build starts.
       - name: Check README drift (issue #1545)
         run: npm run check:readme
 
@@ -141,21 +128,10 @@ jobs:
       - name: ESLint fixtures verifier (issue #1542)
         run: npm run lint:fixtures
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      # Cache the expensive Linux test build once. The platform smoke jobs
-      # deliberately do not persist their target directories, avoiding three
-      # large OS-specific target caches.
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "src-tauri -> target"
-
       # Typecheck the frontend against the committed bindings and build the
-      # desktop + mobile bundles the Rust tests embed and the budget gate
-      # below measures. `npm run build` runs `tsc` itself, so this step is
-      # just `npm run build` (no separate `tsc --noEmit`).
+      # desktop + mobile bundles the budget gate below measures. `npm run build`
+      # runs `tsc` itself, so this step is just `npm run build` (no separate
+      # `tsc --noEmit`).
       - name: Build desktop + mobile bundles
         run: npm run build
 
@@ -187,22 +163,92 @@ jobs:
       - name: Run vitest test suite (unit + integration)
         run: npx vitest run --pool=threads tests/unit tests/integration
 
-      # Record the runner's disk and memory budget before the build, then drop
-      # the image's unused toolchains. Uploaded as an artifact rather than only
+      # Fail CI if any code path spawns `git` via bare `Command::new("git")`
+      # or sets `creation_flags` inline. Only process_util may own those details.
+      # Node-only, so it lives in the fast frontend gate rather than the compile.
+      - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
+        run: node scripts/check-process-spawn-discipline.mjs
+
+  # The single Rust compile, shared by every downstream Rust job so a cold
+  # target directory is paid for once instead of seven times. It starts at t=0
+  # (it needs no frontend output of its own) and publishes both the Cargo cache
+  # (rust-cache) and the built mobile assets the shards and the bindings job
+  # consume. The Rust *tests* do not run here: they live in `rust-tests` and
+  # `rust-bindings`, which give every test a log that survives the runner-loss
+  # failure mode this split was built for (issue #1520).
+  rust-build:
+    name: Rust build (compile)
+    runs-on: ubuntu-latest
+    # A cold, parallel compile and link of every test target, plus the pinned
+    # Codex dispatch smoke. A lost runner is caught well before this cap.
+    timeout-minutes: 90
+    env:
+      # Four crates compile concurrently instead of one. The old
+      # `CARGO_BUILD_JOBS: "1"` was a blunt workaround for the hosted runner
+      # losing communication with the server under memory pressure; an 8 GB
+      # swapfile (created below) plus a lower-peak linker is the real fix, and
+      # this job is not on an interactive path either way.
+      CARGO_BUILD_JOBS: "4"
+      # Debug symbols are the bulk of this crate's build output and buy a
+      # pass/fail test run nothing. They also cost memory and link time.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      # lld links a Tauri-sized binary with far less memory and time than the
+      # default GNU ld, which is what makes the parallel build safe. Every Rust
+      # job sets the identical flags so the shared Cargo cache stays valid and
+      # no shard silently recompiles.
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
+      # appindicator3, libxdo, OpenSSL, and (for RUSTFLAGS above) lld even when
+      # running the Rust tests, so every job that compiles or runs the Rust
+      # suite installs them.
+      - uses: ./.github/actions/install-linux-build-deps
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cache the expensive Linux test build once. The shards and the bindings
+      # job restore this instead of rebuilding; the platform smoke jobs
+      # deliberately do not persist OS-specific target directories.
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      # Record the runner's disk and memory budget, drop the image's unused
+      # toolchains, and add swap. Uploaded as an artifact rather than only
       # printed: a runner that dies mid-build never flushes its log, which is
-      # exactly how the first four attempts of issue #1520 lost their evidence.
-      - name: Report runner disk and memory
+      # exactly how the first attempts of issue #1520 lost their evidence.
+      - name: Prepare the runner (disk cleanup + swap)
         run: |
           {
             echo "=== before ==="
             df -h /
             free -h
             nproc
-            du -sh src-tauri/target 2>/dev/null || echo "no target/ yet"
           } | tee runner-budget.txt
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo fallocate -l 8G /mnt/buildmesh-swap || sudo dd if=/dev/zero of=/mnt/buildmesh-swap bs=1M count=8192 status=none
+          sudo chmod 600 /mnt/buildmesh-swap
+          sudo mkswap /mnt/buildmesh-swap
+          sudo swapon /mnt/buildmesh-swap
           {
-            echo "=== after image cleanup ==="
+            echo "=== after image cleanup + swap ==="
             df -h /
             free -h
           } | tee -a runner-budget.txt
@@ -211,16 +257,16 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: quality-runner-budget
+          name: rust-build-runner-budget
           path: runner-budget.txt
           retention-days: 7
 
-      # Compile only. The Rust *tests* run in the `rust-tests` matrix and in
-      # `rust-bindings` below, which between them give every test a log that
-      # survives the failure mode this job kept hitting: a hosted runner lost
-      # mid-step reports no conclusion and takes its log with it, so a single
-      # combined `cargo test` localises nothing. Compiling here means the
-      # shards restore a warm Cargo cache instead of rebuilding the crate.
+      # tauri-build validates `frontendDist` (../dist) and the Rust suite embeds
+      # dist/mobile, so both bundles must exist before the compile. `npm run
+      # build` runs tsc + vite + vite --mode mobile.
+      - name: Build desktop + mobile bundles
+        run: npm run build
+
       - name: Compile the Rust test binaries
         run: cargo test --locked --no-run
         working-directory: src-tauri
@@ -235,16 +281,6 @@ jobs:
           name: mobile-dist
           path: dist/mobile
           retention-days: 1
-
-      # Fail CI if any code path spawns `git` via bare `Command::new("git")`
-      # or sets `creation_flags` inline. Only process_util may own those details.
-      - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
-        run: node scripts/check-process-spawn-discipline.mjs
-
-      # Fail CI if the committed bindings drift from what the Rust structs now
-      # generate ??? wire-shape drift becomes a red build, not a runtime crash.
-      # The bindings are regenerated by `rust-bindings`, which owns the
-      # authoritative run; this job keeps the grep gates that need no test run.
 
       # Manual runs additionally exercise the real CLI contract at a known
       # version. Regular PRs stay hermetic and use deterministic help-parser
@@ -277,9 +313,20 @@ jobs:
   # it. The in-shell `timeout` turns a hang into a step failure with a log.
   rust-tests:
     name: Rust tests (${{ matrix.shard.label }})
-    needs: quality
+    needs: rust-build
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    env:
+      # Only the compiler *fingerprint* inputs need to match `rust-build` (which
+      # owns the compile): a differing RUSTFLAGS or profile-debug value forces
+      # every shard to recompile the crate the previous job just built.
+      # `CARGO_BUILD_JOBS` is deliberately absent — it is not a fingerprint
+      # input, the shards normally only run the prebuilt binary, and they have
+      # no swapfile, so they must not raise their own link peak.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
     strategy:
       fail-fast: false
       matrix:
@@ -312,7 +359,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Warm cache from `quality`, which compiled the same targets.
+      # Warm cache from `rust-build`, which compiled the same targets.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -356,17 +403,27 @@ jobs:
 
   # The authoritative Rust pass: every target, in one process, with the real
   # export directory, so ts-rs regenerates the committed bindings and the
-  # drift gate has a single writer. Runs only once every shard has passed, and
-  # `if: always()` with an explicit result check rather than relying on the
-  # implicit skip: a required status check that is *skipped* counts as
-  # satisfied by GitHub, so a silently skipped aggregate would be a hole in
-  # the merge gate. It fails instead.
+  # drift gate has a single writer. Runs only once the compile and every shard
+  # have passed, and `if: always()` with an explicit result check rather than
+  # relying on the implicit skip: a required status check that is *skipped*
+  # counts as satisfied by GitHub, so a silently skipped aggregate would be a
+  # hole in the merge gate. It fails instead.
   rust-bindings:
     name: Rust tests + TS bindings
-    needs: [quality, rust-tests]
+    needs: [quality, rust-build, rust-tests]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # Same fingerprint inputs as `rust-build`/`rust-tests` so the restored
+      # cache is reused for the export, doctest, and integration binaries
+      # rather than rebuilt. Deliberately no `CARGO_BUILD_JOBS`: this job has no
+      # swapfile, and the default keeps its extra links within the memory it
+      # used before (lld only lowers that peak).
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
     steps:
       # Fail closed, and say why in the run rather than letting a skipped job
@@ -377,20 +434,21 @@ jobs:
       # The dependency results arrive as env vars, not through an expression:
       # GitHub's workflow validator rejects the `needs.*.result` wildcard
       # inside a function call (`join(needs.*.result, " ")` fails the whole file
-      # with zero jobs), so read the two jobs individually. A matrix
-      # dependency's `result` is `success` only when every leg succeeded, which
-      # is the aggregate this gate needs.
-      - name: Refuse to run unless every shard succeeded
+      # with zero jobs), so read the jobs individually. A matrix dependency's
+      # `result` is `success` only when every leg succeeded, which is the
+      # aggregate this gate needs.
+      - name: Refuse to run unless every upstream gate succeeded
         shell: bash
         env:
           QUALITY_RESULT: ${{ needs.quality.result }}
+          RUST_BUILD_RESULT: ${{ needs.rust-build.result }}
           RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
         run: |
-          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
-            echo "::error::quality=$QUALITY_RESULT rust-tests=$RUST_TESTS_RESULT — the Rust suite is not fully green, so the authoritative pass is not running."
+          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_BUILD_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
+            echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT — the Rust suite is not fully green, so the authoritative pass is not running."
             exit 1
           fi
-          echo "quality=$QUALITY_RESULT rust-tests=$RUST_TESTS_RESULT"
+          echo "quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT"
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -459,12 +517,11 @@ jobs:
   # class (#149 ??? bytes emitted but never reach xterm.js) had no
   # pre-merge gate. The job installs Chromium, runs only the
   # `verify-smoke` Playwright project, and stays well under 5 minutes.
-  # Intentionally does NOT `needs: quality` ??? verify-smoke is a
-  # lightweight frontend test with a mock backend; gating it on the
-  # ~10-minute quality job destroys the fast feedback loop for a
-  # nothing-in-common dependency. It also doesn't gate `platform-smoke`
-  # (the chromium project is far slower, depends on a running
-  # buildmesh.exe, and stays a separate local-only contract per
+  # Intentionally has no `needs` ??? verify-smoke is a lightweight frontend
+  # test with a mock backend; gating it on any upstream job destroys the
+  # fast feedback loop for a nothing-in-common dependency. It also doesn't
+  # gate `platform-smoke` (the chromium project is far slower, depends on a
+  # running buildmesh.exe, and stays a separate local-only contract per
   # CLAUDE.local.md).
   verify-smoke:
     name: Verify-smoke (Linux)
@@ -511,13 +568,23 @@ jobs:
           path: test-results/
           retention-days: 7
 
+  # Compiles and links the real Tauri app on the two remaining hosts, including
+  # the frontend `beforeBuildCommand`, without spending time or storage on
+  # transient installers. Starts at t=0 alongside `quality` — it consumes
+  # nothing from it — so a queue delay on the frontend gate no longer pushes
+  # these required checks off the end of the run.
   platform-smoke:
     name: Platform smoke (${{ matrix.os }})
-    needs: quality
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ${{ matrix.os }}
+    env:
+      # No debug symbols in the smoke binary — it proves the app compiles and
+      # links, and the ConPTY test reads no symbols. Roughly halves the Windows
+      # link, which is on the per-PR critical path.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     # A failure on one operating system must not hide a regression on the
-    # other. Linux compilation and linking are covered by the quality job.
+    # other. Linux compilation and linking are covered by `rust-build`.
     strategy:
       fail-fast: false
       matrix:
