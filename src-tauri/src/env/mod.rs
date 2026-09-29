@@ -164,6 +164,53 @@ mod tests {
     }
 
     #[test]
+    fn wsl_default_marker_outranks_the_first_listed_distribution() {
+        let listing = "  NAME              STATE           VERSION\n  Debian            Stopped         2\n* Ubuntu            Running         2\n";
+        assert_eq!(
+            environment::parse_wsl_distro_list(listing).as_deref(),
+            Some("Ubuntu")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_first_distribution_without_a_default_marker() {
+        let listing = "  NAME              STATE           VERSION\n  Debian            Stopped         2\n  Ubuntu            Running         2\n";
+        assert_eq!(
+            environment::parse_wsl_distro_list(listing).as_deref(),
+            Some("Debian")
+        );
+    }
+
+    /// Issue #1954: with the feature present but no distribution registered,
+    /// `wsl.exe -l -v` answers in prose rather than a listing. Taking the
+    /// first word after the skipped first line resolved that prose to a
+    /// distro named `Distributions`, which is what made the opt-in WSL
+    /// contract job fail on a hosted runner.
+    #[test]
+    fn rejects_wsl_listing_without_a_header_because_no_distro_is_registered() {
+        for listing in [
+            "Windows Subsystem for Linux has no installed distributions.\nDistributions can be installed by visiting the Microsoft Store:\nhttps://aka.ms/wslstore\n",
+            "Windows Subsystem for Linux has no installed distributions.\n",
+            "The Windows Subsystem for Linux is not installed.\nYou can install by running 'wsl.exe --install'.\nFor more information please visit https://aka.ms/wslinstall\n",
+        ] {
+            assert_eq!(
+                environment::parse_wsl_distro_list(listing),
+                None,
+                "prose output must not resolve to a distro: {listing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_empty_wsl_listing() {
+        assert_eq!(environment::parse_wsl_distro_list(""), None);
+        assert_eq!(
+            environment::parse_wsl_distro_list("  NAME              STATE           VERSION\n"),
+            None
+        );
+    }
+
+    #[test]
     fn parses_wsl_home_marker_after_login_banner() {
         let output = b"Welcome to Ubuntu\r\nlast login: today\n__BUILDMESH_WSL_HOME__/home/alond\r\n";
         assert_eq!(
