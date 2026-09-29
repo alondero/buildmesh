@@ -50,8 +50,12 @@ npm run test:ci          # vitest unit + integration + Playwright e2e (needs the
 cargo test               # Rust unit tests (run inside src-tauri/)
 ```
 
-CI runs the equivalent gates on every pull request. The checks and what each
-proves are listed in
+On every pull request, CI runs the required checks: the static agent/docs/lint
+gates, the frontend build and bundle budget, the vitest unit and integration
+suites, the Rust suite, and the `verify-smoke` Playwright project. It does
+**not** run the full local Playwright suite that `npm run test:ci` triggers —
+that `chromium` project needs a running app on :1991 and is a local contract
+check, not a PR gate. What each required check proves is listed in
 [docs/development/README.md](docs/development/README.md#verification-matrix),
 and the authoritative required-status-check names — plus the release gate and
 emergency bypass — live in
