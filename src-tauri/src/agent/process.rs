@@ -128,6 +128,12 @@ mod terminal_input;
 pub use terminal_input::InputActivity;
 use terminal_input::{TerminalInput, UNKNOWN_INPUT_BUFFER_LEN};
 
+#[derive(Clone, Copy)]
+enum InputFraming {
+    ByteStream,
+    TerminalEvent,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputUnavailable {
     MissingProcess,
@@ -199,8 +205,8 @@ impl AgentProcess {
     }
 
     /// Non-blocking enqueue onto the dedicated writer thread.
-    fn enqueue_input(&self, data: Vec<u8>) -> Result<InputActivity, std::sync::mpsc::TrySendError<Vec<u8>>> {
-        self.enqueue_input_if_current(data, None).map(|(_, activity)| activity)
+    fn enqueue_input(&self, data: Vec<u8>, framing: InputFraming) -> Result<InputActivity, std::sync::mpsc::TrySendError<Vec<u8>>> {
+        self.enqueue_input_if_current(data, None, framing).map(|(_, activity)| activity)
     }
 
     fn input_stamp_result(&self) -> Result<InputStamp, InputUnavailable> {
@@ -214,7 +220,7 @@ impl AgentProcess {
         Ok(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>) -> Result<(Option<InputStamp>, InputActivity), std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>, framing: InputFraming) -> Result<(Option<InputStamp>, InputActivity), std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
         if self.retired.load(Ordering::SeqCst) { return Err(std::sync::mpsc::TrySendError::Disconnected(data)); }
         let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
@@ -224,7 +230,10 @@ impl AgentProcess {
         }
         // Failed sends must not advance the decoder, including half a reply.
         let mut next = input.clone();
-        let activity = next.accept(&data);
+        let activity = match framing {
+            InputFraming::ByteStream => next.accept(&data),
+            InputFraming::TerminalEvent => next.accept_event(&data),
+        };
         match guard.as_ref() {
             Some(tx) => tx.try_send(data)?,
             None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
@@ -274,6 +283,7 @@ impl AgentProcess {
 /// Trait abstracting the process registry methods needed by http_server.
 pub trait ProcessRegistryApi: Send + Sync {
     fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String>;
+    /// One complete terminal input event; callers must not split keyboard events.
     fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String>;
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String>;
 }
@@ -314,10 +324,15 @@ impl AgentProcessRegistry {
     }
 
     pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
-        self.write_input(session_id, data).map(|_| ())
+        self.write_input_with_framing(session_id, data, InputFraming::ByteStream).map(|_| ())
     }
 
+    /// Desktop IPC and mobile WebSocket preserve each complete xterm onData event.
     pub fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String> {
+        self.write_input_with_framing(session_id, data, InputFraming::TerminalEvent)
+    }
+
+    fn write_input_with_framing(&self, session_id: i64, data: &[u8], framing: InputFraming) -> Result<InputActivity, String> {
         let agent = self
             .get(&session_id)
             .ok_or_else(|| "Agent not running".to_string())?;
@@ -336,7 +351,7 @@ impl AgentProcessRegistry {
         // (the user can re-type). The bound is 64 messages. A paste is
         // one message of whatever size the caller passed (issue #1498);
         // do not split it into keystroke-sized writes.
-        let send_result = agent.enqueue_input(data.to_vec());
+        let send_result = agent.enqueue_input(data.to_vec(), framing);
         let activity = match send_result {
             Ok(activity) => activity,
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -413,7 +428,7 @@ impl AgentProcessRegistry {
     pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
         let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
         let expected = InputStamp::decode(expected).ok_or_else(|| "Invalid input ownership stamp".to_string())?;
-        agent.enqueue_input_if_current(data.to_vec(), Some(expected)).map_err(|e| e.to_string())
+        agent.enqueue_input_if_current(data.to_vec(), Some(expected), InputFraming::ByteStream).map_err(|e| e.to_string())
             .map(|(stamp, _)| stamp.map(InputStamp::encode))
     }
 
@@ -885,6 +900,73 @@ mod tests {
         rx.recv().unwrap();
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
         assert_ne!(agent.input_version.load(Ordering::Relaxed), InputStamp::decode(&stamp).unwrap().version);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn registry_recovers_input_fence_after_escape_then_submit_or_clear() {
+        let id = -930_023;
+        let (registry, rx) = testing::capturing_registry(id);
+        let agent = registry.get(&id).unwrap();
+        for boundary in [b'\r', 0x03] {
+            let previous = registry.input_stamp(id).unwrap();
+            registry.write_input(id, b"\x1b").unwrap();
+            assert_eq!(rx.recv().unwrap(), b"\x1b");
+            assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+            assert!(!registry.commit_recovered_turn(id, &previous, i64::MAX,
+                || panic!("pending Escape must block recovery")).unwrap());
+            assert!(registry.write_bytes_if_current(id, b"continue", &previous).unwrap().is_none());
+            assert!(rx.try_recv().is_err());
+
+            let last_submit = agent.last_submit_ms.load(Ordering::Relaxed);
+            assert_eq!(registry.write_input(id, &[boundary]).unwrap(), InputActivity {
+                user_input: true, submitted: boundary == b'\r',
+            });
+            assert_eq!(rx.recv().unwrap(), vec![boundary]);
+            let current = registry.input_stamp(id).expect("boundary makes reports bindable again");
+            assert_ne!(current, previous);
+            assert!(!registry.commit_recovered_turn(id, &previous, i64::MAX,
+                || panic!("old report cannot cross new input")).unwrap());
+            assert!(registry.commit_recovered_turn(id, &current, i64::MAX, || Ok(true)).unwrap());
+            if boundary == b'\r' {
+                assert!(agent.last_submit_ms.load(Ordering::Relaxed) > 0);
+            } else {
+                assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), last_submit);
+            }
+        }
+        assert!(!registry.write_input(id, b"\x1b\r").unwrap().submitted);
+        assert_eq!(rx.recv().unwrap(), b"\x1b\r");
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        registry.write_input(id, b"\x03").unwrap();
+        rx.recv().unwrap();
+
+        registry.write_bytes(id, b"\x1b").unwrap();
+        rx.recv().unwrap();
+        registry.write_bytes(id, b"\r").unwrap();
+        rx.recv().unwrap();
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput),
+            "raw byte fragments must not acquire terminal event semantics");
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn dropped_clear_event_does_not_recover_an_uncertain_prompt() {
+        let id = -930_024;
+        let registry = AgentProcessRegistry::new();
+        insert_trivial_agent(&registry, id);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
+        let original = registry.input_stamp(id).unwrap();
+        registry.write_input(id, b"\x1b").unwrap();
+        assert_eq!(registry.write_input(id, b"\x03").unwrap(), InputActivity::default());
+        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert_eq!(rx.recv().unwrap(), b"\x1b");
+        assert!(rx.try_recv().is_err());
+        assert!(!registry.commit_recovered_turn(id, &original, i64::MAX,
+            || panic!("dropped clear cannot authorize recovery")).unwrap());
+        assert_eq!(registry.write_input(id, b"\x03").unwrap(), InputActivity { user_input: true, submitted: false });
+        assert_eq!(rx.recv().unwrap(), b"\x03");
+        assert!(registry.input_stamp(id).is_some());
         registry.kill_session(id);
     }
 

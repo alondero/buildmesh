@@ -348,6 +348,27 @@ test.describe('verify-smoke (issue #157)', () => {
     await assertXtermHasRenderedBytes(page, SMOKE_NODE_ID, 10000);
   });
 
+  test('agent input preserves separate recovery keys and a single Alt+Enter event', async ({ page }) => {
+    const writes: string[] = [];
+    await page.exposeFunction('recordTerminalInput', (data: string) => { writes.push(data); });
+    await page.goto('/');
+    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    const input = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm-helper-textarea`);
+    await input.focus();
+    await page.evaluate(() => {
+      const host = window as unknown as {
+        __BUILDMESH_MOCK__: { on(command: string, handler: (args: { data: string }) => void): void };
+        recordTerminalInput(data: string): void;
+      };
+      host.__BUILDMESH_MOCK__.on('write_to_agent', ({ data }) => host.recordTerminalInput(data));
+    });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Enter');
+    await page.keyboard.press('Alt+Enter');
+    await page.keyboard.press('Control+c');
+    await expect.poll(() => writes).toEqual(['\x1b', '\r', '\x1b\r', '\x03']);
+  });
+
   test('utility tabs fill the body and preserve terminal and keyboard state across switches', async ({ page }) => {
     await page.goto('/');
     await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();

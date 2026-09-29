@@ -34,6 +34,19 @@ impl TerminalInput {
         self.len == 0 && !self.bracketed_paste && self.pending.is_empty()
     }
 
+    /// One complete xterm onData event, not an arbitrary transport chunk.
+    pub fn accept_event(&mut self, data: &[u8]) -> InputActivity {
+        // A separate submit/clear event ends an unfinished keyboard escape.
+        // ESC+CR in ONE event is Alt+Enter, which may insert a newline instead.
+        if !self.bracketed_paste
+            && matches!(data, b"\r" | b"\n" | b"\x03")
+            && (self.pending == b"\x1b" || self.pending.starts_with(b"\x1b["))
+        {
+            self.pending.clear();
+        }
+        self.accept(data)
+    }
+
     pub fn accept(&mut self, data: &[u8]) -> InputActivity {
         let mut activity = InputActivity::default();
         for &byte in data {
@@ -161,6 +174,51 @@ fn transport_reply(sequence: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_and_clear_recover_after_incomplete_keyboard_sequences() {
+        for prefix in [b"\x1b".as_slice(), b"\x1b[", b"\x1b[12;"] {
+            for boundary in [b'\r', b'\n', 0x03] {
+                for split in 0..=prefix.len() {
+                    let mut input = TerminalInput::default();
+                    input.accept_event(&prefix[..split]);
+                    input.accept_event(&prefix[split..]);
+                    let activity = input.accept_event(&[boundary]);
+                    assert_eq!(activity, InputActivity {
+                        user_input: true,
+                        submitted: boundary != 0x03,
+                    }, "prefix {prefix:?} split {split}");
+                    assert!(input.empty_prompt(), "prefix {prefix:?} split {split}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pasted_or_string_payload_controls_do_not_establish_a_boundary() {
+        for prefix in [b"\x1b[200~\x1b".as_slice(), b"\x1b[200~\x1b[", b"\x1b]11;"] {
+            for boundary in [b'\r', b'\n', 0x03] {
+                let mut input = TerminalInput::default();
+                input.accept_event(prefix);
+                assert!(!input.accept_event(&[boundary]).submitted);
+                assert!(!input.empty_prompt());
+            }
+        }
+    }
+
+    #[test]
+    fn alt_enter_and_unframed_escape_controls_remain_uncertain() {
+        for boundary in [b'\r', b'\n', 0x03] {
+            let mut input = TerminalInput::default();
+            assert!(!input.accept_event(&[0x1b, boundary]).submitted);
+            assert!(!input.empty_prompt());
+
+            let mut input = TerminalInput::default();
+            input.accept(b"\x1b");
+            assert!(!input.accept(&[boundary]).submitted);
+            assert!(!input.empty_prompt());
+        }
+    }
 
     #[test]
     fn protocol_packets_are_inert_at_every_split() {
