@@ -23,6 +23,9 @@ pub(crate) fn prepare(
 ) -> Result<Option<Candidate>, Blocker> {
     if let Some(blocker) = view.report_blocker(node_id) { return Err(blocker); }
     let Some(step) = view.step(node_id) else { return Ok(None); };
+    // Discovery cannot recover a suspended process. Name the actionable wait
+    // instead of promising automatic session discovery forever.
+    if matches!(input, Err(InputUnavailable::MissingProcess)) { return Err(Blocker::ProcessUnavailable); }
     let evidence = view.classifier_evidence(node_id).filter(|evidence| {
         let Some(owner) = &evidence.identity else { return false; };
         let Some(native_report) = &evidence.report else { return false; };

@@ -767,6 +767,18 @@ fn drive_run(
         context: context.clone(),
         steps: load_steps(active.run.id)?,
     };
+    // Repair only legacy conflicts whose source is proven by their original
+    // history digest. The next ordinary observation commits the reconciliation.
+    for step in &view.steps {
+        let key = format!("node.{}.evidence.{}", step.node_id, step.attempt);
+        let Some(mut evidence) = view.context.get(&key)
+            .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok()) else { continue; };
+        if evidence.conflicts.iter().any(|conflict| conflict.status_projection.is_none())
+            && db::circuit::evidence::restore_projection_conflicts(view.run_id, &step.node_id, step.attempt, &mut evidence)
+                .map_err(|error| error.to_string())? {
+            view.context.set(&key, serde_json::to_string(&evidence).map_err(|error| error.to_string())?);
+        }
+    }
     jobs::reconcile(&view);
 
     if let Some(source) = active.run.source_agent_node_id {

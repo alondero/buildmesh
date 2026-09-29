@@ -67,12 +67,29 @@ pub(crate) fn detect_default_wsl_distro() -> Option<String> {
 }
 
 pub(super) fn parse_wsl_distro_list(stdout: &str) -> Option<String> {
-    let rows = stdout
+    let mut lines = stdout
         .lines()
-        .skip(1)
         .map(|line| line.trim_matches('\0').trim())
         .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
+        .peekable();
+    // A listing announces itself with a `NAME STATE VERSION` header. When the
+    // feature is installed but no distribution is registered, `wsl.exe`
+    // answers in prose across several lines instead ("Windows Subsystem for
+    // Linux has no installed distributions. / Distributions can be installed by
+    // visiting the Microsoft Store: / https://aka.ms/wslstore"). Skipping a line
+    // and taking the next word without this check made that prose resolve to a
+    // distro literally named `Distributions`, which then reached every
+    // `\\wsl$\<name>\` path and `wsl -d <name>` spawn built from it — all
+    // of which can only fail. No header means no listing.
+    if !lines
+        .peek()
+        .and_then(|header| header.split_whitespace().next())
+        .is_some_and(|name| name.eq_ignore_ascii_case("NAME"))
+    {
+        return None;
+    }
+    let rows = lines.skip(1).collect::<Vec<_>>();
+
     rows.iter()
         .find_map(|line| {
             line.strip_prefix('*')

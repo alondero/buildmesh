@@ -119,4 +119,38 @@ describe('launch configurations in the spawn menu', () => {
     expect(status.isConnected).toBe(false);
     expect(await screen.findByRole('menuitem', { name: 'Edit New Codex' })).toBeTruthy();
   });
+
+  it('emits separate save and refresh timing checkpoints without configuration values', async () => {
+    const saved: SpawnConfiguration = { id: 'launch/new', name: 'New Codex', spawn_option_id: 'codex', model: null, effort: null, extra_args: null };
+    const refreshedProvider = { id: saved.id, harness_id: 'codex', unavailable_reason: undefined } as unknown as ProviderInfo;
+    vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+    ]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValueOnce(saved);
+    vi.mocked(api.listProviders).mockResolvedValueOnce([refreshedProvider]);
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      render(<GroupedProviderMenu providers={[
+        row('codex', 'codex'),
+        { ...row('launch/existing', 'codex'), configuration: configuration('launch/existing', 'Existing', 'codex') },
+      ]} onSelect={vi.fn()} />);
+
+      await userEvent.click(screen.getByRole('button', { name: 'codex configurations' }));
+      await userEvent.click(await screen.findByRole('menuitem', { name: 'New configuration…' }));
+      await userEvent.type(screen.getByLabelText('Name'), 'New Codex');
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      expect(await screen.findByRole('menuitem', { name: 'Edit New Codex' })).toBeTruthy();
+
+      const lines = info.mock.calls.map((args) => String(args[0])).filter((line) => line.startsWith('launch_config_timing:'));
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatch(/^launch_config_timing: checkpoint=save elapsed=\d+ms$/);
+      expect(lines[1]).toMatch(/^launch_config_timing: checkpoint=refresh elapsed=\d+ms$/);
+      for (const line of lines) {
+        expect(line).not.toContain('New Codex');
+        expect(line).not.toContain('launch/new');
+      }
+    } finally {
+      info.mockRestore();
+    }
+  });
 });

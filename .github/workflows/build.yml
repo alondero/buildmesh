@@ -47,6 +47,16 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The runner image ships the WSL feature but no distribution, and the
+      # contract test below is `#[ignore]`d precisely because it needs a real
+      # guest. Importing one is what makes this job establish the precondition
+      # it asserts rather than fail inside the test for want of a guest
+      # (issue #1954).
+      - name: Provision a WSL distribution
+        uses: Vampire/setup-wsl@v7
+        with:
+          distribution: Ubuntu-24.04
+
       - name: Verify default and explicit WSL Codex homes
         run: cargo test --locked wsl_profile_materializes_in_default_and_explicit_codex_home -- --ignored
         working-directory: src-tauri
