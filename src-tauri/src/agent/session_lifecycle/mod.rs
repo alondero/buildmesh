@@ -1093,8 +1093,8 @@ mod tests {
         assert_eq!(w[0].0, 7);
         assert_eq!(w[0].1, SessionStatus::Spawning);
         assert_eq!(
-            w[0].2,
-            vec![SessionStatus::Error, SessionStatus::Archived],
+            w[0].2.as_slice(),
+            FORBIDDEN_TERMINAL,
             "forbidden set must match the reader thread's race-guard (#654)"
         );
     }
@@ -1116,7 +1116,7 @@ mod tests {
     /// set — there is no prior `Spawning` write to gate on, so a
     /// `write_status_if(.., Spawning)` would silently no-op and the row
     /// would stay `Pending`. The forbidden set is the same as
-    /// `on_spawn_started`'s — `Error` / `Archived` — so a stopped node
+    /// `on_spawn_started`'s terminal set, so a stopped node
     /// never gets revived.
     #[test]
     fn on_already_active_writes_running_unless_terminal() {
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].0, 7);
         assert_eq!(w[0].1, SessionStatus::Running);
-        assert_eq!(w[0].2, vec![SessionStatus::Error, SessionStatus::Archived]);
+        assert_eq!(w[0].2.as_slice(), FORBIDDEN_TERMINAL);
     }
 
     #[test]
@@ -1331,9 +1331,9 @@ mod tests {
         assert_eq!(w[0].0, 7);
         assert_eq!(w[0].1, SessionStatus::Error);
         assert_eq!(
-            w[0].2,
-            vec![SessionStatus::Error, SessionStatus::Archived],
-            "early-exit must not resurrect Error/Archived (#654)"
+            w[0].2.as_slice(),
+            FORBIDDEN_TERMINAL,
+            "early-exit must not resurrect a terminal node (#654)"
         );
         assert_eq!(
             *sink.resume_failed(),
@@ -1346,10 +1346,12 @@ mod tests {
     fn on_attention_writes_awaiting_input_and_emits_attention_needed() {
         let sink = RecordingSink::new();
         on_attention(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes(),
-            vec![(7, SessionStatus::AwaitingInput)]
-        );
+        assert_eq!(sink.status(), Some(SessionStatus::AwaitingInput));
+        let writes = sink.writes_unless();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, 7);
+        assert_eq!(writes[0].1, SessionStatus::AwaitingInput);
+        assert_eq!(writes[0].2.as_slice(), FORBIDDEN_TERMINAL);
         assert_eq!(*sink.attention_needed(), vec![7]);
         assert!(
             sink.attention_cleared().is_empty(),
@@ -1381,7 +1383,7 @@ mod tests {
         let w = sink.writes_unless();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].1, SessionStatus::Error);
-        assert_eq!(w[0].2, vec![SessionStatus::Error, SessionStatus::Archived]);
+        assert_eq!(w[0].2.as_slice(), FORBIDDEN_TERMINAL);
         assert!(sink.attention_needed().is_empty());
         assert!(sink.attention_cleared().is_empty());
         assert!(sink.resume_failed().is_empty());

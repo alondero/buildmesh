@@ -960,6 +960,7 @@ pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
         })
 }
 
+#[cfg(test)]
 pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, stamp: &str) -> SqlResult<bool> {
     Ok(conn.execute("UPDATE agent_nodes SET status='ready', status_changed_at=?3
         WHERE id=?1 AND status='running'
