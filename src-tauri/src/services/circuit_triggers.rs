@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::circuit::security::{gate_trigger, AutopilotTrigger, GateDecision};
+use crate::circuit::security::{gate_trigger, CircuitTrigger, GateDecision};
 use crate::circuit::context::CircuitContext;
 use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::db;
@@ -80,7 +80,7 @@ pub fn maybe_poll_github() {
 
 /// Best-effort parser for SQLite `datetime('now')` output
 /// (`YYYY-MM-DD HH:MM:SS`) into a wall-clock anchor. Shared logic with
-/// `services::autopilot`'s private copy — kept local so the trigger core
+/// The trigger poller's private copy — kept local so the trigger core
 /// has no cross-module test coupling; divergence would surface as a
 /// wrong cooldown, caught by the round-trip test below.
 pub(crate) fn parse_sqlite_datetime(s: &str) -> Option<SystemTime> {
@@ -207,11 +207,11 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
         }
     };
 
-    // Preserve issue-driven Autopilot's dependency ordering: a labelled
+    // Preserve the issue-trigger dependency ordering: a labelled
     // issue whose `Blocked by` references an open or already-managed issue
     // remains parked, so it cannot consume a circuit run before its
     // prerequisite is resolved. The review blueprint adds this filter here
-    // because its circuit ledger, rather than the legacy autopilot ledger,
+    // because its Circuit ledger, rather than the retired legacy ledger,
     // owns deduplication.
     if review_blueprint {
         let known_issue_numbers = match db::list_circuit_trigger_identities(circuit.id) {
@@ -258,7 +258,7 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
     let mut gate_decisions = HashMap::new();
     if review_blueprint {
         issues.retain(|issue| {
-            let trigger = AutopilotTrigger::from_issue(&owner, &repo, issue);
+            let trigger = CircuitTrigger::from_issue(&owner, &repo, issue);
             match gate_trigger(&client, &trigger) {
                 Ok(decision) => {
                     gate_decisions.insert(issue.number, decision);
@@ -300,7 +300,7 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
                 if let Some(decision) = gate_decisions.get(&i.number) {
                     ctx.with_collaborator_gate(matches!(decision, GateDecision::AutoRun));
                 }
-                ctx.with_autopilot_finish_prompt(Some(i.number), Some("draft_pr"));
+                ctx.with_circuit_finish_prompt(Some(i.number), Some("draft_pr"));
                 ctx
             })
     });
@@ -390,7 +390,7 @@ fn base_context(circuit: &AutopilotCircuit) -> CircuitContext {
     ctx.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     ctx.with_app_reviewer_provider();
     let action = "draft_pr".to_string();
-    ctx.with_autopilot_finish_prompt(None, Some(action.as_str()));
+    ctx.with_circuit_finish_prompt(None, Some(action.as_str()));
     ctx
 }
 

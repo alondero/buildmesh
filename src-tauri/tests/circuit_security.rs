@@ -1,8 +1,8 @@
-//! Integration test for the Autopilot security gate and secret scrubber
+//! Integration test for the Circuit trigger gate and secret scrubber
 //! (issue #499, ADR-0012 §5). Exercises the crate's *public* surface end-to-end
-//! — the same entry points the future Autopilot trigger pipeline and the
+//! — the same entry points the Circuit trigger poller and the
 //! coordinator log path call — rather than reaching into module internals:
-//!   * `autopilot::evaluate` — the collaborator gate decision
+//!   * `circuit::security::evaluate` — the collaborator gate decision
 //!   * `GateDecision::initial_status` — the Suspended mapping for external runs
 //!   * `secret_scrubber::SecretScrubber::scrub` — log masking
 //!
@@ -11,13 +11,13 @@
 //! what these assertions pin.
 
 use buildmesh_lib::circuit::security::{
-    evaluate, AutopilotTrigger, CollaboratorPermission, GateDecision, TriggerKind,
+    evaluate, CircuitTrigger, CollaboratorPermission, GateDecision, TriggerKind,
 };
 use buildmesh_lib::models::SessionStatus;
 use buildmesh_lib::secret_scrubber::SecretScrubber;
 
-fn trigger(author: &str, kind: TriggerKind) -> AutopilotTrigger {
-    AutopilotTrigger {
+fn trigger(author: &str, kind: TriggerKind) -> CircuitTrigger {
+    CircuitTrigger {
         owner: "alondero".to_string(),
         repo: "buildmesh".to_string(),
         number: 499,

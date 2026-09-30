@@ -62,7 +62,7 @@ interface GridNodeHeaderProps {
   dragHandleProps?: Record<string, unknown>;
 }
 
-const AUTOPILOT_PILL_CLASSES: Record<CircuitIndicatorTone, string> = {
+const CIRCUIT_OUTCOME_CLASSES: Record<CircuitIndicatorTone, string> = {
   automation: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
   warning: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
   success: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
@@ -77,7 +77,7 @@ function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership
   return {
     label: `${ownership.circuit_name} · #${ownership.run_id}`,
     title: `Circuit run #${ownership.run_id} (${stateLabel}): ${presentation?.detail ?? 'historical ownership retained for inspection.'}`,
-    className: AUTOPILOT_PILL_CLASSES[tone],
+    className: CIRCUIT_OUTCOME_CLASSES[tone],
   };
 }
 
@@ -117,7 +117,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const meshColor = getMeshColor(titleNode.mesh_id, mesh?.color);
   const canResume = canResumeSuspendedNode(node);
   const lostConversation = hasLostConversation(node, hasActiveCircuitOwnership(circuitOwnership));
-  const autopilotPresentation = getCircuitNodePresentation(node, circuitOwnership);
+  const circuitPresentation = getCircuitNodePresentation(node, circuitOwnership);
   const circuitPill = circuitOwnership ? getCircuitPillDetails(node, circuitOwnership) : null;
   const signalUnavailable = isSignalHealthProblem(node.signal_health);
   // The dot's tooltip is the only place an unproven signal can surface, since
@@ -160,8 +160,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
     useUIStore.getState().focusCircuitRun(runId);
   };
   // A visible Pilot light backed by Circuit ownership is the quick link to that
-  // run; a legacy Autopilot run has no Circuits Probe entry to open.
-  const circuitRunAction = autopilotPresentation && circuitOwnership
+  // run in the Circuits Probe.
+  const circuitRunAction = circuitPresentation && circuitOwnership
     ? { label: 'Open this Circuit run in the Circuits Probe.', onActivate: () => openCircuitRun(circuitOwnership.run_id) }
     : undefined;
   const outcomeCount = attentionOutcome?.nodeIds.length ?? 0;
@@ -176,7 +176,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         <span role="status" aria-label={statusDotLabel}
           title={statusDotTitle}
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getNodeStatusConfig(titleNode).bgColor}`} />
-        <CircuitNodeIndicatorCell presentation={autopilotPresentation} action={circuitRunAction} />
+        <CircuitNodeIndicatorCell presentation={circuitPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
           title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">
@@ -190,8 +190,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         onClick={event => { event.stopPropagation(); onReveal?.(); }}
         aria-label={`${attentionOutcome.label}${outcomeCount > 1 ? ` (${outcomeCount} sessions)` : ''}. ${attentionOutcome.detail} ${outcomeCount > 1 ? 'Show next session.' : 'Show this session.'}`}
         title={attentionOutcome.detail}
-        data-testid="autopilot-outcome-chip" data-outcome={attentionOutcome.kind}
-        className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${AUTOPILOT_PILL_CLASSES[attentionOutcome.tone]}`}>
+        data-testid="circuit-outcome-chip" data-outcome={attentionOutcome.kind}
+        className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${CIRCUIT_OUTCOME_CLASSES[attentionOutcome.tone]}`}>
         <CircuitIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
         {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}

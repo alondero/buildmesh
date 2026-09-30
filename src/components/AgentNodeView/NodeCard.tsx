@@ -86,7 +86,7 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   // nodes' semantic-turn state doesn't cascade into this card.
   const semanticTurn = useAgentNodeStore((s) => s.semanticTurns[selectedId]);
   // Per-member satellite state for the header outcome chip. Selecting the
-  // member ids' entries (not the whole map) keeps unrelated nodes' autopilot
+  // member ids' entries (not the whole map) keeps unrelated nodes' Circuit
   // writes from re-rendering this card — same intent as the per-id node
   // subscription above.
   const memberCircuitOwnerships = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.circuitOwnerships[id])));

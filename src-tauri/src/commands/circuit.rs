@@ -1,4 +1,4 @@
-//! Autopilot Circuits IPC surface (spec #1205 / walking skeleton #1206).
+//! Circuit IPC surface (spec #1205 / walking skeleton #1206).
 //!
 //! Minimal milestone-1 contract: list / create / enable / delete
 //! circuits, Trigger Now, and read back runs with their step ledger. The
@@ -249,7 +249,7 @@ pub fn create_circuit(
             } = &kind
             else {
                 return Err(
-                    "the issue-driven Autopilot review blueprint requires an issue-label trigger"
+                    "the issue-driven Circuit review blueprint requires an issue-label trigger"
                         .to_string(),
                 );
             };
@@ -665,7 +665,7 @@ fn trigger_circuit_now_prepared_locked(
     }
     if graph.is_issue_driven_autopilot_review() {
         return Err(
-            "issue-driven Autopilot review circuits are triggered by labelled GitHub issues; Trigger Now requires issue context"
+            "issue-driven Circuit review runs are triggered by labelled GitHub issues; Trigger Now requires issue context"
                 .to_string(),
         );
     }
@@ -684,7 +684,7 @@ fn trigger_circuit_now_prepared_locked(
     context.set("review.provider", preferences.reviewer_provider.as_deref().unwrap_or(""));
     let action =
         "draft_pr".to_string();
-    context.with_autopilot_finish_prompt(None, Some(action.as_str()));
+    context.with_circuit_finish_prompt(None, Some(action.as_str()));
     let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
         conn,
         circuit.id,

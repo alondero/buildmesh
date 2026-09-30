@@ -36,10 +36,10 @@ function stopPropagation(event: SyntheticEvent) {
 }
 
 /**
- * The Pilot-light shape for an Autopilot presentation. Shared by the fixed
+ * The Pilot-light shape for a Circuit presentation. Shared by the fixed
  * identity-cell indicator and the header's outcome chip so both draw the same
  * active/waiting/done vocabulary from one place (see
- * `docs/specs/autopilot-node-indicators.md`).
+ * `docs/specs/circuit-node-indicators.md`).
  */
 export function CircuitIndicatorGlyph({ phase, tone, className = 'h-3.5 w-3.5' }: CircuitIndicatorGlyphProps) {
   if (phase === 'active') {
@@ -76,7 +76,7 @@ export function CircuitIndicatorGlyph({ phase, tone, className = 'h-3.5 w-3.5' }
 /** Reserves the shared 14px identity column even when the light is absent. */
 export function CircuitNodeIndicatorCell({ presentation, action }: CircuitNodeIndicatorProps) {
   return (
-    <span data-testid="autopilot-indicator-cell" className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+    <span data-testid="circuit-indicator-cell" className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center">
       <CircuitNodeIndicator presentation={presentation} action={action} />
     </span>
   );
@@ -92,7 +92,7 @@ export function CircuitNodeIndicator({ presentation, action }: CircuitNodeIndica
     return (
       <button
         type="button"
-        data-testid="autopilot-indicator"
+        data-testid="circuit-indicator"
         onClick={(event) => {
           // Stop the click before the card's own handler selects the member and
           // re-focuses its terminal, which would pull focus off the Circuits
@@ -113,7 +113,7 @@ export function CircuitNodeIndicator({ presentation, action }: CircuitNodeIndica
 
   return (
     <span
-      data-testid="autopilot-indicator"
+      data-testid="circuit-indicator"
       role="img"
       aria-label={presentation.label}
       title={presentation.detail}

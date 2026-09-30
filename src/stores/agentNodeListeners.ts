@@ -48,7 +48,7 @@ import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPaylo
 import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
 import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
+import type { CircuitPrReadyPayload, CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
 
@@ -59,14 +59,14 @@ import { getNodeGitPath } from '../lib/paths';
  */
 export interface AgentNodeActionSurface {
   /** Refetch the full node list (used by `node-created` /
-   *  `autopilot-node-closed`). The store's `fetchAgentNodes` is the
+   *  `node-deleted`). The store's `fetchAgentNodes` is the
    *  canonical implementation; tests that want to assert the dispatch
  *   alone can pass a spy. */
   fetchAgentNodes: () => Promise<void>;
   /** Conditional full refresh (issue #1751): skips the fan-out when the
    *  last snapshot is fresh and every scoped id is already known. Only
-   *  for additive events (`node-created`); evictions (`autopilot-node-
-   *  closed`) must always refetch, since presence in the cache is
+   *  for additive events (`node-created`); deletions (`node-deleted`)
+   *  must always refetch, since presence in the cache is
    *  exactly what the fetch purges. */
   refreshIfStale: (nodeIds: number[]) => Promise<void>;
   /** Switch the active node synchronously (used by `node-activated`,
@@ -76,9 +76,6 @@ export interface AgentNodeActionSurface {
    *  transition (`awaiting_input`/`running`/`error`) and by
    *  `node-renamed`. */
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
-  /** Patch the autopilot pill state for one node. Used by
-   *  `autopilot-finishing` / `autopilot-pr-created` /
-   *  `autopilot-finish-failed`. */
   /** Patch every visible node owned by a Circuit run when its runner state changes. */
   patchCircuitOwnershipState: (runId: number, state: string) => void;
   /** Re-read the Circuit ownership ledger on its own. Needed because
@@ -157,6 +154,13 @@ export async function attachAgentNodeListeners(
       if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
         void surface.fetchAgentNodes();
       }
+    }),
+  );
+
+  unlistens.push(
+    await listen<CircuitPrReadyPayload>('circuit-pr-ready', ({ payload }) => {
+      const node = surface.findAgentNode(payload.node_id);
+      if (node) invalidateNodeCaches(node.id, getNodeGitPath(node));
     }),
   );
 

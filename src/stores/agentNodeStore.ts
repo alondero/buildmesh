@@ -316,7 +316,7 @@ interface AgentNodeState {
   // timeout can't fire `sendToAgent` against a deleted node. `fetchAgentNodes`
   // additionally cancels any schedule whose target node is absent from the
   // refreshed list OR has `status === 'archived'` (issue #1252) — otherwise
-  // the autopilot-node-closed path would let a stale timer fire against an
+  // the node-deleted path would let a stale timer fire against an
   // archived node, surfacing a spurious "System" error toast minutes later.
   schedules: Record<number, ScheduledTask>;
 
@@ -453,7 +453,7 @@ interface AgentNodeState {
 /// use this hook instead of the duplicated `useMemo(() => nodeIds.map(id =>
 /// nodesById[id]).filter(...), [nodeIds, nodesById])` block. `useShallow`
 /// does the shallow equality on the array's elements so unrelated writes
-/// (autopilot pill, closing flag, error string) don't churn the consumer.
+/// (Circuit indicator, closing flag, error string) don't churn the consumer.
 ///
 /// Returns a fresh array reference on every `nodeIds` change (e.g. a delete
 /// or reorder), so `useMemo`-style downstream derivations in consumers
@@ -485,7 +485,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // response when it moved — the read started earlier, so its snapshot is
   // older than the state already applied. Coalescing is not sufficient on its
   // own: it orders the queue, but a stale in-flight response still lands after
-  // the newer event (spec `autopilot-node-indicators.md` step 7: "an older
+  // the newer event (spec `circuit-node-indicators.md` step 7: "an older
   // response cannot overwrite newer event state").
   let circuitOwnershipsRevision = 0;
   let nodeRevision = 0;
@@ -564,7 +564,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // "hit Enter" sentinel) at an archived node, the backend would
       // reject, and App.tsx's generic "System" toast pipeline would
       // surface a spurious error minutes after the user moved on. The
-      // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
+      // `node-deleted` listener (`stores/agentNodeListeners.ts`)
       // routes through here, so every archive transition sweeps
       // schedules for free — without this, the only cancellation path
       // was `deleteAgentNode`, which the archive path never invokes.
@@ -573,7 +573,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // is a side effect we don't want running twice under React
       // StrictMode. We keep the same object reference when nothing was
       // cancelled, so subscribers that read `state.schedules` don't
-      // re-render on every fetch (the steady-state autopilot case).
+      // re-render on every fetch (the steady-state Circuit case).
       const oldSchedules = get().schedules;
       const keptSchedules: Record<number, ScheduledTask> = {};
       for (const idStr of Object.keys(oldSchedules)) {
@@ -1244,8 +1244,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         return { schedules: next };
       });
       // Issue #1252 — belt-and-braces guard. The fetch-time cancellation
-      // in `fetchAgentNodes` is the common path: an `autopilot-node-
-      // closed` event archives the node, the listener refetches, and
+      // in `fetchAgentNodes` is the common path: a `node-deleted` event
+      // archives the node, the listener refetches, and
       // any pending schedule is dropped. This guard covers the narrow
       // race where the timer resolves AFTER the schedule was created
       // but BEFORE the refetch lands — bail silently rather than call

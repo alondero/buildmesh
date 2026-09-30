@@ -60,7 +60,7 @@ pub struct PullRequest {
     /// fork-PR payloads — same `#[serde(default)]` rationale as `head_ref`.
     #[serde(default)]
     pub head_sha: String,
-    /// GitHub login of the PR's author (`user.login`). Captured for Autopilot's
+    /// GitHub login of the PR's author (`user.login`). Captured for the Circuit
     /// collaborator gate (ADR-0012 §5) — the author of an external PR is the
     /// identity whose push access the gate checks before auto-running. Distinct
     /// from `head_repo_owner`: for a fork PR the author and the fork owner are
@@ -207,7 +207,7 @@ pub struct PrFile {
 /// `permission` field collapses its granular roles to four legacy values:
 /// `maintain` reports as `write` and `triage` as `read`. So `Admin`/`Write`
 /// exactly mean "has push access" and `Read`/`None` mean "does not" — which is
-/// the trust boundary Autopilot's collaborator gate keys off (ADR-0012 §5).
+/// the trust boundary the Circuit collaborator gate keys off (ADR-0012 §5).
 /// An unrecognised value parses to `None` (conservative: an unknown level is
 /// never granted auto-run).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,11 +267,9 @@ impl GitHubClient {
     /// than erroring. Other non-success statuses propagate as `GitHubError::Api`,
     /// mirroring `find_open_pr_for_branch`'s 404-is-a-value handling.
     ///
-    /// Seam: the only caller is `autopilot::gate_trigger`, part of the
-    /// not-yet-built Autopilot trigger pipeline (issue #499 ships the gate
-    /// helpers; the pipeline that drives them is a later slice). `allow(dead_code)`
-    /// until that lands — the logic it feeds is covered by the gate's tests.
-    #[allow(dead_code)]
+    /// Circuit trigger ingestion uses this permission before deciding whether
+    /// an issue or pull-request run can proceed automatically. The policy and
+    /// this network boundary are covered by the Circuit security tests.
     pub fn collaborator_permission(
         &self,
         owner: &str,
@@ -1127,7 +1125,7 @@ pub(crate) mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Collaborator permission — the wire→enum mapping the Autopilot gate keys
+    // Collaborator permission — the wire→enum mapping the Circuit gate keys
     // off (ADR-0012 §5). GitHub's legacy `permission` field is one of
     // admin/write/read/none; `has_push_access` is the trust boundary.
     // -----------------------------------------------------------------------

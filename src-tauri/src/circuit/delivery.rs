@@ -166,7 +166,7 @@ fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app:
 
 /// Wait for the staged paste to land at an idle input box.
 ///
-/// A node the turn evaluator **buffers** ([`evaluator::is_piloted`]) has an
+/// A node the turn evaluator **buffers** ([`evaluator::is_circuit_piloted`]) has an
 /// output clock, and the wait is signal-driven off it: the paste's echo first
 /// (so a provider that renders no echo falls through at the deadline), then a
 /// quiet redraw. A node the evaluator never buffers — an ordinary node a human
@@ -201,7 +201,7 @@ enum PasteReadiness {
 
 fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> {
     let mut readiness = PromptReadiness { paste: PasteReadiness::Generic, receipt: None };
-    if !evaluator::is_piloted(node_id) { return Ok(readiness); }
+    if !evaluator::is_circuit_piloted(node_id) { return Ok(readiness); }
     let node = crate::db::get_agent_node_by_id(node_id)
         .map_err(|error| format!("could not identify prompt target {node_id}: {error}"))?;
     let harness = crate::preferences::resolve_harness_provider(&node.provider).adapter().id();
@@ -251,7 +251,7 @@ fn settle_after_paste(
         }
         return Err(format!("The harness did not render the {chars}-character pasted prompt before Enter"));
     }
-    if !evaluator::is_piloted(node_id) {
+    if !evaluator::is_circuit_piloted(node_id) {
         std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
         return Ok(());
     }
@@ -306,7 +306,7 @@ fn press_enter_until_output_guarded(
     // already working on the prompt, and reporting "never submitted" would mark
     // a node the user just handed work to as needing attention, for a
     // submission this path has no way to observe either way.
-    let buffered = evaluator::is_piloted(node_id);
+    let buffered = evaluator::is_circuit_piloted(node_id);
     let verifiable = buffered || receipt.is_some();
     for attempt in 1..=MAX_ENTER_ATTEMPTS {
         if attempt > 1 && receipt.is_some_and(|receipt| receipt.accepted()) {
@@ -582,7 +582,7 @@ mod tests {
         let id = -930_020;
         let (registry, rx) = crate::agent::process::testing::capturing_registry(id);
         assert!(
-            !evaluator::is_piloted(id),
+            !evaluator::is_circuit_piloted(id),
             "fixture precondition: this target is not buffered by the evaluator"
         );
 
@@ -610,7 +610,7 @@ mod tests {
         let (registry, rx) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
         assert!(
-            evaluator::is_piloted(id) && evaluator::millis_since_last_output(id).is_none(),
+            evaluator::is_circuit_piloted(id) && evaluator::millis_since_last_output(id).is_none(),
             "fixture precondition: buffered, but no output to acknowledge against"
         );
 

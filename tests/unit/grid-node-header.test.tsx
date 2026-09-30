@@ -176,7 +176,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     const pill = screen.getByTestId('circuit-run-pill');
     expect(pill.textContent).toBe('Review workflow · #2');
     expect(pill.className).toContain('text-accent-violet');
-    expect(pill.getAttribute('title')).toContain('Autopilot is driving');
+    expect(pill.getAttribute('title')).toContain('Circuit is driving');
   });
 
   it('links circuit ownership to the run in the Circuits Probe', () => {
@@ -233,11 +233,11 @@ describe('GridNodeHeader contextual information and actions', () => {
     render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }}
       attentionOutcome={attentionOutcome} onReveal={onReveal} onBuildRun={() => {}} />);
     expect(screen.getByRole('status', { name: 'Needs input' })).toBeTruthy();
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     expect(chip.dataset.outcome).toBe('needs_input');
-    expect(chip.getAttribute('title')).toBe('Autopilot is waiting for you: approve the deploy.');
+    expect(chip.getAttribute('title')).toBe('Circuit is waiting for you: approve the deploy.');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Needs input. Autopilot is waiting for you: approve the deploy. Show this session.');
+      .toBe('Needs input. Circuit is waiting for you: approve the deploy. Show this session.');
     fireEvent.click(chip);
     expect(onReveal).toHaveBeenCalledOnce();
   });
@@ -248,11 +248,11 @@ describe('GridNodeHeader contextual information and actions', () => {
       { circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }}, semanticTurns: {} },
     );
     render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     expect(chip.dataset.outcome).toBe('failed');
-    expect(chip.textContent).toContain('Autopilot failed');
+    expect(chip.textContent).toContain('Circuit failed');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Autopilot failed. Autopilot failed and needs a human. Show this session.');
+      .toBe('Circuit failed. Circuit failed and needs a human. Show this session.');
     expect(chip.className).toContain('ring-1');
   });
 
@@ -268,24 +268,24 @@ describe('GridNodeHeader contextual information and actions', () => {
       2,
     );
     render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     // The focused session wins the copy; the count covers every session needing attention.
     expect(chip.dataset.outcome).toBe('needs_input');
     expect(chip.textContent).toContain('2');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Needs input (2 sessions). Autopilot is waiting for you: approve the deploy. Show next session.');
+      .toBe('Needs input (2 sessions). Circuit is waiting for you: approve the deploy. Show next session.');
   });
 
   it('renders no outcome chip when the card has nothing actionable', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.queryByTestId('autopilot-outcome-chip')).toBeNull();
+    expect(screen.queryByTestId('circuit-outcome-chip')).toBeNull();
   });
 
   it('reserves the ownership cell without rendering an unpiloted indicator', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cell = screen.getByTestId('autopilot-indicator-cell');
+    const cell = screen.getByTestId('circuit-indicator-cell');
     expect(cell.className).toContain('w-3.5');
-    expect(cell.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+    expect(cell.querySelector('[data-testid="circuit-indicator"]')).toBeNull();
   });
 
 
@@ -293,16 +293,16 @@ describe('GridNodeHeader contextual information and actions', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'completed', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Autopilot done/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit done/ })).toBeTruthy();
   });
 
   it('opens the run in the Circuits Probe from the title-bar Pilot light', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const indicator = screen.getByRole('button', { name: /Autopilot active/ });
+    const indicator = screen.getByRole('button', { name: /Circuit active/ });
     expect(indicator.getAttribute('aria-label'))
-      .toBe('Autopilot active. Open this Circuit run in the Circuits Probe.');
+      .toBe('Circuit active. Open this Circuit run in the Circuits Probe.');
     fireEvent.click(indicator);
     expect(useUIStore.getState().probeTab).toBe('circuits');
     expect(useUIStore.getState().probeOpen).toBe(true);
@@ -314,18 +314,18 @@ describe('GridNodeHeader contextual information and actions', () => {
     seedAgentNodes([{ ...NODE, status: 'awaiting_input' }], NODE.id);
     useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     const { rerender } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Autopilot waiting/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit waiting/ })).toBeTruthy();
 
     useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }} });
     rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Autopilot needs attention/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit needs attention/ })).toBeTruthy();
   });
 
   it('keeps cancelled Circuit history out of the compact indicator', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'cancelled', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByTestId('autopilot-indicator-cell').querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+    expect(screen.getByTestId('circuit-indicator-cell').querySelector('[data-testid="circuit-indicator"]')).toBeNull();
   });
 });
 describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
@@ -588,7 +588,7 @@ describe('GridNodeHeader resume affordance', () => {
     openUrlMock.mockClear();
   });
 
-  it('shows a lost-conversation badge for missing identity outside Autopilot', () => {
+  it('shows a lost-conversation badge for missing identity outside Circuit', () => {
     const node = { ...NODE, status: 'suspended' as const, cli_session_id: '' };
     seedAgentNodes([node], node.id);
     useAgentNodeStore.setState({ circuitOwnerships: {} });
@@ -620,9 +620,9 @@ describe('GridNodeHeader resume affordance', () => {
     expect(screen.getAllByTestId('grid-resume-button')).toHaveLength(1);
   });
 
-  it('does NOT render a Resume button when Suspended but cli_session_id is null (autopilot gate)', () => {
-    // Autopilot-gate Suspended rows are parked at creation with no
-    // session id — the autopilot's own "Approve Sandbox Run" action
+  it('does NOT render a Resume button when Suspended but cli_session_id is null (Circuit gate)', () => {
+    // Circuit-gate Suspended rows are parked at creation with no
+    // session id — the Circuit's "Approve Sandbox Run" action
     // is the recovery surface there. Same gate as the sidebar
     // NodeItem's `showResume` (see its docblock).
     const node = { ...NODE, status: 'suspended' as const, cli_session_id: null };

@@ -77,7 +77,7 @@ use crate::process_util::run_worker_pass;
 const TICK_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Startup delay so boot-time DB migration finishes before the first
-/// pass (mirrors the legacy autopilot worker).
+/// pass for active Circuit runs.
 const STARTUP_DELAY: Duration = Duration::from_secs(5);
 
 /// Wake condvar. Trigger Now notifies; the worker otherwise wakes on
@@ -355,8 +355,8 @@ pub fn wake_circuit_worker() {
     cvar.notify_all();
 }
 
-/// Start the dedicated circuits worker thread. Called once from Tauri
-/// `setup`, alongside the legacy autopilot worker. Startup order:
+/// Start the dedicated Circuit worker thread. Called once from Tauri
+/// `setup`. Startup order:
 /// reconcile → loop (interval pass, GitHub poll pass, drive pass,
 /// lost-turn watchdog).
 ///
@@ -505,7 +505,7 @@ fn global_agent_reservation_fits(
 /// Observe the capacity available to one running circuit. The worker injects
 /// the app-wide pool setting so this seam can exercise the real DB counters
 /// without a Tauri runtime. A circuit's durable lease is the agent budget;
-/// the legacy per-mesh Autopilot cap is deliberately not read here.
+/// the retired per-mesh automation cap is deliberately not read here.
 fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> CircuitEvent {
     let circuit_running =
         db::count_running_circuit_steps(active.run.circuit_id).unwrap_or_else(|e| {
@@ -527,7 +527,7 @@ fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> 
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     tracing::warn!(
-                        "circuits: global Autopilot pool count failed, failing closed: {}",
+                        "circuits: global Circuit agent-pool count failed, failing closed: {}",
                         e
                     );
                     0
@@ -658,7 +658,7 @@ fn run_pass(app: &AppHandle) {
                         available: global_pool.map(|limit| i64::from(limit).saturating_sub(reserved_circuit_slots).saturating_sub(unleased_slots).max(0)),
                     });
                     tracing::info!(
-                        "circuits: global Autopilot pool held — run {} needs {} reserved agent slot(s)",
+                        "circuits: global Circuit agent pool held — run {} needs {} reserved agent slot(s)",
                         active.run.id, required
                     );
                     continue;
@@ -2875,8 +2875,8 @@ pub(super) fn execute_effects(
                     },
                 );
             }
-            Effect::CallGithub { .. } => {
-                outcome_events.extend(gated_dispatch_call_github(
+            Effect::CallGithub { node_id, action, .. } => {
+                let outcomes = gated_dispatch_call_github(
                     &effect_batch,
                     run_state.as_deref(),
                     matches!(view.state, RunState::Completed | RunState::Failed),
@@ -2884,7 +2884,30 @@ pub(super) fn execute_effects(
                     view,
                     effect,
                     None,
-                )?);
+                )?;
+                let pr_is_available = *action == crate::circuit::model::GithubActionKind::OpenPr
+                    && outcomes.iter().any(|event| {
+                        matches!(
+                            event,
+                            CircuitEvent::GithubActionResult {
+                                success: true,
+                                pr_number: Some(_),
+                                ..
+                            }
+                        )
+                    });
+                if pr_is_available {
+                    if let Some(agent_node_id) = view.resolve_target_agent(node_id) {
+                        let _ = app.emit(
+                            "circuit-pr-ready",
+                            CircuitPrReadyPayload {
+                                run_id: active.run.id,
+                                node_id: agent_node_id,
+                            },
+                        );
+                    }
+                }
+                outcome_events.extend(outcomes);
             }
         }
     }
@@ -5657,7 +5680,7 @@ mod tests {
     // unique run-id namespaces per test, asserts only about OUR entries,
     // and a per-test tidying pass so our entries don't leak.
     // This mirrors the PLANNER_TEST_MESH constant pattern used by
-    // services::autopilot::tests for the same reason.
+    // the other Circuit worker tests for the same reason.
 
     #[test]
     fn approvals_sweep_drops_entries_for_vanished_runs() {
@@ -6577,8 +6600,8 @@ mod tests {
     }
 
     /// `provider: None` leaves the AST override empty. The worker then
-    /// resolves the effective provider through the same explicit -> mesh ->
-    /// application default chain as legacy Autopilot before creating the
+    /// resolves the effective provider through the shared explicit -> mesh ->
+    /// application default spawn chain before creating the
     /// row, so this pure resolver remains free of database access.
     #[test]
     fn circuit_spawn_default_provider_is_none_when_unset() {
@@ -6889,6 +6912,16 @@ pub struct CircuitAgentBlockedPayload {
     pub node_id: i64,
     #[ts(as = "i32")]
     pub issue: i64,
+}
+
+/// An OpenPr action completed and an open pull request is available for an agent node.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitEvents.ts")]
+pub struct CircuitPrReadyPayload {
+    #[ts(as = "i32")]
+    pub run_id: i64,
+    #[ts(as = "i32")]
+    pub node_id: i64,
 }
 
 fn classifier_provider(preferences: &crate::preferences::AppPreferences) -> &str {

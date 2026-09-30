@@ -143,7 +143,7 @@ fn create_review_activity_pair(
                 "https://github.com/alondero/buildmesh/issues/42",
                 &["ready-for-agent".to_string()],
             );
-            context.with_autopilot_finish_prompt(Some(42), Some("none"));
+            context.with_circuit_finish_prompt(Some(42), Some("none"));
             context.with_collaborator_gate(true);
             let run_id = crate::db::create_circuit_run(
                 circuit.id,

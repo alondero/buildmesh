@@ -809,7 +809,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
-  // Circuit agent pool size (app-wide cap on concurrent autopilot nodes). The
+  // Circuit agent pool size (app-wide cap on concurrent Circuit agents). The
   // draft is a string so the input can hold a cleared/in-progress value;
   // `''` means "no global cap". Committed on blur / Enter rather than per
   // keystroke — a half-typed "1" of "10" must not briefly cap the pool at 1.
@@ -1459,9 +1459,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  // Commit the autopilot pool-size draft (blur / Enter). `''` clears the
+  // Commit the Circuit pool-size draft (blur / Enter). `''` clears the
   // global cap; anything else is clamped to a non-negative integer (0 =
-  // pause new autopilot spawns). Optimistic with rollback, mirroring the
+  // pause new Circuit spawns). Optimistic with rollback, mirroring the
   // other settings writes; the dirty site clears optimistically too so a
   // successful save never leaves a phantom discard banner.
   const commitPoolSize = async () => {

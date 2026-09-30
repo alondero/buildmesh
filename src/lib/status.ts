@@ -80,7 +80,7 @@ export const STATUS_CONFIG = {
     label: 'Suspended',
     hex: '#8b5cf6',
   },
-  // Issue #485 — an Autopilot node whose wrap-up finished (clean worktree,
+  // Issue #485 — a Circuit-managed node whose wrap-up finished (clean worktree,
   // branch pushed, PR opened). Terminal state; green mirrors the diff
   // "added" accent used elsewhere for success.
   completed: {
@@ -92,7 +92,7 @@ export const STATUS_CONFIG = {
   },
   // Issue #1364 — an ordinary turn finished cleanly and the agent is at its
   // prompt, ready for another prompt. The user is NOT needed (unlike
-  // awaiting_input) and this is NOT Autopilot's PR-opened terminal state
+  // awaiting_input) and this is NOT Circuit's PR-opened terminal state
   // (completed). Green ✓ but distinct copy: "Ready", never "PR opened".
   ready: {
     color: 'text-accent-green',

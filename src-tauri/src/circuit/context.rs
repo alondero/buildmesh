@@ -6,7 +6,7 @@
 //! `{{ path }}` placeholders. Whitespace inside the braces is tolerated
 //! (`{{circuit.name}}` == `{{ circuit.name }}`). Unknown paths resolve to
 //! the empty string — a template referencing a not-yet-populated namespace
-//! must not wedge a run. Trigger, Autopilot, and PR builders below populate
+//! must not wedge a run. Circuit trigger, policy, and PR builders below populate
 //! the namespaces used by the executable blueprints.
 //!
 //! Deliberately NOT the full Mustache spec: no sections, no inverted
@@ -120,7 +120,7 @@ impl CircuitContext {
     /// blueprint. The template is loaded here, at run creation time, so the
     /// user's current Circuit `finish.md` and explicit publication action apply without freezing a
     /// copy into the blueprint JSON.
-    pub fn with_autopilot_finish_prompt(
+    pub fn with_circuit_finish_prompt(
         &mut self,
         issue_number: Option<i64>,
         action_on_success: Option<&str>,

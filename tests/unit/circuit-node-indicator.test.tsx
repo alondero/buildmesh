@@ -8,8 +8,8 @@ import type { CircuitNodePresentation } from '../../src/lib/circuitNodePresentat
 const presentation: CircuitNodePresentation = {
   phase: 'waiting',
   tone: 'error',
-  label: 'Autopilot needs attention',
-  detail: 'Autopilot reported a failure or an unknown state and needs attention.',
+  label: 'Circuit needs attention',
+  detail: 'Circuit reported a failure or an unknown state and needs attention.',
 };
 
 const ACTION_LABEL = 'Open this Circuit run in the Circuits Probe.';
@@ -17,19 +17,19 @@ const ACTION_LABEL = 'Open this Circuit run in the Circuits Probe.';
 describe('CircuitNodeIndicator', () => {
   it('renders nothing without a presentation', () => {
     const { container } = render(<CircuitNodeIndicatorCell presentation={null} />);
-    expect(container.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+    expect(container.querySelector('[data-testid="circuit-indicator"]')).toBeNull();
   });
 
   it('is a static image when no activation is supplied', () => {
     render(<CircuitNodeIndicator presentation={presentation} />);
-    expect(screen.getByRole('img', { name: 'Autopilot needs attention' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Circuit needs attention' })).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
   });
 
   it('becomes a labelled button when an activation is supplied', () => {
     const onActivate = vi.fn();
     render(<CircuitNodeIndicator presentation={presentation} action={{ label: ACTION_LABEL, onActivate }} />);
-    const button = screen.getByRole('button', { name: `Autopilot needs attention. ${ACTION_LABEL}` });
+    const button = screen.getByRole('button', { name: `Circuit needs attention. ${ACTION_LABEL}` });
     expect(button.getAttribute('title')).toBe(`${presentation.detail} ${ACTION_LABEL}`);
     fireEvent.click(button);
     expect(onActivate).toHaveBeenCalledOnce();
@@ -50,7 +50,7 @@ describe('CircuitNodeIndicator', () => {
       </div>,
     );
 
-    const button = screen.getByTestId('autopilot-indicator');
+    const button = screen.getByTestId('circuit-indicator');
     fireEvent.pointerDown(button);
     fireEvent.doubleClick(button);
     fireEvent.click(button);

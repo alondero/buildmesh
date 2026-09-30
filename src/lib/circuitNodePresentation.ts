@@ -17,46 +17,46 @@ const LIVE_CIRCUIT_STATES = new Set(['pending', 'running', 'paused']);
 const ACTIVE: CircuitNodePresentation = {
   phase: 'active',
   tone: 'automation',
-  label: 'Autopilot active',
-  detail: 'Autopilot is driving this Agent Node.',
+  label: 'Circuit active',
+  detail: 'Circuit is driving this Agent Node.',
 };
 
 const WAITING: CircuitNodePresentation = {
   phase: 'waiting',
   tone: 'warning',
-  label: 'Autopilot waiting',
-  detail: 'Autopilot still owns this Agent Node but is not currently driving it.',
+  label: 'Circuit waiting',
+  detail: 'Circuit still owns this Agent Node but is not currently driving it.',
 };
 
 const DONE: CircuitNodePresentation = {
   phase: 'done',
   tone: 'success',
-  label: 'Autopilot done',
-  detail: 'Autopilot finished; this Agent Node remains available for review.',
+  label: 'Circuit done',
+  detail: 'Circuit finished; this Agent Node remains available for review.',
 };
 
 const NEEDS_ATTENTION: CircuitNodePresentation = {
   phase: 'waiting',
   tone: 'error',
-  label: 'Autopilot needs attention',
-  detail: 'Autopilot reported a failure or an unknown state and needs attention.',
+  label: 'Circuit needs attention',
+  detail: 'Circuit reported a failure or an unknown state and needs attention.',
 };
 
 const WAITING_NODE_DETAILS: Partial<Record<AgentNode['status'], string | ((node: AgentNode) => string)>> = {
-  ready: 'Autopilot is between turns after this Agent Node yielded cleanly.',
-  idle: 'Autopilot is waiting to start the next turn.',
-  awaiting_input: 'Autopilot is waiting for input from you.',
-  pending: 'Autopilot is waiting for this Agent Node to start.',
-  spawning: 'Autopilot is waiting for this Agent Node to start.',
+  ready: 'Circuit is between turns after this Agent Node yielded cleanly.',
+  idle: 'Circuit is waiting to start the next turn.',
+  awaiting_input: 'Circuit is waiting for input from you.',
+  pending: 'Circuit is waiting for this Agent Node to start.',
+  spawning: 'Circuit is waiting for this Agent Node to start.',
   suspended: (node) => node.cli_session_id
-    ? 'Autopilot is waiting for this Agent Node to recover its existing session.'
-    : 'Autopilot is waiting for this Agent Node to recover before starting a new session.',
-  completed: 'Autopilot ownership is reconciling; the run is still live while this Agent Node reports completed.',
+    ? 'Circuit is waiting for this Agent Node to recover its existing session.'
+    : 'Circuit is waiting for this Agent Node to recover before starting a new session.',
+  completed: 'Circuit ownership is reconciling; the run is still live while this Agent Node reports completed.',
 };
 
 const CIRCUIT_WAITING_DETAILS: Record<'pending' | 'paused', string> = {
-  pending: 'Autopilot is queued for the next Circuit step.',
-  paused: 'Autopilot is paused by the Circuit.',
+  pending: 'Circuit is queued for the next step.',
+  paused: 'Circuit is paused.',
 };
 
 function waitingForNode(node: AgentNode, circuitState?: string): CircuitNodePresentation {
@@ -121,7 +121,7 @@ export function hasActiveCircuitOwnership(
 //
 // One member is chosen as the *primary*: the focused session when it demands
 // attention, otherwise the highest-priority one (failures before waits). The
-// primary drives the chip's label, tone, detail, and Autopilot-attribution —
+// primary drives the chip's label, tone, detail, and Circuit attribution —
 // so switching tabs updates what the chip describes instead of pinning the
 // copy to whichever member happened to be listed first.
 //
@@ -131,9 +131,9 @@ export function hasActiveCircuitOwnership(
 // session. See `isSoloFocusedFailure`.
 //
 // An active run is carried by the Pilot light. A finished run is already told
-// four ways — the green lifecycle dot, the Pilot-light check, the PR pill, and
-// the `autopilot-pr-created` toast — so a third green chip with a no-op click
-// was pure noise (round-1 review). An unpiloted, healthy card renders none.
+// by the green lifecycle dot, the Pilot-light check, and the PR pill, so a
+// third green chip with a no-op click would be redundant. An unpiloted,
+// healthy card renders none.
 
 export type CircuitOutcomeKind = 'failed' | 'needs_input';
 
@@ -159,16 +159,16 @@ export interface CircuitOutcomeSources {
 }
 
 /**
- * Whether the presentation shows Autopilot as *currently responsible* for the
+ * Whether the presentation shows Circuit as *currently responsible* for the
  * node. This must not be inferred from raw ledger presence: the Circuit
  * ledger retains terminal rows for inspection
  * (`completed`, `failed`, `cancelled`). A cancelled circuit withdrew
  * automation (`mapCircuitOwnership` returns `null`), and a completed run is
  * finished — so a later failure or prompt belongs to the agent, not to
- * Autopilot, and must read "Agent failed" / "This agent is waiting" rather
- * than claiming Autopilot needs a human.
+ * Circuit, and must read "Agent failed" / "This agent is waiting" rather
+ * than claiming Circuit needs a human.
  */
-function isAutopilotResponsible(presentation: CircuitNodePresentation | null): boolean {
+function isCircuitResponsible(presentation: CircuitNodePresentation | null): boolean {
   return presentation != null && presentation.phase !== 'done';
 }
 
@@ -184,16 +184,16 @@ function outcomeCandidateFor(node: AgentNode, sources: CircuitOutcomeSources): O
     sources.circuitOwnerships[node.id],
   );
   if (node.status === 'error' || presentation?.tone === 'error') {
-    return { id: node.id, kind: 'failed', responsible: isAutopilotResponsible(presentation) };
+    return { id: node.id, kind: 'failed', responsible: isCircuitResponsible(presentation) };
   }
   if (node.status === 'awaiting_input') {
-    return { id: node.id, kind: 'needs_input', responsible: isAutopilotResponsible(presentation) };
+    return { id: node.id, kind: 'needs_input', responsible: isCircuitResponsible(presentation) };
   }
   return null;
 }
 
 /**
- * A solo card whose focused member failed under Autopilot: the title bar's one
+ * A solo card whose focused member failed under Circuit: the title bar's one
  * Pilot light is already visibly red for that member, and `revealAttention`
  * could only cycle back to it. The chip adds no reachability here, so it is the
  * single case this resolver suppresses. A multi-member card keeps the chip even
@@ -223,16 +223,16 @@ function buildOutcome(primary: OutcomeCandidate, nodeIds: number[], sources: Cir
   if (kind === 'failed') {
     return {
       kind, phase: 'waiting', tone: 'error', nodeId, nodeIds,
-      label: responsible ? 'Autopilot failed' : 'Agent failed',
-      detail: responsible ? 'Autopilot failed and needs a human.' : 'This agent is in an error state.',
+      label: responsible ? 'Circuit failed' : 'Agent failed',
+      detail: responsible ? 'Circuit failed and needs a human.' : 'This agent is in an error state.',
     };
   }
   const what = sources.semanticTurns[nodeId]?.description?.trim();
   return {
     kind, phase: 'waiting', tone: 'warning', label: 'Needs input', nodeId, nodeIds,
     detail: what
-      ? asSentence(`${responsible ? 'Autopilot' : 'This agent'} is waiting for you: ${what}`)
-      : `${responsible ? 'Autopilot' : 'This agent'} is waiting for your input.`,
+      ? asSentence(`${responsible ? 'Circuit' : 'This agent'} is waiting for you: ${what}`)
+      : `${responsible ? 'Circuit' : 'This agent'} is waiting for your input.`,
   };
 }
 

@@ -203,7 +203,6 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   it('restartFreshAgent calls spawn_agent with a Fresh intent when node has a cli_session_id', async () => {
     mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
     mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
-    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
     seedAgentNodes([node]);
@@ -225,7 +224,6 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   it('restartFreshAgent passes custom rows/cols when provided', async () => {
     mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
     mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
-    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
     seedAgentNodes([node]);

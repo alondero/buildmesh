@@ -31,7 +31,7 @@ const prClient = createDualKeyCache<number, OpenPr>({
  * path. The `refresh()` handle is exposed for manual invalidation, and
  * buildmesh's own PR-state write-paths force a refetch without a mounted
  * hook via `refreshOpenPrByPath` (merge, issue #780) /
- * `invalidateOpenPrForNode` (spawn + autopilot wrap-up, issue #1004).
+ * `invalidateOpenPrForNode` (spawn + Circuit OpenPr completion, issue #1004).
  */
 export function useOpenPr(nodeId: number, gitPath: string | null): {
   pr: OpenPr | null;
@@ -82,7 +82,7 @@ export function refreshOpenPrByPath(gitPath: string): void {
  * intact — the next time the header mounts).
  *
  * Callers go through `invalidateNodeCaches` — see that module for why a
- * fresh spawn and an autopilot wrap-up both need this.
+ * fresh spawn and a completed Circuit OpenPr action both need this.
  */
 export function invalidateOpenPrForNode(nodeId: number, gitPath: string): void {
   prClient.invalidate(nodeId);

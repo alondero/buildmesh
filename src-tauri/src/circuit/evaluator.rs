@@ -67,15 +67,6 @@ pub fn register_circuit(node_id: i64) {
 }
 
 /// Is this node buffered for Circuit observation (fast, in-memory)?
-pub fn is_piloted(node_id: i64) -> bool {
-    NODES
-        .lock()
-        .unwrap()
-        .get(&node_id)
-        .is_some_and(|state| state.circuit_owned)
-}
-
-/// Whether this node is registered for Circuit observation.
 pub fn is_circuit_piloted(node_id: i64) -> bool {
     NODES
         .lock()
@@ -998,13 +989,11 @@ mod tests {
     fn circuit_registration_buffers_output_and_unregister_drops_it() {
         let id = 910_005;
         register_circuit(id);
-        assert!(is_piloted(id));
         assert!(is_circuit_piloted(id));
         on_output(id, "circuit output");
         assert_eq!(cleaned_tail(id), "circuit output");
 
         unregister(id);
-        assert!(!is_piloted(id));
         assert!(!is_circuit_piloted(id));
         assert_eq!(cleaned_tail(id), "");
     }

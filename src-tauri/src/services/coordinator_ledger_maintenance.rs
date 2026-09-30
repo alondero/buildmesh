@@ -44,8 +44,7 @@
 //!
 //! ## Worker shape
 //!
-//! Mirrors `services::autopilot::start_autopilot_worker` (issue #482, PRD
-//! #480): a `std::thread::spawn` whose body is
+//! Uses the same long-lived worker pattern as the Circuit worker: a `std::thread::spawn` whose body is
 //! `loop { sweeps...; sleep(PRUNE_INTERVAL); }`. The very first iteration
 //! runs immediately (no startup delay) — the sweeps are fast and bounded, and
 //! running once on every app launch is the point. Failures are logged and

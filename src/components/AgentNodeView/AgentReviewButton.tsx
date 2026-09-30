@@ -65,7 +65,7 @@ export function AgentReviewButton({ node, providerList }: { node: AgentNode; pro
   // The source agent has to yield a turn before `await_source` can fire, and
   // the reviewer has to yield one before `verdict` can rule — so a harness that
   // cannot yield turns wedges the run instead of failing it. Mirror the
-  // backend's harness-side gate (`autopilot::compatibility::evaluate`) here so
+  // backend's harness-side gate (`circuit::compatibility::evaluate`) here so
   // the control is disabled rather than silently minting a stuck circuit.
   const circuitBlocked = blocksReviewCircuit(node.provider);
   const eligible = !circuitBlocked && (statusEligible || processAlive);

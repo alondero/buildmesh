@@ -11,8 +11,8 @@ user guide, source, tests, or an accepted ADR.
 |---|---|
 | [Build/run system](build-run-system.md) | Build, Run, and terminal utility flow; its old `mesh.toml` storage section is explicitly superseded in the document |
 | [Git sync and changed files](prd-git-sync-and-changed-files.md) | Git synchronization and review surfaces |
-| [Autopilot mode](prd-autopilot-mode.md) | Issue-driven autonomous Agent Node lifecycle |
-| [Autopilot indicators](autopilot-node-indicators.md) | Current presentation contract for automated nodes |
+| [Autopilot mode](prd-autopilot-mode.md) | Superseded historical design for the retired legacy mode |
+| [Circuit indicators](circuit-node-indicators.md) | Current presentation contract for Circuit-owned nodes |
 | [Harness configuration](prd-harness-configuration.md) | Per-harness defaults and Mesh overrides |
 | [Harness/provider separation](prd-harness-provider-separation.md) | Domain and configuration contract |
 | [Remote access MVP](prd-remote-access.md) | Superseded early remote-access design; current security and pairing behavior is in [the user guide](../user-guide.md#remote-access) and [ADR 0034](../adr/0034-pairing-tickets-and-trusted-root-rotation.md) |

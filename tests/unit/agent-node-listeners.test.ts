@@ -78,7 +78,7 @@ describe('attachAgentNodeListeners', () => {
 
     await attachAgentNodeListeners(surface);
 
-    // Thirteen event subscriptions should be live after attach — one per
+    // Ten event subscriptions should be live after attach — one per
     // event the store cares about. We read the setup's listener map
     // directly rather than going through `listen`'s mock, because
     // the mock returns Promise<unlistenFn> per call and doesn't
@@ -95,12 +95,13 @@ describe('attachAgentNodeListeners', () => {
       'node-spawn-completed',
       'node-spawn-failed',
       'circuit-run-updated',
+      'circuit-pr-ready',
     ]));
     // No `attention-needed` store listener: the backend emits
     // `agent-lifecycle` on every mark transition (issue #1364), so a
     // second listener would duplicate the state mutations.
     expect(eventNames).not.toContain('attention-needed');
-    expect(eventNames).toHaveLength(9);
+    expect(eventNames).toHaveLength(10);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -119,11 +120,11 @@ describe('attachAgentNodeListeners', () => {
 
     expect(typeof unlisten).toBe('function');
     // One unlisten per registered event, including Circuit ownership changes.
-    expect(mockListen).toHaveBeenCalledTimes(9);
+    expect(mockListen).toHaveBeenCalledTimes(10);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(9);
+    expect(unlistenFns).toHaveLength(10);
   });
 
   it('reconciles Circuit ownership for every live and terminal run transition', async () => {

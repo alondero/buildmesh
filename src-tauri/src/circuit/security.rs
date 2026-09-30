@@ -4,12 +4,12 @@ use crate::models::SessionStatus;
 use crate::services::github::{GitHubClient, GitHubError, Issue, PullRequest};
 
 // Re-export so external callers (and the integration test) can name the gate's
-// input type through the public `autopilot` path even though `services` is a
+// input type through the public `circuit` path even though `services` is a
 // private module — this is also what keeps `evaluate`'s public signature
 // nameable (no private-in-public lint).
 pub use crate::services::github::CollaboratorPermission;
 
-/// Which GitHub object an Autopilot trigger came from. The gate decision is the
+/// Which GitHub object a Circuit trigger came from. The gate decision is the
 /// same for both today (collaborator push-access), but the kind is carried so a
 /// later policy could treat them differently (e.g. always gate fork PRs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,11 +18,11 @@ pub enum TriggerKind {
     PullRequest,
 }
 
-/// A normalised Autopilot trigger: the repo coordinates plus *who* raised the
+/// A normalised Circuit trigger: the repo coordinates plus *who* raised the
 /// issue/PR. `author` is the identity whose push access the gate checks — it is
 /// the GitHub login, taken from the issue/PR `user.login`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AutopilotTrigger {
+pub struct CircuitTrigger {
     pub owner: String,
     pub repo: String,
     pub number: i64,
@@ -30,7 +30,7 @@ pub struct AutopilotTrigger {
     pub kind: TriggerKind,
 }
 
-impl AutopilotTrigger {
+impl CircuitTrigger {
     /// Build a trigger from a fetched [`Issue`]. `owner`/`repo` are the mesh's
     /// repo coordinates (the issue body doesn't carry them); `author` and
     /// `number` come from the issue.
@@ -47,9 +47,8 @@ impl AutopilotTrigger {
     /// Build a trigger from a fetched [`PullRequest`]. The gate checks *who
     /// opened the PR* (`pr.author`), not the fork owner — the two usually match
     /// but the author is the trust-relevant identity.
-    // Seam: the poller (#482) ingests issues only today; PR triggers are a
-    // later Autopilot slice. Covered by this module's tests + the
-    // autopilot_security integration test.
+    // The Circuit poller currently builds issue triggers. This constructor
+    // keeps pull-request identity normalization covered for future trigger use.
     #[allow(dead_code)]
     pub(crate) fn from_pull_request(owner: &str, repo: &str, pr: &PullRequest) -> Self {
         Self {
@@ -65,7 +64,7 @@ impl AutopilotTrigger {
 /// The collaborator gate's verdict for one trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateDecision {
-    /// Author has push access — Autopilot may spawn and run the node
+    /// Author has push access — Circuit may spawn and run the node
     /// automatically (it follows the normal spawn lifecycle).
     AutoRun,
     /// Author lacks push access (external / first-time contributor) or is
@@ -80,7 +79,7 @@ impl GateDecision {
         matches!(self, GateDecision::RequireApproval)
     }
 
-    /// The lifecycle status an Autopilot-spawned node should start in under this
+    /// The lifecycle status a Circuit-spawned node should start in under this
     /// decision. `RequireApproval` → `Suspended` (the existing parked state the
     /// desktop UI will surface an "Approve Sandbox Run" action on). `AutoRun` →
     /// `None`: the node takes the normal spawn path (`Pending` → `Running`), so
@@ -100,7 +99,7 @@ impl GateDecision {
 /// is never auto-run: an unknown identity can't be a verified collaborator, so
 /// it gates regardless of the fetched permission (which for an empty username
 /// would already be `None`, but the explicit guard makes the intent loud).
-pub fn evaluate(trigger: &AutopilotTrigger, author_permission: CollaboratorPermission) -> GateDecision {
+pub fn evaluate(trigger: &CircuitTrigger, author_permission: CollaboratorPermission) -> GateDecision {
     if trigger.author.trim().is_empty() {
         return GateDecision::RequireApproval;
     }
@@ -115,7 +114,7 @@ pub fn evaluate(trigger: &AutopilotTrigger, author_permission: CollaboratorPermi
 /// Circuit trigger ingestion owns this network seam; `evaluate` owns the pure policy.
 pub(crate) fn gate_trigger(
     client: &GitHubClient,
-    trigger: &AutopilotTrigger,
+    trigger: &CircuitTrigger,
 ) -> Result<GateDecision, GitHubError> {
     // Short-circuit an unknown author before the fetch: an empty login would
     // build a malformed `collaborators//permission` URL and waste a rate-limited
@@ -132,8 +131,8 @@ pub(crate) fn gate_trigger(
 mod tests {
     use super::*;
 
-    fn trigger(author: &str) -> AutopilotTrigger {
-        AutopilotTrigger {
+    fn trigger(author: &str) -> CircuitTrigger {
+        CircuitTrigger {
             owner: "alondero".to_string(),
             repo: "buildmesh".to_string(),
             number: 7,
@@ -202,7 +201,7 @@ mod tests {
         // trigger lifts `author`/`number` from the fetched issue.
         let json = r#"{ "number": 358, "title": "x", "user": {"login": "octocat"} }"#;
         let issue: Issue = serde_json::from_str(json).expect("issue parses");
-        let t = AutopilotTrigger::from_issue("alondero", "buildmesh", &issue);
+        let t = CircuitTrigger::from_issue("alondero", "buildmesh", &issue);
         assert_eq!(t.author, "octocat");
         assert_eq!(t.number, 358);
         assert_eq!(t.kind, TriggerKind::Issue);
@@ -218,7 +217,7 @@ mod tests {
             "head": {"ref": "feat/x"}
         }"#;
         let pr: PullRequest = serde_json::from_str(json).expect("pr parses");
-        let t = AutopilotTrigger::from_pull_request("alondero", "buildmesh", &pr);
+        let t = CircuitTrigger::from_pull_request("alondero", "buildmesh", &pr);
         assert_eq!(t.author, "contributor-jane");
         assert_eq!(t.kind, TriggerKind::PullRequest);
     }
@@ -235,7 +234,7 @@ mod tests {
             "head": {"ref": "patch-1"}
         }"#;
         let pr: PullRequest = serde_json::from_str(json).expect("pr parses");
-        let t = AutopilotTrigger::from_pull_request("alondero", "buildmesh", &pr);
+        let t = CircuitTrigger::from_pull_request("alondero", "buildmesh", &pr);
         // drive-by-dan is not a collaborator → GitHub reports `none`.
         let decision = evaluate(&t, CollaboratorPermission::None);
         assert_eq!(decision, GateDecision::RequireApproval);

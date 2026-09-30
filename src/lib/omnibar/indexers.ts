@@ -189,7 +189,7 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
     keywords: ['project', 'properties', 'build', 'run'],
   },
   'probe-circuits': {
-    // See probe-autopilot above — the `Automation:` prefix was a one-off
+    // See probe-circuits above — the `Automation:` prefix was a one-off
     // namespace that did not appear in the inspector header, so the palette
     // entry was the only surface using two words for the same destination.
     id: 'probe-circuits',

@@ -14,7 +14,7 @@ import type { useAgentNodeStore as UseAgentNodeStore, AgentNode } from '../../sr
 // the path is missing (`src-tauri/src/commands/file_watcher.rs`), and once a
 // real event finally arrives the cache's `minRefetchIntervalMs` window (60s
 // for the PR, 2s for the summary) suppresses it. The store now invalidates
-// both caches on `node-spawn-completed` / `autopilot-pr-created`, which is
+// both caches on `node-spawn-completed` / `circuit-pr-ready`, which is
 // exactly the moment the cached `null` becomes structurally wrong.
 //
 // Every assertion below deliberately runs WITHOUT advancing the clock, so a
@@ -74,6 +74,22 @@ async function attachListeners(node: AgentNode = makeNode()) {
 }
 
 describe('node cache invalidation (issue #1004)', () => {
+
+  it('refetches the open PR when a Circuit OpenPr action completes', async () => {
+    mockInvoke.mockResolvedValue(null);
+    const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_open_pr_for_node', { nodeId: 7 }));
+    expect(result.current.pr).toBeNull();
+
+    await attachListeners();
+
+    replyWith(PR);
+    await act(async () => {
+      await emit('circuit-pr-ready', { run_id: 1, node_id: 7 });
+    });
+
+    await waitFor(() => expect(result.current.pr).toEqual(PR));
+  });
 
   it('refetches the git summary on node-spawn-completed, inside the 2s freshness window', async () => {
     mockInvoke.mockResolvedValue({ total: 0, added: 0, modified: 0, deleted: 0 });

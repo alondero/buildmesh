@@ -107,7 +107,6 @@ describe('useAgentNodeStore', () => {
       nodeIds: [],
       activeNodeId: null,
       circuitOwnerships: {},
-      circuitOwnerships: {},
       loading: false,
       error: null,
       closingNodeIds: new Set(),
@@ -560,7 +559,7 @@ describe('useAgentNodeStore', () => {
       const circuitStates = ['running', 'paused', 'running'] as const;
       const phases = [];
       render(createElement(StoreBackedCircuitIndicator, { nodeId: 11 }));
-      const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active'];
+      const visibleLabels = ['Circuit active', 'Circuit waiting', 'Circuit active'];
       for (const [index, state] of circuitStates.entries()) {
         ledgerState = state;
         await mockEmit('circuit-run-updated', { run_id: 1, state });
@@ -582,12 +581,12 @@ describe('useAgentNodeStore', () => {
         return Promise.resolve(undefined);
       });
       await mockEmit('circuit-run-updated', { run_id: 1, state: 'completed' });
-      await waitFor(() => expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy());
+      await waitFor(() => expect(screen.getByRole('img', { name: 'Circuit done' })).toBeTruthy());
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
       expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
     });
 
-    // Issue #1751 review: `autopilot-node-closed` is an eviction from the
+    // Issue #1751 review: `node-deleted` is an eviction from the
     // active nodes, not a patch. The backend archived the row, so the next
     // `list_agent_nodes` snapshot excludes it (`WHERE status != 'archived'`)
     // and the store must drop it from nodeIds/nodesById. Presence in the
@@ -625,7 +624,7 @@ describe('useAgentNodeStore', () => {
       // freshly-owned node — an immediate signal, not a silent gap.
       expect(getCircuitNodePresentation(
         node, useAgentNodeStore.getState().circuitOwnerships[11],
-      )).toMatchObject({ phase: 'waiting', label: 'Autopilot waiting' });
+      )).toMatchObject({ phase: 'waiting', label: 'Circuit waiting' });
       // Satellite read only — the node list is not refetched.
       expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
     });
@@ -649,7 +648,7 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().circuitOwnerships[5]).toBe(unchanged);
     });
 
-    // Spec `autopilot-node-indicators.md` step 7: "Give the async refresh an
+    // Spec `circuit-node-indicators.md` step 7: "Give the async refresh an
     // owner so an older response cannot overwrite newer event state" — and the
     // acceptance bullet "Resolve older/newer refreshes in both orders". Each
     // test below holds one reader open, lands the newer write, then releases it:
@@ -875,7 +874,6 @@ describe('useAgentNodeStore', () => {
         if (cmd === 'create_agent_node') return Promise.resolve(newNode);
         if (cmd === 'spawn_agent') return Promise.resolve(undefined);
         if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...newNode, status: 'running' }]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -918,7 +916,6 @@ describe('useAgentNodeStore', () => {
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'spawn_agent') return Promise.resolve(undefined);
         if (cmd === 'list_agent_nodes') return Promise.resolve([existing]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -949,7 +946,6 @@ describe('useAgentNodeStore', () => {
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'spawn_agent') return gate;
         if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...existing, status: 'running' }]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -1764,14 +1760,14 @@ describe('useAgentNodeStore', () => {
     // would call `send_to_agent` against an archived node, the backend
     // would reject, `state.error` would be set, and App.tsx's generic
     // "System" toast pipeline would surface a spurious error minutes
-    // after the user moved on. The `autopilot-node-closed` listener
+    // after the user moved on. The `node-deleted` listener
     // (`stores/agentNodeListeners.ts`) routes through `fetchAgentNodes`,
     // so every archive transition sweeps schedules for free.
     it('cancels schedules whose node comes back archived from fetchAgentNodes', async () => {
       seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
       // The next list_agent_nodes reflects node 7 as archived — the
-      // shape the autopilot-node-closed handler triggers via
+      // shape the node-deleted handler triggers via
       // fetchAgentNodes.
       mockInvoke.mockResolvedValueOnce([makeNode({ id: 7, status: 'archived' })]);
 
@@ -1811,7 +1807,7 @@ describe('useAgentNodeStore', () => {
       seedAgentNodes([makeNode({ id: 8, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(8, 1000, 'ping', '1m');
       // Node 8 transitions to archived before the timer fires (e.g.
-      // an autopilot close landed between the schedule and the tick).
+      // a Circuit cleanup landed between the schedule and the tick).
       seedAgentNodes([makeNode({ id: 8, status: 'archived' })]);
 
       await vi.advanceTimersByTimeAsync(1000);

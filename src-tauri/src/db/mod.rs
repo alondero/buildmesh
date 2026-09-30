@@ -678,14 +678,14 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        -- Autopilot runs (issue #482, PRD #480). One row per auto-spawned
+        -- Retired Autopilot runs (issue #482, PRD #480). One row per auto-spawned
         -- Agent Node, keyed by the node so close/delete cascades. Kept as a
         -- satellite table (not an agent_nodes column) so the positional
         -- AGENT_NODE_COLUMNS projection and its consumers stay untouched.
         -- `state` is the wrap-up pipeline machine: implementing (agent working
         -- on the issue) -> finishing (wrap-up prompt injected, attempt N) ->
         -- completed | failed. `attempts` counts wrap-up/self-correction
-        -- injections (capped by autopilot::MAX_FINISH_ATTEMPTS).
+        -- injections (capped by the former finish-attempt limit).
         CREATE TABLE IF NOT EXISTS autopilot_runs (
             node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
             mesh_id INTEGER NOT NULL,

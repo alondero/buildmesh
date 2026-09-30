@@ -65,9 +65,6 @@ const MESH: Mesh = {
   created_at: '2026-01-01',
   scratchpad: '',
   sandbox: false,
-  // Issue #979 — autopilot trigger label drives the new toggle badge.
-  // Real meshes default to `buildmesh:run`; the test uses the same value
-  // so the badge renders and the toggle IPC is verifiable end-to-end.
 
 };
 
@@ -134,12 +131,6 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDER
         return Promise.resolve('anthropic');
       case 'create_issue_node':
         return Promise.resolve(DRAFT);
-      // Issue #979 — trigger-label toggle. Default to success; tests
-      // that want a failing path override via mockImplementation /
-      // mockRejectedValueOnce. The `args` are logged to the IPC record
-      // so tests can assert the action ('add'/'remove') + label passed.
-      case 'set_issue_label':
-        return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
     }

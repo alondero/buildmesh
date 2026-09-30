@@ -48,17 +48,17 @@ describe('getCircuitNodePresentation', () => {
 
   it('keeps Circuit waiting details tied to the lifecycle state', () => {
     expect(getCircuitNodePresentation(node('ready'), ownership('running'))?.detail)
-      .toBe('Autopilot is between turns after this Agent Node yielded cleanly.');
+      .toBe('Circuit is between turns after this Agent Node yielded cleanly.');
     expect(getCircuitNodePresentation(node('idle'), ownership('running'))?.detail)
-      .toBe('Autopilot is waiting to start the next turn.');
+      .toBe('Circuit is waiting to start the next turn.');
     expect(getCircuitNodePresentation(node('awaiting_input'), ownership('running'))?.detail)
-      .toBe('Autopilot is waiting for input from you.');
+      .toBe('Circuit is waiting for input from you.');
     expect(getCircuitNodePresentation(node('pending'), ownership('running'))?.detail)
-      .toBe('Autopilot is waiting for this Agent Node to start.');
+      .toBe('Circuit is waiting for this Agent Node to start.');
     expect(getCircuitNodePresentation({ ...node('suspended'), cli_session_id: 'session-1' }, ownership('running'))?.detail)
-      .toBe('Autopilot is waiting for this Agent Node to recover its existing session.');
+      .toBe('Circuit is waiting for this Agent Node to recover its existing session.');
     expect(getCircuitNodePresentation(node('suspended'), ownership('running'))?.detail)
-      .toBe('Autopilot is waiting for this Agent Node to recover before starting a new session.');
+      .toBe('Circuit is waiting for this Agent Node to recover before starting a new session.');
   });
 
   it.each(['completed'] as const)('maps Circuit %s to done', (state) => {
@@ -67,7 +67,7 @@ describe('getCircuitNodePresentation', () => {
 
   it('maps a failed legacy run to waiting with an attention tone', () => {
     const result = getCircuitNodePresentation(node(), ownership('failed'));
-    expect(result).toMatchObject({ phase: 'waiting', tone: 'error', label: 'Autopilot needs attention' });
+    expect(result).toMatchObject({ phase: 'waiting', tone: 'error', label: 'Circuit needs attention' });
   });
 
   it('keeps an error lifecycle in waiting with an attention tone', () => {
@@ -98,9 +98,9 @@ describe('getCircuitNodePresentation', () => {
 
   it('distinguishes an explicit Circuit pause and queued Circuit work', () => {
     expect(getCircuitNodePresentation(node('running'), ownership('paused'))?.detail)
-      .toBe('Autopilot is paused by the Circuit.');
+      .toBe('Circuit is paused.');
     expect(getCircuitNodePresentation(node('running'), ownership('pending'))?.detail)
-      .toBe('Autopilot is queued for the next Circuit step.');
+      .toBe('Circuit is queued for the next step.');
   });
 
   it('maps a running Circuit run driving a running node to active', () => {
@@ -111,7 +111,7 @@ describe('getCircuitNodePresentation', () => {
     expect(getCircuitNodePresentation(node('completed'), ownership('running'))).toMatchObject({
       phase: 'waiting',
       tone: 'warning',
-      detail: 'Autopilot ownership is reconciling; the run is still live while this Agent Node reports completed.',
+      detail: 'Circuit ownership is reconciling; the run is still live while this Agent Node reports completed.',
     });
   });
 
@@ -135,7 +135,7 @@ describe('getCircuitNodePresentation', () => {
     expect(getCircuitNodePresentation(node(), ownership('mystery'))).toMatchObject({
       phase: 'waiting',
       tone: 'error',
-      label: 'Autopilot needs attention',
+      label: 'Circuit needs attention',
     });
   });
 
@@ -174,7 +174,7 @@ describe('resolveCircuitOutcome', () => {
     expect(result?.detail).toContain('approve the deploy');
   });
 
-  it('still flags an unowned awaiting node, so the chip is not Autopilot-only', () => {
+  it('still flags an unowned awaiting node, so the chip is not Circuit-only', () => {
     const result = resolveCircuitOutcome([member(1, 'awaiting_input')], sources());
     expect(result?.detail).toContain('This agent is waiting');
   });
@@ -197,13 +197,13 @@ describe('resolveCircuitOutcome', () => {
       sources({ 2: 'failed' }),
       1,
     );
-    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Autopilot failed', nodeId: 2 });
+    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Circuit failed', nodeId: 2 });
     expect(result?.nodeIds).toEqual([2]);
   });
 
   it('leaves completed automation to the existing green signals (no chip)', () => {
-    // A finished run needs no action and is already told by the lifecycle dot,
-    // the Pilot-light check, the PR pill, and the autopilot-pr-created toast.
+    // A finished run needs no action and is already shown by the lifecycle
+    // dot, the Pilot-light check, and the PR pill.
     expect(resolveCircuitOutcome([member(1, 'completed')], sources({ 1: 'completed' }))).toBeNull();
     expect(resolveCircuitOutcome([member(1, 'completed')], sources({}, { 1: ownership('completed') }))).toBeNull();
   });
@@ -270,7 +270,7 @@ describe('resolveCircuitOutcome', () => {
     expect(resolveCircuitOutcome(members, srcs, 2)?.detail).toContain('approve the second command');
   });
 
-  it('suppresses the chip for a solo card whose focused member failed under Autopilot', () => {
+  it('suppresses the chip for a solo card whose focused member failed under Circuit', () => {
     // The lone Pilot light is already visibly red for this member and a chip
     // click could only cycle back to it, so the chip is pure duplication.
     expect(resolveCircuitOutcome([member(1, 'error')], sources({ 1: 'failed' }), 1)).toBeNull();
@@ -291,7 +291,7 @@ describe('resolveCircuitOutcome', () => {
     // Focus is what puts the light on screen; if the failed member is not the
     // one being shown, the chip is the only route back to it.
     const result = resolveCircuitOutcome([member(1, 'error')], sources({ 1: 'failed' }), 99);
-    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed', nodeId: 1 });
+    expect(result).toMatchObject({ kind: 'failed', label: 'Circuit failed', nodeId: 1 });
   });
 
   it('keeps the failure chip on a multi-member card even when the focused member failed', () => {
@@ -300,21 +300,21 @@ describe('resolveCircuitOutcome', () => {
       sources({ 1: 'failed' }),
       1,
     );
-    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed', nodeId: 1 });
+    expect(result).toMatchObject({ kind: 'failed', label: 'Circuit failed', nodeId: 1 });
   });
 
-  it('attributes a failed Circuit run to Autopilot', () => {
+  it('attributes a failed Circuit run to Circuit', () => {
     const result = resolveCircuitOutcome([member(1, 'completed')], sources({}, { 1: ownership('failed') }));
-    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Autopilot failed', nodeId: 1 });
+    expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Circuit failed', nodeId: 1 });
   });
 
-  it('attributes a Circuit-managed failed run to Autopilot', () => {
+  it('attributes a Circuit-managed failed run to Circuit', () => {
     const result = resolveCircuitOutcome([member(1, 'error')], sources({ 1: 'failed' }));
-    expect(result).toMatchObject({ kind: 'failed', label: 'Autopilot failed' });
+    expect(result).toMatchObject({ kind: 'failed', label: 'Circuit failed' });
   });
 
   it.each(['cancelled', 'completed'] as const)(
-    'does not attribute a %s Circuit to Autopilot (retained history is not responsibility)',
+    'does not attribute a %s Circuit to Circuit (retained history is not responsibility)',
     (state) => {
       const result = resolveCircuitOutcome([member(1, 'error')], sources({}, { 1: ownership(state) }));
       expect(result).toMatchObject({ kind: 'failed', tone: 'error', label: 'Agent failed' });
@@ -322,13 +322,13 @@ describe('resolveCircuitOutcome', () => {
     },
   );
 
-  it('attributes a paused Circuit gate waiting on a human to Autopilot', () => {
+  it('attributes a paused Circuit gate waiting on a human to Circuit', () => {
     const result = resolveCircuitOutcome([member(1, 'awaiting_input')], sources({}, { 1: ownership('paused') }));
     expect(result).toMatchObject({ kind: 'needs_input', label: 'Needs input' });
-    expect(result?.detail).toContain('Autopilot is waiting for your input');
+    expect(result?.detail).toContain('Circuit is waiting for your input');
   });
 
-  it('does not attribute awaiting input on a cancelled Circuit to Autopilot', () => {
+  it('does not attribute awaiting input on a cancelled Circuit to Circuit', () => {
     const result = resolveCircuitOutcome([member(1, 'awaiting_input')], sources({}, { 1: ownership('cancelled') }));
     expect(result?.detail).toContain('This agent is waiting');
   });

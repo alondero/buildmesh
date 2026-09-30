@@ -564,16 +564,14 @@ function App() {
     return () => { void unlisten.then(fn => fn()); };
   }, []);
 
-  // Autopilot lifecycle notifications (PRD #480 story 14). Same toast stack
-  // as Sync/Worktree; the `Autopilot` label groups all three outcomes. The
-  // node list refetch keeps status badges (Completed / Error) in step with
-  // the backend's direct DB writes, which emit no dedicated status event.
+  // Circuit needs-input notifications share the toast stack with Sync and
+  // Worktree. The inline action remains attached to the owning agent node.
   useEffect(() => {
     const unlistenBlocked = listen<CircuitAgentBlockedPayload>(
       'circuit-agent-blocked',
       (event) => {
         addToast(
-          'Autopilot',
+          'Circuit',
           `Agent on node ${event.payload.node_id} needs your input (issue #${event.payload.issue}).`,
           'warning',
         );

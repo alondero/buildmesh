@@ -149,7 +149,7 @@ pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64,
                 return;
             }
             // Node closed / pipeline aborted while we waited.
-            if !evaluator::is_piloted(node_id) {
+            if !evaluator::is_circuit_piloted(node_id) {
                 return;
             }
             // Stage-2 spawn may still be provisioning the worktree/PTY.
