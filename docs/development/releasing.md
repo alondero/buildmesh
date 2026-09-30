@@ -133,6 +133,26 @@ run cannot say which test did it; one job per group means a loss costs one
 group. The shards are **not** required checks — `Rust tests + TS bindings` is
 the authoritative, single-writer pass and the gate.
 
+Each Rust test step carries its own in-shell `timeout` (30 minutes for a shard,
+45 for the non-shard pass) under a longer job cap, and writes its log to a file
+that an `if: always()` upload step preserves. The log is written by **redirection,
+not a `| tee` pipeline** (#1961): `timeout` signals the child's whole process
+group, but a descendant that leaves that group still holds the pipe open, so
+`tee` never sees EOF and the step outlives the guard that was supposed to end
+it. Run 36531715263 lost the `services` shard that way — about 45 minutes with
+no step conclusion, and no log, because a cancelled job flushes neither. With a
+redirect, nothing sits between the test and the step shell. A hung test now
+costs one failed shard with a retrievable log, instead of an open-ended stall
+that holds the required `Rust tests + TS bindings` gate open.
+
+GitHub runs a `run:` block under `bash -e`, so the guard has to be captured
+erexit-safely: a bare `timeout` that fails ends the step on the spot, and the
+status capture, the log print, and the 124 annotation after it never run. Both
+steps initialise `status=0` and consume the guarded command's own failure with
+`|| status=$?`, which keeps the failure path reachable while the step still
+exits with the guarded command's code. The same rule applies to any new
+timeout-guarded step: a guard whose failure path cannot execute is not a guard.
+
 Because libtest filters are substring matches, they cannot express "this
 test's first path segment is X", so the split is a list of exact filters and
 `--skip`s. A new top-level module would therefore go unrun silently unless it
