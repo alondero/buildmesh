@@ -268,6 +268,23 @@ ADR-0032 added a working-set tab strip *inside* the open inspector
 alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
 
+### Configuration vs maintenance destinations (issue #1460, ADR-0038)
+Two Mesh-lens destinations are split by job and must never merge again:
+`properties` (**Project Settings**) owns configuration, `worktrees`
+(**Repository**) owns maintenance. Project Settings is the only home for
+identity/directory, agent runtime defaults, build and run, and worktree strategy
+(use-worktree, base ref, mode, warm pool, worktree directory) — the last group
+moved there from Repository. Repository keeps health/recovery, branch and
+worktree cleanup, and remote-tracking prune, and imports no `updateMesh*`
+wrapper. Both render labelled `ProbeSection` groups, both state that they act
+on the project root rather than a focused Agent Node's worktree, and Delete Mesh
+lives in a `tone="danger"` section that states impact and recovery before the
+shared `ConfirmDialog` repeats the scope. The `probe-<tab>` **ids are
+deliberately unchanged** (ADR-0030 keeps them stable for callers and deep links)
+even though the source files are named after the destinations; the palette
+reaches both through the `Project` tool group and the title bar through one
+`More` disclosure. Neither destination takes permanent navigation space.
+
 The Issues and Pull Requests probes are both Mesh-owned GitHub feeds. Their
 backend is split by resource under `services::github`: `issues` owns issue
 listing, Blocked-by parsing, and trigger-label flags; `prs` owns pull-request
@@ -620,7 +637,7 @@ Event-driven agent provisioning: a mesh with `autopilot_enabled` is polled every
 - **Wrap-up (ADR-0011):** on COMPLETED, the user-customizable `<app-data>/autopilot/finish.md` template (seeded on first use; `{{PR_STEP}}`/`{{ISSUE_REF}}` placeholders) is injected into the PTY (bracketed-paste for multi-line). The *agent* runs tests/commits/pushes/`gh pr create`; Buildmesh then verifies deterministically (worktree clean + branch pushed + open PR unless policy `none`) and either completes the node (`SessionStatus::Completed`), injects a correction prompt (max 3 attempts total), or fails it (`Error` + `autopilot-finish-failed` event).
 - **Prompt injection is two-phase — never glue Enter onto a paste (#874):** ink-based TUIs (Claude Code) batch stdin reads, so a `\r` in the same write as a bracketed paste is absorbed into the paste and the prompt sits staged, unsubmitted (node 2328, 2026-07-17). `pipeline::write_prompt_to_pty` stages the paste alone, then a background watcher waits for the echo + output quiescence, sends `\r` as its own write, and verifies PTY output follows (`press_enter_until_output`, bounded retries; final failure marks the node for attention instead of stalling silently). Codex multiline pastes, including proxied Codex providers, require their completed input-box paste marker or complete short visible prompt text before Enter: Windows console input can still be processing the paste while unrelated startup output makes the generic echo clock appear ready. The Codex wait uses an output cursor captured before the PTY write, accepts CRLF-normalized marker counts, and ends early if the process dies. Enter acknowledgment uses a byte cursor captured before its PTY write, so immediate output is not lost to millisecond rounding. The launch watcher submits prefills through the same helper.
 - **Turn delivery is best-effort; the poller backstops it (#874, #993):** the attention callback is an HTTP hook that can silently fail, so lost turns must be recoverable. Three layers: (1) the in-flight guard *queues* turns arriving mid-evaluation and re-runs (`try_begin_evaluation`/`end_evaluation_and_check_rerun`) — never drops them; (2) the green-only re-drive completes or advances observably-done `finishing` rows stale ≥5 min; (3) `pipeline::watchdog_pass` synthesises a full turn evaluation for any piloted node with output no evaluation reacted to (`evaluator::note_evaluation` vs `LAST_OUTPUT`) once it has been quiet ≥3 min — classify in `implementing`, verify/correct in `finishing`, or complete a yielded `suffix_pending` turn. A suffix-pending row stays active and holds capacity until that final Node Turn.
-- Frontend events: `autopilot-blocked` / `autopilot-pr-created` / `autopilot-finish-failed` → toast stack in `App.tsx`; config UI lives in `MeshPropertiesTab` (one atomic `update_mesh_autopilot` write).
+- Frontend events: `autopilot-blocked` / `autopilot-pr-created` / `autopilot-finish-failed` → toast stack in `App.tsx`; config UI lives in the Autopilot destination (`AutopilotProbeTab`, one atomic `update_mesh_autopilot` write — #1013 removed it from project settings).
 
 ## Autopilot Circuits (spec #1205, walking skeleton #1206)
 

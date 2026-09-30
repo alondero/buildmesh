@@ -137,7 +137,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // window lands `setCertPathCopied(false)` on an unmounted component.
   // `useRef` keeps the handle stable across renders without triggering
   // a re-render when we mutate `.current`. Mirrors the
-  // `successTimerRef` pattern in `WorktreeManagerTab.tsx:367-374`.
+  // `successTimerRef` pattern in `RepositoryTab.tsx:367-374`.
   const copyFeedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 'connect' is the default — modal opens for the common case. Tabs
   // let each QR render at full modal width so a phone can scan from
@@ -304,7 +304,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   // Issue #1251: clear the copy-feedback timer on unmount so a late
   // `setCertPathCopied(false)` cannot land on an unmounted tree (e.g.
   // user copies the cert path, then closes the modal within 2s).
-  // Mirror the `WorktreeManagerTab.tsx:367-374` pattern: a dedicated
+  // Mirror the `RepositoryTab.tsx:367-374` pattern: a dedicated
   // effect with an empty dep list and the cleanup in the return.
   useEffect(() => {
     return () => {

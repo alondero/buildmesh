@@ -34,7 +34,14 @@ export function toolTileId(tab: ProbeTab): string {
   return `command-omnibar-tool-${tab}`;
 }
 
-const CODE_TABS = ['files', 'review', 'worktrees', 'properties'] as const;
+const CODE_TABS = ['files', 'review'] as const;
+// Issue #1460 — Project Settings and Repository get their own group. The two
+// were siblings under "Code", which was the palette's version of the problem
+// the issue describes: configuration and maintenance looked like code
+// browsing. Splitting the group makes the distinction legible on the start
+// screen without adding any permanent navigation (the grid only renders
+// inside the open palette).
+const PROJECT_TABS = ['properties', 'worktrees'] as const;
 const GITHUB_TABS = ['issues', 'pulls'] as const;
 const AUTOMATE_TABS = ['autopilot', 'circuits'] as const;
 const REMEMBER_TABS = ['sessions', 'scratchpad'] as const;
@@ -42,6 +49,7 @@ const APP_TABS = ['usage'] as const;
 
 type GroupedTab =
   | (typeof CODE_TABS)[number]
+  | (typeof PROJECT_TABS)[number]
   | (typeof GITHUB_TABS)[number]
   | (typeof AUTOMATE_TABS)[number]
   | (typeof REMEMBER_TABS)[number]
@@ -74,6 +82,11 @@ export const TOOL_DISCOVERY_GROUPS: readonly ToolDiscoveryGroup[] & _AssertDisco
     id: 'code',
     title: 'Code',
     tiles: CODE_TABS.map(tile),
+  },
+  {
+    id: 'project',
+    title: 'Project',
+    tiles: PROJECT_TABS.map(tile),
   },
   {
     id: 'github',

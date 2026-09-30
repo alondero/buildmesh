@@ -21,7 +21,7 @@ use tauri::command;
 /// Moved from `commands::pr` (issue #433): none of the call sites are
 /// PR-related — the function is a general auth check used by
 /// `commands::git::get_mesh_git_static`, the mobile `GET /api/gh/auth` HTTP
-/// route, and `MeshPropertiesTab.tsx`. The function name is the public
+/// route, and `ProjectSettingsTab.tsx`. The function name is the public
 /// Tauri-IPC contract; module path is an internal detail.
 #[command]
 pub async fn check_gh_auth() -> bool {

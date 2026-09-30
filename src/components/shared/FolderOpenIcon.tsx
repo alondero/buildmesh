@@ -1,7 +1,7 @@
 /**
  * Lucide folder-open (24×24, stroke-based). Lifted from `PathHeader`
  * because three call sites now render the same glyph: `PathHeader`
- * (Probe Panel), `WorktreeManagerTab` (per-worktree rows), and
+ * (Probe Panel), `RepositoryTab` (per-worktree rows), and
  * `GridNodeHeader` (agent node title bar).
  *
  * Single-purpose presentational primitive — no click handling, no
