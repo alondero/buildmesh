@@ -21,7 +21,7 @@ export function CircuitRunCapacity({ meshId, capacity }: { meshId: number; capac
     setError(null);
     try {
       await updateMeshCircuitRunCapacity(meshId, value);
-      await useMeshStore.getState().fetchMeshes();
+      await useMeshStore.getState().refreshMeshes();
     } catch (cause) {
       if (mounted.current) setError(formatError(cause));
     } finally {
