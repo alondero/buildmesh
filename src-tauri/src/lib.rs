@@ -481,6 +481,7 @@ pub fn run() {
             commands::preferences::verify_provider_pairing,
             commands::preferences::get_pairing_defaults,
             commands::preferences::compatible_providers_for_harness,
+            commands::preferences::compatible_providers_by_harness,
             commands::preferences::attach_proxied_provider,
             commands::preferences::update_provider_pairing,
             commands::preferences::remove_provider_pairing,

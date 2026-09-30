@@ -183,6 +183,22 @@ returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default(
 which previously overwrote a partially-unknown prefs file with defaults — a
 silent data-loss path).
 
+**The Settings Harnesses pane does not depend on the Spawn Menu.** The attach
+picker ("Add proxied provider") resolves its whole `harness_id → compatible
+accounts` map in one backend call,
+`preferences::compatible_providers_by_harness` — keyed by the union of the
+effective harness profiles and the harness ids named by stored pairings, so it
+covers rows that reach the pane as a pairing without a profile of their own.
+`loadPairings` therefore takes no providers list, and the modal's mount fan-out
+loads pairings alongside every other resource (issue #1935). Before that,
+pairings took its harness ids from `list_providers` and issued one
+`compatible_providers_for_harness` per harness, which both cost N round trips
+and made the pane open in `providers + pairings` — the Codex install probe
+behind `list_providers` could take seconds. Don't reintroduce the dependency;
+`useSettingsResources`' `retryResource('pairings')` boundary check ("Awaiting
+providers list") is a separate affordance guard on the *retry* path, because the
+pane's harness rows come from `providers`, and it is not a data dependency.
+
 ### Terminal Persistence (CRITICAL)
 Startup identity recovery (#1555) lives in `services/session_recovery.rs`. List all Suspended nodes before recovery, including NULL/empty CLI session IDs; never restore the old SQL filter or one-time Codex migration gate. Historic recovery requires an unambiguous workspace/time match and a conditional write against the original fresh-start timestamp. Fresh intent atomically clears identity and records that timestamp; Resume preserves it. Missing-ID legacy nodes may be approval-gated and must not be auto-started by transcript matching. See [node-resume-recovery.md](learning/node-resume-recovery.md) for provider evidence, limits, and test coverage.
 

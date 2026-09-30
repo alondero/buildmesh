@@ -953,13 +953,19 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // on the read outcome. Other resources are untouched — the user
   // clicking Retry should rehydrate only what they asked for.
   //
-  // Issue #1534 (review round 4) — pairings has a hard dependency
-  // on providers: it queries `compatible_providers_for_harness` for
-  // each non-terminal harness in the providers list. If providers
-  // isn't loaded, retrying pairings would either fabricate a clean
-  // state (the bug round 2 caught) or stay permanently failed (the
-  // trap round 4 caught). The boundary check belongs here, not in
-  // the core loader.
+  // Issue #1534 (review round 4) — the pairings retry has a boundary
+  // check on providers: if providers isn't loaded, retrying pairings
+  // would either fabricate a clean state (the bug round 2 caught) or
+  // stay permanently failed (the trap round 4 caught). The boundary
+  // check belongs in the retry path, not in the core loader.
+  //
+  // Issue #1935 — that was a *data* dependency too (the loader took its
+  // harness ids from the provider menu) and it is gone: the mount
+  // fan-out now loads pairings alongside every other resource. The
+  // guard survives as an affordance check — the Harnesses pane renders
+  // its harness rows from `providers`, so reloading pairings behind an
+  // empty list would populate a pane that has no rows. The two are
+  // separate concerns and were changed separately.
   //
   // Issue #1534 (review round 5) — the modal's local `retryResource`
   // was deleted. The hook's `retryResource` (returned from
@@ -991,7 +997,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   }, [loadProbeDefaults]);
 
   useEffect(() => {
-    // Fan out the six independent initial loads concurrently.
+    // Fan out the seven independent initial loads concurrently.
     // `Promise.allSettled` here is *defensive*: each `loadX` already
     // swallows its own errors via `withResourceLoad` and updates
     // `resources[key]` independently, so a rejection in one loader
@@ -999,38 +1005,36 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     // intent explicit and protects against a loader that escapes
     // its catch in the future.
     //
-    // Issue #1534 (review round 5) — pairings is loaded AFTER
-    // providers resolves (rather than auto-chained inside
-    // `loadProviders`) so that account-only handlers don't
-    // re-probe WSL harness verifications. The chain here is
-    // explicit so it's easy to see where pairings enters the
-    // critical path: providers → pairings, not accounts →
-    // providers → pairings.
+    // Issue #1935 — pairings used to be excluded from this fan-out and
+    // started only after `providers` settled, because it took its
+    // harness-id list from the provider menu and issued one
+    // `compatible_providers_for_harness` call per harness. It now takes
+    // the whole attach-picker map from the backend in a single call, so
+    // it is just another load here: the modal opens in
+    // max(providers, pairings) rather than providers + pairings, and a
+    // slow Codex install probe no longer delays the Harnesses pane.
+    //
+    // The dependency that *did* matter is preserved where it belongs —
+    // `retryResource`'s pairings boundary check. Pairings is not
+    // auto-chained into `loadProviders` either (issue #1534 round 5):
+    // account-only refreshes must not re-probe WSL harness verifications.
     void Promise.allSettled([
       loadPreferences(),
       loadProviders(),
       loadAccounts(),
+      loadPairings(),
       loadCoordinator(),
       loadDevices(),
       loadNetwork(),
-    ]).then(async (results) => {
-      // Once providers settles on initial mount, trigger pairings.
-      // We check `results` for the providers outcome so a failed
-      // providers load still leaves pairings at `idle` — pairings
-      // stays off the critical path until the user retries providers.
-      const providersResult = results[1];
-      if (providersResult.status === 'fulfilled' && providersResult.value) {
-        await loadPairings(providersResult.value);
-      }
-    });
+    ]);
   }, [
     loadPreferences,
     loadProviders,
     loadAccounts,
+    loadPairings,
     loadCoordinator,
     loadDevices,
     loadNetwork,
-    loadPairings,
   ]);
 
   // Revoke a paired device: optimistically drop it from the list, then call the
@@ -1068,7 +1072,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   };
 
   // Issue #1534 — `loadPairingData` is superseded by the per-resource
-  // `loadPairings(providerList)` above. The legacy function silently
+  // `loadPairings()` above. The legacy function silently
   // swallowed its errors as `console.error` and left the pairing state
   // empty, which the Harnesses pane then rendered as "no compatible
   // providers" — indistinguishable from "no providers actually fit".
@@ -1112,14 +1116,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       await api.attachProxiedProvider(harnessId, providerId, apiKey, baseUrl, modelTiers);
       // Issue #1534 (review round 5) — attach changes the
       // providers list AND the pairings (newly attached provider
-      // is now in the effective pairings set), so both refreshes
-      // are needed. `loadProviders` alone is no longer sufficient.
-      // The chain order matters: loadProviders first (its result
-      // drives pairings), then loadPairings(providers).
-      const [providerList] = await Promise.all([loadProviders(), loadAccounts()]);
-      if (providerList) {
-        await loadPairings(providerList);
-      }
+      // is now in the effective pairings set), so all three refreshes
+      // are needed. Issue #1935 — they no longer chain: pairings
+      // reads its own harness ids from the backend, so waiting for
+      // `loadProviders` only added the provider-menu probe to the
+      // latency of a user-initiated refresh.
+      await Promise.all([loadProviders(), loadAccounts(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1136,11 +1138,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     try {
       await api.updateProviderPairing(harnessId, providerId, baseUrl, modelTiers);
       // Update changes pairings too (model tiers / base URL live
-      // on the pairing, not on the provider).
-      const providerList = await loadProviders();
-      if (providerList) {
-        await loadPairings(providerList);
-      }
+      // on the pairing, not on the provider). Concurrent since
+      // issue #1935 — neither refresh needs the other's result.
+      await Promise.all([loadProviders(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1152,11 +1152,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     try {
       await api.removeProviderPairing(harnessId, providerId);
       // Detach removes the pairing — both providers and pairings
-      // need refresh. Same chain as attach.
-      const providerList = await loadProviders();
-      if (providerList) {
-        await loadPairings(providerList);
-      }
+      // need refresh. Concurrent since issue #1935 (same reasoning
+      // as attach).
+      await Promise.all([loadProviders(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;

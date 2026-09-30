@@ -52,9 +52,10 @@ export const INITIAL_RESOURCES: Record<ResourceKey, ResourceState> = {
   preferences: { status: 'loading', error: null },
   providers: { status: 'loading', error: null },
   accounts: { status: 'loading', error: null },
-  // Pairings derive their `compatibleByHarness` map from `providers`,
-  // so they only start loading once providers loads successfully.
-  pairings: { status: 'idle', error: null },
+  // Issue #1935 — pairings no longer waits on providers. Its attach-picker map
+  // comes from the backend in one call, so the resource starts with the rest of
+  // the mount fan-out and costs `max(...)` instead of `providers + pairings`.
+  pairings: { status: 'loading', error: null },
   coordinator: { status: 'loading', error: null },
   devices: { status: 'loading', error: null },
   network: { status: 'loading', error: null },
@@ -97,9 +98,7 @@ export interface UseSettingsResources extends SettingsResourceCallbacks {
   loadPreferences: () => Promise<api.AppPreferences | null>;
   loadProviders: () => Promise<api.ProviderInfo[] | null>;
   loadAccounts: () => Promise<{ accountList: api.ProviderAccount[]; catalog: api.ProviderAccount[] } | null>;
-  loadPairings: (
-    providerList: api.ProviderInfo[],
-  ) => Promise<{
+  loadPairings: () => Promise<{
     effective: api.ProviderPairing[];
     verifications: api.PairingVerification[];
     storedKeys: Set<string>;
@@ -112,9 +111,8 @@ export interface UseSettingsResources extends SettingsResourceCallbacks {
     tls_active: boolean;
     exposed_interfaces: api.RealizedBind[];
   } | null>;
-  /** Retry a single failed resource. The pairings path requires
-   *  the current providers list (passed from the modal, which owns
-   *  `providers` state). */
+  /** Retry a single failed resource. The pairings path still requires the
+   *  modal to hand it the current providers list — see `retryResource`. */
   retryResource: (key: ResourceKey, options?: { providers?: api.ProviderInfo[] }) => void;
 }
 
@@ -183,11 +181,32 @@ export function useSettingsResources(
     [setResource],
   );
 
+  /** One preferences read shared by the two loaders that need it (issue
+   *  #1935). `loadPreferences` and `loadPairings` start concurrently on mount
+   *  and both want `provider_pairings`; preferences is a process-cached read,
+   *  so a second round trip would re-read the store the modal already holds.
+   *  The in-flight promise is dropped once it settles, so a post-mutation
+   *  refresh still reads fresh state — this coalesces, it does not cache. */
+  const prefsInFlightRef = useRef<Promise<api.AppPreferences> | null>(null);
+  const readPreferences = useCallback(() => {
+    const inFlight = prefsInFlightRef.current;
+    if (inFlight) return inFlight;
+    const request = api.getAppPreferences();
+    prefsInFlightRef.current = request;
+    const clear = () => {
+      if (prefsInFlightRef.current === request) prefsInFlightRef.current = null;
+    };
+    // Both arms are handlers (not a bare `.then`), so a rejected shared read
+    // never surfaces as an unhandled rejection from this bookkeeping branch.
+    request.then(clear, clear);
+    return request;
+  }, []);
+
   const loadPreferences = useCallback(
-    () => withResourceLoad('preferences', () => api.getAppPreferences(), (prefs) => {
+    () => withResourceLoad('preferences', () => readPreferences(), (prefs) => {
       callbacksRef.current.onPreferencesLoaded?.(prefs);
     }),
-    [withResourceLoad],
+    [withResourceLoad, readPreferences],
   );
 
   const loadProviders = useCallback(
@@ -227,7 +246,7 @@ export function useSettingsResources(
   );
 
   const loadPairings = useCallback(
-    (providerList: api.ProviderInfo[]) => {
+    () => {
       const helper = callbacksRef.current.getHostPairingVerifications;
       if (!helper) {
         // The modal must wire `getHostPairingVerifications` via
@@ -251,39 +270,30 @@ export function useSettingsResources(
       return withResourceLoad(
         'pairings',
         async () => {
-          // Issue #1534 (review round 4) — stored pairings
-          // (which rows are user-detachable vs derived) live on
-          // the preferences object. Coupling pairings to a
-          // strict getAppPreferences call was the failure-
-          // isolation bug; now the lookup is best-effort.
-          let storedKeys = new Set<string>();
-          try {
-            const prefs = await api.getAppPreferences();
-            const stored = prefs.provider_pairings ?? [];
-            storedKeys = new Set(
-              stored.map((p) => `${p.harness_id}:${p.provider_id}`),
-            );
-          } catch {
-            // Non-fatal: pairings can render without the stored
-            // hint.
-          }
-          const [effective, verifications] = await Promise.all([
+          // Issue #1935 — one fan-out, no `providers` in the critical path.
+          // The attach-picker map is one backend call over every harness the
+          // pane can render (`compatible_providers_by_harness`), so this loader
+          // needs nothing from the Spawn Menu and starts with the rest of the
+          // mount fan-out.
+          //
+          // Issue #1534 (review round 4) — stored pairings (which rows are
+          // user-detachable vs derived) live on the preferences object.
+          // Coupling pairings to a strict getAppPreferences call was the
+          // failure-isolation bug; now the lookup is best-effort. The read is
+          // shared with `loadPreferences` rather than issued a second time.
+          const [prefs, effective, verifications, compatible] = await Promise.all([
+            readPreferences().then((p) => p, () => null),
             api.getProviderPairings(),
             helper(),
+            api.compatibleProvidersByHarness(),
           ]);
-          const nativeHarnesses = [...new Map(providerList.filter((p) => p.harness_id !== 'terminal')
-            .map((p) => [p.harness_id, p])).values()];
-          const entries = await Promise.all(
-            nativeHarnesses.map(async (h) => {
-              const list = await api.compatibleProvidersForHarness(h.harness_id);
-              return [h.harness_id, Array.isArray(list) ? list : []] as const;
-            }),
-          );
+          const stored = prefs?.provider_pairings ?? [];
           return {
             effective: Array.isArray(effective) ? effective : [],
             verifications: Array.isArray(verifications) ? verifications : [],
-            storedKeys,
-            compatible: Object.fromEntries(entries),
+            storedKeys: new Set(stored.map((p) => `${p.harness_id}:${p.provider_id}`)),
+            compatible:
+              compatible && typeof compatible === 'object' ? compatible : {},
           };
         },
         (data) => {
@@ -291,7 +301,7 @@ export function useSettingsResources(
         },
       );
     },
-    [withResourceLoad],
+    [withResourceLoad, readPreferences],
   );
 
   const loadCoordinator = useCallback(
@@ -330,12 +340,19 @@ export function useSettingsResources(
     [withResourceLoad],
   );
 
-  /** Retry a single failed resource. The pairings path has a hard
-   *  dependency on providers: it queries
-   *  `compatible_providers_for_harness` for each non-terminal
-   *  harness in the providers list. If providers isn't loaded,
-   *  retrying pairings would fabricate a clean state. The boundary
-   *  check lives here (issue #1534 round 4).
+  /** Retry a single failed resource. The pairings *retry* path still has a
+   *  boundary check on providers (issue #1534 round 4): the Harnesses pane
+   *  renders its harness rows from `providers`, so reloading pairings behind
+   *  an empty providers list would load compatibility data for a pane with no
+   *  rows — and, when the list is empty because the *read* failed, report it
+   *  as a clean state rather than the failure it is. The user retries
+   *  providers first.
+   *
+   *  This is deliberately separate from the mount load's concurrency. Since
+   *  issue #1935 the loader itself needs nothing from `providers` (the
+   *  attach-picker map is one backend call over every harness), so the mount
+   *  fan-out starts pairings immediately — the guard here is about the retry
+   *  affordance, not about a data dependency.
    *
    * Issue #1534 (review round 5) — replaced the 7-case switch with
    * a `Record<ResourceKey, (options?) => void>` lookup so adding a
@@ -353,8 +370,8 @@ export function useSettingsResources(
         pairings: () => {
           if (!options?.providers || options.providers.length === 0) {
             // Awaiting providers. The boundary check (issue
-            // #1534 round 4) — pairings can't load without a
-            // providers list. Mark pairings as failed with a
+            // #1534 round 4) — pairings can't be retried behind an
+            // empty providers list. Mark pairings as failed with a
             // clear message so the user retries providers first.
             setResource('pairings', {
               status: 'failed',
@@ -362,7 +379,7 @@ export function useSettingsResources(
             });
             return;
           }
-          void loadPairings(options.providers);
+          void loadPairings();
         },
         coordinator: () => void loadCoordinator(),
         devices: () => void loadDevices(),

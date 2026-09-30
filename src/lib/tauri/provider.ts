@@ -20,8 +20,9 @@
 //! - **Proxied provider pairings** — `getProviderPairings`,
 //!   `getPairingVerifications`, `verifyProviderPairing`,
 //!   `getPairingDefaults`, `compatibleProvidersForHarness`,
-//!   `attachProxiedProvider`, `updateProviderPairing`,
-//!   `removeProviderPairing`.
+//!   `compatibleProvidersByHarness` (issue #1935 — the one-call form the
+//!   Settings Harnesses pane uses), `attachProxiedProvider`,
+//!   `updateProviderPairing`, `removeProviderPairing`.
 //! - **Usage meters** — `getProviderMeters`, `getMuseSessionTelemetry`
 //!   + the `MUSE_SESSION_TELEMETRY_EVENT` constant.
 //! - **Resolved harness view** (issue #1656) — `getResolvedHarnessView`
@@ -253,6 +254,17 @@ export const compatibleProvidersForHarness = (harnessId: string) =>
   _invoke<
     ProviderAccount[]
   >('compatible_providers_for_harness', { harnessId });
+
+/** The whole attach-picker map — `harnessId → compatible accounts` — in one
+ *  call (issue #1935). Replaces the per-harness `compatibleProvidersForHarness`
+ *  fan-out, which cost N round trips and made the Settings Harnesses pane's
+ *  pairings load wait on the Spawn Menu load it derived its harness ids from.
+ *  The key is a harness id; a harness that speaks no proxy surface is present
+ *  with an empty list, so `map[id] ?? []` is the whole contract. */
+export const compatibleProvidersByHarness = () =>
+  _invoke<
+    Record<string, ProviderAccount[]>
+  >('compatible_providers_by_harness');
 
 /** Attach a proxied provider under a harness. Busts the provider-list cache. */
 export const attachProxiedProvider = async (

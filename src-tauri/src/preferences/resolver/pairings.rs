@@ -7,6 +7,7 @@ use super::super::storage::{load, save};
 use super::accounts::provider_accounts;
 use super::catalog::{first_class_surfaces, harness_surface, keyed_first_class_template, provider_surfaces};
 use super::pairing_compat::pairing_can_potentially_match;
+use std::collections::BTreeMap;
 
 /// Dedupe an id sequence keeping the first occurrence of each id, preserving
 /// order. A malformed caller (or hand-edited prefs) sending `[claude, claude]`
@@ -243,6 +244,64 @@ pub fn compatible_providers_for_harness(harness_id: &str) -> Vec<ProviderAccount
             }
             attach_pairing_defaults(harness_id, account, &stored, |_| Some(surface))
                 .is_some_and(|pairing| pairing_can_potentially_match(&pairing))
+        })
+        .collect()
+}
+
+/// The compatible-provider map for every harness the Settings page can render —
+/// `harness_id` → attachable accounts — as one read (issue #1935).
+///
+/// The Harnesses pane used to take its harness ids from the Spawn Menu
+/// (`list_providers`) and then issue one `compatible_providers_for_harness`
+/// IPC call per harness. Two costs: N round trips for a computation that is a
+/// pure function of preferences, and a data dependency that pushed the whole
+/// pairings load behind the Codex-probe-gated provider menu. This is the same
+/// per-harness computation hoisted behind a single call, so the frontend can
+/// load pairings concurrently with the menu and in one request.
+///
+/// Ids are the union of the three sources that can put a row on that page, so
+/// the map is a superset of what the pane renders and no row loses its attach
+/// picker: the effective harness profiles; the harness ids named by stored
+/// pairings; and the harness half of every saved Launch Configuration's spawn
+/// option. The last two matter because a row can reach the pane *through* a
+/// pairing or a configuration for a harness that has no profile of its own
+/// (a route or recipe stored against an undetected harness). A native-only
+/// harness that speaks no proxy surface is present with an empty list, which
+/// is the honest answer rather than a missing key.
+pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount>> {
+    let prefs = match load() {
+        Ok(prefs) => prefs,
+        Err(e) => {
+            tracing::warn!(
+                "preferences::compatible_providers_by_harness load failed, using harness profiles only: {}",
+                e
+            );
+            AppPreferences::default()
+        }
+    };
+    let mut harness_ids: Vec<String> =
+        super::harness::harness_profiles().into_iter().map(|p| p.id).collect();
+    let add = |id: String, ids: &mut Vec<String>| {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    };
+    for pairing in &prefs.provider_pairings {
+        add(pairing.harness_id.clone(), &mut harness_ids);
+    }
+    for configuration in &prefs.spawn_configurations {
+        add(
+            crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str())
+                .harness_id()
+                .to_string(),
+            &mut harness_ids,
+        );
+    }
+    harness_ids
+        .into_iter()
+        .map(|harness_id| {
+            let accounts = compatible_providers_for_harness(&harness_id);
+            (harness_id, accounts)
         })
         .collect()
 }

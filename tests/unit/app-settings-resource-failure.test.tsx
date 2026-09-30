@@ -15,7 +15,7 @@
  * rejection from a specific command the way the issue requires.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
 import { openSettingsPane } from '../utils/settings-panes';
@@ -384,16 +384,18 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     expect(coordToggle.hasAttribute('disabled')).toBe(true);
   });
 
-  it('switching to the Harnesses pane while pairings is still idle shows the loading state, not an empty HarnessConfigList (round-2 review)', async () => {
-    // Round-2 review showstopper — pairings starts at `idle` until
-    // providers loads. Navigating to the Harnesses pane mid-load
-    // used to fall through the ternary's else branch and mount an
-    // empty HarnessConfigList, flashing "no compatible providers"
+  it('switching to the Harnesses pane while pairings is still loading shows the loading state, not an empty HarnessConfigList (round-2 review)', async () => {
+    // Round-2 review showstopper — navigating to the Harnesses pane before
+    // pairings resolves used to fall through the ternary's else branch and
+    // mount an empty HarnessConfigList, flashing "no compatible providers"
     // — the exact bug #1534 aimed to fix.
     //
-    // We mock listProviders to hang (never resolves) so the
-    // chain never gets to pairings. Switching to Harnesses must
-    // therefore render the loading banner, NOT HarnessConfigList.
+    // Issue #1935 — the *trigger* moved, the contract did not. Pairings no
+    // longer waits for `list_providers`, so hanging the provider menu no
+    // longer holds pairings back; we hold the pairings read itself open
+    // instead. The assertion is unchanged: while the resource is not
+    // `loaded`, the pane must show a loading signal and must not mount
+    // HarnessConfigList.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       switch (cmd) {
         case 'get_app_preferences':
@@ -407,19 +409,18 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
             provider_pairings: [],
           });
         case 'list_providers':
-          // Never resolve — providers stays in `loading` indefinitely,
-          // so pairings stays in `idle`.
-          return new Promise(() => {});
+          return Promise.resolve(REAL_PROVIDERS);
         case 'get_provider_accounts':
           return Promise.resolve([]);
         case 'get_keyed_first_class_catalog':
           return Promise.resolve([]);
         case 'get_provider_pairings':
-          return Promise.resolve([]);
+          // Never resolve — pairings stays in `loading`.
+          return new Promise(() => {});
         case 'get_pairing_verifications':
           return Promise.resolve([]);
-        case 'compatible_providers_for_harness':
-          return Promise.resolve([]);
+        case 'compatible_providers_by_harness':
+          return Promise.resolve({});
         case 'get_coordinator_status':
           return Promise.resolve({ enabled: false, has_token: false });
         case 'list_device_sessions':
@@ -433,18 +434,174 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
 
     render(<AppSettingsModal onClose={() => {}} />);
 
-    // Switch to Harnesses before any load resolves. The testid for
+    // Switch to Harnesses before the pairings read resolves. The testid for
     // the loading state is `resource-load-pairings-loading`; the
     // empty-state text is "Spawn menu order" — neither should be
     // present because HarnessConfigList must not mount.
     await openSettingsPane('Harnesses');
     expect(await screen.findByTestId('resource-load-pairings-loading')).toBeTruthy();
     // The "Spawn menu order" section + HarnessConfigList are gated
-    // on at least two orderable harnesses; with `providers` empty
-    // the section is hidden anyway, but the loading banner is what
+    // on at least two orderable harnesses; the loading banner is what
     // we're pinning — it's the visible signal that the data isn't
     // ready.
     expect(screen.queryByText(/no compatible providers/i)).toBeNull();
+  });
+
+  it('a slow list_providers does not delay pairings (issue #1935)', async () => {
+    // The perf claim: pairings used to start only after `list_providers`
+    // settled, so the pane opened in `providers + pairings` and a slow
+    // Codex install probe held the whole Harnesses view hostage. Pairings
+    // now runs in the same fan-out — the discriminating fact is that its
+    // reads are *issued at all* while the provider menu is still in
+    // flight, and that the resource reaches a terminal, non-error state.
+    const commands: string[] = [];
+    let releaseProviders: (list: ProviderInfo[]) => void = () => {};
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      commands.push(cmd);
+      switch (cmd) {
+        case 'get_app_preferences':
+          return Promise.resolve({
+            default_provider: null,
+            naming_provider: null,
+            circuit_agent_pool_size: null,
+            worktree_directory: '',
+            confirm_before_quit: true,
+            harness_defaults: {},
+            provider_pairings: [],
+          });
+        case 'list_providers':
+          return new Promise<ProviderInfo[]>((resolve) => {
+            releaseProviders = resolve;
+          });
+        case 'get_provider_accounts':
+          return Promise.resolve(REAL_ACCOUNTS);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_by_harness':
+          return Promise.resolve({ anthropic: REAL_ACCOUNTS });
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Harnesses');
+
+    // Pairings' own reads were issued and finished while the provider menu
+    // is still open — before the fix, `get_provider_pairings` was never
+    // called at all in this state.
+    await waitFor(() => {
+      expect(commands).toContain('get_provider_pairings');
+      expect(commands).toContain('compatible_providers_by_harness');
+    });
+    expect(screen.queryByTestId('resource-load-pairings-loading')).toBeNull();
+    expect(screen.queryByTestId('resource-load-pairings')).toBeNull();
+    // ...while providers is genuinely still loading, so the wait above was
+    // not observing an already-settled resource.
+    expect(screen.getAllByTestId('resource-load-providers-loading').length).toBeGreaterThan(0);
+
+    // Releasing the provider menu still works — nothing was left dangling.
+    await act(async () => {
+      releaseProviders(REAL_PROVIDERS);
+    });
+    await waitFor(() =>
+      expect(screen.queryByTestId('resource-load-providers-loading')).toBeNull(),
+    );
+  });
+
+  it('reads preferences once on the initial modal load (issue #1935)', async () => {
+    // `loadPairings` used to call `getAppPreferences()` again for the stored
+    // pairing keys, so the initial load hit the preferences store twice.
+    // The two loaders now share one in-flight read.
+    let prefsReads = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_app_preferences') {
+        prefsReads += 1;
+        return Promise.resolve({
+          default_provider: null,
+          naming_provider: null,
+          circuit_agent_pool_size: null,
+          worktree_directory: '',
+          confirm_before_quit: true,
+          harness_defaults: {},
+          provider_pairings: [],
+        });
+      }
+      switch (cmd) {
+        case 'list_providers':
+          return Promise.resolve(REAL_PROVIDERS);
+        case 'get_provider_accounts':
+          return Promise.resolve(REAL_ACCOUNTS);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_by_harness':
+          return Promise.resolve({ anthropic: REAL_ACCOUNTS });
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Harnesses');
+
+    // Wait for both consumers of the shared read to have committed.
+    await waitFor(() => {
+      expect(screen.queryByTestId('resource-load-pairings-loading')).toBeNull();
+      expect(screen.queryByTestId('resource-load-preferences-loading')).toBeNull();
+    });
+    expect(prefsReads).toBe(1);
+  });
+
+  it('the pairings Retry reports the Awaiting-providers boundary instead of a clean state (issue #1534 round 4, still reachable)', async () => {
+    // The boundary check survived #1935 as an *affordance* check: the
+    // Harnesses pane renders its harness rows from `providers`, so a pairings
+    // retry issued with no providers list must say so rather than quietly
+    // re-run behind an empty list and present it as "no compatible
+    // providers". The mount load no longer needs the guard; this path does.
+    mockWithFailure('get_provider_pairings', 'pairings endpoint 500');
+
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Harnesses');
+
+    const banner = await screen.findByTestId('resource-load-pairings');
+    expect(banner.textContent).toContain('pairings endpoint 500');
+    // `list_providers` succeeded, so the pane is on the pairings banner and
+    // the retry is reachable.
+    const retry = screen.getByTestId('resource-load-pairings-retry');
+    expect(retry).toBeTruthy();
+    const pairingReads = () =>
+      vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'get_provider_pairings').length;
+    const readsBefore = pairingReads();
+
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      const same = screen.getByTestId('resource-load-pairings');
+      expect(same.textContent).toContain('Awaiting providers list');
+    });
+    // The guard short-circuits: it never re-issues the read it has no
+    // boundary for.
+    expect(pairingReads()).toBe(readsBefore);
   });
 
   it('retrying pairings while providers is empty marks pairings failed (no fabricated clean state)', async () => {
