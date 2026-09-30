@@ -152,11 +152,16 @@ configuration or shortcut change, provider/harness change, platform or
 security change, API/protocol change, or release behavior change:
 
 1. Update the applicable page from the [documentation hub](docs/README.md).
-2. Add a categorized entry to the current versioned release note in
-   [`docs/releases/`](docs/releases/) for user-visible behavior changes. Do
-   not use a generic `Unreleased` bucket. Use `docs: none — <reason>` in the
-   commit message when a documentation update is genuinely unnecessary.
-3. Run `npm run test:docs` and `npm run check:docs`.
+2. Run `npm run test:docs` and `npm run check:docs`.
+3. Use `docs: none — <reason>` in the commit message when a documentation
+   update is genuinely unnecessary.
+
+You do **not** edit a release note in a pull request. Versioned release notes
+under [`docs/releases/`](docs/releases/) are drafted from the merged
+Conventional Commits at release time (`npm run release:notes`) and curated by
+the maintainer, so the shared release-note file no longer conflicts on every
+PR. Write a commit subject and body that could become a release-note line —
+see [the release-notes guide](docs/releases/README.md).
 
 ## License
 

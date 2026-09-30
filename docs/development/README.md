@@ -106,7 +106,9 @@ in [the release procedure](releasing.md#required-checks-and-branch-protection).
 ### Changing a user-visible feature
 
 - Update the task procedure, defaults, limitations, and recovery path.
-- Add or update the current versioned release note under `docs/releases/` for user-visible behavior changes.
+- Write a Conventional Commit message clear enough to seed the release note
+  drafted at release time (`npm run release:notes`); do not edit `docs/releases/`
+  in the pull request.
 - Add screenshots or browser evidence for layout, accessibility, or interaction
   changes when the engineering contract calls for it.
 - Run `npm run check:docs` and the product checks appropriate to the boundary.

@@ -32,7 +32,9 @@
 ## Documentation impact
 
 <!-- Documentation is part of the feature contract. Name the updated user
-     guide, troubleshooting page, developer doc, ADR/spec, or release notes.
+     guide, troubleshooting page, developer doc, or ADR/spec. Release notes are
+     generated at release time from the merged commits (`npm run release:notes`),
+     so do not edit `docs/releases/` here — write a clear commit message instead.
      If no update is needed, record the reason here and in the commit message,
      for example `docs: none — generated binding only`. -->
 

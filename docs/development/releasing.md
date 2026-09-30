@@ -35,10 +35,29 @@ output.)
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`,
    `src-tauri/Cargo.toml`, and the `buildmesh` entry in `src-tauri/Cargo.lock`.
-2. Create or update `docs/releases/v1.2.0.md` with the concise, user-visible
-   changes for this release. The release workflow checks that this exact file
-   exists and uses it as the GitHub Release body.
-3. Commit the version bump and release notes, then merge to `main`.
+2. Draft the release note:
+   ```
+   npm run release:notes
+   ```
+   This prints a draft to stdout from the Conventional Commits merged since
+   the previous release — the version defaults to the manifest, the base to the
+   `chore(release): vX.Y.Z` commit for the highest already-released version
+   below this one. Read the header: it states the resolved base and commit
+   count, so a wrong range is visible before you curate anything.
+
+   To write the file instead of printing it:
+   ```
+   npm run release:notes -- --write
+   ```
+   This writes `docs/releases/v1.2.0.md`. It **fails if that file already
+   exists** — which is the normal case once a draft is open. If the draft is
+   already there, curate it in place; to regenerate over it, add `--force`.
+
+   Either way, curate before tagging: keep the user-visible entries, drop the
+   internal work, and add the Highlights and Upgrade notes a reader needs. The
+   release workflow checks that this exact file exists and uses it as the GitHub
+   Release body.
+3. Commit the version bump and the generated release note, then merge to `main`.
 4. **Push a matching tag** — this is the only trigger for the release build:
    ```
    git tag v1.2.0
@@ -63,10 +82,11 @@ output.)
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
-Release notes are versioned under [`docs/releases/`](../releases/). Include
-features, fixes, security changes, breaking changes, migrations, and known
-limitations; do not add internal implementation work or rely on a generic
-workflow-generated body.
+Release notes are versioned under [`docs/releases/`](../releases/) and drafted
+from the merged Conventional Commits — `npm run release:notes` — rather than
+edited by each pull request. Include features, fixes, security changes, breaking
+changes, migrations, and known limitations; curate out internal implementation
+work.
 
 ## Required checks and branch protection
 

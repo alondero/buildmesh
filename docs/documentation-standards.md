@@ -46,7 +46,7 @@ Use this impact map when changing behavior:
 
 | Change | Documentation and evidence to consider |
 |---|---|
-| New or changed user workflow | README discovery link, user guide procedure, troubleshooting entry if failure modes changed, and the current versioned release note in `docs/releases/` |
+| New or changed user workflow | README discovery link, user guide procedure, troubleshooting entry if failure modes changed, and a Conventional Commit message clear enough to seed the release note drafted at release time (`npm run release:notes`) |
 | New harness, provider, setting, shortcut, or platform | User guide capability/setup table, README summary or drift source, platform limitations, and a live/tested source of truth |
 | Security, auth, data storage, network, or destructive behavior | User-facing warning and recovery steps, `SECURITY.md` if reporting scope changes, and an ADR |
 | Tauri command, HTTP route, IPC payload, or generated type | Developer guide/API documentation, Rust source docs, contract tests, and regenerated bindings where applicable |
