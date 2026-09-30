@@ -381,11 +381,29 @@ jobs:
           # outright, so this lands outside the repository.
           TS_RS_EXPORT_DIR: ${{ runner.temp }}/ts-rs-${{ matrix.shard.label }}
         run: |
-          set -o pipefail
+          # The log is written by redirection, never through a pipe
+          # (issue #1961). `timeout` signals the process group it starts, but
+          # a test's descendant can leave that group while still holding the
+          # pipe's write end, so `tee` never sees EOF and the step does not
+          # return: the `services` shard ran ~45 minutes that way, past both
+          # this 30-minute guard and the job cap, and a cancelled job flushes
+          # no log, so it produced no evidence either. With a redirect nothing
+          # sits between the test and this shell, the guard ends the step, and
+          # the upload step below still gets the same file.
+          log="cargo-${{ matrix.shard.label }}.log"
+          # GitHub runs a `run:` block under `bash -e`, so a bare `timeout`
+          # that fails ends the step on the spot: the status capture, the
+          # `cat`, and the annotation below would all be skipped, and a hung
+          # shard would fail with an empty step log and no explanation.
+          # Initialising the status and consuming `timeout`'s own failure with
+          # `||` keeps those lines reachable on both paths; the step still
+          # exits with the guarded command's code. Do not "simplify" the `||`.
+          status=0
           timeout --kill-after=2m 30m \
-            cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }} 2>&1 \
-            | tee "cargo-${{ matrix.shard.label }}.log"
-          status=${PIPESTATUS[0]}
+            cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }} > "$log" 2>&1 || status=$?
+          # Printing the log keeps the step's own output as readable as the
+          # pipeline was; for a hung shard its tail is the main clue.
+          cat "$log"
           if [ "$status" = 124 ]; then
             echo "::error::The ${{ matrix.shard.label }} shard exceeded 30 minutes and was killed ??? a test in it is hanging."
           fi
@@ -484,7 +502,15 @@ jobs:
       # and the bindings land in src/types/generated/.
       - name: Run Rust export, documentation, and integration tests
         run: |
-          set -o pipefail
+          # Redirection rather than a tee pipeline, for the same reason as the
+          # shards (issue #1961): a descendant that leaves `timeout`'s process
+          # group keeps the pipe open, so the step outlives the guard meant to
+          # end it. The inner script keeps its own `pipefail`; only the outer
+          # pipeline plumbing is gone.
+          log=cargo-nonshard-tests.log
+          # Same errexit-safe capture as the shards: under `bash -e` a bare
+          # `timeout` would skip the `cat` and the annotation on failure.
+          status=0
           timeout --kill-after=2m 45m bash -euo pipefail -c '
             cargo test --locked --lib export_bindings -- --test-threads=1
             cargo test --locked --doc -- --test-threads=1
@@ -493,13 +519,25 @@ jobs:
               test_target="${test_target%.rs}"
               cargo test --locked --test "$test_target" -- --test-threads=1
             done
-          ' 2>&1 | tee cargo-nonshard-tests.log
-          status=${PIPESTATUS[0]}
+          ' > "$log" 2>&1 || status=$?
+          cat "$log"
           if [ "$status" = 124 ]; then
             echo "::error::Rust export, documentation, and integration tests exceeded 45 minutes."
           fi
           exit "$status"
         working-directory: src-tauri
+
+      # The shards have always uploaded their log; this job did not, so a hang
+      # here lost the only evidence it produced. Same `if: always()`, same
+      # reason (issue #1961).
+      - name: Upload the non-shard test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-nonshard-tests-log
+          path: src-tauri/cargo-nonshard-tests.log
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Check Rust???TS type bindings are up to date
         shell: bash
