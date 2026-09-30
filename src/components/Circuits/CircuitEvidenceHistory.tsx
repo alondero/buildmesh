@@ -17,6 +17,7 @@ const labels: Record<string, string> = {
   effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
   effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
   operator_attestation: 'Operator-recorded outcome (attestation)',
+  checkpoint_reason: 'Checkpoint explanation',
   observation: 'Observed evidence', evidence_recheck: 'Evidence recheck requested',
   native_hook_received: 'Native evidence received', classification: 'Report interpretation',
 };
@@ -244,6 +245,21 @@ export function CircuitEvidenceHistory({ runId, updatedAt }: {
       {error && <p role="alert" className="text-status-error break-words">{error}</p>}
       {rows === null && !error && <p>Loading history…</p>}
       {rows?.length === 0 && <p className="text-text-muted">No evidence history was retained for this run.</p>}
+      {checkpoints.length > 0 && <div className="space-y-2">
+        <p>Inspect the agent or external result, then choose how to continue. Record completed advances this step without replaying its action.</p>
+        <p>For a staged prompt, submit it in the agent terminal first. Record completed only after confirming it was accepted.</p>
+        <p>An operator-recorded outcome is an attestation. It does not grant permission or review approval.</p>
+        <label className="block">Reason and supporting evidence
+          <textarea value={reason} onChange={(event) => setReason(event.target.value)} disabled={pending}
+            className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
+        </label>
+        {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null || reason.trim() === ''} className="flex flex-wrap gap-2">
+          <legend>{step.node_id}</legend>
+          {step.actions.map((action) => <button key={action} type="button" className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
+            {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence' }[action]}
+          </button>)}
+        </fieldset>)}
+      </div>}
       {coverage.length > 0 && <details>
         <summary className="cursor-pointer">Current harness observation capabilities</summary>
         <ul className="space-y-2 break-words">
@@ -279,19 +295,7 @@ export function CircuitEvidenceHistory({ runId, updatedAt }: {
           <HistoryDetail entry={entry} />
         </li>)}
       </ol>
-      {checkpoints.length > 0 && <div className="space-y-2">
-        <p>An operator-recorded outcome is an attestation. It does not grant permission or review approval.</p>
-        <label className="block">Reason and supporting evidence
-          <textarea value={reason} onChange={(event) => setReason(event.target.value)} disabled={pending}
-            className="block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1" />
-        </label>
-        {checkpoints.map((step) => <fieldset key={step.node_id} disabled={pending || rows === null || reason.trim() === ''} className="flex flex-wrap gap-2">
-          <legend>{step.node_id}</legend>
-          {step.actions.map((action) => <button key={action} type="button" className="text-accent-cyan disabled:opacity-50" onClick={() => void record(step, action)}>
-            {{ completed: 'Record completed', not_performed: 'Record not performed', retry: 'Retry as new attempt', recheck: 'Recheck evidence' }[action]}
-          </button>)}
-        </fieldset>)}
-      </div>}
+
     </div>}
   </details>;
 }
