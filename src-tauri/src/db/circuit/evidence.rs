@@ -168,6 +168,16 @@ pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
     Ok(view)
 }
 
+fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::circuit::stepper::RunView, String> {
+    use crate::circuit::{context::CircuitContext, model::StepOutcome, stepper::{RunState, RunView, StepStatus, StepView}};
+    let steps = super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
+    Ok(RunView { run_id:run.id, graph:run_graph(db, run.id)?, state:RunState::from_db_str(&run.state),
+        context:CircuitContext::from_json(&run.context_json)?,
+        steps:steps.into_iter().map(|step| StepView { node_id:step.node_id, attempt:step.attempt,
+            status:StepStatus::from_db_str(&step.status), outcome:step.outcome.as_deref().and_then(StepOutcome::from_db_str),
+            error:step.error_message, agent_node_id:step.agent_node_id }).collect() })
+}
+
 fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceView, String> {
     let entries = history_inner(db, run_id).map_err(|e| e.to_string())?;
     let run = super::ledger::get_circuit_run_inner(db, run_id)
@@ -179,15 +189,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
         let graph = run_graph(db, run_id)?;
         let context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
-        let view = crate::circuit::stepper::RunView {
-            run_id, graph: graph.clone(), state: crate::circuit::stepper::RunState::from_db_str(&run.state),
-            context: context.clone(), steps: steps.iter().map(|step| crate::circuit::stepper::StepView {
-                node_id: step.node_id.clone(), attempt: step.attempt,
-                status: crate::circuit::stepper::StepStatus::from_db_str(&step.status),
-                outcome: step.outcome.as_deref().and_then(crate::circuit::model::StepOutcome::from_db_str),
-                error: step.error_message.clone(), agent_node_id: step.agent_node_id,
-            }).collect(),
-        };
+        let view = recovery_view(db, &run)?;
         for step in steps {
             if let Some(agent_id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
                 if let Some(agent) = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id).optional().map_err(|e| e.to_string())? {
@@ -249,7 +251,13 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                     | CircuitNodeKind::ReviewVerdict { .. }
                     | CircuitNodeKind::AwaitAgentTurn { .. }
                     | CircuitNodeKind::SpawnAgentNode { .. },
-                ) => vec![CheckpointAction::Recheck],
+                ) => {
+                    let mut actions = vec![CheckpointAction::Recheck];
+                    if view.can_attest_completion(&step.node_id) {
+                        actions.push(CheckpointAction::Completed);
+                    }
+                    actions
+                },
                 _ => vec![],
             };
             checkpoints.push(CircuitCheckpoint {
@@ -700,6 +708,31 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     let graph = run_graph(&tx, run.id)?;
     // An attestation cannot authorize tool use or supply a review verdict.
     use crate::circuit::model::CircuitNodeKind;
+    if matches!(request.action, CheckpointAction::Completed)
+        && matches!(graph.node(&request.node_id).map(|n| &n.kind), Some(
+            CircuitNodeKind::SpawnAgentNode { .. } | CircuitNodeKind::AwaitAgentTurn { .. }
+            | CircuitNodeKind::LlmTurnClassifier { .. }))
+        && (step.agent_node_id.is_some() || !matches!(graph.node(&request.node_id).map(|n| &n.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })))
+    {
+        let mut view = recovery_view(&tx, &run)?;
+        if !view.can_attest_completion(&request.node_id) {
+            return Err("Resolve outstanding work, input requests and conflicting evidence before recording completion.".into());
+        }
+        let reason = format!("Operator-recorded completion: {}", request.reason.trim());
+        view.context.set(&format!("node.{}.status", step.node_id), "completed");
+        view.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
+        view.context.set(&format!("node.{}.observation_blocker", step.node_id), "");
+        // Leave native evidence untouched. The next worker tick schedules
+        // successors, retaining their independent approval and report gates.
+        super::ledger::commit_circuit_advance_inner(&tx, run.id, None, Some(&view.context.to_json()?), &[
+            super::CircuitStepOp { node_id:step.node_id.clone(), status:"completed".into(), attempt:step.attempt,
+                outcome:Some(Some("completed".into())), error:Some(None),
+                agent_node_id:None, fresh_attempt:false }
+        ]).map_err(|e| e.to_string())?;
+        append_history(&tx, run.id, Some(&step.node_id), Some(step.attempt), "operator_attestation",
+            &reason, Some(SOURCE_OPERATOR), Some("completed")).map_err(|e| e.to_string())?;
+        return tx.commit().map_err(|e| e.to_string());
+    }
     if matches!(request.action, CheckpointAction::Recheck) {
         let kind = graph.node(&request.node_id).map(|n| &n.kind);
         let open_pr = matches!(
@@ -798,23 +831,12 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             "The pull request identity must be reconciled before this step can advance.".into(),
         );
     }
-    let gates = super::ledger::list_circuit_run_steps_inner(&tx, request.run_id)
-        .map_err(|e| e.to_string())?;
-    if graph.has_ancestor_matching(&request.node_id, |node| {
-        matches!(
-            node.kind,
-            CircuitNodeKind::CollaboratorCheck {
-                require_approval: true
-            } | CircuitNodeKind::ReviewVerdict { .. }
-        ) && !gates.iter().any(|s| {
-            s.node_id == node.id
-                && s.status == "completed"
-                && s.outcome.as_deref() == Some("completed")
-        })
-    }) {
-        return Err(
-            "Separate permission and review approval gates must be satisfied first.".into(),
-        );
+    // This step was already admitted by the graph. Requiring every ancestor
+    // verdict to be approved deadlocks the changes-requested feedback route
+    // and alternative approval branches. Current human requests still block.
+    let recovery = recovery_view(&tx, &run)?;
+    if recovery.report_has_known_blockers(&request.node_id) {
+        return Err("Resolve outstanding work, input requests and conflicting evidence before recording an outcome.".into());
     }
     let prior: Option<String> = tx.query_row("SELECT state FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind=?4",
         params![request.run_id,request.node_id,request.attempt,effect_kind], |r| r.get(0)).optional().map_err(|e| e.to_string())?;
@@ -874,7 +896,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         status: status.into(),
         attempt,
         outcome,
-        error: Some(Some(reason.clone())),
+        error: Some((status != "completed").then(|| reason.clone())),
         agent_node_id: None,
         fresh_attempt: attempt != step.attempt,
     };
@@ -1220,13 +1242,11 @@ pub(crate) fn commit_transition_locked(
     if let Some(guard) = evidence.input_guard {
         let current: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id=?1 AND cli_session_id=?2
-            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost')
-            AND (?4=0 OR status IN ('ready','awaiting_input','completed')))",
+            AND CAST(session_started_at AS TEXT)=?3 AND status NOT IN ('archived','error','lost'))",
             params![
                 guard.agent_node_id,
                 guard.session_id,
-                guard.session_incarnation,
-                guard.report_guard.is_some()
+                guard.session_incarnation
             ],
             |r| r.get(0),
         )?;
@@ -2927,6 +2947,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(context.get("pr.number"), None);
+    }
+
+    #[test]
+    fn feedback_attestation_respects_current_requests_without_requiring_review_approval() {
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
+                VALUES(1,'verdict',1,'completed','working'),(1,'feedback',1,'unverified',NULL);
+            INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','uncertain');").unwrap();
+        let graph = CircuitGraph::agent_review(None,None,3);
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
+        let mut context = CircuitContext::default();
+        context.set("source.agent_id","9");
+        context.set("node.feedback.human_wait","1");
+        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
+        let request = CheckpointRequest { run_id:1,node_id:"feedback".into(),attempt:1,expected_revision:0,
+            action:CheckpointAction::Completed,reason:"Submitted the staged feedback in the source terminal and confirmed acceptance".into() };
+        assert!(record_outcome_locked(&mut db,&request).is_err());
+        context.set("node.feedback.human_wait","0");
+        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
+        record_outcome_locked(&mut db,&request).unwrap();
+        let steps = super::super::ledger::list_circuit_run_steps_inner(&db,1).unwrap();
+        assert_eq!(steps.iter().find(|s| s.node_id == "feedback").unwrap().status,"completed");
+        assert_eq!(steps.iter().find(|s| s.node_id == "verdict").unwrap().outcome.as_deref(),Some("working"));
+        assert_eq!(history_inner(&db,1).unwrap().iter().filter(|e| e.kind == "operator_attestation").count(),1);
+    }
+
+    #[test]
+    fn operator_completion_advances_evidence_checkpoint_without_forging_observations() {
+        use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind},
+            observation::WorkEvidence, stepper::{advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView}};
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'agent','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+            VALUES(1,'spawn',1,'unverified',9);").unwrap();
+        let mut graph = CircuitGraph::walking_skeleton("");
+        graph.blueprint = None;
+        graph.nodes.retain(|node| node.id != "inject");
+        graph.edges.retain(|edge| edge.from != "inject");
+        graph.edges.iter_mut().find(|edge| edge.to == "inject").unwrap().to = "notify".into();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
+        let request = CheckpointRequest { run_id:1, node_id:"spawn".into(), attempt:1,
+            expected_revision:0, action:CheckpointAction::Completed,
+            reason:"Inspected the finished work and terminal; advance this handoff".into() };
+        for kind in [CircuitNodeKind::ReviewVerdict { target_node_id:None },
+            CircuitNodeKind::CollaboratorCheck { require_approval:true }] {
+            let mut protected = graph.clone();
+            protected.nodes.iter_mut().find(|n| n.id == "spawn").unwrap().kind = kind;
+            db.execute("UPDATE autopilot_circuits SET graph_json=?1", [protected.to_json().unwrap()]).unwrap();
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+        }
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
+        for evidence in [WorkEvidence { children:[("child".into(),false)].into_iter().collect(), ..Default::default() },
+            WorkEvidence { conflicted:true, ..Default::default() }] {
+            let mut context = CircuitContext::default();
+            context.set("node.spawn.evidence.1", serde_json::to_string(&evidence).unwrap());
+            db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
+            assert!(record_outcome_locked(&mut db, &request).is_err());
+        }
+        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [r#"{"node.spawn.human_wait":"1"}"#]).unwrap();
+        assert!(record_outcome_locked(&mut db, &request).is_err());
+        db.execute("UPDATE autopilot_circuit_runs SET context_json='{}'", []).unwrap();
+        assert!(evidence_view_inner(&db,1).unwrap().checkpoints[0].actions.iter().any(|a| matches!(a,CheckpointAction::Completed)));
+        record_outcome_locked(&mut db, &request).unwrap();
+        assert!(record_outcome_locked(&mut db, &request).is_err(), "stale operator action must not be replayed");
+        let run = super::super::ledger::get_circuit_run_inner(&db,1).unwrap().unwrap();
+        let steps = super::super::ledger::list_circuit_run_steps_inner(&db,1).unwrap();
+        assert_eq!(steps[0].status,"completed");
+        assert_eq!(steps[0].error_message,None, "the attestation belongs in history, not a completed step's error");
+        assert_eq!(steps[0].attempt,1);
+        let entries = history_inner(&db,1).unwrap();
+        assert!(entries.iter().any(|e| e.kind == "operator_attestation" && e.source.as_deref() == Some("operator")));
+        assert!(!entries.iter().any(|e| matches!(e.kind.as_str(),"observation"|"classification"|"effect_intent")));
+        let mut view = RunView { run_id:1, graph, state:RunState::Running,
+            context:CircuitContext::from_json(&run.context_json).unwrap(),
+            steps: vec![StepView { node_id:"trigger".into(), status:StepStatus::Completed, attempt:1,
+                outcome:Some(crate::circuit::model::StepOutcome::Completed), error:None, agent_node_id:None },
+                StepView { node_id:"spawn".into(), status:StepStatus::Completed, attempt:1,
+                    outcome:Some(crate::circuit::model::StepOutcome::Completed), error:steps[0].error_message.clone(), agent_node_id:Some(9) }] };
+        advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots:4,agent_free_slots:4 }));
+        assert_eq!(view.state,RunState::Completed);
     }
 
     #[test]

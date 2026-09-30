@@ -161,6 +161,18 @@ impl RunView {
         self.report_blocker(node_id).is_some()
     }
 
+    /// Human attestation resolves a handoff, never a review verdict or an
+    /// unallocated spawn. Keep the UI offer and durable command on one policy.
+    pub(crate) fn can_attest_completion(&self, node_id: &str) -> bool {
+        self.state == RunState::Running
+            && self.step(node_id).is_some_and(|step| step.status == StepStatus::Unverified
+                && step.agent_node_id.or_else(|| self.resolve_target_agent(node_id)).is_some())
+            && matches!(self.graph.node(node_id).map(|node| &node.kind), Some(
+                CircuitNodeKind::SpawnAgentNode { .. } | CircuitNodeKind::AwaitAgentTurn { .. }
+                | CircuitNodeKind::LlmTurnClassifier { .. }))
+            && !self.report_has_known_blockers(node_id)
+    }
+
     fn accepts_report_binding(&self, node_id: &str, binding: &ClassificationBinding, output: Option<&str>) -> bool {
         let Some(step) = self.step(node_id) else { return false; };
         let owner = &binding.owner;
@@ -530,10 +542,10 @@ pub enum CircuitEvent {
         pr_title: Option<String>,
         error: Option<String>,
     },
-    /// The worker found a GitHub action still running after a prior pass or
-    /// process restart. Re-emit its effect; OpenPr is idempotent at the
-    /// review-blueprint worker seam.
+    /// The worker found an unacknowledged action after a prior pass or restart.
     GithubActionRetry { node_id: String },
+    /// Reconcile a saved PR target without replaying a mutation.
+    GithubRecheckDue { node_id: String, attempt: i32, now_ms: i64 },
     /// Re-run a committed CloseAgentNode effect after a crash between the
     /// step commit and the node deletion/association cleanup.
     CloseAgentRetry { node_id: String },
@@ -1428,6 +1440,26 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     "The external action may already have been applied. Inspect its result before recording an outcome or deliberately retrying.".into());
             }
         }
+        CircuitEvent::GithubRecheckDue { node_id, attempt, now_ms } => {
+            if run.state == RunState::Running
+                && run.step(node_id).is_some_and(|step| step.status == StepStatus::Unverified && step.attempt == *attempt)
+                && matches!(run.graph.node(node_id).map(|node| &node.kind), Some(CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. }))
+            {
+                let prefix = format!("node.{node_id}.reconcile.{attempt}");
+                let count = run.context.get(&format!("{prefix}.count")).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+                let next = run.context.get(&format!("{prefix}.next_ms")).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                if count < 5 && *now_ms >= next {
+                    run.context.set(&format!("{prefix}.count"), (count + 1).to_string());
+                    run.context.set(&format!("{prefix}.next_ms"), now_ms.saturating_add(60_000).to_string());
+                    run.context.set(&format!("node.{node_id}.recheck_only"), "1");
+                    set_step(run, &mut t, node_id, StepStatus::Running);
+                    if let Some(step) = run.step_mut(node_id) { step.error = None; }
+                    if let Some(write) = t.step_writes.last_mut() { write.error = Some(None); }
+                    t.context_changed = true;
+                    t.effects.push(Effect::CallGithub { node_id:node_id.clone(), action:GithubActionKind::OpenPr, label:None, comment:None });
+                }
+            }
+        }
         CircuitEvent::CloseAgentRetry { node_id } => {
             if matches!(
                 run.step(node_id),
@@ -1470,19 +1502,21 @@ fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepSt
         .filter_map(|e| run.step(&e.from).map(|ps| ps.attempt))
         .max()
         .unwrap_or(1);
+    let mut fresh_attempt = false;
     let changed = match run.step_mut(node_id) {
         Some(step) => {
             if incoming_attempt > step.attempt {
+                fresh_attempt = true;
                 step.attempt = incoming_attempt;
                 step.outcome = None;
                 step.error = None;
             }
-            if step.status != status {
+            if step.status != status || fresh_attempt {
                 step.status = status;
                 step.outcome = status.outcome();
                 true
             } else {
-                false
+                fresh_attempt
             }
         }
         None => {
@@ -1501,7 +1535,10 @@ fn set_step(run: &mut RunView, t: &mut Transition, node_id: &str, status: StepSt
         // Preserve the existing attempt count on re-transitions (a retry's
         // second run must not write attempt=1 over its reset value).
         let attempt = run.step(node_id).map(|s| s.attempt).unwrap_or(1);
-        t.step_writes.push(StepWrite::for_existing(node_id, status, attempt));
+        let mut write = StepWrite::for_existing(node_id, status, attempt);
+        write.outcome = Some(status.outcome());
+        write.fresh_attempt = fresh_attempt;
+        t.step_writes.push(write);
     }
 }
 
@@ -1901,20 +1938,6 @@ fn start_step(run: &mut RunView, t: &mut Transition, node_id: &str, kind: &Circu
             ),
         );
         return;
-    }
-    let incoming_attempt = run
-        .graph
-        .incoming(node_id)
-        .iter()
-        .filter_map(|e| run.step(&e.from).map(|ps| ps.attempt))
-        .max()
-        .unwrap_or(1);
-    if let Some(step) = run.step_mut(node_id) {
-        if incoming_attempt > step.attempt {
-            step.attempt = incoming_attempt;
-            step.outcome = None;
-            step.error = None;
-        }
     }
     set_step(run, t, node_id, StepStatus::Running);
     start_effects_and_completion(run, t, node_id, kind);

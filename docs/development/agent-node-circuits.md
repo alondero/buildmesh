@@ -148,7 +148,26 @@ restart inventory is in the [Circuit effect recovery contract](circuit-effect-re
 
 Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
 the observation window without sending the original prompt or requesting an
-automatic continuation. Observed human-input waits and explicit approval gates
+automatic continuation. Eligible agent handoffs also offer **Record completed**:
+inspect the work, enter a reason, and attest that this step can advance. This is
+an operator decision, not verified lifecycle evidence. Missing agent attachments,
+known unfinished child work, conflicting evidence, and unresolved human requests
+cannot be completed this way; review-verdict and approval gates remain separate.
+Recovery controls appear before the retained history entries.
+
+If a feedback prompt is staged in a terminal, submit it there and confirm that
+the harness accepted it before recording the prompt-delivery step as completed.
+Do not mark it not performed and retry while the staged text remains: that can
+duplicate the prompt. A changes-requested review can authorize feedback recovery;
+it does not need an approved verdict first.
+
+Uncertain OpenPr actions with a saved repository and branch get up to five
+automatic read-only lookups, a minute apart, on the same attempt. A matching PR
+restores its identity and advances the run without creating another PR. The
+allowance survives restart; after it is exhausted, **Recheck evidence** remains
+available for a deliberate lookup.
+
+Observed human-input waits and explicit approval gates
 are excluded from the evidence deadline; native wait coverage across harnesses
 is still being integrated.
 A yielded foreground turn alone cannot complete a spawn that was assigned work.

@@ -239,6 +239,24 @@ fn clean_description(value: &str) -> Option<String> {
     })
 }
 
+/// The answer choices a structured question request offered (issue #1966).
+///
+/// Read only from the `questions[].options[].label` list the question tools
+/// already send — the same structured field the question *text* is parsed from.
+/// Prose, notification messages, permission decisions, and shapes that do not
+/// parse yield `None`, so a client renders an open-to-answer action rather
+/// than inventing yes/no semantics.
+fn question_choices(payload: &HookPayload) -> Option<crate::agent::session_lifecycle::InputRequest> {
+    let questions = payload.tool_input.as_ref()?.get("questions")?.as_array()?;
+    let choices: Vec<&str> = questions
+        .iter()
+        .filter_map(|question| question.get("options").and_then(|options| options.as_array()))
+        .flatten()
+        .filter_map(|option| option.get("label").and_then(|label| label.as_str()))
+        .collect();
+    crate::agent::session_lifecycle::InputRequest::from_choices(choices)
+}
+
 fn string_field<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
     let mut cursor = value;
     for key in path {
@@ -894,6 +912,11 @@ fn classify(
     {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             kind: Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested),
+            // Issue #1966 — a question carries the answer list when the
+            // harness enumerated one, and nothing at all when it did not.
+            // Clients render choices only for a real list; an open question
+            // stays open-to-answer instead of borrowing permission semantics.
+            request: question_choices(&payload),
             message: payload.message.clone().or_else(|| {
                 let questions = payload.tool_input.as_ref()?.get("questions")?.as_array()?;
                 clean_description(&questions.iter().filter_map(|question| question.get("question")?.as_str())
@@ -3617,6 +3640,73 @@ mod tests {
             classified.detail.kind,
             Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested)
         );
+    }
+
+    /// Issue #1966 — a question tool that enumerated answers carries the
+    /// choice list on the observation, so a client can offer those answers
+    /// instead of permission-shaped yes/no chips.
+    #[test]
+    fn structured_question_carries_its_answer_choices() {
+        let body = serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "toolName": "AskUserQuestion",
+            "toolInput": {
+                "questions": [{
+                    "question": "Should the deployment target staging or production?",
+                    "options": [
+                        { "label": "Staging" },
+                        { "label": "Production" },
+                    ],
+                }],
+            },
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&body, "anthropic", |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        let request = classified.detail.request.expect("a question with answers carries its choices");
+        assert_eq!(request.choices, vec!["Staging".to_string(), "Production".to_string()]);
+    }
+
+    /// Issue #1966 — an open question (no enumerated answers) and a
+    /// permission decision both carry NO request schema. Absence is the signal
+    /// that keeps a client from inventing yes/no semantics.
+    #[test]
+    fn open_question_and_permission_request_carry_no_choices() {
+        let open = serde_json::json!({
+            "hookEventName": "PreToolUse",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "toolName": "AskUserQuestion",
+            "toolInput": { "questions": [{ "question": "Which branch should I use?" }] },
+        })
+        .to_string()
+        .into_bytes();
+        assert!(classify(&open, "anthropic", |_| Some(0)).detail.request.is_none());
+
+        let permission = serde_json::json!({
+            "hookEventName": "PermissionRequest",
+            "sessionId": "550e8400-e29b-41d4-a716-446655440000",
+            "toolName": "Edit",
+            "toolInput": { "file_path": "src/lib/auth.ts" },
+        })
+        .to_string()
+        .into_bytes();
+        let classified = classify(&permission, "anthropic", |_| Some(0));
+        assert_eq!(classified.decision, Decision::MarkInput);
+        assert!(classified.detail.request.is_none());
+    }
+
+    /// Issue #1966 — choices repeated across the questions of one request are
+    /// offered once, and a blank label is not an answer.
+    #[test]
+    fn question_choices_are_deduplicated_and_validated() {
+        use crate::agent::session_lifecycle::InputRequest;
+        assert_eq!(
+            InputRequest::from_choices(vec!["Yes", "  ", "Yes", "No "]).map(|request| request.choices),
+            Some(vec!["Yes".to_string(), "No".to_string()])
+        );
+        assert!(InputRequest::from_choices(Vec::<String>::new()).is_none());
     }
 
     /// Unstructured prose mentioning "question" must NOT become a

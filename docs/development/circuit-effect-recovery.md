@@ -3,6 +3,8 @@
 This contributor reference maps every effect emitted by the Circuit stepper to
 its durable intent, dispatch, result, cancellation, and restart policy. It
 describes the current implementation and the automated evidence that pins it.
+The [September 30 recovery audit](circuit-recovery-2026-09-30.md) records the
+live failures behind the report-commit and inherited-attempt regression tests.
 The user workflow for uncertain actions is in
 [Agent Node Circuits](agent-node-circuits.md).
 
@@ -47,6 +49,21 @@ result cannot replace cancellation or a newer attempt. Only OpenPr has a
 read-only external recheck. Other GitHub mutations and prompt/spawn outcomes
 remain manual attestations; `not_performed` is the only path to a deliberate
 new attempt.
+
+OpenPr checkpoints with a saved target also receive up to five automatic
+read-only rechecks, at least one minute apart. The count and next eligible time
+are persisted per attempt before lookup; restart cannot reset the allowance.
+Manual recheck remains available afterwards. Neither path reclaims the original
+mutation. A matching lookup commits the PR identity and reconciliation together.
+
+Attached-agent completion gates can accept an operator-recorded completion,
+using the same eligibility policy for the displayed action and the command.
+The transaction checks the history revision, current run and attempt, and known
+work/request/conflict blockers, then records the outcome without synthesizing
+native observations. Review verdicts and approval gates cannot be attested this
+way. An already-admitted feedback delivery can be attested on a changes-requested
+route; requiring all ancestor verdicts to be approved would deadlock that route.
+The next ordinary worker tick schedules downstream work.
 
 The focused deterministic evidence is:
 

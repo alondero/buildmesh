@@ -15,6 +15,34 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[test]
+fn inherited_retry_attempt_can_commit_github_result() {
+    let fixture = dispatch_fixture();
+    crate::db::commit_circuit_advance(fixture.run_id, None, None, &[
+        CircuitStepOp { node_id: "implementer".into(), status: "completed".into(),
+            outcome: Some(Some("completed".into())), error: None, agent_node_id: None,
+            attempt: 2, fresh_attempt: true },
+        CircuitStepOp { node_id: "open_pr".into(), status: "failed".into(),
+            outcome: Some(Some("failed".into())), error: Some(Some("branch not pushed".into())),
+            agent_node_id: None, attempt: 1, fresh_attempt: false },
+    ]).unwrap();
+    let mut view = running_view(fixture.run_id);
+    let transition = advance(&mut view, &CircuitEvent::Tick(
+        crate::circuit::stepper::Capacity { circuit_free_slots: 4, agent_free_slots: 4 }));
+    persist_transition(fixture.run_id, &mut view, &transition).unwrap();
+    assert_eq!(view.step("open_pr").unwrap().attempt, 2);
+    assert_eq!(view.step("open_pr").unwrap().status, StepStatus::Running);
+    let event = CircuitEvent::GithubActionResult { node_id: "open_pr".into(), success: true,
+        pr_number: Some(314), pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
+        pr_head_ref: Some(DISPATCH_HEAD.into()), pr_title: Some("Fixed".into()), error: None };
+    persist_effect_result(&mut view, &event).expect("retry projection must match durable attempt and error");
+    assert_eq!(reopened_run(fixture.run_id).state, "completed");
+    assert_eq!(run_context(fixture.run_id).get("pr.number"), Some("314"));
+    let stored = crate::db::list_circuit_run_steps(fixture.run_id).unwrap();
+    let step = stored.iter().find(|step| step.node_id == "open_pr").unwrap();
+    assert_eq!(step.outcome.as_deref(), Some("completed"), "restart must preserve outcome-based routing");
+}
+
+#[test]
 fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
     for action in [
         GithubActionKind::AddLabel,
@@ -1003,6 +1031,44 @@ fn operator_recheck(run_id: i64) {
     .unwrap();
 }
 
+#[test]
+fn automatic_pr_reconciliation_is_read_only_durable_and_bounded() {
+    let fixture = open_pr_fixture();
+    let mut view = running_view(fixture.run_id);
+    reconcile_stuck_github_step(&mut view);
+    for index in 0..5 {
+        let event = CircuitEvent::GithubRecheckDue { node_id:"open_pr".into(), attempt:1, now_ms:1000 + index * 60_000 };
+        let transition = advance(&mut view, &event);
+        assert_eq!(transition.effects.len(),1);
+        persist_transition(fixture.run_id, &mut view, &transition).unwrap();
+        let active = active_run(fixture.run_id);
+        let missing = github::reconcile_open_pr_for_worker(&active, &mut view, "open_pr", |_,_,_| Ok(None));
+        persist_effect_result(&mut view, &missing).unwrap();
+        // Reconstruct solely from the ledger, as after an app restart.
+        view = running_view(fixture.run_id);
+        let too_soon = advance(&mut view, &CircuitEvent::GithubRecheckDue {
+            node_id:"open_pr".into(), attempt:1, now_ms:1001 + index * 60_000 });
+        assert!(too_soon.effects.is_empty());
+    }
+    let exhausted = advance(&mut view, &CircuitEvent::GithubRecheckDue {
+        node_id:"open_pr".into(), attempt:1, now_ms:1_000_000 });
+    assert!(exhausted.effects.is_empty());
+    assert_eq!(view.step("open_pr").unwrap().status,StepStatus::Unverified);
+    assert_eq!(history_count(fixture.run_id,"effect_possible_dispatch"),1);
+    let history = crate::db::circuit::evidence::history(fixture.run_id).unwrap();
+    assert!(history.entries.iter().any(|entry| entry.kind == "checkpoint_reason"
+        && entry.detail.contains("No open pull request was found")));
+    operator_recheck(fixture.run_id);
+    let mut view = resume_queued_recheck(fixture.run_id);
+    let active = active_run(fixture.run_id);
+    let found = github::reconcile_open_pr_for_worker(&active, &mut view,"open_pr", |_,_,_| Ok(Some(pull_request("feature/circuit-recovery"))));
+    persist_effect_result(&mut view, &found).unwrap();
+    assert_eq!(reopened_run(fixture.run_id).state,"completed");
+    let history = crate::db::circuit::evidence::history(fixture.run_id).unwrap();
+    assert!(history.entries.iter().any(|entry| entry.kind == "checkpoint_reason"
+        && entry.detail.contains("No open pull request was found")), "recovery retains the original reason");
+}
+
 /// The worker's next tick promotes the queued recheck back to `Running` and
 /// re-emits the read-only GitHub call. Returns the view at that handoff, which
 /// is where the deterministic reconciliation begins.
@@ -1103,16 +1169,16 @@ fn open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_secon
     assert_eq!(effect_state(fixture.run_id), "uncertain");
     assert_eq!(history_count(fixture.run_id, "effect_possible_dispatch"), 1);
 
-    // Explicit operator Recheck, then the worker reschedules the recheck.
-    operator_recheck(fixture.run_id);
-    assert_eq!(open_pr_step_status(fixture.run_id), "pending_slot");
-    let mut resumed = resume_queued_recheck(fixture.run_id);
-    assert_eq!(open_pr_step_status(fixture.run_id), "running");
-    assert_eq!(effect_state(fixture.run_id), "uncertain");
-
-    // The read-only lookup reconciles the found PR onto the same run.
+    // Automatic read-only reconciliation uses the same durable attempt and
+    // production effect dispatcher; the scripted endpoint rejects a POST.
+    let mut resumed = running_view(fixture.run_id);
+    let transition = advance(&mut resumed, &CircuitEvent::GithubRecheckDue {
+        node_id:"open_pr".into(), attempt:1, now_ms:1000 });
+    assert_eq!(transition.effects.len(),1);
+    persist_transition(fixture.run_id, &mut resumed, &transition).unwrap();
     let active = active_run(fixture.run_id);
-    let event = recheck_with_client(&active, &mut resumed, &client);
+    let event = super::execute_call_github_effect(&active, &mut resumed, "open_pr",
+        GithubActionKind::OpenPr, None, None, Some(&client)).unwrap().remove(0);
     assert!(matches!(
         event,
         CircuitEvent::GithubActionResult { success: true, pr_number: Some(314), .. }

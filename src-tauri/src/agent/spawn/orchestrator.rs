@@ -235,7 +235,7 @@ pub(crate) async fn spawn_with_intent(
 
     // Issue #1180 — the prefill comes from `SpawnIntent::initial_prompt`,
     // the single source of truth shared with the desktop draft response
-    // and the Autopilot watcher. `into_string()` consumes the
+    // and the Circuit worker. `into_string()` consumes the
     // `InitialPrompt` wrapper, giving us an owned `String` without an
     // extra `as_str().to_string()` re-allocation. A supporting harness
     // forwards the same string the user already saw on the draft

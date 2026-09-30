@@ -95,6 +95,7 @@ mod tests {
             timestamp: "2026-08-31T00:00:00+00:00".into(),
             signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
             semantic_turn: None,
+            request: None,
         };
         let json = serde_json::to_string(&EventMsg::LifecycleChanged(Box::new(payload))).unwrap();
         assert!(json.contains(r#""type":"agent-lifecycle""#));
@@ -119,6 +120,7 @@ mod tests {
             timestamp: "2026-08-31T00:00:00+00:00".into(),
             signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
             semantic_turn: None,
+            request: None,
         };
         emit(EventMsg::LifecycleChanged(Box::new(payload)));
         let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())

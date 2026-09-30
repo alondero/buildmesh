@@ -259,6 +259,23 @@ mod tests {
                 output:Some(candidate.output), binding:Some(candidate.binding) });
             assert_eq!(routed.state, RunState::Completed);
             assert!(!transition.classifications[0].lifecycle_verified);
+            // Exercise the durable boundary too: a stale Running projection
+            // must not contradict the readiness decision for this same report.
+            let mut db = rusqlite::Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&db).unwrap();
+            db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+                INSERT INTO agent_nodes(id,mesh_id,name,path,status,cli_session_id,session_started_at)
+                VALUES(900,1,'agent','/repo','running','session',100);
+                INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+                INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(42,1,1,'running');").unwrap();
+            crate::db::circuit::evidence::commit_transition_locked(
+                &mut db, 42, Some("completed"), &routed.context.to_json().unwrap(), &[],
+                crate::db::circuit::evidence::EvidenceWrite {
+                    input_guard: transition.input_guard.as_ref(),
+                    classifications: &transition.classifications,
+                    ..Default::default()
+                },
+            ).expect("the admitted report must commit despite a stale Running display");
         }
         for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft),
             (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {

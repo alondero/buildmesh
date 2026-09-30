@@ -7,7 +7,7 @@
 //! The GitHub-issue / GitHub-PR prefill helpers (`format_issue_prefill`,
 //! `format_pr_prefill`) used to live here; both were consolidated into
 //! [`crate::agent::spawn::SpawnIntent::initial_prompt`] (issue #1180) so the
-//! desktop draft, the background launch, and the Autopilot watcher all
+//! desktop draft, the background launch, and the Circuit worker all
 //! derive from the same `SpawnIntent` instead of three divergent free
 //! functions.
 //!
@@ -38,7 +38,7 @@ use ts_rs::TS;
 // ---------------------------------------------------------------------------
 
 /// Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
-/// after the `pending` row is committed, by the autopilot spawn path, and by
+/// after the `pending` row is committed, by the Circuit spawn path, and by
 /// the HTTP-based E2E test server (`commands::test::handle_inject_test_output`'s
 /// sibling). The frontend `agentNodeStore` refetches the node list on receipt
 /// (issue #490 renamed this from `session-created`).
@@ -324,7 +324,7 @@ pub async fn spawn_issue_agent(
 // duplicated the logic. The single source of truth lives in
 // `agent::spawn::intent` and is reached via
 // `SpawnIntent::Issue(context).initial_prompt()` everywhere (desktop draft,
-// background launch, Autopilot watcher).
+// background launch, Circuit worker).
 
 // ---------------------------------------------------------------------------
 // Two-stage issue spawn (fast stage-1 + background stage-2)
@@ -814,7 +814,7 @@ pub fn create_pr_node(
 /// used solely for session naming via `pr_node_name`) and
 /// the prefill surfaced on the desktop draft comes from
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
-/// with the background launch path and the Autopilot watcher.
+/// with the background launch path and the Circuit worker.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_node_impl(
@@ -905,7 +905,7 @@ pub(crate) fn create_pr_node_impl_configured(
     // surfaces (and the `spawn_with_intent` background task forwards to the
     // harness) come from the same `initial_prompt()` source. Issue #1180
     // closed the previous `format_pr_prefill` helper duplication — three
-    // sites (commands, services/autopilot, autopilot/launch) used to
+    // sites (commands, services/circuit_worker, circuit/launch) used to
     // recompute the prompt independently and could silently drift.
     let intent = SpawnIntent::PullRequest(PullRequestContext {
         owner,
