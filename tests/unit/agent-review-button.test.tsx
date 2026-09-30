@@ -150,7 +150,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.getByRole('heading', { name: 'Review or circuit for Fix parser' })).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Maximum review rounds'), { target: { value: '5' } });
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null, false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 5, null));
     await waitFor(() => expect(useUIStore.getState().probeTab).toBe('circuits'));
     expect(useMeshStore.getState().selectedMeshId).toBe(7);
     expect(useAgentNodeStore.getState().activeNodeId).toBe(42);
@@ -161,7 +161,7 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
   it('themes its dropdowns with a defined surface token (regression: bg-surface-raised)', () => {
@@ -205,7 +205,7 @@ describe('agent workflow title-bar control', () => {
     // by the Rust test `native_configuration_resolves_selected_values_before_defaults`).
     expect(screen.getByTestId('reviewer-provider-selection').textContent).toBe('MiniMax');
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax', false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'launch/claude:minimax'));
   });
 
   it('sends a cross-harness pick without warning about the model', async () => {
@@ -218,7 +218,7 @@ describe('agent workflow title-bar control', () => {
     expect(screen.queryByText(/#1690/)).toBeNull();
     fireEvent.click(screen.getByRole('menuitem', { name: /Codex/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex', false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, 'codex'));
   });
 
   it('resets the reviewer provider when the dialog is reopened', async () => {
@@ -230,7 +230,7 @@ describe('agent workflow title-bar control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
     expect(screen.getByTestId('reviewer-provider-default').getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null, false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null));
   });
 
   it('offers saved manual Circuits and passes the selected id', async () => {
@@ -248,7 +248,7 @@ describe('agent workflow title-bar control', () => {
     // not that the control is hidden.
     expect(screen.queryByRole('menu', { name: 'Select a provider' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Start Circuit' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null, false));
+    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, 3, 3, null));
   });
 
   it('keeps an actionable backend error in the dialog', async () => {
@@ -331,35 +331,5 @@ describe('agent workflow title-bar control', () => {
     // Let any pending microtask resolve so we can compare counts after.
     await Promise.resolve();
     expect(callCount.n).toBe(0);
-  });
-
-  it('forwards the readiness-gate override (#1792) when the user opts in', async () => {
-    // The override lets the user mint a run on a never-observed source
-    // (no `cli_session_id`, no readable `assistant_report`); the backend
-    // records it on the run's `context_json` for audit.
-    renderButton();
-    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    fireEvent.click(screen.getByLabelText(/Review an agent that hasn.t started yet/));
-    fireEvent.click(screen.getByRole('button', { name: 'Start review' }));
-    await waitFor(() => expect(trigger).toHaveBeenCalledWith(42, null, 3, null, true));
-  });
-
-  it('resets the readiness-gate override when the dialog is reopened', async () => {
-    // The override is intentionally off by default so power users opt in
-    // by choice on every review; it does not leak across modal opens.
-    // `async` + `findByLabelText` so the async `listCircuits` state update
-    // (triggered by every modal open) settles inside `act(...)` and the
-    // test runs without the "An update to AgentReviewButton inside a
-    // test was not wrapped in act(...)" warning. The same pattern as
-    // `offers saved manual Circuits and passes the selected id`.
-    renderButton();
-    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const override = await screen.findByLabelText(/Review an agent that hasn.t started yet/);
-    fireEvent.click(override);
-    expect((override as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Start review or circuit' }));
-    const reopened = await screen.findByLabelText(/Review an agent that hasn.t started yet/);
-    expect((reopened as HTMLInputElement).checked).toBe(false);
   });
 });

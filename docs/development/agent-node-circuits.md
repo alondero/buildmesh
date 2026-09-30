@@ -104,40 +104,29 @@ by another Circuit or legacy Autopilot must finish that automation first, so
 two controllers cannot send it competing instructions. Suspended agents must
 be resumed before starting a workflow.
 
-## Source-agent readiness gate (#1792)
+## When a review can start
 
-The built-in review preset refuses to mint a run on a source agent that has
-not produced any observable evidence yet — neither a captured `cli_session_id`
-nor a readable `assistant_report` revision. A freshly-spawned node reaches
-`status = Running` before the worker has had time to read a session identity
-from the harness's transcript dir or capture a readable report, so without
-this gate the review would burn the full `ACTIVE_WAIT_MS` budget waiting for
-evidence that never arrives. When the gate fires, the dialog shows:
+A review or authored Circuit must pass two source checks: the IPC command
+requires a live process, and the ledger mint path requires status
+`Running | AwaitingInput | Completed | Ready` — resume a suspended agent first.
+There is no separate "the source has been observed" precondition: a source
+whose worker has not yet captured a session identity or a readable report
+still starts.
 
-> Source agent has not started yet — wait for its first turn before starting
-> a review.
+The run's first step waits for the source to yield a turn, so a source that has
+not finished its first turn is fine — the review simply waits for it. That wait
+is bounded: if the source never becomes observable, the [#1791
+watchdog](../releases/v1.4.0.md#circuit-watchdog-fails-fast-on-never-observed-agents-1791)
+ends it after 15 minutes with "agent produced no session identity or report
+within 15 minutes — inspect the agent terminal" instead of holding the run for
+the full active-wait budget, as in the [Muse Index review](circuit-run-183-muse-index.md).
 
-The dialog opens a **Review an agent that hasn't started yet** checkbox in
-the same panel as the rounds control. Ticking it bypasses the gate and the
-override is recorded on the run's `context_json` (`source.review_allow_unobserved
-= "1"`) so the audit trail shows which runs skipped the readiness check. The
-checkbox defaults to off, so the default behaviour is to wait for the source
-to be observed.
-
-The gate is **only** enforced on the built-in review preset:
-
-- **Recovery** (Continue review after a failed run) bypasses the gate: the
-  source is already known to be observed via its previous run's evidence.
-- **Explicit user-selected Circuits** (any authored blueprint chosen from the
-  picker) bypass the gate: the user is asking for a specific blueprint, not
-  the built-in review preset.
-- **Recovery-via-IPC entry points** (Continue review, the reviewer's feedback
-  step) call the recovery path internally and therefore inherit its
-  permissive behaviour.
-
-The override does not soften any other gate: the reviewer still has to be
-alive, the source still has to be in `Running | AwaitingInput | Completed |
-Ready`, and the first-writer-wins dedupe (issue #1660) still hands back the
+The title-bar control is stricter than the backend on one axis: it disables
+itself when the *source* harness cannot yield a turn (for example, a plain
+Terminal, or a harness with neither a native attention hook nor a passive turn
+watcher), because `await_source` and `verdict` would otherwise park forever
+waiting for a status the harness never reports. The reviewer must likewise be an
+eligible harness. The first-writer-wins dedupe (issue #1660) still hands back the
 original run id on a retry.
 
 ## Unverified checkpoints and evidence history
