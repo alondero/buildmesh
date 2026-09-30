@@ -357,6 +357,66 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
     });
 
+    // Issue #1460 — the two project destinations are reachable from the
+    // title bar through one disclosure, and take no permanent space while it
+    // is closed (the issue's "must not consume permanent Probe rail space").
+    describe('project overflow disclosure (issue #1460)', () => {
+      it('renders nothing until the trigger is clicked', async () => {
+        await renderTitleBar();
+        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+        expect(screen.getByRole('button', { name: 'More project actions' }).getAttribute('aria-expanded')).toBe('false');
+      });
+
+      it('lists both destinations with their user-facing names and one-line scope', async () => {
+        await renderTitleBar();
+        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
+
+        const panel = screen.getByTestId('titlebar-overflow-panel');
+        expect(panel.textContent).toContain('Project Settings');
+        expect(panel.textContent).toContain('Repository');
+        // The descriptions are what stop the two entries looking like an
+        // undifferentiated pair again.
+        expect(panel.textContent).toMatch(/Health, recovery, cleanup/);
+        // Not the pre-#1460 name.
+        expect(panel.textContent).not.toContain('Worktree Manager');
+      });
+
+      it('opens the Project Settings destination in the inspector', async () => {
+        await renderTitleBar();
+        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
+        fireEvent.click(screen.getByTestId('titlebar-overflow-properties'));
+
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('properties');
+        // Choosing an entry closes the disclosure and hands focus back, so
+        // the keyboard user is not stranded at the title bar.
+        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+      });
+
+      it('opens the Repository destination in the inspector', async () => {
+        await renderTitleBar();
+        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
+        fireEvent.click(screen.getByTestId('titlebar-overflow-worktrees'));
+
+        expect(useUIStore.getState().probeOpen).toBe(true);
+        expect(useUIStore.getState().probeTab).toBe('worktrees');
+      });
+
+      it('toggles closed and closes on Escape', async () => {
+        await renderTitleBar();
+        const trigger = screen.getByRole('button', { name: 'More project actions' });
+        fireEvent.click(trigger);
+        expect(screen.getByTestId('titlebar-overflow-panel')).toBeTruthy();
+        fireEvent.click(trigger);
+        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+
+        fireEvent.click(trigger);
+        expect(screen.getByTestId('titlebar-overflow-panel')).toBeTruthy();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+      });
+    });
+
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
       // Pill and switcher labels drop to icon-only below the SAME tier

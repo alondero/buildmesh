@@ -1,7 +1,7 @@
 /**
  * Field — label/control rhythm wrapper for Probe tabs.
  *
- * Lifted from `MeshPropertiesTab` (wayfinder #990 ticket #994) when a
+ * Lifted from `ProjectSettingsTab` (wayfinder #990 ticket #994) when a
  * second form tab (`AutopilotProbeTab`) needed the same `htmlFor`/`id`
  * wiring — the same lift pattern as `ProbeTabBody` (issue #842),
  * `ProbeToolbar` (issue #813), and `SaveIndicator` (issue #729).

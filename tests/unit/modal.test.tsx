@@ -418,7 +418,7 @@ describe('Modal portals to document.body (issue #1292)', () => {
   // running-node Regenerate `<ConfirmDialog>` is still nested inside the
   // NodeItem row, which applies `hover:brightness-125` (`filter`), so it
   // inherits the same bug. Patching the call sites one by one would chain
-  // through ConfirmDialog → MeshPropertiesTab → WorktreeManagerTab → …
+  // through ConfirmDialog → ProjectSettingsTab → RepositoryTab → …
   // Doing it once inside `Modal` covers every consumer.
   //
   // The bug was: `position: fixed` resolves against the nearest ancestor

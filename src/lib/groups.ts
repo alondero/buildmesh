@@ -97,7 +97,7 @@ export function hasSpawnableAgent(
  * (issue #575 / ADR-0016 §6) — the wire carries the grouping field
  * explicitly so the renderer never re-derives it. This helper is
  * the single source of truth for that bucketing (was duplicated in
- * `GroupedProviderMenu`, `MeshPropertiesTab`, and mobile
+ * `GroupedProviderMenu`, `ProjectSettingsTab`, and mobile
  * `NodeList`'s `ProviderPicker`).
  *
  * An optional `filter` is applied per-row BEFORE bucketing so a

@@ -192,7 +192,7 @@ describe('theme text-token contrast (#732)', () => {
 describe('load-bearing text-text-muted sites promoted to text-text-secondary (#732)', () => {
   const loadBearingSites: Array<{ file: string; fragment: string; mustNotContain: string }> = [
     {
-      file: 'src/components/Probe/WorktreeManagerTab.tsx',
+      file: 'src/components/Probe/RepositoryTab.tsx',
       // Repo path (line 882) — uniquely identified by the trailing
       // `truncate flex-1 min-w-0` that no other `text-2xs font-mono`
       // line in this file uses.
@@ -200,7 +200,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/Probe/WorktreeManagerTab.tsx',
+      file: 'src/components/Probe/RepositoryTab.tsx',
       // Remote-tracking branch (line 1121) — the `text-2xs font-mono`
       // prefix with `px-1 truncate` tail is unique to this site (the
       // repo-path line uses `flex-1 min-w-0` instead).
@@ -208,7 +208,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/Probe/WorktreeManagerTab.tsx',
+      file: 'src/components/Probe/RepositoryTab.tsx',
       // Ahead/behind counts (line 987). Anchor on the body content
       // `↑{b.ahead}` so the assertion cannot be confused with the
       // decorative Badge helper that also uses `text-2xs`.
@@ -216,7 +216,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/Probe/WorktreeManagerTab.tsx',
+      file: 'src/components/Probe/RepositoryTab.tsx',
       // Local branch name (line 1054).
       fragment: ' · {w.branch}',
       mustNotContain: 'text-text-muted',
@@ -264,7 +264,7 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
       mustNotContain: 'text-text-muted',
     },
     {
-      file: 'src/components/Probe/MeshPropertiesTab.tsx',
+      file: 'src/components/Probe/ProjectSettingsTab.tsx',
       // The mesh directory read-only field (line 339). Anchor on the
       // className tail — `{activeMeshPath}` only appears on the `value=`
       // line, not the className line, so it would let a className

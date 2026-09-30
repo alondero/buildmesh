@@ -254,7 +254,7 @@ describe('ProbePanel', () => {
 
   it('renders the Mesh Properties form (issue #375) when the âš™ï¸ tab is open', () => {
     // Sanity check on the wiring: the properties tab now hosts the new
-    // `<MeshPropertiesTab>` (config form), not the legacy placeholder
+    // `<ProjectSettingsTab>` (config form), not the legacy placeholder
     // "coming soon" message. A specific input label is enough to prove
     // the form mounted.
     useUIStore.setState({ probeOpen: true, probeTab: 'properties' });

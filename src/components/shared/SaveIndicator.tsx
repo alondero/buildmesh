@@ -1,7 +1,7 @@
 /**
  * SaveIndicator — `min-h-7` slot keeps the surrounding UI from
  * reflowing when the status flips between `error` and `idle`. Lifted
- * out of `MeshPropertiesTab` (issue #729) so `ScratchpadTab` adopts
+ * out of `ProjectSettingsTab` (issue #729) so `ScratchpadTab` adopts
  * the same surface (issue #813).
  */
 import type { SaveStatus } from '../../hooks/useSaveStatus';
