@@ -181,8 +181,19 @@ Now has no source context and rejects graphs requiring a source binding.
 the source finished before the run started. `ReviewVerdict` routes `completed`
 for explicit approval, `working` for findings requiring changes, and `blocked`
 for an unclear/incomplete review or a classifier failure. These are routing
-outcomes, not agent lifecycle statuses. Both gates reuse the existing Autopilot
-classification backend configuration.
+outcomes, not agent lifecycle statuses. Circuit reviewer prompts now ask for a
+final `BUILDMESH_REVIEW_V1: APPROVE`, `REQUEST_CHANGES`, or `BLOCKED` line
+(the prefix is required for each value). Fix feedback in the node-review preset
+asks for `BUILDMESH_HANDOFF_V1: READY` or `BLOCKED`. Valid result lines route
+without another model call; malformed or conflicting result lines cannot approve.
+The full report still carries findings and verification. Legacy free-form reports
+reuse the configured Autopilot classifier and existing verdict fallback.
+
+A fresh explicit result can establish report readiness despite a stale Running
+status. Session, input, report-revision, known child-work and human-request checks
+still apply. This is report-based handoff, not verified lifecycle completion.
+Dispatch appends the contract to saved/custom prompts without changing their
+review scope. Existing historical reports are not rewritten or auto-approved.
 
 The implementation lives in `autopilot/circuit/node_review.rs`, the pure
 stepper, and the existing Circuit worker. The built-in review graph is a

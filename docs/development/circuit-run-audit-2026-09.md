@@ -94,3 +94,51 @@ redraw without acceptance. These are automated seam tests and live read-only
 diagnosis, not a completed live Circuit under the patched binary. Initial Muse
 delivery before a session identity exists and ordinary unbuffered manual nodes
 retain their existing delivery path. Capacity policy is unchanged.
+
+
+## September 30: explicit circuit results
+
+Read-only stable-profile ledger, history, retained logs and source transcript
+inspection at base `4c04513487d6cf318d71a8076c366eeaaa964893` found:
+
+| Run | Observation |
+|---|---|
+| 266 | Reviewer process unavailable. |
+| 267, 268 | Review verdicts routed requested changes; both runs later failed. No evidence here establishes a classifier misroute. |
+| 269 | Second review requested changes; feedback submission could not confirm that the 8,416-character paste rendered. |
+| 270 | Reviewer 4671 explicitly requested changes; verdict routed `working` at 21:42:13 UTC. Feedback to source 4666 was acknowledged at 21:42:17. Source MiniMax Code wrote a final fixes report at 21:49:58, followed by a `background_task_read_settlement` custom record at 21:50:11, but its node remained Running. `await_fixes` became Unverified at 23:50:23. |
+| 271 | Failed after reviewer process-unavailable observations. |
+| 272 | First review requested changes and fixes completed; the next reviewer waited for session identity. |
+| 273 | Pending admission. |
+
+Run 270 is not proof of an incorrect verdict classifier. Its retained source
+report says both blocking findings were fixed and records 3,582 passing tests,
+while its gate timed out saying no new report. MiniMax Code report snapshots
+do not establish native turn completion; Running prevents report admission, and
+quiet-turn recovery depends on a sufficiently quiet terminal. The retained logs
+show no classifier invocation for source 4666 after feedback. The precise reason
+quiet recovery never invoked inference is not established by retained logs.
+
+The chosen simplification asks the agent that did the work to publish its result.
+At dispatch, reviewer prompts gain a versioned final verdict line; node-review
+feedback gains a versioned READY/BLOCKED handoff line. Both remain ordinary readable
+reports. A single valid terminal line removes the readiness/verdict inference
+round trip after evidence preflight, including with a stale Running projection.
+Malformed, duplicate, quoted, fenced and unknown-version claims cannot approve.
+Missing contracts retain legacy behavior. No graph migration, new dependency,
+credentials or report transmission to another provider is required.
+
+Jev remains a possible future fallback for genuinely unstructured reports. Its
+[typed decisions](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+and [confidence scores](https://docs.typesafe.ai/confidence) do not replace
+session/freshness evidence; domain-specific evaluation is still needed. For an
+orchestrated reviewer, directly declaring the decision is simpler than adding a
+second decision service to infer it.
+
+The replay regression uses run 270's MiniMax Code record shapes with an explicit
+handoff added. It must recover a Running/Unverified gate without claiming native
+lifecycle proof, and reject newer tools, stale revisions, input drafts, permission
+waits, conflicts and unfinished children. A worker regression first failed because
+an explicit verdict still invoked the classifier. These tests establish new
+protocol behavior, not recovery of the historical live run: no live outcomes,
+agent sessions or reviewed worktrees were changed.

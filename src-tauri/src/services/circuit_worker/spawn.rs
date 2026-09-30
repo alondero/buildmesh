@@ -549,7 +549,7 @@ pub(super) fn spawn_step_agent(
         parent_provider.as_deref(),
     );
 
-    let resolved_prompt = view.context.resolve(&prompt);
+    let resolved_prompt = super::report_contract::prompt(view, node_id, &view.context.resolve(&prompt));
     let source_issue = view
         .context
         .get("issue.number")

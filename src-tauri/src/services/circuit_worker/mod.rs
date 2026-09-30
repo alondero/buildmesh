@@ -62,6 +62,7 @@ mod jobs;
 mod github_recovery_tests;
 mod codex_observer;
 pub(crate) mod readiness;
+mod report_contract;
 pub(crate) mod observer_policy;
 pub(crate) mod native_hooks;
 mod spawn;
@@ -2183,6 +2184,9 @@ fn classify_gate_report(
     if spawn_hands_off_report(view, node_id) {
         return Some(evaluator::Classification::Completed);
     }
+    if let Some(result) = report_contract::interpretation(view, node_id, output) {
+        return Some(result);
+    }
     // Ready is a clean lifecycle turn completion, not an LLM judgement of
     // task quality. Review must work even when the classifier is unavailable.
     if review_turn_is_complete(view, node_id, status) {
@@ -2285,6 +2289,9 @@ fn reviewer_readiness(
 ) -> ReviewerReadiness {
     use crate::autopilot::evaluator::{reviewer_turn_prompt, Classification};
     if !(is_reviewer_verdict_gate(view, node_id) || spawn_hands_off_report(view, node_id)) || status != SessionStatus::AwaitingInput {
+        return ReviewerReadiness::Reportable;
+    }
+    if report_contract::declares_completion(view, node_id, output) {
         return ReviewerReadiness::Reportable;
     }
     match readiness(&reviewer_turn_prompt(output)) {
@@ -2693,6 +2700,7 @@ pub(super) fn execute_effects(
                 }
             }
             Effect::InjectPty { node_id, prompt, .. } => {
+                let prompt = report_contract::prompt(view, node_id, prompt);
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
                 let intent = db::circuit::evidence::EffectIntent { node_id: node_id.clone(), attempt, kind: db::circuit::evidence::EffectKind::Prompt };
                 match view.resolve_target_agent(node_id) {
@@ -2731,7 +2739,7 @@ pub(super) fn execute_effects(
                         // record already exists when the hook is handled
                         // (issue #1898).
                         match db::circuit::evidence::record_prompt_submission(
-                            active.run.id, node_id, attempt, target, prompt,
+                            active.run.id, node_id, attempt, target, &prompt,
                         ) {
                             Ok(revision) => view.context.set("evidence.revision", revision.to_string()),
                             Err(error) => {
@@ -2746,7 +2754,7 @@ pub(super) fn execute_effects(
                                 let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(target)
                                     .ok_or("Terminal input is already owned; prompt was not sent")?;
                                 crate::autopilot::pipeline::write_prompt_to_pty_guarded(
-                                    &crate::agent::process::PROCESS_REGISTRY, target, prompt, app, Some(&input),
+                                    &crate::agent::process::PROCESS_REGISTRY, target, &prompt, app, Some(&input),
                                 )
                             },
                             || db::circuit::evidence::acknowledge_prompt_delivery(active.run.id, node_id, attempt)
@@ -4529,6 +4537,23 @@ mod tests {
             should_classify_report(&view, "verdict", SessionStatus::AwaitingInput, "Findings: none. Verdict: approved.", None),
             "the reviewer's next report must be observed"
         );
+    }
+
+    #[test]
+    fn structured_review_routes_without_classifier() {
+        use crate::autopilot::evaluator::Classification;
+        let mut view = report_gate_view();
+        view.graph = CircuitGraph::agent_review(None, None, 3);
+        for (verdict, expected) in [("APPROVE", Classification::Completed),
+            ("REQUEST_CHANGES", Classification::Working), ("BLOCKED", Classification::Blocked)] {
+            let report = format!("Review details and verification.\nBUILDMESH_REVIEW_V1: {verdict}");
+            for status in [SessionStatus::Ready, SessionStatus::Completed, SessionStatus::AwaitingInput] {
+                assert_eq!(reviewer_readiness(&view, "verdict", status, &report,
+                    |_| panic!("structured final review needs no readiness inference")), ReviewerReadiness::Reportable);
+                assert_eq!(classify_gate_report(&view, "verdict", status, &report,
+                    |_| panic!("structured verdict needs no inference")), Some(expected));
+            }
+        }
     }
 
     #[test]
