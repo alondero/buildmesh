@@ -13,7 +13,7 @@
 //
 // Two intentionally decorative chips keep bare `rounded` and gain an
 // `// allow-bare-rounded` comment to bypass the guard:
-//   - src/components/Probe/WorktreeManagerTab.tsx (Badge, 9px status chip)
+//   - src/components/Probe/RepositoryTab.tsx (Badge, 9px status chip)
 //   - src/components/Probe/GitPullRequestsTab.tsx (10px "can't merge" pill)
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -28,7 +28,7 @@ if (files.length === 0) {
 // We match a unique enough substring of the className. Keep these in sync with
 // tests/unit/radii-audit.test.ts ALLOWED_BARE_ROUNDED.
 const KEEP_FRAGMENTS = [
-  "px-1 py-px rounded text-2xs", // WorktreeManagerTab Badge (was text-[9px] pre-#733 modernization)
+  "px-1 py-px rounded text-2xs", // RepositoryTab Badge (was text-[9px] pre-#733 modernization)
   "px-2 py-1 text-2xs rounded bg-bg-card text-text-muted", // GitPullRequestsTab "can't merge" (was text-[10px])
 ];
 

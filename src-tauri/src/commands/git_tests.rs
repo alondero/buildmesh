@@ -779,7 +779,7 @@ mod tests {
     /// The cache must live in `get_mesh_git_static`, NOT in
     /// `commands::github::check_gh_auth` itself: that command is also called by
     /// the mobile `/git/auth` HTTP route (`http/routes/git.rs:112`) and by
-    /// `MeshPropertiesTab.tsx` when the user clicks "re-check", and both
+    /// `ProjectSettingsTab.tsx` when the user clicks "re-check", and both
     /// want a fresh value.
     #[test]
     fn get_mesh_git_static_caches_gh_auth_across_calls() {

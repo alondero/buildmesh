@@ -332,7 +332,10 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(useUIStore.getState().probeTab).toBe('files');
 
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(screen.getByTestId('probe-tool-menu-properties').getAttribute('tabindex')).toBe('0');
+    // Issue #1460 — the rail's row order follows the palette's group order
+    // (Code: files, review | Project: properties, worktrees), so one row down
+    // from `review` is the second Project tile, `worktrees`.
+    expect(screen.getByTestId('probe-tool-menu-worktrees').getAttribute('tabindex')).toBe('0');
     expect(useUIStore.getState().probeTab).toBe('files');
   });
 
@@ -347,18 +350,20 @@ describe('ProbeToolRail (ADR-0032)', () => {
     expect(document.activeElement?.id).toBe('probe-rail-menu-files');
     const menu = screen.getByRole('menu', { name: 'All tools' });
 
-    // Under the old model this landed on 'worktrees' (a full virtual row down).
+    // Under the old model this landed on the third tile (a full virtual row down).
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
     expect(document.activeElement?.id).toBe('probe-rail-menu-review');
 
+    // Issue #1460 — the 1D order is the group order, so the next tile is
+    // `properties` (first Project tile), not `worktrees`.
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
-    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+    expect(document.activeElement?.id).toBe('probe-rail-menu-properties');
 
     // No second column exists — horizontal arrows do not move focus.
     fireEvent.keyDown(menu, { key: 'ArrowRight' });
-    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+    expect(document.activeElement?.id).toBe('probe-rail-menu-properties');
     fireEvent.keyDown(menu, { key: 'ArrowLeft' });
-    expect(document.activeElement?.id).toBe('probe-rail-menu-worktrees');
+    expect(document.activeElement?.id).toBe('probe-rail-menu-properties');
     expect(useUIStore.getState().probeTab).toBe('files');
 
     // ArrowUp walks back and the column wraps at both ends.

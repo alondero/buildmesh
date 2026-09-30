@@ -176,17 +176,27 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
   },
   'probe-worktrees': {
     id: 'probe-worktrees',
-    label: 'Open Worktrees',
-    subtitle: 'Switch branches and working folders',
+    label: 'Open Repository',
+    subtitle: 'Check health, recover, and clean up branches',
     icon: 'worktrees',
-    keywords: ['git', 'worktree', 'branch'],
+    keywords: ['repository', 'worktree', 'branch', 'git', 'prune', 'cleanup', 'maintenance'],
   },
   'probe-properties': {
     id: 'probe-properties',
     label: 'Open Project Settings',
-    subtitle: 'Configure the selected project',
+    subtitle: 'Identity, agent defaults, commands, worktrees',
     icon: 'properties',
-    keywords: ['project', 'properties', 'build', 'run'],
+    keywords: [
+      'project',
+      'properties',
+      'build',
+      'run',
+      'worktree',
+      'base ref',
+      'harness',
+      'sandbox',
+      'pool',
+    ],
   },
   'probe-circuits': {
     // See probe-circuits above — the `Automation:` prefix was a one-off

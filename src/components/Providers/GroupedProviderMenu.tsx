@@ -45,7 +45,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
   // selectors; resume pickers keep them but omit configuration rows.
   // Group by `group_key`, preserving the backend's harness order. The filter
   // is applied per-row before bucketing so a filtered header can collapse.
-  // The bucketing is shared with `MeshPropertiesTab` and the mobile
+  // The bucketing is shared with `ProjectSettingsTab` and the mobile
   // `ProviderPicker` via `groupByHarness` (issue #583 cleanup).
   const groups = useMemo(
     () => groupByHarness(providers, { filter: (option) =>

@@ -43,8 +43,8 @@ implementations.
 | Project Files (`files`) | Mesh | Mesh-owned repository view; it uses the focused node's working tree only when that node belongs to the Mesh. Its changed-files view is `HEAD`-relative. |
 | Agent Changes (`review`) | Agent | One focused Agent Node; its change set and diffs are relative to the node's Base Ref / merge-base. |
 | Usage (`usage`) | Host | Host-global. It never resolves or displays a Mesh or Agent subject. |
-| Worktree Manager (`worktrees`) | Mesh | Mesh worktree inventory and maintenance actions. |
-| Mesh Properties (`properties`) | Mesh | Mesh configuration, including destructive Mesh actions. |
+| Repository (`worktrees`) | Mesh | Mesh-owned repository maintenance: health and recovery, branch/worktree cleanup, remote-tracking prune. Never acts on a focused Agent Node's worktree. |
+| Project Settings (`properties`) | Mesh | Mesh configuration only: identity and directory, agent runtime defaults, build and run, worktree strategy. Destructive Mesh actions are confined to its labelled danger zone. |
 | Autopilot (`autopilot`) | Mesh | Mesh Autopilot policy and status. |
 | Circuits (`circuits`) | Mesh | Mesh-owned Circuit blueprints and runs. |
 | Git Issues (`issues`) | Mesh | Mesh GitHub feed and issue-to-node actions. |

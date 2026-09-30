@@ -572,7 +572,7 @@ describe('GridNodeHeader PR chip', () => {
  *      working-tree node resolves to the worktree subdir, the root-mode
  *      node resolves to the mesh root.
  *   3. Errors from the IPC are swallowed (`console.error`, no reject),
- *      matching the precedent in `WorktreeManagerTab.openInExplorer`
+ *      matching the precedent in `RepositoryTab.openInExplorer`
  *      and avoiding a toast storm when a worktree row is stale.
  */
 describe('GridNodeHeader resume affordance', () => {

@@ -401,7 +401,7 @@ static DB: OnceCell<Database> = OnceCell::new();
 //     auto-pause threshold (`loop_consecutive_failures` check vs a
 //     descending walk of `(loop_iteration, state)`); (c) interval-delay
 //     pacing (`loop_interval_seconds` check vs `MAX(updated_at)` of
-//     loop rows). All three checks happen in `services::autopilot`
+//     loop rows). These were enforced by the retired legacy poller.
 //     (`evaluate_loop_continuation`), reading through the hydration
 //     helper `list_loop_history`. See `ensure_autopilot_run_loop_iteration`
 //     for the additive safety net.

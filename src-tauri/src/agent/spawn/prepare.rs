@@ -272,12 +272,12 @@ pub(super) async fn prepare_context(
         .as_ref()
         .and_then(|r| r.worktree_mode.as_deref())
         .unwrap_or(DEFAULT_WORKTREE_MODE);
-    // Autopilot enforcement (issue #482, PRD #480): auto-spawned nodes must
+    // Circuit enforcement: implementation nodes must
     // always work on a real branch (and in a worktree) — the wrap-up sequence
     // pushes a branch and opens a PR, which a detached-HEAD worktree or a
     // shared mesh root cannot do. The ledger row is written before stage-2
     // starts, so this read is ordered correctly. The node row itself already
-    // carries `use_worktree = true` (spawn override in `services::autopilot`).
+    // carries `use_worktree = true` (spawn override in `services::circuit_worker`).
     let force_branched = matches!(worktree_policy, WorktreePolicy::ForceBranched);
     let use_worktree = use_worktree || force_branched;
     let worktree_mode = if force_branched {

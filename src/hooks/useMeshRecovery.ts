@@ -9,7 +9,7 @@ import {
 /**
  * Mesh-health recovery actions (issue #283 — extracted from the inline
  * orchestration that used to live in `BranchesWorktreesSection`; #377
- * moved the live UI to the `WorktreeManagerTab` inside the Probe Panel
+ * moved the live UI to the `RepositoryTab` inside the Probe Panel
  * and deleted the now-dead legacy file).
  *
  * Owns the in-flight flag + one-line status message + the "always invalidate

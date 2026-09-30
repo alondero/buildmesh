@@ -12,7 +12,7 @@
  * active mesh has already changed).
  *
  * Save status converged onto the same `useSaveStatus` hook +
- * `<SaveIndicator>` primitive as `MeshPropertiesTab` (issue #813).
+ * `<SaveIndicator>` primitive as `ProjectSettingsTab` (issue #813).
  * The "Load failed" pill at the corner is a separate channel —
  * persists until the next read resolves, vs the save status which
  * auto-clears on success.
@@ -104,7 +104,7 @@ export function ScratchpadTab() {
       setText('');
       // Reset the save-status on mesh-switch so a stale "Save failed"
       // from the outgoing mesh doesn't bleed onto the incoming mesh's
-      // corner. Same defensive pattern as `MeshPropertiesTab.tsx`'s
+      // corner. Same defensive pattern as `ProjectSettingsTab.tsx`'s
       // `saveStatus.reset()` effect.
       saveStatus.reset();
       setLoadError(null);

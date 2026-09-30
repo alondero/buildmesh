@@ -556,7 +556,7 @@ mod tests {
     //
     // These pin the panic-isolation spine used by every long-lived worker
     // thread. The per-worker fault-injection tests (in
-    // services::autopilot etc.) exercise the full wiring; here we only
+    // services::circuit_worker and related workers) exercise the full wiring; here we only
     // pin the helper itself. Mutex-recovery coverage lives with the
     // per-module helpers (`db::write_conn`, `lock_planner_set`,
     // `lock_circuit_worker_static`) introduced by issue #1224.

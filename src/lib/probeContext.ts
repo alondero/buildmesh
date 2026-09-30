@@ -81,17 +81,31 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     stateful: false,
   },
   worktrees: {
-    label: 'Worktree Manager',
+    // Issue #1460 — renamed from "Worktree Manager". The destination is
+    // maintenance only (health, recovery, cleanup, prune); the worktree
+    // *configuration* that used to sit here moved to Project Settings, and
+    // keeping the old name would keep promising configuration the
+    // destination no longer offers. The id stays `worktrees` — ADR-0030
+    // keeps `probe-<tab>` ids stable for callers and deep links.
+    label: 'Repository',
+    tooltip: 'Repository health, recovery, and cleanup',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,
     baseline: 'mesh',
     stateful: true,
+    mixedOwnership:
+      'Mesh-owned maintenance: health and cleanup act on the project root, never on a focused Agent Node worktree.',
   },
   properties: {
     // Issue #1375 — the inspector header and the palette entry must agree on
     // the user-facing task name ("Open Project Settings" in the palette).
+    // Issue #1460 — this destination also absorbed the worktree strategy
+    // block (use-worktree, base ref, mode, warm pool, worktree directory)
+    // from the Repository destination, so it is now the only place project
+    // configuration is edited.
     label: 'Project Settings',
+    tooltip: 'Project identity, agent defaults, commands, and worktree strategy',
     lens: 'mesh',
     followsSelection: true,
     pinnable: true,

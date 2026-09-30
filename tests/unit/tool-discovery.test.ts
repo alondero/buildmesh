@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  TOOL_DISCOVERY_GROUPS,
   TOOL_DISCOVERY_ROW_LAYOUT,
   TOOL_DISCOVERY_TILES,
   toolDiscoveryArrowTarget,
@@ -20,7 +21,8 @@ describe('tool discovery grid traversal', () => {
     ['review', 'left', 'files', 'moves left within a row'],
     ['files', 'left', 'files', 'stops at the left edge of a row'],
     ['review', 'right', 'review', 'stops at the right edge of a row'],
-    ['properties', 'down', 'pulls', 'preserves the column across a group heading'],
+    ['properties', 'down', 'issues', 'preserves the column across a group heading'],
+    ['worktrees', 'down', 'pulls', 'preserves the column from the other Project tile'],
     ['pulls', 'down', 'circuits', 'preserves the column across another group heading'],
     ['scratchpad', 'down', 'usage', 'clamps into the one-tile final row'],
     ['usage', 'down', 'files', 'wraps from the last row to the first'],
@@ -28,7 +30,27 @@ describe('tool discovery grid traversal', () => {
   ];
 
   it('matches the rendered per-group two-column rows', () => {
+    // Legacy Autopilot removal leaves the Automate group with the Circuit tile.
     expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 1, 2, 1]);
+  });
+
+  it('groups the two project destinations together, not with code browsing', () => {
+    // The palette's start screen is where the pre-split IA was most visible:
+    // Project Settings sat beside Files and Agent Changes. Configuration and
+    // maintenance now share a "Project" heading (issue #1460).
+    const project = TOOL_DISCOVERY_GROUPS.find((g) => g.id === 'project');
+    expect(project?.tiles.map((t) => t.tab)).toEqual(['properties', 'worktrees']);
+    const code = TOOL_DISCOVERY_GROUPS.find((g) => g.id === 'code');
+    expect(code?.tiles.map((t) => t.tab)).toEqual(['files', 'review']);
+  });
+
+  it('labels the two destinations with their user-facing names', () => {
+    // The Repository destination was renamed from "Worktree Manager"
+    // (issue #1460); the tile title comes from probeContext, so the palette,
+    // the title bar, and the inspector header cannot drift apart.
+    const tiles = TOOL_DISCOVERY_TILES;
+    expect(tiles.find((t) => t.tab === 'properties')?.title).toBe('Project Settings');
+    expect(tiles.find((t) => t.tab === 'worktrees')?.title).toBe('Repository');
   });
 
   it.each(cases)('%s %s -> %s (%s)', (from, direction, to) => {

@@ -1,12 +1,17 @@
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 /**
- * Tests for the clean Mesh Properties tab — issue #375.
+ * Tests for the Project Settings destination — issue #1460 (was the Mesh
+ * Properties tab, issue #375).
  *
- * The new tab ports the configuration fields from the legacy
- * `MeshPropertiesPanel` and *excludes* the Git-maintenance UI (worktree * config, branches, uncommitted changes). The suite below pins both:
- * the field surface that must stay, and the surface that must NOT come
- * back when we delete the legacy drawer.
+ * The tab ports the configuration fields from the legacy
+ * `MeshPropertiesPanel`. Issue #1460 made it the single home for project
+ * configuration by pulling the worktree-strategy block in from the old
+ * Worktree Manager (use-worktree, starting point, worktree mode, pre-spawn
+ * pool, worktree directory) and by wrapping the destination in labelled
+ * sections with Delete Mesh in a labelled danger zone. The suite below pins
+ * all three: the section structure, the moved strategy controls, and the
+ * maintenance UI that must NOT come back here.
  *
  * Rendering strategy: mount the full `ProbePanel` with the properties
  * destination opened via `openProbeTab` (the post-#1375 on-demand entry
@@ -16,13 +21,16 @@ import { openProbeDestination } from './helpers/openProbeDestination';
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import { emit } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
+import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
 
 const MESH: Mesh = {
   id: 42,
@@ -43,6 +51,19 @@ const MESH: Mesh = {
   sandbox: false,
 };
 
+/** Minimal Agent Node fixture. Only `id` / `mesh_id` matter to the Delete
+ *  Mesh confirmation's node count, so callers override just those. */
+function nodeFixture(overrides: Partial<AgentNode> = {}): AgentNode {
+  return {
+    id: 1,
+    mesh_id: 42,
+    name: 'node-1',
+    path: '/repos/demo/.worktrees/node-1',
+    status: 'idle',
+    ...overrides,
+  } as AgentNode;
+}
+
 const MESH_CONFIG = {
   name: 'demo',
   build_command: 'npm run build',
@@ -60,7 +81,11 @@ const MESH_CONFIG = {
   sandbox: true,
   // Autopilot Policy (issue #481) — disabled by default in the fixture;
   // the dedicated tests below flip it on via a per-test override.
-
+  autopilot_enabled: false,
+  autopilot_trigger_label: null,
+  autopilot_concurrency_limit: 2,
+  autopilot_provider: null,
+  autopilot_action_on_success: null,
 };
 
 /** Capability descriptor for the test fixtures — every native row in
@@ -122,8 +147,30 @@ function capsFixture(harness_id: string): unknown {
  * Wire the mocked `invoke` to answer each command the tab calls during
  * mount + a single edit cycle. Anything we don't care about resolves
  * with `{}` so other panels can keep loading in the same render.
+ *
+ * Issue #1460 — the worktree-strategy commands (`update_mesh_use_worktree`,
+ * `update_worktree_base_ref`, `update_mesh_pool_size`,
+ * `update_mesh_worktree_directory`, `get_mesh_pool_count`,
+ * `get_worktree_directory_config`) answer here too. They used to be mocked
+ * by the Worktree Manager suite, which no longer owns this surface; without
+ * them the moved controls would hit the `{ cmd, args }` fall-through and the
+ * pool badge would render an `object` instead of a number.
+ *
+ * `overrides.meshConfig` replaces the loaded mesh config wholesale (the
+ * wire values for use-worktree / base ref / worktree mode / pool size);
+ * `poolCount` drives the badge; the two `save*Fails` knobs flip the matching
+ * save to a rejecting handler so the "do not revert on failure" rule can be
+ * asserted.
  */
-function mockBackend() {
+function mockBackend(
+  overrides: {
+    meshConfig?: Record<string, unknown>;
+    poolCount?: number;
+    saveUseWorktreeFails?: boolean;
+    saveBaseRefFails?: boolean;
+  } = {},
+) {
+  const poolCount = overrides.poolCount ?? 0;
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'list_providers':
@@ -140,7 +187,17 @@ function mockBackend() {
           { id: 'codex', label: 'Codex', color: '#000', icon: '', resumable: false, harness_id: 'codex', provider_id: null, is_proxied: false, group_key: 'codex', capabilities: capsFixture('codex') },
         ]);
       case 'get_mesh_properties':
-        return Promise.resolve(MESH_CONFIG);
+        return Promise.resolve(overrides.meshConfig ?? MESH_CONFIG);
+      case 'get_mesh_pool_count':
+        return Promise.resolve(poolCount);
+      case 'get_worktree_directory_config':
+        return Promise.resolve({
+          effective_directory: '/repos/demo/.claude/worktrees',
+          app_directory: null,
+          mesh_directory: null,
+        });
+      case 'get_app_preferences':
+        return Promise.resolve({ worktree_directory: null });
       case 'detect_mesh_project':
         return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
       case 'detect_ai_context':
@@ -164,8 +221,18 @@ function mockBackend() {
         });
       case 'update_mesh_column':
       case 'update_mesh_sandbox':
+      case 'update_mesh_pool_size':
+      case 'update_mesh_worktree_directory':
       case 'delete_mesh':
         return Promise.resolve();
+      case 'update_mesh_use_worktree':
+        return overrides.saveUseWorktreeFails
+          ? Promise.reject(new Error('mock: update_mesh_use_worktree failed'))
+          : Promise.resolve();
+      case 'update_worktree_base_ref':
+        return overrides.saveBaseRefFails
+          ? Promise.reject(new Error('mock: update_worktree_base_ref failed'))
+          : Promise.resolve();
       case 'list_meshes':
         // `useMeshStore.deleteMesh` refetches the mesh list after deletion.
         // The default branch returns a list-shaped value so the .map() in
@@ -193,7 +260,7 @@ beforeEach(() => {
   mockBackend();
 });
 
-describe('MeshPropertiesTab (issue #375)', () => {
+describe('ProjectSettingsTab (issue #1460)', () => {
   it('renders the config form when the âš™ï¸ tab is open and a mesh is selected', async () => {
     openProbeDestination('properties');
     const loadedFieldQuery = { timeout: 10_000 };
@@ -223,21 +290,28 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(header.textContent).toContain('Project Settings');
   });
 
-  it('excludes the worktree/branch maintenance fields', async () => {
+  it('excludes the branch/worktree MAINTENANCE fields', async () => {
     openProbeDestination('properties');
     // Wait for the form to mount so the negative assertions are stable.
     expect(await screen.findByLabelText('Name')).toBeTruthy();
 
-    // The legacy drawer's Git-maintenance fields must NOT appear.
-    expect(screen.queryByLabelText(/^Use worktree$/i)).toBeNull();
-    expect(screen.queryByLabelText('Starting point')).toBeNull();
-    expect(screen.queryByLabelText('Worktree mode')).toBeNull();
-    // The standalone sections from the legacy drawer.
+    // The legacy drawer's Git-maintenance fields must NOT appear. Note this is
+    // the *maintenance* half: issue #1460 deliberately moved the worktree
+    // STRATEGY controls in (Use worktree / Starting point / Worktree mode now
+    // live in the "Worktree strategy" section), so only the destructive,
+    // per-repo surface stays away.
     expect(screen.queryByText(/Branches & Worktrees/i)).toBeNull();
     expect(screen.queryByText('Uncommitted Changes')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Select recommended/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Delete Selected/i })).toBeNull();
+    expect(screen.queryByTestId('repository-health-section')).toBeNull();
+    expect(screen.queryByTestId('repository-cleanup-section')).toBeNull();
+    // ...and the worktree strategy it DOES own is present, so the negative
+    // assertions above are about maintenance, not about a stripped form.
+    expect(screen.queryByLabelText('Use worktree')).toBeTruthy();
     // The Delete Mesh button IS supposed to come back (it lived on the
-    // legacy drawer's footer) — the new tab inherits the destructive
-    // operation. See the `Delete Mesh button` describe block below.
+    // legacy drawer's footer) — now in the labelled danger zone. See the
+    // `Delete Mesh danger zone` describe block below.
   });
 
   it('preloads the mesh config (Name, Default provider, Build/Run) from the backend', async () => {
@@ -503,16 +577,10 @@ describe('MeshPropertiesTab (issue #375)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
-  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ────â”€
-  // The `update_mesh_autopilot` IPC and its four-policy-fields shape were
-  // intentionally moved out of Mesh Properties (ticket #1013, follow-up to
-  // #994). The Mesh Properties tab is no longer the configure surface for
-  // Autopilot Policy — that role lives on `AutopilotProbeTab`. The pre-#1013
-  // behavioural assertions for the old policy section moved with it (see
-  // `autopilot-probe-tab.test.tsx`). The test below pins the regression so a
-  // future change can't silently re-introduce the dual-edit surface.
+  // Legacy Autopilot policy controls were removed from the application.
+  // Keep Project Settings free of the retired fields and IPC calls.
 
-  it('does NOT render Autopilot Policy fields (issue #1013)', async () => {
+  it('does not render legacy Autopilot policy fields', async () => {
     openProbeDestination('properties');
 
     // Master toggle + 4 policy fields, none of which should be in the DOM.
@@ -550,7 +618,7 @@ describe('MeshPropertiesTab (issue #375)', () => {
 // (`activeNodeId` is not cleared by `selectMesh`). `useProbeContext` already
 // exposes `activeMeshPath` for this case (the hook itself documents the
 // distinction); the Directory input binds to the wrong field.
-describe('MeshPropertiesTab — Directory field shows the mesh root (not the focused worktree)', () => {
+describe('ProjectSettingsTab — Directory field shows the mesh root (not the focused worktree)', () => {
   // Two meshes with distinct paths so a "wrong path" assertion is sharp.
   const MESH_A: Mesh = { ...MESH, id: 1, name: 'alpha', path: '/repos/alpha' };
   const MESH_B: Mesh = { ...MESH, id: 2, name: 'beta',  path: '/repos/beta' };
@@ -630,17 +698,39 @@ describe('MeshPropertiesTab — Directory field shows the mesh root (not the foc
 });
 
 // Delete Mesh — restored from the legacy `MeshPropertiesPanel` (deleted in #380).
-// The footer button lived outside the form scroll-area, so the new tab renders
-// it INSIDE the form for layout simplicity (the probe is a vertical column,
-// not a fixed-height drawer). The destructive operation + confirmation dialog
-// + probe-close behaviour are ported verbatim from the legacy handleDelete.
-describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => {
-  it('renders a Delete Mesh button at the bottom of the form', async () => {
+// Issue #1460 moved the trigger from a bare red button at the foot of an
+// undifferentiated form into a LABELLED danger zone that states the impact
+// and the recovery story before the confirmation. The destructive operation
+// + shared confirmation dialog + probe-close behaviour are unchanged.
+describe('ProjectSettingsTab — Delete Mesh danger zone (issue #1460)', () => {
+  it('renders Delete Mesh inside a labelled danger zone that explains impact and recovery', async () => {
     openProbeDestination('properties');
 
     // Only the trigger button is in the DOM at this point (no dialog yet).
     const button = await screen.findByRole('button', { name: /delete mesh/i });
     expect(button).toBeTruthy();
+
+    // Issue #1460 (AC1/AC4): the destructive control must be inside an
+    // explicitly labelled danger zone, and the zone must state both the
+    // impact and the recovery story BEFORE the user is asked to confirm.
+    // Asserting the trigger alone is not enough - a red button at the bottom
+    // of a form is exactly what the issue rejected.
+    const zone = await screen.findByTestId('project-settings-danger-zone');
+    expect(zone.getAttribute('aria-label')).toBe('Danger zone');
+    expect(zone.getAttribute('data-tone')).toBe('danger');
+    expect(zone.textContent).toMatch(/stops its agents/i);
+    expect(zone.textContent).toMatch(/left alone|can be added again/i);
+    // The trigger is inside the zone, not a sibling of it.
+    expect(zone.contains(button)).toBe(true);
+  });
+
+  it('keeps every non-destructive section outside the danger zone', async () => {
+    openProbeDestination('properties');
+
+    const zone = await screen.findByTestId('project-settings-danger-zone');
+    for (const label of ['Name', 'Build command', 'Run command', 'Default provider']) {
+      expect(zone.textContent).not.toContain(label);
+    }
   });
 
   it('opens a confirmation dialog when the Delete Mesh button is clicked', async () => {
@@ -653,7 +743,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
     // The dialog's unique confirmation copy — the trigger button never has
     // this text, so this matcher is unambiguous.
     expect(
-      await screen.findByText(/all its agent nodes/i)
+      await screen.findByText(/agent node/)
     ).toBeTruthy();
     // The dialog heading is an <h2>; the trigger is a <button>, so this
     // assertion also distinguishes the two "Delete Mesh" text nodes.
@@ -668,18 +758,51 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
     ).toBeTruthy();
   });
 
+  it('names the exact agent node count in the confirmation (issue #1460 AC4)', async () => {
+    const user = userEvent.setup();
+    // Two nodes belong to mesh 42; one belongs to a different project and must
+    // not be counted, or the confirmation overstates the blast radius.
+    seedAgentNodes([
+      nodeFixture({ id: 1, mesh_id: 42 }),
+      nodeFixture({ id: 2, mesh_id: 42 }),
+      nodeFixture({ id: 3, mesh_id: 99 }),
+    ]);
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByRole('button', { name: /delete mesh/i }));
+
+    // Issue #1460 review finding: the release note claimed the confirmation
+    // "names the project and the node count" while the message said only "all
+    // its agent nodes". The count is the actionable part.
+    const dialog = (await screen.findByRole('button', { name: 'Delete', exact: true }))
+      .closest('[role="dialog"]');
+    const text = dialog?.textContent ?? '';
+    expect(text).toContain('demo');
+    expect(text).toContain('its 2 agent nodes');
+    expect(text).not.toContain('all its agent nodes');
+  });
+
+  it('uses the singular for a one-node project', async () => {
+    const user = userEvent.setup();
+    seedAgentNodes([nodeFixture({ id: 1, mesh_id: 42 })]);
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByRole('button', { name: /delete mesh/i }));
+    await screen.findByText(/its 1 agent node\?/);
+  });
+
   it('cancels without deleting when Cancel is pressed', async () => {
     const user = userEvent.setup();
     openProbeDestination('properties');
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
-    await screen.findByText(/all its agent nodes/i);
+    await screen.findByText(/agent node/);
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
 
     await waitFor(() => {
-      expect(screen.queryByText(/all its agent nodes/i)).toBeNull();
+      expect(screen.queryByText(/agent node/)).toBeNull();
     });
     // The trigger is still in the DOM (no destructive call happened).
     expect(
@@ -699,7 +822,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
-    await screen.findByText(/all its agent nodes/i);
+    await screen.findByText(/agent node/);
 
     await user.click(
       screen.getByRole('button', { name: 'Delete', exact: true })
@@ -717,7 +840,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
   });
 });
 
-// Save-feedback (issue #729) — `MeshPropertiesTab` was the only probe tab
+// Save-feedback (issue #729) — `ProjectSettingsTab` was the only probe tab
 // without a Saving…/Saved/Save failed indicator, and its blur handlers
 // produced unhandled rejections on IPC failure (the field still showed
 // the user's unsaved text with no message). These tests pin the fix:
@@ -737,7 +860,7 @@ describe('MeshPropertiesTab — Delete Mesh button (restored from #380)', () => 
 // project-wide listener for jsdom-emitted promise rejections. The
 // listener captures the rejection reason and the test fails if any
 // rejection lands.
-describe('MeshPropertiesTab — save feedback (issue #729)', () => {
+describe('ProjectSettingsTab — save feedback (issue #729)', () => {
   // The store has only one mesh configured by `beforeEach` in the outer
   // suite (MESH = id 42, name "demo"). For the mesh-switch test we
   // need a second mesh to switch INTO.
@@ -917,6 +1040,51 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     // is the only visible trace of the failure (the indicator stays clean).
   });
 
+  it('discards a stale worktree-strategy save failure when the user switches meshes (issue #1460 review)', async () => {
+    const user = userEvent.setup();
+    useMeshStore.setState({
+      meshes: [MESH, MESH_B],
+      meshesById: new Map<number, Mesh>([
+        [MESH.id, MESH],
+        [MESH_B.id, MESH_B],
+      ]),
+      selectedMeshId: MESH.id,
+    });
+    // Arm the FIRST `update_mesh_use_worktree` to reject on a delay so the
+    // switch happens while it is still in flight.
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (armed && cmd === 'update_mesh_use_worktree') {
+        armed = false;
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('boom-strategy-after-switch')), 50),
+        );
+      }
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    openProbeDestination('properties');
+    await user.click(await screen.findByLabelText('Use worktree'));
+
+    // Switch projects before the delayed rejection lands.
+    await act(async () => {
+      useMeshStore.getState().selectMesh(MESH_B.id);
+    });
+    await new Promise((r) => setTimeout(r, 120));
+
+    // Mesh A's failure must not surface in mesh B's form. The section-local
+    // error channel needs the same mesh-switch guard `wrappedSave` has, or the
+    // `useEffect([activeMeshId])` reset is immediately undone by the late
+    // reject.
+    expect(screen.queryByText(/Failed to update use_worktree/)).toBeNull();
+  });
+
   it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {
     const user = userEvent.setup();
     rejectNextBuildWrite('first-failure');
@@ -953,5 +1121,260 @@ describe('MeshPropertiesTab — save feedback (issue #729)', () => {
     await waitFor(() => {
       expect(screen.queryByText(/Save failed/)).toBeNull();
     });
+  });
+});
+
+// ── Issue #1460: sections + the worktree strategy that moved here ────────────
+
+/**
+ * The section structure is the deliverable, not decoration. Issue #1460's
+ * premise was that a form with fields stacked one under another gave the user
+ * no way to tell a preference from a strategy decision from a destructive
+ * action. These tests pin the headings, their order, and their contents, so a
+ * future field lands in a section rather than back in an undifferentiated
+ * column.
+ */
+describe('ProjectSettingsTab — section structure (issue #1460)', () => {
+  it('renders the labelled sections in configuration order, danger zone last', async () => {
+    openProbeDestination('properties');
+
+    const general = await screen.findByTestId('project-settings-general');
+    const runtime = await screen.findByTestId('project-settings-runtime');
+    const buildRun = await screen.findByTestId('project-settings-build-run');
+    const strategy = await screen.findByTestId('project-settings-worktree-strategy');
+    const danger = await screen.findByTestId('project-settings-danger-zone');
+
+    expect([
+      [general.getAttribute('aria-label'), runtime.getAttribute('aria-label'), buildRun.getAttribute('aria-label'), strategy.getAttribute('aria-label'), danger.getAttribute('aria-label')],
+    ]).toEqual([['General', 'Agent runtime', 'Build and run', 'Worktree strategy', 'Danger zone']]);
+
+    // Document order must match reading order — assert the DOM order, not
+    // just that the nodes exist, or a re-ordered form would still pass.
+    const inOrder = [general, runtime, buildRun, strategy, danger].every(
+      (node, i, all) => i === 0 || (all[i - 1].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+    );
+    expect(inOrder).toBe(true);
+  });
+
+  it('places each existing field in the section that describes it', async () => {
+    openProbeDestination('properties');
+    await screen.findByTestId('project-settings-general');
+
+    const general = screen.getByTestId('project-settings-general');
+    expect(within(general).getByLabelText('Name')).toBeTruthy();
+    expect(within(general).getByLabelText('Directory')).toBeTruthy();
+
+    const runtime = screen.getByTestId('project-settings-runtime');
+    expect(within(runtime).getByLabelText('Default provider')).toBeTruthy();
+    expect(within(runtime).getByLabelText(/Sandbox agent processes/i)).toBeTruthy();
+
+    const buildRun = screen.getByTestId('project-settings-build-run');
+    expect(within(buildRun).getByLabelText(/^Build command/i)).toBeTruthy();
+    expect(within(buildRun).getByLabelText(/^Run command/i)).toBeTruthy();
+    expect(within(buildRun).getByLabelText(/^Root build command/i)).toBeTruthy();
+    expect(within(buildRun).getByLabelText(/^Root run command/i)).toBeTruthy();
+    // The worktree strategy is its own section, not a tail on Build and run.
+    expect(within(buildRun).queryByLabelText('Use worktree')).toBeNull();
+    expect(within(screen.getByTestId('project-settings-worktree-strategy')).getByLabelText('Use worktree')).toBeTruthy();
+  });
+
+  it('states that the settings apply to the project root, not the focused worktree', async () => {
+    openProbeDestination('properties');
+    const note = await screen.findByTestId('probe-scope-note');
+    expect(note.textContent).toMatch(/project root/i);
+    expect(note.textContent).toMatch(/focused agent/i);
+  });
+});
+
+/**
+ * The worktree-strategy block moved here from the Worktree Manager tab
+ * (issue #1460). These tests moved with it: same behaviour, same wire values,
+ * new owner. The wire contract (`origin/main`/`HEAD`, `branched`/`detached`,
+ * the pool size clamp) is unchanged — only the destination is.
+ */
+describe('ProjectSettingsTab — worktree strategy (moved from the Worktree Manager)', () => {
+  it('loads the strategy controls from get_mesh_properties', async () => {
+    mockBackend({
+      meshConfig: {
+        ...MESH_CONFIG,
+        use_worktree: true,
+        base_ref: 'HEAD',
+        worktree_mode: 'detached',
+        pre_spawn_pool_size: 3,
+      },
+    });
+    openProbeDestination('properties');
+
+    const useWorktree = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(useWorktree.checked).toBe(true);
+    // HEAD round-trips to the 'Head' form option, not the raw wire string.
+    const head = (await screen.findByLabelText(/Head/)) as HTMLInputElement;
+    expect(head.value).toBe('head');
+    expect(head.checked).toBe(true);
+    const fresh = screen.getByLabelText(/Fresh/) as HTMLInputElement;
+    expect(fresh.value).toBe('fresh');
+    expect(fresh.checked).toBe(false);
+    const detached = (await screen.findByLabelText(/^Detached/)) as HTMLInputElement;
+    expect(detached.checked).toBe(true);
+    const branched = screen.getByLabelText(/^Branched/) as HTMLInputElement;
+    expect(branched.checked).toBe(false);
+  });
+
+  it('toggling use-worktree calls update_mesh_use_worktree and collapses the radios', async () => {
+    const user = userEvent.setup();
+    openProbeDestination('properties');
+
+    const useWorktree = await screen.findByLabelText('Use worktree');
+    await user.click(useWorktree);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_use_worktree', {
+        meshId: 42,
+        useWorktree: false,
+      });
+    });
+    // The strategy sub-controls collapse with the gate.
+    expect(screen.queryByLabelText(/Fresh/)).toBeNull();
+  });
+
+  it('selecting Head calls update_worktree_base_ref with HEAD on the wire', async () => {
+    const user = userEvent.setup();
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByLabelText(/Head/));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_worktree_base_ref', {
+        meshId: 42,
+        baseRef: 'HEAD',
+      });
+    });
+  });
+
+  it('selecting Detached calls update_mesh_column with column=worktree_mode', async () => {
+    const user = userEvent.setup();
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByLabelText(/^Detached/));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
+        meshId: 42,
+        column: 'worktree_mode',
+        value: 'detached',
+      });
+    });
+  });
+
+  it('defaults a null worktree_mode to branched on load', async () => {
+    mockBackend({ meshConfig: { ...MESH_CONFIG, worktree_mode: null } });
+    openProbeDestination('properties');
+
+    const branched = (await screen.findByLabelText(/^Branched/)) as HTMLInputElement;
+    expect(branched.checked).toBe(true);
+  });
+
+  it('surfaces a save failure inline, names the control, and does NOT revert the form', async () => {
+    const user = userEvent.setup();
+    mockBackend({ saveUseWorktreeFails: true });
+    openProbeDestination('properties');
+
+    const useWorktree = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
+    expect(useWorktree.checked).toBe(true);
+    await user.click(useWorktree);
+
+    const error = await screen.findByTestId('worktree-strategy-error');
+    expect(error.textContent).toContain('Failed to update use_worktree');
+    // The "do not revert on failure" rule: the checkbox keeps the user's
+    // click so the message is actionable.
+    expect(useWorktree.checked).toBe(false);
+  });
+
+  it('hides the pool badge when the pool is disabled (size 0)', async () => {
+    mockBackend({ meshConfig: { ...MESH_CONFIG, pre_spawn_pool_size: 0 }, poolCount: 0 });
+    openProbeDestination('properties');
+
+    await screen.findByLabelText('Use worktree');
+    expect(screen.queryByTestId('pool-status')).toBeNull();
+  });
+
+  it('shows "X / Y ready" when the pool is enabled', async () => {
+    mockBackend({ meshConfig: { ...MESH_CONFIG, pre_spawn_pool_size: 3 }, poolCount: 2 });
+    openProbeDestination('properties');
+
+    const badge = await screen.findByTestId('pool-status');
+    expect(badge.textContent).toContain('2 / 3 ready');
+    // A11y: the full sentence is the accessible name, not the placeholder.
+    expect(badge.getAttribute('aria-label')).toBe('2 of 3 pre-spawn worktrees ready');
+  });
+
+  it('re-fetches the pool count when pool-count-changed fires', async () => {
+    mockBackend({ meshConfig: { ...MESH_CONFIG, pre_spawn_pool_size: 3 }, poolCount: 1 });
+    openProbeDestination('properties');
+    expect((await screen.findByTestId('pool-status-text')).textContent).toContain('1 / 3');
+
+    // A claim or a refill in the pool worker fires this event; the badge must
+    // follow it, because the count is what the user uses to decide whether to
+    // wait. Fire it inside act() so the refetch's setState is flushed.
+    mockBackend({ meshConfig: { ...MESH_CONFIG, pre_spawn_pool_size: 3 }, poolCount: 3 });
+    await act(async () => {
+      await emit(POOL_COUNT_CHANGED_EVENT, 42);
+    });
+
+    expect((await screen.findByTestId('pool-status-text')).textContent).toContain('3 / 3');
+  });
+
+  it('hydrates the worktree directory override and effective path on first open', async () => {
+    // Regression guard: the field must show the project's stored override
+    // before any save, otherwise the section reads as "unset" for a project
+    // that has one and the user cannot tell an inherited path from a missing
+    // one. The move out of the Worktree Manager (issue #1460) briefly dropped
+    // this mount hydration, and a test that only asserted the post-save state
+    // passed regardless.
+    mockBackend({
+      meshConfig: { ...MESH_CONFIG, worktree_directory: 'wt/here' },
+    });
+    openProbeDestination('properties');
+
+    const input = (await screen.findByLabelText('Worktree directory')) as HTMLInputElement;
+    expect(input.value).toBe('wt/here');
+    // The effective path is backend-authoritative, not a TS re-spelling.
+    const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
+    expect(effective).toContain('/repos/demo/.claude/worktrees');
+    // An override is no longer "inherited", so the reset affordance appears.
+    expect(screen.getByRole('button', { name: /reset to inherited/i })).toBeTruthy();
+  });
+
+  it('shows no reset affordance and marks the path inherited when unset', async () => {
+    mockBackend({ meshConfig: { ...MESH_CONFIG, worktree_directory: null } });
+    openProbeDestination('properties');
+
+    await screen.findByLabelText('Worktree directory');
+    const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
+    expect(effective).toContain('(inherited)');
+    expect(screen.queryByRole('button', { name: /reset to inherited/i })).toBeNull();
+  });
+
+  it('saves the worktree directory override on blur', async () => {
+    const user = userEvent.setup();
+    openProbeDestination('properties');
+
+    const input = (await screen.findByLabelText('Worktree directory')) as HTMLInputElement;
+    expect(input.value).toBe('');
+
+    await user.type(input, 'wt/here');
+    await user.tab();
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('update_mesh_worktree_directory', {
+        meshId: 42,
+        directory: 'wt/here',
+      });
+    });
+    // The resolved effective path is backend-authoritative, not a TS guess.
+    // Match the line, not the nested <code> (testing-library's text matcher
+    // returns the deepest element that matches).
+    const effective = (await screen.findByText(/Effective:/)).textContent ?? '';
+    expect(effective).toContain('/repos/demo/.claude/worktrees');
   });
 });

@@ -62,15 +62,15 @@ import {
 
 // Issue #1568 - lazy-load each tab so the initial bundle doesn't pay for
 // every inspector surface the user may never open. The tabs are 4-71 KB
-// each (WorktreeManagerTab alone is 71 KB); until the inspector is opened
+// each (RepositoryTab alone is 71 KB); until the inspector is opened
 // (probeOpen===true) the user's app boots without any of them. Even after
 // opening, only the active tab's chunk is fetched — switching tabs brings
 // the next one down on demand. The lazy components are intentionally
 // defined at module scope so they're not recreated on every render.
 const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ default: m.ProjectFilesTab })));
 const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
-const MeshPropertiesTab = lazy(() => import('./MeshPropertiesTab').then((m) => ({ default: m.MeshPropertiesTab })));
-const WorktreeManagerTab = lazy(() => import('./WorktreeManagerTab').then((m) => ({ default: m.WorktreeManagerTab })));
+const ProjectSettingsTab = lazy(() => import('./ProjectSettingsTab').then((m) => ({ default: m.ProjectSettingsTab })));
+const RepositoryTab = lazy(() => import('./RepositoryTab').then((m) => ({ default: m.RepositoryTab })));
 const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
 const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
 const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
@@ -407,9 +407,9 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // short-circuited above so it renders even with no Mesh selected.
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
-  if (tab === 'properties') return <MeshPropertiesTab />;
+  if (tab === 'properties') return <ProjectSettingsTab />;
   if (tab === 'circuits') return <CircuitsProbeTab />;
-  if (tab === 'worktrees') return <WorktreeManagerTab />;
+  if (tab === 'worktrees') return <RepositoryTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
   if (tab === 'sessions') return <ArchivedNodesTab />;

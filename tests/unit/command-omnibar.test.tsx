@@ -918,12 +918,14 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
       return activeTab();
     };
 
-    // Code is rendered as two columns: Files | Agent Changes on the first
-    // row, then Worktree Manager | Project Settings below it. ArrowDown must
-    // follow the visual column rather than the flat render order.
-    expect(press('ArrowDown')).toBe('worktrees');
+    // Every group renders as two columns. The first row is Files | Agent
+    // Changes; the second row is the Project group (issue #1460 moved
+    // Project Settings and Repository out of "Code" into their own heading).
+    // ArrowDown must follow the visual column rather than the flat render
+    // order.
+    expect(press('ArrowDown')).toBe('properties');
     expect(press('ArrowDown')).toBe('issues');
-    expect(press('ArrowUp')).toBe('worktrees');
+    expect(press('ArrowUp')).toBe('properties');
 
     // Vertical navigation keeps its existing wrap-around contract while
     // preserving the active column at the edge of the grid.
@@ -977,10 +979,12 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     const scrollIntoView = vi.mocked(Element.prototype.scrollIntoView);
     scrollIntoView.mockClear();
     fireEvent.keyDown(input, { key: 'ArrowDown' });
-    // Focus never leaves the input — the highlight is virtual.
+    // Focus never leaves the input — the highlight is virtual. The tile below
+    // `files` is the first Project tile (issue #1460 moved Project Settings
+    // and Repository into their own group, which is the second row).
     expect(document.activeElement).toBe(input);
-    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-worktrees');
-    expect(screen.getByTestId('command-omnibar-tool-worktrees').getAttribute('data-active')).toBe('true');
+    expect(input.getAttribute('aria-activedescendant')).toBe('command-omnibar-tool-properties');
+    expect(screen.getByTestId('command-omnibar-tool-properties').getAttribute('data-active')).toBe('true');
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
 
     // The last left-column tile wraps back to the first left-column tile.
@@ -1014,7 +1018,19 @@ describe('CommandOmnibar — tool discovery start screen (Option A)', () => {
     fireEvent.keyDown(input, { key: 'ArrowDown' });
     fireEvent.keyDown(input, { key: 'Enter' });
     expect(useUIStore.getState().probeOpen).toBe(true);
-    expect(useUIStore.getState().probeTab).toBe('worktrees');
+    // The tile below `files` is Project Settings after the #1460 regroup.
+    expect(useUIStore.getState().probeTab).toBe('properties');
     expect(useUIStore.getState().omnibarOpen).toBe(false);
+  });
+
+  it('the Project group exposes both configuration and maintenance under task names', () => {
+    render(<CommandOmnibar />);
+    openOmnibar('files');
+    const groups = screen.getByTestId('command-omnibar-tool-groups');
+    // The two destinations must not sit under "Code" any more, and the
+    // Repository destination must carry its post-#1460 name.
+    expect(groups.textContent).toContain('Project');
+    expect(groups.textContent).toContain('Repository');
+    expect(groups.textContent).not.toContain('Worktree Manager');
   });
 });
