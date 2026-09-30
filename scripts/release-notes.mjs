@@ -50,9 +50,30 @@ const ORDER = [
   ...[...new Set(Object.values(INTERNAL_TYPES))],
 ];
 
+// A squash-merged commit whose subject is only a co-author trailer (`@ (#1600)`)
+// keeps its real subject on the first body line.
+function firstBodyLine(bodyText) {
+  const line = bodyText
+    .split("\n")
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0 && !/^@/.test(entry));
+  return line ?? null;
+}
+
 export function parseConventionalCommit(subject, body = "") {
-  const text = String(subject ?? "").trim();
   const bodyText = String(body ?? "");
+  let text = String(subject ?? "").trim();
+  // Some squash merges leave a bare co-author trailer as the subject; the real
+  // subject is the first body line, so promote it rather than rendering `@`.
+  if (/^@/.test(text) || text.length === 0) {
+    const promoted = firstBodyLine(bodyText);
+    if (promoted) {
+      // Keep the PR reference the discarded subject carried, so promoting the
+      // real subject does not silently drop the link.
+      const carried = text.match(/((?:\(#\d+\)\s*)+)$/)?.[1] ?? "";
+      text = carried ? `${promoted} ${carried.trim()}` : promoted;
+    }
+  }
   const match = text.match(/^([a-zA-Z]+)(?:\(([^)]*)\))?(!)?:\s*(.+)$/);
   const breaking = Boolean(match?.[3]) || /(?:^|\n)BREAKING[ -]CHANGE:/.test(bodyText);
   const description = (match ? match[4] : text).trim();
@@ -62,10 +83,13 @@ export function parseConventionalCommit(subject, body = "") {
   // the last one — the PR that actually landed.
   const trailing = description.match(/^(.*?)\s*(?:\(#(\d+)\)\s*)+$/);
   const visible = trailing ? trailing[1].trim() : description;
-  const pr = trailing?.[2]
-    ?? bodyText.match(/(?:^|\n)(?:Closes|Fixes|Resolves)\s+#(\d+)/i)?.[1]
-    ?? bodyText.match(/#(\d+)/)?.[1]
-    ?? null;
+  // Only an explicit `Closes #N` trailer counts. A bare `#N` in a body is
+  // usually an *issue* or an unrelated cross-reference, and publishing it as a
+  // PR link is worse than omitting the number.
+  const trailer = bodyText.match(/(?:^|\n)(?:Closes|Fixes|Resolves)\s+#(\d+)/i)?.[1] ?? null;
+  // ...but do not repeat a number the subject already cites, such as
+  // `add Muse transcript reader (issue #1708)` with a matching `Closes #1708`.
+  const pr = trailing?.[2] ?? (trailer && !visible.includes(`#${trailer}`) ? trailer : null);
   if (!match) return { type: null, scope: null, breaking, subject: visible, pr };
   return { type: match[1].toLowerCase(), scope: match[2] || null, breaking, subject: visible, pr };
 }
@@ -138,6 +162,43 @@ export function renderReleaseNotes({ version, base, commits, includeInternal = f
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
+// Version-aware comparison so v1.10.0 sorts above v1.9.0.
+export function compareVersions(a, b) {
+  const pa = String(a).replace(/^v/, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const pb = String(b).replace(/^v/, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    const diff = (pa[index] ?? 0) - (pb[index] ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+// Pick the base for the next release.
+//
+// Release tags in this repo point at the pre-merge commit on the release
+// branch, so `git describe` walks back to v1.0.0 — the only tag actually
+// reachable from main. That silently inflated a draft to 613 commits when the
+// real range is 95. Instead, take the highest-versioned tag BELOW the release
+// being prepared and map it onto the `chore(release): vX.Y.Z` commit that
+// carries the same version into main, since that commit is the true boundary
+// on main. Falls back to plain reachability only when no such commit exists.
+export function resolveBase({ version, tags, releaseCommits, reachableTag }) {
+  const target = String(version).replace(/^v/, "");
+  const priorTags = tags
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag) && compareVersions(tag, target) < 0)
+    .sort((a, b) => compareVersions(b, a));
+
+  for (const tag of priorTags) {
+    const match = releaseCommits.find((commit) => commit.version === tag);
+    if (match) return { ref: match.commit, source: `release-commit for ${tag}` };
+  }
+
+  // No release commit carried the tag into main; fall back to a tag that is
+  // actually reachable from HEAD, then to the most recent one either way.
+  if (reachableTag) return { ref: reachableTag, source: "reachable tag" };
+  return { ref: priorTags[0] ?? tags[0] ?? null, source: "highest prior tag" };
+}
+
 function git(args) {
   return execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }).trim();
 }
@@ -147,16 +208,62 @@ function manifestVersion() {
   return String(pkg.version ?? "").replace(/-.*$/, "");
 }
 
-function previousTag() {
+// `chore(release): vX.Y.Z` commits reachable from HEAD, newest first. These
+// are the on-main boundaries for each shipped version.
+function releaseCommits() {
+  let raw = "";
+  try {
+    raw = git(["log", "--first-parent", "--format=%s%x1f%H", "HEAD"]);
+  } catch {
+    return [];
+  }
+  const found = [];
+  for (const line of raw.split("\n")) {
+    const [subject, hash] = line.split("\x1f");
+    const match = String(subject ?? "").match(/^chore\(release\): v(\d+\.\d+\.\d+)/);
+    if (match && hash) found.push({ version: `v${match[1]}`, commit: hash });
+  }
+  return found;
+}
+
+function versionTags() {
+  try {
+    return git(["tag", "--list", "v*"]).split("\n").filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function reachableTag() {
   try {
     return git(["describe", "--tags", "--abbrev=0", "--match", "v[0-9]*"]);
   } catch {
-    try {
-      return git(["rev-list", "--max-parents=0", "HEAD"]).split("\n").pop();
-    } catch {
-      return null;
-    }
+    return null;
   }
+}
+
+function rootCommit() {
+  try {
+    // [0] is the first root; `.pop()` would pick an arbitrary one when a
+    // grafted or merged history has several.
+    return git(["rev-list", "--max-parents=0", "HEAD"]).split("\n")[0];
+  } catch {
+    return null;
+  }
+}
+
+function resolvePreviousBase(version) {
+  const resolved = resolveBase({
+    version,
+    tags: versionTags(),
+    releaseCommits: releaseCommits(),
+    reachableTag: reachableTag(),
+  });
+  if (resolved.ref) return resolved;
+  const root = rootCommit();
+  return root
+    ? { ref: root, source: "the first commit" }
+    : { ref: null, source: "the start of history" };
 }
 
 function readCommits(base) {
@@ -180,7 +287,8 @@ function printUsage() {
   console.log(`Usage: npm run release:notes -- [version] [options]
 
   version            Release version (default: manifest version without the -0 suffix)
-  --base <ref>       Commit/tag to start from (default: most recent vX.Y.Z tag)
+  --base <ref>       Commit/tag to start from (default: the boundary of the highest
+                     released version below this one)
   --write            Write docs/releases/v<version>.md instead of printing it
   --force            Overwrite an existing release-note file
   --all              Include internal commits (chore, refactor, docs, ...)
@@ -200,7 +308,17 @@ function main() {
     if (arg === "--write") write = true;
     else if (arg === "--force") force = true;
     else if (arg === "--all") includeInternal = true;
-    else if (arg === "--base") base = args[++index];
+    else if (arg === "--base") {
+      const value = args[++index];
+      // A missing value would silently fall back to the auto-detected base and
+      // produce a wrong-range note, so fail loudly instead.
+      if (!value || value.startsWith("-")) {
+        console.error(`--base needs a commit or tag.`);
+        process.exitCode = 2;
+        return;
+      }
+      base = value;
+    }
     else if (arg.startsWith("--base=")) base = arg.slice("--base=".length);
     else if (arg === "-h" || arg === "--help") {
       printUsage();
@@ -222,11 +340,13 @@ function main() {
     return;
   }
 
-  const resolvedBase = base ?? previousTag();
-  const commits = readCommits(resolvedBase);
+  const resolved = base
+    ? { ref: base, source: base }
+    : resolvePreviousBase(version);
+  const commits = readCommits(resolved.ref);
   const markdown = renderReleaseNotes({
     version,
-    base: resolvedBase ?? "the start of history",
+    base: resolved.ref ?? "the start of history",
     commits,
     includeInternal,
   });
@@ -238,12 +358,16 @@ function main() {
 
   const target = path.join(releasesDir, `v${version}.md`);
   if (existsSync(target) && !force) {
-    console.error(`${path.relative(root, target)} already exists — curate it, or pass --force to overwrite.`);
+    console.error(
+      `${path.relative(root, target)} already exists — it is the active draft, so curate it in place.\n`
+      + `Preview with: npm run release:notes\n`
+      + `Regenerate over it with: npm run release:notes -- --write --force`,
+    );
     process.exitCode = 1;
     return;
   }
   writeFileSync(target, markdown);
-  console.log(`wrote ${path.relative(root, target)} (${commits.length} commits since ${resolvedBase ?? "the start of history"})`);
+  console.log(`wrote ${path.relative(root, target)} (${commits.length} commits since ${resolved.ref ?? "the start of history"}, via ${resolved.source})`);
 }
 
 const invokedDirectly = process.argv[1]

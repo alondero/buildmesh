@@ -18,9 +18,20 @@ contributors no longer edit it:
 1. Write a Conventional Commit subject and body that a reader could turn into a
    release-note line.
 2. At release time the maintainer runs `npm run release:notes`, which drafts
-   `vX.Y.Z.md` from the Conventional Commits merged since the previous tag, then
-   curates it. The version defaults to the manifest version without its `-0`
-   suffix and the base defaults to the most recent `vX.Y.Z` tag.
+   `vX.Y.Z.md` from the Conventional Commits merged since the previous release,
+   then curates it. The version defaults to the manifest version without its `-0`
+   suffix.
+
+The base is the `chore(release): vX.Y.Z` commit for the highest already-released
+version below the one being prepared. Release tags point at the pre-merge commit
+on the release branch and so are not ancestors of `main`, which is why plain tag
+reachability is not used. Check the `Generated from … commits since …` header
+before curating: it names the resolved base and the size of the range, so a wrong
+range is visible immediately.
+
+Preview on stdout with `npm run release:notes`; add `--write` to create the file
+(`--write` refuses to overwrite an existing draft — pass `--force` to regenerate
+over one, or curate it in place).
 
 Keep only changes users need to know about:
 
