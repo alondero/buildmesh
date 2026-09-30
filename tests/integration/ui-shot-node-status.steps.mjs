@@ -86,26 +86,31 @@ export default async function ({ page, invoke }) {
     // A question: the harness's own answers as text, one explicit
     // open-to-answer action, and no yes/no chips to send at a prompt
     // Buildmesh never read.
+    // Playwright's `getByTestId` matches the whole attribute, so every child
+    // id carries its node id: `attn-approve-2` never matches `attn-approve`.
+    // `tests/unit/mobile-node-list.test.tsx` cross-checks every selector below
+    // against a rendered card, so this cannot drift back to a selector that
+    // only ever times out or passes vacuously.
     const questionCard = mobile.getByTestId(`attn-card-${question.id}`);
-    await expect(questionCard.getByTestId('attn-open')).toContainText('Answer in terminal');
-    await expect(questionCard.getByTestId('attn-choices')).toContainText('Staging');
-    await expect(questionCard.getByTestId('attn-choices')).toContainText('Production');
-    await expect(questionCard.getByTestId('attn-approve')).toHaveCount(0);
-    await expect(questionCard.getByTestId('attn-reject')).toHaveCount(0);
+    await expect(questionCard.getByTestId(`attn-open-${question.id}`)).toContainText('Answer in terminal');
+    await expect(questionCard.getByTestId(`attn-choices-${question.id}`)).toContainText('Staging');
+    await expect(questionCard.getByTestId(`attn-choices-${question.id}`)).toContainText('Production');
+    await expect(questionCard.getByTestId(`attn-approve-${question.id}`)).toHaveCount(0);
+    await expect(questionCard.getByTestId(`attn-reject-${question.id}`)).toHaveCount(0);
     await questionCard.screenshot({ path: `${shots}/node-status-question.png` });
 
     // A permission request keeps its approval controls.
     const permissionCard = mobile.getByTestId(`attn-card-${permission.id}`);
-    await expect(permissionCard.getByTestId('attn-approve')).toContainText('Approve (Y)');
-    await expect(permissionCard.getByTestId('attn-reject')).toContainText('Reject (N)');
-    await expect(permissionCard.getByTestId('attn-choices')).toHaveCount(0);
+    await expect(permissionCard.getByTestId(`attn-approve-${permission.id}`)).toContainText('Approve (Y)');
+    await expect(permissionCard.getByTestId(`attn-reject-${permission.id}`)).toContainText('Reject (N)');
+    await expect(permissionCard.getByTestId(`attn-choices-${permission.id}`)).toHaveCount(0);
 
     // An input request Buildmesh could not classify: open the terminal, and
     // still no yes/no chips.
     const unknownCard = mobile.getByTestId(`attn-card-${unknown.id}`);
-    await expect(unknownCard.getByTestId('attn-open')).toContainText('Open terminal to respond');
-    await expect(unknownCard.getByTestId('attn-approve')).toHaveCount(0);
-    await expect(unknownCard.getByTestId('attn-reject')).toHaveCount(0);
+    await expect(unknownCard.getByTestId(`attn-open-${unknown.id}`)).toContainText('Open terminal to respond');
+    await expect(unknownCard.getByTestId(`attn-approve-${unknown.id}`)).toHaveCount(0);
+    await expect(unknownCard.getByTestId(`attn-reject-${unknown.id}`)).toHaveCount(0);
 
     // The harness answers that question and immediately asks another, without
     // the node ever leaving `awaiting_input` — the replacement must be
@@ -116,8 +121,8 @@ export default async function ({ page, invoke }) {
       tool_input: { questions: [{ question: nextPrompt, options: [{ label: 'Hotfix' }, { label: 'main' }] }] },
     });
     await expect(questionCard.getByText(nextPrompt, { exact: true })).toBeVisible();
-    await expect(questionCard.getByTestId('attn-choices')).toContainText('Hotfix');
-    await expect(questionCard.getByTestId('attn-open')).toBeEnabled();
+    await expect(questionCard.getByTestId(`attn-choices-${question.id}`)).toContainText('Hotfix');
+    await expect(questionCard.getByTestId(`attn-open-${question.id}`)).toBeEnabled();
 
     await mobile.locator('nav button').filter({ hasText: 'Work' }).click();
     await mobile.getByRole('textbox', { name: 'Search work' }).fill('Node status verification');

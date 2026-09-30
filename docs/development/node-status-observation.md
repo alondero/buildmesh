@@ -173,3 +173,17 @@ It uses a short-lived pairing ticket for the mobile browser. This verifies the
 production delivery/read path; it does not launch a real model or prove a CLI's
 hook configuration. Synthetic nodes have no PTY, so opening their terminals can
 produce expected resize errors and adds no lifecycle evidence.
+
+Because that driver needs a running dev backend, nothing in `npm test` would
+otherwise prove its selectors resolve — a gap that once shipped a driver whose
+positive assertions could only time out and whose `toHaveCount(0)` negatives
+passed vacuously, because Playwright's `getByTestId` matches the whole attribute
+and the card renders node-scoped ids like `attn-approve-2`. The guard
+`keeps the real-SPA driver's selectors in sync with the rendered cards` in
+`tests/unit/mobile-node-list.test.tsx` reads the driver, renders each request
+kind, and checks every selector against the `data-testid` values actually in the
+DOM: a positive assertion must name an element that exists, a `toHaveCount(0)`
+must name one that does not, and a selector naming a node the fixtures do not
+define fails rather than passing. Renaming a testid without updating the driver
+fails the unit suite.
+

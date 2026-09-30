@@ -1018,7 +1018,7 @@ function AttentionCard({
         type="button"
         className="deck-body"
         data-testid={`node-${node.id}`}
-        aria-label={`Open ${node.name} details`}
+        aria-label={`Open ${node.name} terminal to respond`}
         onClick={onOpen}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
