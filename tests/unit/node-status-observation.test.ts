@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext, signalHealthNote } from '../../src/lib/status';
+import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext, nodeInputRequest, signalHealthNote } from '../../src/lib/status';
 import type { LifecycleChangedPayload } from '../../src/types/generated/LifecycleChangedPayload';
 
 const observation = (overrides: Partial<LifecycleChangedPayload> = {}): LifecycleChangedPayload => ({
@@ -7,6 +7,11 @@ const observation = (overrides: Partial<LifecycleChangedPayload> = {}): Lifecycl
   message: 'Waiting for child agents', provider_event: 'Stop', provider_session_id: null,
   completion_reason: null, transcript_path: null, timestamp: '2026-09-29T12:00:00Z',
   signal_health: 'ok', semantic_turn: null, ...overrides,
+});
+
+const awaiting = (overrides: Partial<LifecycleChangedPayload> = {}) => ({
+  status: 'awaiting_input' as const,
+  lifecycle: observation({ status: 'awaiting_input', kind: 'input_required', ...overrides }),
 });
 
 describe('node observation presentation', () => {
@@ -23,6 +28,52 @@ describe('node observation presentation', () => {
     expect(getNodeStatusConfig(node).label).toBe('Needs an answer');
     expect(nodeInputContext(node)).toBe('Which branch should I use?');
     expect(nodeInputContext({ ...node, status: 'ready' })).toBeUndefined();
+  });
+});
+
+describe('input request semantics (issue #1966)', () => {
+  it('offers permission actions only for a permission observation', () => {
+    expect(nodeInputRequest(awaiting({ kind: 'permission_requested' }))?.mode).toBe('permission');
+    // A question, an unclassified yield, and an unobserved request must all
+    // refuse the yes/no chips: `y`/`n` are a guess about a harness prompt
+    // Buildmesh never read.
+    expect(nodeInputRequest(awaiting({ kind: 'question_requested' }))?.mode).toBe('question');
+    expect(nodeInputRequest(awaiting({ kind: 'input_required' }))?.mode).toBe('unknown');
+    expect(nodeInputRequest({ status: 'awaiting_input', lifecycle: null })?.mode).toBe('unknown');
+  });
+
+  it('ignores an observation that no longer describes the current status', () => {
+    // The DB drops a stale snapshot, but a client may hold one: a running
+    // node's old permission observation must not shape its reply controls.
+    const node = { status: 'awaiting_input' as const, lifecycle: observation({ kind: 'permission_requested' }) };
+    expect(nodeInputRequest(node)?.mode).toBe('unknown');
+  });
+
+  it('reports no request for a node that is not waiting on one', () => {
+    expect(nodeInputRequest({ status: 'running', lifecycle: observation() })).toBeUndefined();
+  });
+
+  it('surfaces enumerated choices only when the harness supplied them', () => {
+    const offered = awaiting({ kind: 'question_requested', request: { choices: ['Staging', 'Production'] } });
+    expect(nodeInputRequest(offered)?.choices).toEqual(['Staging', 'Production']);
+    // An open question, and a request snapshot from before the field existed.
+    expect(nodeInputRequest(awaiting({ kind: 'question_requested' }))?.choices).toEqual([]);
+    expect(nodeInputRequest({ status: 'awaiting_input', lifecycle: null })?.choices).toEqual([]);
+  });
+
+  it('never reads a choice list off a permission decision', () => {
+    const node = awaiting({ kind: 'permission_requested', request: { choices: ['Yes', 'No'] } });
+    expect(nodeInputRequest(node)?.choices).toEqual([]);
+  });
+
+  it('gives each request its own identity, including a replacement on the same node', () => {
+    const first = awaiting({ kind: 'question_requested', timestamp: '2026-09-29T12:00:00Z' });
+    const second = awaiting({ kind: 'question_requested', timestamp: '2026-09-29T12:01:00Z' });
+    expect(nodeInputRequest(first)?.key).not.toBe(nodeInputRequest(second)?.key);
+    // A different kind at the same instant is a different request too.
+    expect(nodeInputRequest(first)?.key).not.toBe(
+      nodeInputRequest(awaiting({ kind: 'permission_requested', timestamp: '2026-09-29T12:00:00Z' }))?.key,
+    );
   });
 });
 

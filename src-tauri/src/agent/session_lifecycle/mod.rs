@@ -276,6 +276,46 @@ impl SignalHealth {
     }
 }
 
+/// The answer request a harness is blocked on (issue #1966).
+///
+/// Only carried when the hook payload described a **structured** request — the
+/// harness handed Buildmesh an enumerable choice list. An open question with no
+/// enumerated answers carries no `choices`, and neither does a request whose
+/// shape could not be parsed: an empty list means "no trustworthy choices",
+/// which clients must render as an open-to-answer action rather than guessing
+/// yes/no semantics.
+///
+/// Generated to `src/types/generated/InputRequest.ts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export, export_to = "InputRequest.ts")]
+pub struct InputRequest {
+    /// The answers the harness offered, in harness order. Empty when the
+    /// request was open-ended or its shape was not trustworthy.
+    pub choices: Vec<String>,
+}
+
+impl InputRequest {
+    /// The request to carry for a parsed choice list, or `None` when no
+    /// choice survived validation — an unparseable shape is indistinguishable
+    /// from an open question, and neither earns permission-style chips.
+    pub fn from_choices<I, S>(choices: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut seen: Vec<String> = Vec::new();
+        for choice in choices {
+            let choice = choice.as_ref().split_whitespace().collect::<Vec<_>>().join(" ");
+            // Harnesses may repeat an answer across the questions of one
+            // request; rendering it twice would offer the same answer twice.
+            if !choice.is_empty() && !seen.contains(&choice) {
+                seen.push(choice);
+            }
+        }
+        (!seen.is_empty()).then_some(Self { choices: seen })
+    }
+}
+
 /// Provider-side details preserved from the hook payload (issue #1364 §1).
 /// Carried by the lifecycle event so the UI can distinguish "the harness has
 /// not produced an event yet" from "the hook was not installed, trusted,
@@ -301,6 +341,10 @@ pub struct HookSignalDetail {
     pub signal_health: SignalHealth,
     /// Semantic turn payload when the signal carries one.
     pub semantic_turn: Option<SemanticTurnPayload>,
+    /// The structured answer request when the harness supplied one
+    /// (issue #1966). `None` for permission decisions and for open questions
+    /// with no enumerable answers.
+    pub request: Option<InputRequest>,
     /// Human-facing message.
     pub message: Option<String>,
     /// Optional normalized-kind override. The attention route sets this when
@@ -354,6 +398,12 @@ pub struct LifecycleChangedPayload {
     pub signal_health: SignalHealth,
     /// Semantic turn when the signal carries one.
     pub semantic_turn: Option<SemanticTurnPayload>,
+    /// The structured answer request the harness is blocked on (issue #1966).
+    /// Absent unless the hook payload supplied a trustworthy choice list, so
+    /// a client can never mistake "no schema" for "no choices offered".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub request: Option<InputRequest>,
 }
 
 impl LifecycleChangedPayload {
@@ -377,6 +427,7 @@ impl LifecycleChangedPayload {
             timestamp: chrono::Utc::now().to_rfc3339(),
             signal_health: detail.signal_health,
             semantic_turn: detail.semantic_turn.clone(),
+            request: detail.request.clone(),
         }
     }
 }
@@ -796,6 +847,10 @@ pub fn on_hook_running_with_detail(
 
 fn commit_settled_signal(sink: &dyn SessionLifecycleSink, mut payload: LifecycleChangedPayload) -> Result<bool, String> {
     payload.semantic_turn = None;
+    // A settled turn is not blocked on an answer (issue #1966): the request
+    // schema belongs to the awaiting signal that carried it, never to the
+    // running/ready signal that follows.
+    payload.request = None;
     if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? { return Ok(false); }
     emit_settled_signal(sink, payload);
     Ok(true)
@@ -947,6 +1002,7 @@ pub(crate) fn recover_turn_completed(
     let mut payload = LifecycleChangedPayload::new(node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready,
         detail, "turn finished - agent is ready for another prompt");
     payload.semantic_turn = None;
+    payload.request = None;
     let committed = recover_circuit_turn(node_id, &mut payload, recovery)?;
     if committed { emit_settled_signal(sink, payload); }
     Ok(committed)
