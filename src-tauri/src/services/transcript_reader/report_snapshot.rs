@@ -227,6 +227,68 @@ mod tests {
     }
 
     #[test]
+    fn explicit_mcode_handoff_recovers_running_without_claiming_native_completion() {
+        use crate::services::circuit_worker::readiness;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::agent::process::InputUnavailable;
+        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.jsonl");
+        let lines = format!("{}\n{}\n", serde_json::json!({
+            "message_id":"final", "turn_id":"fixes", "message": {"role":"assistant",
+            "timestamp":1790718598978i64, "content":[{"type":"text",
+            "text":"Both blocking findings fixed; 3582 tests passed.\nBUILDMESH_HANDOFF_V1: READY"}]}
+        }), serde_json::json!({"message_id":"settlement", "turn_id":"fixes",
+            "message":{"role":"custom", "customType":"background_task_read_settlement",
+            "content":"", "timestamp":1790718611791i64}}));
+        fs::write(&path, &lines).unwrap();
+        let snapshot = read_file(&path, TranscriptFormat::Mcode).unwrap();
+        assert!(!snapshot.turn_finished);
+        let (mut run, _) = classified_run(snapshot.clone());
+        run.context.set("source.review_preset", "1");
+        let agent = AgentNode { id:900, provider:"mcode".into(), cli_session_id:Some("session".into()),
+            status:SessionStatus::Running, ..Default::default() };
+        for status in [StepStatus::Running, StepStatus::Unverified] {
+            run.steps[0].status = status;
+            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
+                Ok("1:0".into()), Ok(snapshot.clone())).unwrap().expect("explicit handoff");
+            assert_eq!(candidate.status, SessionStatus::Ready);
+            let mut routed = run.clone();
+            let transition = advance(&mut routed, &CircuitEvent::TurnClassified {
+                node_id:"await_source".into(), classification:Some(crate::autopilot::evaluator::Classification::Completed),
+                output:Some(candidate.output), binding:Some(candidate.binding) });
+            assert_eq!(routed.state, RunState::Completed);
+            assert!(!transition.classifications[0].lifecycle_verified);
+        }
+        for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft),
+            (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {
+            assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
+                Err(input), Ok(snapshot.clone())).err(), Some(blocker));
+        }
+        let mut waiting = run.clone();
+        waiting.context.set("node.await_source.human_wait", "1");
+        assert_eq!(readiness::prepare(&waiting, "await_source", &agent, Some("100:projection"),
+            Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(B::HumanResponseRequired));
+        for (evidence, blocker) in [
+            (WorkEvidence { conflicted:true, ..Default::default() }, B::EvidenceConflict),
+            (WorkEvidence { children: [("child".into(), false)].into_iter().collect(), ..Default::default() }, B::KnownWorkOutstanding),
+        ] {
+            let mut blocked = run.clone();
+            blocked.context.set("node.await_source.evidence.1", serde_json::to_string(&evidence).unwrap());
+            assert_eq!(readiness::prepare(&blocked, "await_source", &agent, Some("100:projection"),
+                Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(blocker));
+        }
+        run.context.set("agent.900.previous_report_revision", &snapshot.revision);
+        assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
+            Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(B::ReportSuperseded));
+        fs::write(&path, format!("{lines}{}\n", serde_json::json!({"message_id":"new-work", "turn_id":"next",
+            "message":{"role":"assistant", "timestamp":1790718612000i64, "content":[
+                {"type":"toolCall", "id":"call", "name":"bash", "arguments":{}}]}}))).unwrap();
+        assert!(!snapshot.is_current());
+        assert_eq!(read_file(&path, TranscriptFormat::Mcode).unwrap_err(), ReportReadError::WorkInProgress);
+    }
+
+    #[test]
     fn native_report_preflight_recovers_running_projection_and_unverified_checkpoint() {
         use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};
