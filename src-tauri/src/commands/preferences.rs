@@ -52,7 +52,7 @@ pub fn set_app_reviewer_provider(provider: Option<String>) -> Result<(), String>
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     if let Some(ref value) = prefs.reviewer_provider {
-        crate::autopilot::compatibility::validate_reviewer_provider_id(value)?;
+        crate::circuit::compatibility::validate_reviewer_provider_id(value)?;
     }
     preferences::save(prefs)
 }
@@ -78,9 +78,9 @@ pub fn set_app_naming_provider(provider: Option<String>) -> Result<(), String> {
 /// limits alone apply); `Some(0)` pauses all new autopilot spawns. Takes
 /// effect on the poller's next pass — running nodes are never killed.
 #[command]
-pub fn set_app_autopilot_pool_size(size: Option<u32>) -> Result<(), String> {
+pub fn set_app_circuit_agent_pool_size(size: Option<u32>) -> Result<(), String> {
     let mut prefs = preferences::load()?;
-    prefs.autopilot_pool_size = size;
+    prefs.circuit_agent_pool_size = size;
     preferences::save(prefs)
 }
 
@@ -1043,4 +1043,15 @@ mod resolved_view_tests {
         assert_eq!(crate::preferences::reviewer_provider(), None);
         crate::preferences::reset_for_tests();
     }
+}
+
+#[command]
+pub fn set_circuit_classifier_provider(provider: Option<String>) -> Result<(), String> {
+    let provider = provider.filter(|value| !value.trim().is_empty());
+    if let Some(selection) = provider.as_deref() {
+        crate::session_naming::naming_backend_env(selection)?;
+    }
+    let mut prefs = preferences::load()?;
+    prefs.circuit_classifier_provider = provider;
+    preferences::save(prefs)
 }

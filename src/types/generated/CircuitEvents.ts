@@ -7,4 +7,9 @@ export type CircuitNotificationPayload = { run_id: number, message: string,
  */
 severity: string, };
 
+/**
+ * An OpenPr action completed and an open pull request is available for an agent node.
+ */
+export type CircuitPrReadyPayload = { run_id: number, node_id: number, };
+
 export type CircuitRunUpdatedPayload = { run_id: number, state: string, };

@@ -4,17 +4,17 @@
 
 Two built-in blueprints:
 
-- `WalkingSkeleton` (`src-tauri/src/autopilot/circuit/model.rs::walking_skeleton`) — the canonical
+- `WalkingSkeleton` (`src-tauri/src/circuit/model.rs::walking_skeleton`) — the canonical
   spawn → inject → notify chain under one of four trigger roots (Manual / Interval / labelled GitHub
   issue / labelled GitHub PR). Reconciles spec #1205's *Issue-Driven PR Flow* and *Continuous Looping
   Pacer* presets (they're the same skeleton with different triggers).
-- `IssueDrivenAutopilotReview` (`src-tauri/src/autopilot/circuit/model.rs::issue_driven_autopilot_review`)
+- `IssueDrivenAutopilotReview` (`src-tauri/src/circuit/model.rs::issue_driven_autopilot_review`)
   — the *PR Adversarial Reviewer* preset. Issue-label trigger, collaborator gate, implementation
   agent, finish path, PR open, reviewer spawn, feedback inject into implementation, close reviewer.
 
 ## Drift gates (adding a new built-in blueprint fails CI without a fixture)
 
-- Rust: `autopilot::circuit::blueprint_contract::built_in_catalog_covers_every_blueprint_kind`
+- Rust: `circuit::blueprint_contract::built_in_catalog_covers_every_blueprint_kind`
   iterates every `CircuitBlueprintKind` variant and asserts a `BUILT_IN_CATALOG` entry exists.
 - TypeScript: `tests/unit/circuits-probe-catalog.test.tsx` iterates `PROBE_CATALOG` and asserts each
   matches a generated `CircuitBlueprintKind` variant AND each appears as a `<option>` in the
@@ -24,7 +24,7 @@ Two built-in blueprints:
 
 | Concern                          | File                                                              | Coverage |
 | -------------------------------- | ----------------------------------------------------------------- | -------- |
-| Builder marker / topology / edges | `src-tauri/src/autopilot/circuit/blueprint_contract.rs`           | 19 tests |
+| Builder marker / topology / edges | `src-tauri/src/circuit/blueprint_contract.rs`           | 19 tests |
 | JSON round-trip / validate       | `blueprint_contract.rs` (every entry iterates `validate()`/`to_json`/`from_json`) | covered |
 | Stepper success path             | `stepper.rs::tests::issue_review_blueprint_runs_reviewer_feedback_and_closes_reviewer_node` | covered |
 | Stepper collaborator Blocked     | `stepper.rs::tests::issue_review_collaborator_gate_blocks_until_human_approval` | new |

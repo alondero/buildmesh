@@ -98,19 +98,10 @@ const MESH: Mesh = {
   sandbox: false,
   pre_spawn_pool_size: 1,
   color: null,
-  autopilot_enabled: false,
-  autopilot_trigger_label: null,
-  autopilot_concurrency_limit: 2,
-  autopilot_provider: null,
-  autopilot_action_on_success: null,
+
   root_build_command: null,
   root_run_command: null,
-  autopilot_mode: 'issue_driven',
-  loop_initial_prompt: null,
-  loop_suffix_prompt: null,
-  loop_max_iterations: null,
-  loop_interval_seconds: 0,
-  loop_consecutive_failures: 0,
+
 };
 
 /**

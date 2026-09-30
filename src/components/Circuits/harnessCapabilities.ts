@@ -105,8 +105,8 @@ function harnessIdForProvider(
  *
  * `true` only for a harness Buildmesh can *prove* cannot yield a turn: the
  * ones carrying neither a native attention hook nor a passive turn watcher,
- * plus the plain shell. This is the harness half of the backend's Autopilot
- * compatibility gate (`autopilot::compatibility::evaluate`). A circuit gate
+ * plus the plain shell. This is the harness half of the backend's Circuit
+ * compatibility gate (`circuit::compatibility::evaluate`). A circuit gate
  * that waits on an agent (`AwaitAgentTurn`, `ReviewVerdict`) only advances
  * once that agent's status reaches `AwaitingInput`/`Ready`/`Completed`, and
  * those statuses arrive only from the attention/lifecycle path — so such a run

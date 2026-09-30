@@ -16,7 +16,7 @@ Review of what the `mcode` binary actually exposes, versus what Buildmesh's
 Mcode adapter advertises and uses. Both primary concerns have landed:
 **transcript understanding** (`TranscriptFormat::Mcode`) and **attention
 hooks** (the provisioned Agent-Plugin, validated against a live 0.4.12 TUI —
-issue #1797). The Autopilot gate is open for mcode.
+issue #1797). The Circuit compatibility gate is open for mcode.
 
 ## Sources (primary only)
 
@@ -28,7 +28,7 @@ issue #1797). The Autopilot gate is open for mcode.
 | `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-detailed-spec.md`, `examples/hello-mcode-hooks`) | The superseded v0.3.x Agent-Plugin format (`io.minimax.mcode/hooks/hooks.json`) |
 | `src-tauri/src/agent/provider/adapters/mcode.rs` | Current Buildmesh adapter |
 | `src-tauri/src/services/transcript_reader/adapters/mcode.rs` | Current Buildmesh reader |
-| `src-tauri/src/agent/capabilities.rs`, `autopilot/compatibility.rs` | Harness contract and Autopilot gate |
+| `src-tauri/src/agent/capabilities.rs`, `circuit/compatibility.rs` | Harness contract and Circuit gate |
 
 Delivery, layout, and payload claims below are backed by the live run; the
 scanner and manifest rules are traceable to the shipped bundle and the
@@ -225,7 +225,7 @@ is the only scope the CLI allows: scoping per node would need
 and sessions too and breaks the transcript reader.
 
 `MissingAttentionHook` no longer fires for mcode, so
-`autopilot::compatibility::evaluate` allows it (with worktrees on); pinned by
+`circuit::compatibility::evaluate` allows it (with worktrees on); pinned by
 `compute_for_mesh_allows_mcode_via_attention_hook`.
 
 ### Known limits

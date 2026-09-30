@@ -54,7 +54,7 @@ mod tests {
     }
 
     fn circuit_recovery_fixture() -> (Connection, crate::db::agent_node::CircuitRecoveryFence) {
-        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
         let conn = conn_with_agent_nodes();
         conn.execute_batch("CREATE TABLE autopilot_circuit_runs(id INTEGER PRIMARY KEY,state TEXT,context_json TEXT);
             CREATE TABLE autopilot_circuit_run_steps(run_id INTEGER,node_id TEXT,status TEXT,attempt INTEGER,agent_node_id INTEGER);

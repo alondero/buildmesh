@@ -2,12 +2,12 @@
 //!
 //! After issue #1052 this module owns only the **spawn-orchestration** surface
 //! (`spawn_agent`, `spawn_issue_agent`, `create_issue_node`, `create_pr_node`,
-//! `spawn_handover_agent`, `auto_resume_agent_nodes`, `list_autopilot_runs`) +
+//! `spawn_handover_agent`, `auto_resume_agent_nodes`) +
 //! the helpers that wrap their inputs (`validate_pr_spawn_inputs`) + the matching wire types.
 //! The GitHub-issue / GitHub-PR prefill helpers (`format_issue_prefill`,
 //! `format_pr_prefill`) used to live here; both were consolidated into
 //! [`crate::agent::spawn::SpawnIntent::initial_prompt`] (issue #1180) so the
-//! desktop draft, the background launch, and the Autopilot watcher all
+//! desktop draft, the background launch, and the Circuit worker all
 //! derive from the same `SpawnIntent` instead of three divergent free
 //! functions.
 //!
@@ -38,7 +38,7 @@ use ts_rs::TS;
 // ---------------------------------------------------------------------------
 
 /// Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
-/// after the `pending` row is committed, by the autopilot spawn path, and by
+/// after the `pending` row is committed, by the Circuit spawn path, and by
 /// the HTTP-based E2E test server (`commands::test::handle_inject_test_output`'s
 /// sibling). The frontend `agentNodeStore` refetches the node list on receipt
 /// (issue #490 renamed this from `session-created`).
@@ -324,7 +324,7 @@ pub async fn spawn_issue_agent(
 // duplicated the logic. The single source of truth lives in
 // `agent::spawn::intent` and is reached via
 // `SpawnIntent::Issue(context).initial_prompt()` everywhere (desktop draft,
-// background launch, Autopilot watcher).
+// background launch, Circuit worker).
 
 // ---------------------------------------------------------------------------
 // Two-stage issue spawn (fast stage-1 + background stage-2)
@@ -614,30 +614,7 @@ pub fn create_issue_node(
     Ok(IssueNodeDraft { node, prefill })
 }
 
-/// One Autopilot-managed node's pipeline position, for the header pill.
-/// `state` is the typed `autopilot_runs.state` union
-/// (`implementing`/`finishing`/`completed`/`failed`/`merged`).
-#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
-#[ts(export, export_to = "AutopilotRunState.ts")]
-pub struct AutopilotRunStateRow {
-    #[ts(as = "i32")]
-    pub node_id: i64,
-    pub state: crate::db::AutopilotRunState,
-}
 
-/// Every live (non-archived) Autopilot run, so the frontend can badge
-/// piloted nodes. Fetched alongside the node list; kept fresh by the
-/// `autopilot-*` lifecycle events triggering a refetch.
-#[command]
-pub fn list_autopilot_runs() -> Result<Vec<AutopilotRunStateRow>, String> {
-    db::list_autopilot_run_states()
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(node_id, state)| AutopilotRunStateRow { node_id, state })
-                .collect()
-        })
-        .map_err(|e| e.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420
@@ -837,7 +814,7 @@ pub fn create_pr_node(
 /// used solely for session naming via `pr_node_name`) and
 /// the prefill surfaced on the desktop draft comes from
 /// [`SpawnIntent::initial_prompt`] — the single source of truth shared
-/// with the background launch path and the Autopilot watcher.
+/// with the background launch path and the Circuit worker.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_pr_node_impl(
@@ -928,7 +905,7 @@ pub(crate) fn create_pr_node_impl_configured(
     // surfaces (and the `spawn_with_intent` background task forwards to the
     // harness) come from the same `initial_prompt()` source. Issue #1180
     // closed the previous `format_pr_prefill` helper duplication — three
-    // sites (commands, services/autopilot, autopilot/launch) used to
+    // sites (commands, services/circuit_worker, circuit/launch) used to
     // recompute the prompt independently and could silently drift.
     let intent = SpawnIntent::PullRequest(PullRequestContext {
         owner,

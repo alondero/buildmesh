@@ -47,13 +47,8 @@ import type { NodeDeletedPayload } from '../types/generated/NodeDeletedPayload';
 import type { NodeActivatedPayload } from '../types/generated/NodeActivatedPayload';
 import type { NodeSpawnCompletedPayload } from '../types/generated/NodeSpawnCompletedPayload';
 import type { NodeSpawnFailedPayload } from '../types/generated/NodeSpawnFailedPayload';
-import type { AutopilotFinishingPayload } from '../types/generated/AutopilotFinishingPayload';
-import type { AutopilotPrCreatedPayload } from '../types/generated/AutopilotPrCreatedPayload';
-import type { AutopilotFinishFailedPayload } from '../types/generated/AutopilotFinishFailedPayload';
-import type { AutopilotNodeClosedPayload } from '../types/generated/AutopilotNodeClosedPayload';
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
-import type { CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
+import type { CircuitPrReadyPayload, CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
 
@@ -64,14 +59,14 @@ import { getNodeGitPath } from '../lib/paths';
  */
 export interface AgentNodeActionSurface {
   /** Refetch the full node list (used by `node-created` /
-   *  `autopilot-node-closed`). The store's `fetchAgentNodes` is the
+   *  `node-deleted`). The store's `fetchAgentNodes` is the
    *  canonical implementation; tests that want to assert the dispatch
  *   alone can pass a spy. */
   fetchAgentNodes: () => Promise<void>;
   /** Conditional full refresh (issue #1751): skips the fan-out when the
    *  last snapshot is fresh and every scoped id is already known. Only
-   *  for additive events (`node-created`); evictions (`autopilot-node-
-   *  closed`) must always refetch, since presence in the cache is
+   *  for additive events (`node-created`); deletions (`node-deleted`)
+   *  must always refetch, since presence in the cache is
    *  exactly what the fetch purges. */
   refreshIfStale: (nodeIds: number[]) => Promise<void>;
   /** Switch the active node synchronously (used by `node-activated`,
@@ -81,10 +76,6 @@ export interface AgentNodeActionSurface {
    *  transition (`awaiting_input`/`running`/`error`) and by
    *  `node-renamed`. */
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
-  /** Patch the autopilot pill state for one node. Used by
-   *  `autopilot-finishing` / `autopilot-pr-created` /
-   *  `autopilot-finish-failed`. */
-  patchAutopilotState: (id: number, state: AutopilotRunState) => void;
   /** Patch every visible node owned by a Circuit run when its runner state changes. */
   patchCircuitOwnershipState: (runId: number, state: string) => void;
   /** Re-read the Circuit ownership ledger on its own. Needed because
@@ -139,7 +130,7 @@ const KNOWN_CIRCUIT_RUN_STATES = new Set([
  *
  * Each handler is a one-liner that dispatches to a store action, so
  * adding a new event means (1) a generated payload type, (2) a small
- * `patchAgentNode` / `patchAutopilotState` line, (3) one entry here.
+ * `patchAgentNode` / Circuit ownership line, (3) one entry here.
  */
 export async function attachAgentNodeListeners(
   surface: AgentNodeActionSurface,
@@ -163,6 +154,13 @@ export async function attachAgentNodeListeners(
       if (TERMINAL_CIRCUIT_RUN_STATES.has(payload.state)) {
         void surface.fetchAgentNodes();
       }
+    }),
+  );
+
+  unlistens.push(
+    await listen<CircuitPrReadyPayload>('circuit-pr-ready', ({ payload }) => {
+      const node = surface.findAgentNode(payload.node_id);
+      if (node) invalidateNodeCaches(node.id, getNodeGitPath(node));
     }),
   );
 
@@ -203,7 +201,6 @@ export async function attachAgentNodeListeners(
       } else if (
         event.payload.kind === 'work_resumed' ||
         event.payload.kind === 'turn_completed' ||
-        event.payload.kind === 'autopilot_completed' ||
         event.payload.kind === 'input_required' ||
         event.payload.kind === 'permission_requested' ||
         event.payload.kind === 'question_requested'
@@ -269,50 +266,6 @@ export async function attachAgentNodeListeners(
       if (node) {
         invalidateNodeCaches(nodeId, getNodeGitPath(node));
       }
-    }),
-  );
-
-  // Autopilot pipeline transitions: patch the pill state in place so
-  // the header tracks the run without waiting for the next full
-  // refetch. App.tsx separately refetches on the completion/failure
-  // events to pick up the node's own status change.
-  unlistens.push(
-    await listen<AutopilotFinishingPayload>('autopilot-finishing', (event) => {
-      surface.patchAutopilotState(event.payload.node_id, 'finishing');
-    }),
-  );
-  unlistens.push(
-    await listen<AutopilotPrCreatedPayload>('autopilot-pr-created', (event) => {
-      surface.patchAutopilotState(event.payload.node_id, 'completed');
-      // The wrap-up just opened a PR, so the chip's cached "no PR" is
-      // wrong — and up to 60s of freshness window stands between it
-      // and the next bus-driven refetch. Issue #1004.
-      const node = surface.findAgentNode(event.payload.node_id);
-      if (node) {
-        invalidateNodeCaches(event.payload.node_id, getNodeGitPath(node));
-      }
-    }),
-  );
-  unlistens.push(
-    await listen<AutopilotFinishFailedPayload>('autopilot-finish-failed', (event) => {
-      surface.patchAutopilotState(event.payload.node_id, 'failed');
-    }),
-  );
-
-  // Merged-PR auto-close: the backend archived the node (NOT deleted);
-  // refetch so the card leaves the grid. This stays a full fetch on
-  // purpose (issue #1751 review): an archive is an *eviction* from the
-  // active nodes — the backend snapshot excludes the row (`WHERE status
-  // != 'archived'`) — so a presence-gated `refreshIfStale` must never
-  // guard it. Checking that the id is already in the cache would skip
-  // exactly the fetch that purges it and strand a zombie card. We
-  // deliberately do NOT dispose the terminal — archive keeps the row,
-  // branch, and scrollback alive for the Archive tab, and the
-  // terminal-persistence rule says only a node-delete may dispose.
-  // `TerminalManager` is a singleton; the instance survives the refetch.
-  unlistens.push(
-    await listen<AutopilotNodeClosedPayload>('autopilot-node-closed', async () => {
-      await surface.fetchAgentNodes();
     }),
   );
 

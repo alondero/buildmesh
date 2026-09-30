@@ -1331,7 +1331,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                     // from flipping an active turn to Ready.
                     let decision = lifecycle_decision(
                         classified_decision,
-                        &state,
+                        state,
                         codex_permission_pending,
                         accept,
                     );
@@ -1558,7 +1558,7 @@ mod tests {
             )
             .unwrap();
             let node_id = db.last_insert_rowid();
-            let graph = crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work")
+            let graph = crate::circuit::model::CircuitGraph::walking_skeleton("work")
                 .to_json()
                 .unwrap();
             db.execute(

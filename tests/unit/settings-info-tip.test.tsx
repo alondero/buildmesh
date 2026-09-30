@@ -16,7 +16,7 @@ function mockBackend() {
           default_provider: null,
           reviewer_provider: null,
           naming_provider: null,
-          autopilot_pool_size: null,
+          circuit_agent_pool_size: null,
           worktree_directory: null,
           harness_defaults: {},
           provider_pairings: [],
@@ -48,14 +48,14 @@ describe('Settings — InfoTip help affordance', () => {
     mockBackend();
     render(<AppSettingsModal onClose={() => {}} />);
 
-    const trigger = await screen.findByRole('button', { name: 'About Autopilot pool size' });
+    const trigger = await screen.findByRole('button', { name: 'About Circuit agent pool size' });
     // Closed by default — the long paragraph is not rendered at all.
     expect(screen.queryByRole('tooltip')).toBeNull();
 
     fireEvent.click(trigger);
     const tip = await screen.findByRole('tooltip');
     expect(tip.textContent).toMatch(/leave empty for no global cap/i);
-    expect(tip.textContent).toMatch(/lowering the cap just holds new spawns/i);
+    expect(tip.textContent).toMatch(/lowering the cap holds new launches/i);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
 
     // Escape closes the tip only — the modal stays mounted, and focus walks

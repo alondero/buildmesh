@@ -30,7 +30,7 @@ pub(crate) struct NativeHook {
     #[serde(default)]
     pub termination_reason: Option<String>,
     #[serde(default)]
-    pub human_fact: Option<crate::autopilot::circuit::observation::ObservedWorkFact>,
+    pub human_fact: Option<crate::circuit::observation::ObservedWorkFact>,
     #[serde(default)]
     pub provider: Option<String>,
     /// SHA-256 of the verbatim `prompt` Claude Code echoes on
@@ -262,8 +262,8 @@ pub(crate) fn receipt_source_id(
 
 // This is the Claude/Codex hook request contract already accepted by the
 // attention route. Tool names identify request kind, never request identity.
-fn human_fact(value: &serde_json::Value) -> Option<crate::autopilot::circuit::observation::ObservedWorkFact> {
-    use crate::autopilot::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
+fn human_fact(value: &serde_json::Value) -> Option<crate::circuit::observation::ObservedWorkFact> {
+    use crate::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
     let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
     let request_id = ["request_id", "tool_use_id", "toolUseId", "requestId", "requestID", "elicitation_id", "toolCallId", "tool_call_id", "callId", "call_id", "permissionID", "permission_id"]
         .iter().find_map(|key| value.get(key).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()))?;
@@ -407,7 +407,7 @@ fn rejected_receipt(
     agent_node_id: i64,
     source: &str,
 ) -> super::CircuitEvent {
-    use crate::autopilot::circuit::observation::{
+    use crate::circuit::observation::{
         CircuitObservation, ObservationIdentity, ObservedWorkFact,
     };
     let expected = ObservationIdentity {
@@ -444,7 +444,7 @@ fn normalize(
     current_incarnation: Option<String>,
     current_input: Option<String>,
 ) -> super::CircuitEvent {
-    use crate::autopilot::circuit::observation::{
+    use crate::circuit::observation::{
         CircuitObservation, ObservationIdentity, ObservedWorkFact as Fact,
     };
     use sha2::{Digest, Sha256};
@@ -549,7 +549,7 @@ fn normalize(
         .collect();
     super::CircuitEvent::ObservationBatch {
         input_guard: authoritative.then(|| {
-            crate::autopilot::circuit::stepper::ObservationInputFence {
+            crate::circuit::stepper::ObservationInputFence {
                 transcript_guard: None, report_guard: None,
                 agent_node_id: identity.agent_node_id,
                 input_stamp: current_input.expect("authoritative input stamp"),
@@ -636,10 +636,10 @@ mod tests {
         // decided in the ledger is what makes a Claude turn's facts
         // authoritative, and an uncorrelated receipt is presented but cannot
         // advance the step.
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        use crate::autopilot::circuit::stepper::CircuitEvent;
+        use crate::circuit::stepper::CircuitEvent;
 
         /// Replay one `Stop` receipt and report how the foreground
         /// termination was dispositioned, plus the resulting evidence.
@@ -739,7 +739,7 @@ mod tests {
 
     #[test]
     fn circuit_native_human_requests_use_exact_ids_and_never_infer_responses_from_activity() {
-        use crate::autopilot::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
+        use crate::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
         let request = br#"{"hook_event_name":"PermissionRequest","session_id":"session","turn_id":"turn","tool_use_id":"tool-1","tool_name":"Bash"}"#;
         let reply = br#"{"hook_event_name":"PostToolUse","session_id":"session","turn_id":"turn","tool_use_id":"tool-1","tool_name":"Bash"}"#;
         for provider in ["claude", "codex"] {
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn codex_permission_without_request_id_is_retained_as_unresolved_permission() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             CircuitObservation, HumanWaitKind, ObservationDisposition, ObservedWorkFact as Fact,
             WorkEvidence,
         };
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn circuit_request_receipts_preserve_attention_correlation_aliases() {
-        use crate::autopilot::circuit::observation::{HumanWaitKind, ObservedWorkFact};
+        use crate::circuit::observation::{HumanWaitKind, ObservedWorkFact};
         for session in ["session_id", "sessionId", "sessionID", "conversationId", "conversation_id", "taskId"] {
             for turn in ["turn_id", "prompt_id", "promptId"] {
                 for request in ["request_id", "tool_use_id", "toolUseId", "requestId", "requestID", "elicitation_id", "toolCallId", "tool_call_id", "callId", "call_id", "permissionID", "permission_id"] {
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn circuit_native_request_projection_and_reply_reconcile_in_both_arrival_orders() {
-        use crate::autopilot::circuit::observation::{CircuitObservation, ObservedWorkFact as Fact, WorkEvidence};
+        use crate::circuit::observation::{CircuitObservation, ObservedWorkFact as Fact, WorkEvidence};
         for (provider, tool) in [("claude", "AskUserQuestion"), ("codex", "request_user_input"), ("codex", "ask_user_question")] {
             for projection_first in [false, true] {
                 let native = |event: &str, index: i64| {
@@ -940,8 +940,8 @@ mod tests {
 
     #[test]
     fn malformed_and_deleted_receipts_are_consumed_without_starving_later_receipts() {
-        use crate::autopilot::circuit::observation::ObservationDisposition;
-        use crate::autopilot::circuit::{
+        use crate::circuit::observation::ObservationDisposition;
+        use crate::circuit::{
             context::CircuitContext,
             model::CircuitGraph,
             stepper::{advance, RunState, RunView},
@@ -1011,7 +1011,7 @@ mod tests {
 
     #[test]
     fn normalization_retains_identity_and_rejects_input_that_overtook_the_hook() {
-        use crate::autopilot::circuit::observation::ObservedWorkFact as Fact;
+        use crate::circuit::observation::ObservedWorkFact as Fact;
         let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("1:2".into()), session_incarnation: Some("1000".into()),
             source_id: "native-event".into(), received_at_ms: 5, turn_fenced: true, explicit_turn_mismatch: false, submission_correlated: true, submission_seq: None,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"prompt","background_tasks":[],"session_crons":[],"last_assistant_message":"Final report"}"#).unwrap() };
@@ -1069,8 +1069,8 @@ mod tests {
 
     #[test]
     fn explicit_old_turn_hook_is_recorded_rejected_and_does_not_reopen_checkpoint() {
-        use crate::autopilot::circuit::observation::ObservationDisposition;
-        use crate::autopilot::circuit::{
+        use crate::circuit::observation::ObservationDisposition;
+        use crate::circuit::{
             context::CircuitContext,
             model::CircuitGraph,
             stepper::{advance, RunState, RunView, StepView, StepStatus},
@@ -1210,7 +1210,7 @@ mod tests {
 
     #[test]
     fn codex_foreground_callbacks_are_recordable_without_authoritative_completion() {
-        use crate::autopilot::circuit::observation::ObservedWorkFact as Fact;
+        use crate::circuit::observation::ObservedWorkFact as Fact;
         for (event, expected_fact) in [
             ("UserPromptSubmit", Fact::Working),
             ("Stop", Fact::ForegroundTerminated),
@@ -1331,7 +1331,7 @@ mod tests {
 
     #[test]
     fn agy_settled_stop_records_fenced_evidence_but_never_completion() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
@@ -1364,7 +1364,7 @@ mod tests {
 
     #[test]
     fn agy_background_busy_stop_is_yield_evidence_not_a_settled_turn() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
@@ -1403,7 +1403,7 @@ mod tests {
 
     #[test]
     fn agy_receipts_persist_without_input_fence_and_keep_successive_turns() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
         // Real persistence boundary: an in-memory DB with a running run and
@@ -1412,7 +1412,7 @@ mod tests {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         let graph = serde_json::to_string(
-            &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work"),
+            &crate::circuit::model::CircuitGraph::walking_skeleton("work"),
         )
         .unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -1479,7 +1479,7 @@ mod tests {
 
     #[test]
     fn agy_receipts_from_replaced_sessions_and_deleted_agents_cannot_advance_the_run() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();

@@ -8,7 +8,7 @@
 //! (`db::update_agent_node_status*`) and the matching Tauri events
 //! (`attention-needed`, `attention-cleared`, `resume-failed`) were emitted
 //! from a sprawl of files (`agent/spawn.rs`, `commands/agent.rs`,
-//! `commands/attention.rs`, `coordinator/drive.rs`, `autopilot/pipeline.rs`,
+//! `commands/attention.rs`, `coordinator/drive.rs`, `circuit/delivery.rs`,
 //! `http/ws.rs`, `attention_autoclear.rs`). New developers — and AI
 //! agents — couldn't answer "what does it mean for a session to enter
 //! state X?" without grepping 4-5 files, and the startup sweep that
@@ -206,7 +206,6 @@ pub enum LifecycleKind {
     /// `Completed` terminal state (issue #485). Distinct from
     /// `TurnCompleted` so consumers never have to inspect `status` to tell
     /// "agent ready for another prompt" from "terminal PR-opened".
-    AutopilotCompleted,
     /// The agent yielded and the user is needed, but the hook did not
     /// distinguish a permission from a question. Node lands in
     /// `AwaitingInput`.
@@ -814,7 +813,7 @@ fn attention_kind(semantic_turn: Option<&SemanticTurnPayload>, detail: &HookSign
 /// broadcast `attention-cleared`. Replaces `clear_attention_node` in
 /// `commands/attention.rs:63-74` plus the matching emits in
 /// `http/ws.rs:215-218`, `coordinator/drive.rs:197-201`,
-/// `autopilot/pipeline.rs:355-357`, `attention_autoclear.rs:104-119`.
+/// `circuit/delivery.rs:355-357`, `attention_autoclear.rs:104-119`.
 pub fn on_attention_cleared(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
@@ -951,22 +950,6 @@ pub fn on_error_if_pending(
     }
     on_error(sink, node_id)?;
     Ok(true)
-}
-
-/// Autopilot finish verified — mark `Completed`. Replaces
-/// `autopilot/pipeline.rs:646`. Emits kind `AutopilotCompleted` — a distinct
-/// normalized kind, so "terminal PR-opened" is never confused with an
-/// ordinary `TurnCompleted` (issue #1364 review).
-pub fn on_completed(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
-    let mut payload = LifecycleChangedPayload::new(
-        node_id,
-        LifecycleKind::AutopilotCompleted,
-        SessionStatus::Completed,
-        &HookSignalDetail::default(),
-        "Autopilot wrap-up verified and PR opened",
-    );
-    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
-    Ok(())
 }
 
 /// An ordinary turn finished and the agent is at its prompt, ready for
@@ -1365,18 +1348,6 @@ mod tests {
         assert_eq!(events[0].status, SessionStatus::Error);
     }
 
-    #[test]
-    fn on_completed_emits_autopilot_completed_with_completed_status() {
-        let sink = RecordingSink::new();
-        on_completed(&sink, 7).unwrap();
-        let events = sink.lifecycle_changed();
-        assert_eq!(events.len(), 1);
-        // A distinct kind: "terminal PR-opened" must never be confused with
-        // an ordinary TurnCompleted (issue #1364 review).
-        assert_eq!(events[0].kind, LifecycleKind::AutopilotCompleted);
-        assert_eq!(events[0].status, SessionStatus::Completed);
-        assert_ne!(events[0].kind, LifecycleKind::TurnCompleted);
-    }
 
     #[test]
     fn on_resume_failed_writes_error_with_forbidden_set_and_emits_resume_failed() {
@@ -1445,17 +1416,6 @@ mod tests {
         assert!(sink.resume_failed().is_empty());
     }
 
-    #[test]
-    fn on_completed_writes_completed_unconditionally() {
-        let sink = RecordingSink::new();
-        on_completed(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes(),
-            vec![(7, SessionStatus::Completed)]
-        );
-        assert!(sink.attention_needed().is_empty());
-        assert!(sink.attention_cleared().is_empty());
-    }
 
     #[test]
     fn on_created_writes_pending() {

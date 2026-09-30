@@ -2,7 +2,7 @@
 //! Circuit Run. Earlier findings and replaced graph snapshots remain archived.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use crate::autopilot::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind}};
+use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind}};
 
 #[derive(Debug)]
 pub(crate) struct ReviewRecovery {

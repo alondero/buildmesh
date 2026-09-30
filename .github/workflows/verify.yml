@@ -339,8 +339,8 @@ jobs:
             args: "agent:: --skip commands::agent:: --skip models::agent::"
           - label: commands-http
             args: "commands:: http::"
-          - label: autopilot-coordinator
-            args: "autopilot:: coordinator:: --skip commands::coordinator:: --skip http::routes:: --skip services::autopilot::"
+          - label: circuit-coordinator
+            args: "circuit:: coordinator:: --skip db::circuit:: --skip commands::circuit:: --skip models::circuit:: --skip commands::coordinator:: --skip http::routes::"
           - label: git-env-preferences
             args: "git:: env:: preferences:: --skip commands::git:: --skip commands::preferences:: --skip models::git::"
           # Everything whose first path segment no other shard owns, so a new

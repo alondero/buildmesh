@@ -838,7 +838,7 @@ pub fn watch_child_exit(
 /// [`crate::agent::session_lifecycle::testing`]. They live in their own
 /// `cfg(test)` module rather than inside `mod tests` for two reasons: the
 /// capture seam swaps [`AgentProcess::writer_tx`], a private field, and
-/// `autopilot::pipeline`'s injected-registry tests need the same fixture.
+/// `circuit::delivery`'s injected-registry tests need the same fixture.
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
@@ -1758,7 +1758,7 @@ mod tests {
 // the full surface so a Tauri command-registration update in `lib.rs` is the
 // only seam changes the move requires. `commands::agent::spawn_agent`,
 // `create_issue_node`, `create_pr_node`, `spawn_issue_agent`,
-// `spawn_handover_agent`, `auto_resume_agent_nodes`, `list_autopilot_runs`
+// `spawn_handover_agent`, `auto_resume_agent_nodes`
 // stay in `commands::agent` — those are spawn orchestration, the legitimate
 // role of the commands layer.
 //
@@ -1931,7 +1931,7 @@ fn validate_handover_text(text: &str) -> Result<(), String> {
 /// existing-node sibling of `commands::agent::spawn_handover_agent`, and the
 /// backing command for the terminal context menu's "Handover to node" rows.
 ///
-/// Delegates to [`crate::autopilot::pipeline::write_prompt_to_pty`] instead of
+/// Delegates to [`crate::circuit::delivery::write_prompt_to_pty`] instead of
 /// writing the bytes here, because the submit is the hard part: a multi-line
 /// buffer has to arrive as ONE bracketed paste and the Enter has to land as its
 /// own write at an idle input box, or an ink TUI swallows the keystroke into
@@ -1950,7 +1950,7 @@ pub async fn handover_to_agent(
     // (`write_prompt_to_pty` rejects a target with no live process before
     // writing): a node still reading `pending`/`spawning` can already accept
     // input, and an archived row could not.
-    crate::autopilot::pipeline::write_prompt_to_pty(target_node_id, &text, &app)
+    crate::circuit::delivery::write_prompt_to_pty(target_node_id, &text, &app)
 }
 
 #[command]

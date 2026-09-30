@@ -28,7 +28,6 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // it adds `env`, `source_issue`, and the `archived` status the hand-written
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
 import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
@@ -299,11 +298,6 @@ interface AgentNodeState {
   //                 by the shallow reconciliation in `fetchAgentNodes`.
   nodesById: Record<number, AgentNode>;
   nodeIds: number[];
-  // Autopilot pipeline state per piloted node id ('implementing' /
-  // 'finishing' / 'completed' / 'failed' / 'merged'). Absent key = not an
-  // autopilot node. Drives the header's Autopilot pill; refreshed with the
-  // node list and nudged by the `autopilot-*` lifecycle events.
-  autopilotStates: Record<number, AutopilotRunState>;
   // Circuit ownership comes from the run-step satellite ledger. Every Agent
   // Node spawned by one run resolves to the same run id shown in its header.
   circuitOwnerships: Record<number, CircuitAgentOwnership>;
@@ -322,7 +316,7 @@ interface AgentNodeState {
   // timeout can't fire `sendToAgent` against a deleted node. `fetchAgentNodes`
   // additionally cancels any schedule whose target node is absent from the
   // refreshed list OR has `status === 'archived'` (issue #1252) — otherwise
-  // the autopilot-node-closed path would let a stale timer fire against an
+  // the node-deleted path would let a stale timer fire against an
   // archived node, surfacing a spurious "System" error toast minutes later.
   schedules: Record<number, ScheduledTask>;
 
@@ -440,7 +434,6 @@ interface AgentNodeState {
   // one-liner that the store can also expose to other callers if a
   // future refactor needs the same seam.
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
-  patchAutopilotState: (id: number, state: AutopilotRunState) => void;
   patchCircuitOwnershipState: (runId: number, state: string) => void;
   /// Re-read just the Circuit ownership ledger, without the full
   /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
@@ -460,7 +453,7 @@ interface AgentNodeState {
 /// use this hook instead of the duplicated `useMemo(() => nodeIds.map(id =>
 /// nodesById[id]).filter(...), [nodeIds, nodesById])` block. `useShallow`
 /// does the shallow equality on the array's elements so unrelated writes
-/// (autopilot pill, closing flag, error string) don't churn the consumer.
+/// (Circuit indicator, closing flag, error string) don't churn the consumer.
 ///
 /// Returns a fresh array reference on every `nodeIds` change (e.g. a delete
 /// or reorder), so `useMemo`-style downstream derivations in consumers
@@ -492,7 +485,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // response when it moved — the read started earlier, so its snapshot is
   // older than the state already applied. Coalescing is not sufficient on its
   // own: it orders the queue, but a stale in-flight response still lands after
-  // the newer event (spec `autopilot-node-indicators.md` step 7: "an older
+  // the newer event (spec `circuit-node-indicators.md` step 7: "an older
   // response cannot overwrite newer event state").
   let circuitOwnershipsRevision = 0;
   let nodeRevision = 0;
@@ -540,9 +533,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     try {
       // Satellite reads fail independently. A transient failure preserves
       // the last known satellite state instead of clearing a live path.
-      const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
+      const [agentNodes, circuitOwnerships, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
-        api.listAutopilotRuns().catch(() => null),
         api.listCircuitAgentOwnerships().catch(() => null),
         api.listSemanticTurns().catch(() => null),
       ]);
@@ -552,9 +544,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         void fetchAgentNodes();
         return;
       }
-      const autopilotStates = !Array.isArray(autopilotRuns)
-        ? get().autopilotStates
-        : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
       // Issue #1384 — shallow reconciliation. For each incoming node, check
       // against the existing entry under the same id; if all reconciled
       // fields match, keep the old object reference. The new `nodesById`
@@ -575,7 +564,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // "hit Enter" sentinel) at an archived node, the backend would
       // reject, and App.tsx's generic "System" toast pipeline would
       // surface a spurious error minutes after the user moved on. The
-      // `autopilot-node-closed` listener (`stores/agentNodeListeners.ts`)
+      // `node-deleted` listener (`stores/agentNodeListeners.ts`)
       // routes through here, so every archive transition sweeps
       // schedules for free — without this, the only cancellation path
       // was `deleteAgentNode`, which the archive path never invokes.
@@ -584,7 +573,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       // is a side effect we don't want running twice under React
       // StrictMode. We keep the same object reference when nothing was
       // cancelled, so subscribers that read `state.schedules` don't
-      // re-render on every fetch (the steady-state autopilot case).
+      // re-render on every fetch (the steady-state Circuit case).
       const oldSchedules = get().schedules;
       const keptSchedules: Record<number, ScheduledTask> = {};
       for (const idStr of Object.keys(oldSchedules)) {
@@ -612,7 +601,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({
         nodesById: newById,
         nodeIds: newIds,
-        autopilotStates,
         circuitOwnerships: reconciledOwnerships,
         semanticTurns: !Array.isArray(semanticTurns)
           ? get().semanticTurns
@@ -675,7 +663,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   return {
   nodesById: {},
   nodeIds: [],
-  autopilotStates: {},
   circuitOwnerships: {},
   semanticTurns: {},
   activeNodeId: null,
@@ -717,9 +704,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         nodesById: { ...state.nodesById, [id]: { ...current, ...patch } },
       };
     });
-  },
-  patchAutopilotState: (id, state) => {
-    set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
   },
   patchCircuitOwnershipState: (runId, state) => {
     // Any recognised run-state event is newer than an in-flight satellite
@@ -763,7 +747,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           refreshIfStale: get().refreshIfStale,
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
-          patchAutopilotState: get().patchAutopilotState,
           patchCircuitOwnershipState: get().patchCircuitOwnershipState,
           refreshCircuitOwnerships: get().refreshCircuitOwnerships,
           setSemanticTurn: get().setSemanticTurn,
@@ -1261,8 +1244,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         return { schedules: next };
       });
       // Issue #1252 — belt-and-braces guard. The fetch-time cancellation
-      // in `fetchAgentNodes` is the common path: an `autopilot-node-
-      // closed` event archives the node, the listener refetches, and
+      // in `fetchAgentNodes` is the common path: a `node-deleted` event
+      // archives the node, the listener refetches, and
       // any pending schedule is dropped. This guard covers the narrow
       // race where the timer resolves AFTER the schedule was created
       // but BEFORE the refetch lands — bail silently rather than call

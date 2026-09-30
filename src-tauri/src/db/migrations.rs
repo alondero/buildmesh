@@ -1148,7 +1148,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 };
                 let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
                 let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
-                let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json) {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
                         tracing::warn!("evolve_to: cannot inspect review circuit {}: {}", id, error);
@@ -1212,7 +1212,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
             for (id, graph_json) in circuits {
-                let mut graph = match crate::autopilot::circuit::model::CircuitGraph::from_json(
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(
                     &graph_json,
                 ) {
                     Ok(graph) => graph,

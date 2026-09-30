@@ -14,8 +14,8 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
-import { getAutopilotNodePresentation } from '../../src/lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../../src/components/shared/AutopilotNodeIndicator';
+import { getCircuitNodePresentation } from '../../src/lib/circuitNodePresentation';
+import { CircuitNodeIndicatorCell } from '../../src/components/shared/CircuitNodeIndicator';
 
 // Issue #647: `agentNodeStore.deleteAgentNode` disposes the xterm terminal
 // BEFORE the `delete_agent_node` IPC commits. On failure the restored row
@@ -67,12 +67,12 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
-function StoreBackedAutopilotIndicator({ nodeId }: { nodeId: number }) {
+function StoreBackedCircuitIndicator({ nodeId }: { nodeId: number }) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
   return node
-    ? createElement(AutopilotNodeIndicatorCell, {
-      presentation: getAutopilotNodePresentation(node, undefined, ownership),
+    ? createElement(CircuitNodeIndicatorCell, {
+      presentation: getCircuitNodePresentation(node, ownership),
     })
     : null;
 }
@@ -106,7 +106,6 @@ describe('useAgentNodeStore', () => {
       nodesById: {},
       nodeIds: [],
       activeNodeId: null,
-      autopilotStates: {},
       circuitOwnerships: {},
       loading: false,
       error: null,
@@ -241,7 +240,6 @@ describe('useAgentNodeStore', () => {
       const ownership = { node_id: 12, run_id: 4, circuit_id: 2, circuit_name: 'Review', state: 'running', parent_node_id: null };
       const semanticTurn = { node_id: 12, kind: 'turn_finished' as const, description: 'ready for review' };
       useAgentNodeStore.setState({
-        autopilotStates: { 12: 'implementing' },
         circuitOwnerships: { 12: ownership },
         semanticTurns: { 12: semanticTurn },
       });
@@ -252,7 +250,6 @@ describe('useAgentNodeStore', () => {
 
       await useAgentNodeStore.getState().fetchAgentNodes();
 
-      expect(useAgentNodeStore.getState().autopilotStates[12]).toBe('implementing');
       expect(useAgentNodeStore.getState().circuitOwnerships[12]).toEqual(ownership);
       expect(useAgentNodeStore.getState().semanticTurns[12]).toEqual(semanticTurn);
     });
@@ -561,14 +558,14 @@ describe('useAgentNodeStore', () => {
       });
       const circuitStates = ['running', 'paused', 'running'] as const;
       const phases = [];
-      render(createElement(StoreBackedAutopilotIndicator, { nodeId: 11 }));
-      const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active'];
+      render(createElement(StoreBackedCircuitIndicator, { nodeId: 11 }));
+      const visibleLabels = ['Circuit active', 'Circuit waiting', 'Circuit active'];
       for (const [index, state] of circuitStates.entries()) {
         ledgerState = state;
         await mockEmit('circuit-run-updated', { run_id: 1, state });
         await waitFor(() => expect(screen.getByRole('img', { name: visibleLabels[index] })).toBeTruthy());
         const ownership = useAgentNodeStore.getState().circuitOwnerships[11];
-        phases.push(getAutopilotNodePresentation(circuitNode, undefined, ownership)?.phase);
+        phases.push(getCircuitNodePresentation(circuitNode, ownership)?.phase);
       }
       expect(phases).toEqual(['active', 'waiting', 'active']);
       expect(mockInvoke).toHaveBeenCalledWith('list_circuit_agent_ownerships');
@@ -584,60 +581,17 @@ describe('useAgentNodeStore', () => {
         return Promise.resolve(undefined);
       });
       await mockEmit('circuit-run-updated', { run_id: 1, state: 'completed' });
-      await waitFor(() => expect(screen.getByRole('img', { name: 'Autopilot done' })).toBeTruthy());
+      await waitFor(() => expect(screen.getByRole('img', { name: 'Circuit done' })).toBeTruthy());
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
       expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
     });
 
-    // Issue #1751 review: `autopilot-node-closed` is an eviction from the
+    // Issue #1751 review: `node-deleted` is an eviction from the
     // active nodes, not a patch. The backend archived the row, so the next
     // `list_agent_nodes` snapshot excludes it (`WHERE status != 'archived'`)
     // and the store must drop it from nodeIds/nodesById. Presence in the
     // cache must never guard that eviction — even with a seconds-fresh
     // snapshot, the closed node has to leave the grid.
-    it('evicts the archived node on autopilot-node-closed despite a fresh snapshot', async () => {
-      const node = makeNode({ id: 7, status: 'running' });
-      mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'list_agent_nodes') return Promise.resolve([node]);
-        return Promise.resolve([]);
-      });
-      // Stamp a fresh snapshot with the node present.
-      await useAgentNodeStore.getState().fetchAgentNodes();
-      expect(useAgentNodeStore.getState().nodeIds).toContain(7);
-
-      // The backend archived the row: snapshots from here on exclude it.
-      mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'list_agent_nodes') return Promise.resolve([]);
-        return Promise.resolve([]);
-      });
-      // Attach with the real store surface (self-contained: unlisten
-      // afterwards so no handler leaks into sibling tests).
-      const s = useAgentNodeStore.getState();
-      const unlisten = await attachAgentNodeListeners({
-        fetchAgentNodes: s.fetchAgentNodes,
-        refreshIfStale: s.refreshIfStale,
-        setActiveNode: s.setActiveNode,
-        patchAgentNode: s.patchAgentNode,
-        patchAutopilotState: s.patchAutopilotState,
-        patchCircuitOwnershipState: s.patchCircuitOwnershipState,
-        refreshCircuitOwnerships: s.refreshCircuitOwnerships,
-        setSemanticTurn: s.setSemanticTurn,
-        findAgentNode: s.findAgentNode,
-        removeAgentNode: s.removeAgentNode,
-      });
-      try {
-        await mockEmit('autopilot-node-closed', { node_id: 7, pr_number: 12 });
-
-        await waitFor(() => {
-          expect(useAgentNodeStore.getState().nodeIds).not.toContain(7);
-        });
-        expect(useAgentNodeStore.getState().nodesById[7]).toBeUndefined();
-        expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
-        expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
-      } finally {
-        unlisten();
-      }
-    });
   });
 
   // Regression: starting a review from a node's title bar creates the run and
@@ -668,9 +622,9 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().circuitOwnerships[11]).toEqual(ownership);
       // The indicator now resolves to a live "waiting" presentation for the
       // freshly-owned node — an immediate signal, not a silent gap.
-      expect(getAutopilotNodePresentation(
-        node, undefined, useAgentNodeStore.getState().circuitOwnerships[11],
-      )).toMatchObject({ phase: 'waiting', label: 'Autopilot waiting' });
+      expect(getCircuitNodePresentation(
+        node, useAgentNodeStore.getState().circuitOwnerships[11],
+      )).toMatchObject({ phase: 'waiting', label: 'Circuit waiting' });
       // Satellite read only — the node list is not refetched.
       expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');
     });
@@ -694,7 +648,7 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().circuitOwnerships[5]).toBe(unchanged);
     });
 
-    // Spec `autopilot-node-indicators.md` step 7: "Give the async refresh an
+    // Spec `circuit-node-indicators.md` step 7: "Give the async refresh an
     // owner so an older response cannot overwrite newer event state" — and the
     // acceptance bullet "Resolve older/newer refreshes in both orders". Each
     // test below holds one reader open, lands the newer write, then releases it:
@@ -920,7 +874,6 @@ describe('useAgentNodeStore', () => {
         if (cmd === 'create_agent_node') return Promise.resolve(newNode);
         if (cmd === 'spawn_agent') return Promise.resolve(undefined);
         if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...newNode, status: 'running' }]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -963,7 +916,6 @@ describe('useAgentNodeStore', () => {
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'spawn_agent') return Promise.resolve(undefined);
         if (cmd === 'list_agent_nodes') return Promise.resolve([existing]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -994,7 +946,6 @@ describe('useAgentNodeStore', () => {
       mockInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'spawn_agent') return gate;
         if (cmd === 'list_agent_nodes') return Promise.resolve([{ ...existing, status: 'running' }]);
-        if (cmd === 'list_autopilot_runs') return Promise.resolve([]);
         return Promise.resolve(undefined);
       });
 
@@ -1809,14 +1760,14 @@ describe('useAgentNodeStore', () => {
     // would call `send_to_agent` against an archived node, the backend
     // would reject, `state.error` would be set, and App.tsx's generic
     // "System" toast pipeline would surface a spurious error minutes
-    // after the user moved on. The `autopilot-node-closed` listener
+    // after the user moved on. The `node-deleted` listener
     // (`stores/agentNodeListeners.ts`) routes through `fetchAgentNodes`,
     // so every archive transition sweeps schedules for free.
     it('cancels schedules whose node comes back archived from fetchAgentNodes', async () => {
       seedAgentNodes([makeNode({ id: 7, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(7, 1000, 'still there?', '5m');
       // The next list_agent_nodes reflects node 7 as archived — the
-      // shape the autopilot-node-closed handler triggers via
+      // shape the node-deleted handler triggers via
       // fetchAgentNodes.
       mockInvoke.mockResolvedValueOnce([makeNode({ id: 7, status: 'archived' })]);
 
@@ -1856,7 +1807,7 @@ describe('useAgentNodeStore', () => {
       seedAgentNodes([makeNode({ id: 8, status: 'running' })]);
       useAgentNodeStore.getState().scheduleInput(8, 1000, 'ping', '1m');
       // Node 8 transitions to archived before the timer fires (e.g.
-      // an autopilot close landed between the schedule and the tick).
+      // a Circuit cleanup landed between the schedule and the tick).
       seedAgentNodes([makeNode({ id: 8, status: 'archived' })]);
 
       await vi.advanceTimersByTimeAsync(1000);

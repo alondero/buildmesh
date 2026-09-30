@@ -7,14 +7,14 @@ const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fenc
 
 pub(crate) fn restore_projection_conflicts(
     run_id: i64, node_id: &str, attempt: i32,
-    evidence: &mut crate::autopilot::circuit::observation::WorkEvidence,
+    evidence: &mut crate::circuit::observation::WorkEvidence,
 ) -> SqlResult<bool> {
     restore_projection_conflicts_inner(&crate::db::read_conn(), run_id, node_id, attempt, evidence)
 }
 
 fn restore_projection_conflicts_inner(
     db: &Connection, run_id: i64, node_id: &str, attempt: i32,
-    evidence: &mut crate::autopilot::circuit::observation::WorkEvidence,
+    evidence: &mut crate::circuit::observation::WorkEvidence,
 ) -> SqlResult<bool> {
     let mut query = db.prepare("SELECT detail FROM circuit_run_history
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='observation'
@@ -81,9 +81,9 @@ pub(super) const DISPOSITION_REQUESTED: &str = "requested";
 /// Buildmesh's recorded disposition for one observation, matching the
 /// snake_case serde form of [`ObservationDisposition`].
 fn observation_disposition_str(
-    value: crate::autopilot::circuit::observation::ObservationDisposition,
+    value: crate::circuit::observation::ObservationDisposition,
 ) -> &'static str {
-    use crate::autopilot::circuit::observation::ObservationDisposition as D;
+    use crate::circuit::observation::ObservationDisposition as D;
     match value {
         D::Accepted => "accepted",
         D::ReducedConfidence => "reduced_confidence",
@@ -154,10 +154,10 @@ pub struct CircuitStepObservationCoverage {
     #[ts(as = "Option<i32>")]
     pub deadline_ms: Option<i64>,
     pub waits_active: bool,
-    pub human_waits: Vec<crate::autopilot::circuit::observation::HumanWait>,
+    pub human_waits: Vec<crate::circuit::observation::HumanWait>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub observation_blocker: Option<crate::autopilot::circuit::observation::CircuitObservationBlocker>,
+    pub observation_blocker: Option<crate::circuit::observation::CircuitObservationBlocker>,
 }
 
 pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
@@ -168,8 +168,8 @@ pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
     Ok(view)
 }
 
-fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::autopilot::circuit::stepper::RunView, String> {
-    use crate::autopilot::circuit::{context::CircuitContext, model::StepOutcome, stepper::{RunState, RunView, StepStatus, StepView}};
+fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::circuit::stepper::RunView, String> {
+    use crate::circuit::{context::CircuitContext, model::StepOutcome, stepper::{RunState, RunView, StepStatus, StepView}};
     let steps = super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
     Ok(RunView { run_id:run.id, graph:run_graph(db, run.id)?, state:RunState::from_db_str(&run.state),
         context:CircuitContext::from_json(&run.context_json)?,
@@ -187,7 +187,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
     let mut coverage = Vec::new();
     {
         let graph = run_graph(db, run_id)?;
-        let context = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json)?;
+        let context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
         let view = recovery_view(db, &run)?;
         for step in steps {
@@ -202,7 +202,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                             .and_then(|json| serde_json::from_str(json).ok())).flatten(),
                         waits_active: run.state == "running" && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
                         human_waits: context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-                            .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok())
+                            .and_then(|json| serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json).ok())
                             .map(|evidence| evidence.human_waits.into_iter().filter(|wait| wait.source != "agent_status_projection").collect()).unwrap_or_default(),
                     });
                 }
@@ -210,7 +210,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
             if run.state != "running" || step.status != "unverified" {
                 continue;
             }
-            use crate::autopilot::circuit::model::CircuitNodeKind;
+            use crate::circuit::model::CircuitNodeKind;
             let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
                 Some(
                     kind @ (CircuitNodeKind::GithubAction { .. }
@@ -222,7 +222,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                     if matches!(
                         kind,
                         CircuitNodeKind::GithubAction {
-                            action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+                            action: crate::circuit::model::GithubActionKind::OpenPr,
                             ..
                         }
                     ) {
@@ -542,7 +542,7 @@ pub(crate) fn receive_native_hook_locked(
     };
     let mut targets = Vec::new();
     for run_id in run_ids {
-        use crate::autopilot::circuit::{
+        use crate::circuit::{
             context::CircuitContext,
             model::StepOutcome,
             stepper::{RunState, RunView, StepStatus, StepView},
@@ -707,7 +707,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         .ok_or("This checkpoint changed. Refresh before acting.")?;
     let graph = run_graph(&tx, run.id)?;
     // An attestation cannot authorize tool use or supply a review verdict.
-    use crate::autopilot::circuit::model::CircuitNodeKind;
+    use crate::circuit::model::CircuitNodeKind;
     if matches!(request.action, CheckpointAction::Completed)
         && matches!(graph.node(&request.node_id).map(|n| &n.kind), Some(
             CircuitNodeKind::SpawnAgentNode { .. } | CircuitNodeKind::AwaitAgentTurn { .. }
@@ -738,7 +738,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         let open_pr = matches!(
             kind,
             Some(CircuitNodeKind::GithubAction {
-                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+                action: crate::circuit::model::GithubActionKind::OpenPr,
                 ..
             })
         );
@@ -761,7 +761,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             return Err("This action has no authoritative automatic evidence recheck. Inspect the external result.".into());
         }
         let mut context =
-            crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json)?;
+            crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         context.set(&format!("node.{}.wait.attempt", step.node_id), "");
         context.set(&format!("node.{}.evaluated_attempt", step.node_id), "");
         context.set(
@@ -807,7 +807,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         return tx.commit().map_err(|e| e.to_string());
     }
     let mut context =
-        crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json)?;
+        crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
     context.set(&format!("node.{}.recheck_only", request.node_id), "0");
     let effect_kind = match graph.node(&request.node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::GithubAction { .. }) => "github",
@@ -822,7 +822,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         && matches!(
             graph.node(&request.node_id).map(|n| &n.kind),
             Some(CircuitNodeKind::GithubAction {
-                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+                action: crate::circuit::model::GithubActionKind::OpenPr,
                 ..
             })
         )
@@ -1052,7 +1052,7 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
         let Some(node) = node else { continue; };
         let attempt = db.query_row("SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
             params![run_id, node], |row| row.get::<_, i32>(0)).optional()?;
-        let blocker = next.get(key).and_then(|value| serde_json::from_str::<crate::autopilot::circuit::observation::CircuitObservationBlocker>(value).ok());
+        let blocker = next.get(key).and_then(|value| serde_json::from_str::<crate::circuit::observation::CircuitObservationBlocker>(value).ok());
         let detail = serde_json::json!({"blocker": blocker, "message": blocker.as_ref().map(|blocker| blocker.message())});
         append_history(db, run_id, Some(node), attempt, "observation_readiness", &detail.to_string(),
             Some(SOURCE_RECONCILIATION), Some(wait_disposition(blocker.is_some())))?;
@@ -1106,9 +1106,9 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
 pub(super) fn run_graph(
     db: &Connection,
     run_id: i64,
-) -> Result<crate::autopilot::circuit::model::CircuitGraph, String> {
+) -> Result<crate::circuit::model::CircuitGraph, String> {
     let json = run_graph_json(db, run_id)?;
-    crate::autopilot::circuit::model::CircuitGraph::from_json(&json)
+    crate::circuit::model::CircuitGraph::from_json(&json)
 }
 
 pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, String> {
@@ -1212,7 +1212,7 @@ pub fn commit_transition(
     };
     drop(db);
     if result.is_ok()
-        && state.is_some_and(crate::autopilot::circuit::vocabulary::RunState::is_terminal_db_str)
+        && state.is_some_and(crate::circuit::vocabulary::RunState::is_terminal_db_str)
     {
         crate::services::circuit_worker::wake_circuit_worker();
     }
@@ -1221,13 +1221,13 @@ pub fn commit_transition(
 
 #[derive(Default)]
 pub struct EvidenceWrite<'a> {
-    pub input_guard: Option<&'a crate::autopilot::circuit::stepper::ObservationInputFence>,
+    pub input_guard: Option<&'a crate::circuit::stepper::ObservationInputFence>,
     pub intents: &'a [EffectIntent],
     pub agent_status_effects: &'a [AgentStatusEffect],
     pub reconciled_effects: &'a [ReconciledEffect],
-    pub observations: &'a [crate::autopilot::circuit::observation::RecordedObservation],
-    pub classifications: &'a [crate::autopilot::circuit::observation::RecordedClassification],
-    pub expected: Option<&'a crate::autopilot::circuit::stepper::TransitionFence>,
+    pub observations: &'a [crate::circuit::observation::RecordedObservation],
+    pub classifications: &'a [crate::circuit::observation::RecordedClassification],
+    pub expected: Option<&'a crate::circuit::stepper::TransitionFence>,
 }
 
 pub(crate) fn commit_transition_locked(
@@ -1301,17 +1301,17 @@ pub(crate) fn commit_transition_locked(
                 && step.status == "completed"
         });
         let configured_status = match graph.as_ref().and_then(|graph| graph.node(&effect.node_id)).map(|node| &node.kind) {
-            Some(crate::autopilot::circuit::model::CircuitNodeKind::SetNodeStatus {
+            Some(crate::circuit::model::CircuitNodeKind::SetNodeStatus {
                 status,
                 ..
             }) => match status {
-                crate::autopilot::circuit::model::SessionStatusKind::Running => {
+                crate::circuit::model::SessionStatusKind::Running => {
                     crate::models::SessionStatus::Running
                 }
-                crate::autopilot::circuit::model::SessionStatusKind::Idle => {
+                crate::circuit::model::SessionStatusKind::Idle => {
                     crate::models::SessionStatus::Idle
                 }
-                crate::autopilot::circuit::model::SessionStatusKind::Completed => {
+                crate::circuit::model::SessionStatusKind::Completed => {
                     crate::models::SessionStatus::Completed
                 }
             },
@@ -1383,8 +1383,8 @@ pub(crate) fn commit_transition_locked(
         })?;
         let is_open_pr = matches!(
             graph.node(&effect.intent.node_id).map(|node| &node.kind),
-            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+            Some(crate::circuit::model::CircuitNodeKind::GithubAction {
+                action: crate::circuit::model::GithubActionKind::OpenPr,
                 ..
             })
         );
@@ -1524,8 +1524,8 @@ fn record_effect_target_locked(
     let graph = run_graph(&tx, run_id)?;
     if !matches!(
         graph.node(node_id).map(|node| &node.kind),
-        Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-            action: crate::autopilot::circuit::model::GithubActionKind::OpenPr,
+        Some(crate::circuit::model::CircuitNodeKind::GithubAction {
+            action: crate::circuit::model::GithubActionKind::OpenPr,
             ..
         })
     ) {
@@ -1634,7 +1634,7 @@ mod tests {
 
     #[test]
     fn legacy_projection_conflicts_restore_only_from_matching_history_and_attempt() {
-        use crate::autopilot::circuit::observation::*;
+        use crate::circuit::observation::*;
         let db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -1959,13 +1959,13 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',2,'running',9);").unwrap();
-        let mut graph = crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("");
+        let mut graph = crate::circuit::model::CircuitGraph::walking_skeleton("");
         graph
             .nodes
             .iter_mut()
             .find(|n| n.id == "inject")
             .unwrap()
-            .kind = crate::autopilot::circuit::model::CircuitNodeKind::LlmTurnClassifier {
+            .kind = crate::circuit::model::CircuitNodeKind::LlmTurnClassifier {
             target_node_id: None,
         };
         db.execute(
@@ -2025,7 +2025,7 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
         // Two real submissions: input A then input B (issue #1898). B is
         // submitted before A's turn start hook lands, so A's start describes
         // a superseded turn.
@@ -2096,7 +2096,7 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
 
         // Buildmesh submits exactly this text.
         record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "run the tests").unwrap();
@@ -2232,7 +2232,7 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
         // No submission was ever recorded, so nothing can be correlated even
         // though the receipt asserts it and carries a plausible turn token.
         let receipt = NativeReceipt {
@@ -2294,7 +2294,7 @@ mod tests {
 
     #[test]
     fn recheck_retains_ownership_uncertainty_and_cannot_authorize_classifier_completion() {
-        use crate::autopilot::circuit::{
+        use crate::circuit::{
             context::CircuitContext,
             model::{CircuitGraph, CircuitNodeKind},
             observation::WorkEvidence,
@@ -2373,7 +2373,7 @@ mod tests {
             &mut view,
             &CircuitEvent::TurnClassified { binding: None,
                 node_id: "spawn".into(),
-                classification: Some(crate::autopilot::evaluator::Classification::Completed),
+                classification: Some(crate::circuit::evaluator::Classification::Completed),
                 output: Some("Done".into()),
             },
         );
@@ -2409,10 +2409,10 @@ mod tests {
             ("unverified", 1)
         );
         let history = history_inner(&db, 1).unwrap();
-        let recorded: crate::autopilot::circuit::observation::RecordedClassification = serde_json::from_str(&history.iter().find(|entry| entry.kind == "classification").expect("interpretation recorded atomically").detail).unwrap();
+        let recorded: crate::circuit::observation::RecordedClassification = serde_json::from_str(&history.iter().find(|entry| entry.kind == "classification").expect("interpretation recorded atomically").detail).unwrap();
         assert!(!recorded.lifecycle_verified);
         assert_eq!(recorded.report_revision, None);
-        assert_eq!(recorded.interpretation, crate::autopilot::circuit::observation::ReportInterpretation::Completed);
+        assert_eq!(recorded.interpretation, crate::circuit::observation::ReportInterpretation::Completed);
         assert!(record_outcome_locked(&mut db, &request).is_err());
         assert!(history_inner(&db, 1)
             .unwrap()
@@ -2422,7 +2422,7 @@ mod tests {
 
     #[test]
     fn receipt_commit_rejects_replaced_sessions_without_advancing_cursor_or_history() {
-        use crate::autopilot::circuit::stepper::ObservationInputFence;
+        use crate::circuit::stepper::ObservationInputFence;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
@@ -2503,7 +2503,7 @@ mod tests {
 
     #[test]
     fn observation_projection_and_effect_intent_commit_atomically() {
-        use crate::autopilot::circuit::observation::*;
+        use crate::circuit::observation::*;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
@@ -2610,7 +2610,7 @@ mod tests {
 
     #[test]
     fn set_node_status_and_step_commit_atomically_across_restart() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
             SessionStatusKind,
         };
@@ -2681,7 +2681,7 @@ mod tests {
 
     #[test]
     fn set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted() {
-        use crate::autopilot::circuit::{
+        use crate::circuit::{
             model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, SessionStatusKind},
             stepper::{RunState, StepStatus, StepView, TransitionFence},
         };
@@ -2764,7 +2764,7 @@ mod tests {
 
     #[test]
     fn unknown_open_pr_checkpoint_offers_read_only_recheck_for_same_attempt() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
         };
         let mut db = Connection::open_in_memory().unwrap();
@@ -2818,7 +2818,7 @@ mod tests {
         let run = super::super::ledger::get_circuit_run_inner(&db, 1)
             .unwrap()
             .unwrap();
-        let context = crate::autopilot::circuit::context::CircuitContext::from_json(
+        let context = crate::circuit::context::CircuitContext::from_json(
             &run.context_json,
         )
         .unwrap();
@@ -2837,10 +2837,10 @@ mod tests {
             history_inner(&db, 1).unwrap().last().unwrap().kind,
             "evidence_recheck"
         );
-        use crate::autopilot::circuit::stepper::{
+        use crate::circuit::stepper::{
             advance, Capacity, CircuitEvent, Effect, RunState, StepStatus, StepView,
         };
-        let mut view = crate::autopilot::circuit::stepper::RunView {
+        let mut view = crate::circuit::stepper::RunView {
             run_id: 1,
             state: RunState::Running,
             graph,
@@ -2942,7 +2942,7 @@ mod tests {
         let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
             .unwrap()
             .unwrap();
-        let context = crate::autopilot::circuit::context::CircuitContext::from_json(
+        let context = crate::circuit::context::CircuitContext::from_json(
             &stored.context_json,
         )
         .unwrap();
@@ -2951,7 +2951,7 @@ mod tests {
 
     #[test]
     fn feedback_attestation_respects_current_requests_without_requiring_review_approval() {
-        use crate::autopilot::circuit::{context::CircuitContext, model::CircuitGraph};
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -2981,7 +2981,7 @@ mod tests {
 
     #[test]
     fn operator_completion_advances_evidence_checkpoint_without_forging_observations() {
-        use crate::autopilot::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind},
+        use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind},
             observation::WorkEvidence, stepper::{advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView}};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -3032,9 +3032,9 @@ mod tests {
         let mut view = RunView { run_id:1, graph, state:RunState::Running,
             context:CircuitContext::from_json(&run.context_json).unwrap(),
             steps: vec![StepView { node_id:"trigger".into(), status:StepStatus::Completed, attempt:1,
-                outcome:Some(crate::autopilot::circuit::model::StepOutcome::Completed), error:None, agent_node_id:None },
+                outcome:Some(crate::circuit::model::StepOutcome::Completed), error:None, agent_node_id:None },
                 StepView { node_id:"spawn".into(), status:StepStatus::Completed, attempt:1,
-                    outcome:Some(crate::autopilot::circuit::model::StepOutcome::Completed), error:steps[0].error_message.clone(), agent_node_id:Some(9) }] };
+                    outcome:Some(crate::circuit::model::StepOutcome::Completed), error:steps[0].error_message.clone(), agent_node_id:Some(9) }] };
         advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots:4,agent_free_slots:4 }));
         assert_eq!(view.state,RunState::Completed);
     }
@@ -3047,13 +3047,13 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (1,'comment','unverified',1);").unwrap();
-        let graph = crate::autopilot::circuit::model::CircuitGraph {
+        let graph = crate::circuit::model::CircuitGraph {
             version: 2,
             blueprint: None,
-            nodes: vec![crate::autopilot::circuit::model::CircuitNode {
+            nodes: vec![crate::circuit::model::CircuitNode {
                 id: "comment".into(),
-                kind: crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-                    action: crate::autopilot::circuit::model::GithubActionKind::PostComment,
+                kind: crate::circuit::model::CircuitNodeKind::GithubAction {
+                    action: crate::circuit::model::GithubActionKind::PostComment,
                     label: None,
                     comment: Some("test".into()),
                     open_pr_policy: None,
@@ -3075,10 +3075,10 @@ mod tests {
             reason: "Checked the remote issue".into(),
         };
         let mut open_pr = graph.clone();
-        if let crate::autopilot::circuit::model::CircuitNodeKind::GithubAction { action, .. } =
+        if let crate::circuit::model::CircuitNodeKind::GithubAction { action, .. } =
             &mut open_pr.nodes[0].kind
         {
-            *action = crate::autopilot::circuit::model::GithubActionKind::OpenPr;
+            *action = crate::circuit::model::GithubActionKind::OpenPr;
         }
         db.execute(
             "UPDATE autopilot_circuits SET graph_json=?1",
@@ -3104,7 +3104,7 @@ mod tests {
         )
         .unwrap();
         request.action = CheckpointAction::Retry;
-        use crate::autopilot::circuit::stepper::{RunState, StepStatus, StepView, TransitionFence};
+        use crate::circuit::stepper::{RunState, StepStatus, StepView, TransitionFence};
         let stale = TransitionFence {
             state: RunState::Running,
             revision: Some(0),
@@ -3332,7 +3332,7 @@ mod tests {
 
     #[test]
     fn open_pr_target_is_saved_only_after_claim_and_survives_reopen() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
         };
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -3384,10 +3384,10 @@ mod tests {
 
     #[test]
     fn open_pr_recheck_completion_reconciles_the_unknown_effect() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
         };
-        use crate::autopilot::circuit::stepper::{
+        use crate::circuit::stepper::{
             advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
         };
         let mut db = Connection::open_in_memory().unwrap();
@@ -3420,7 +3420,7 @@ mod tests {
             run_id: 1,
             state: RunState::Running,
             graph,
-            context: crate::autopilot::circuit::context::CircuitContext::default(),
+            context: crate::circuit::context::CircuitContext::default(),
             steps: vec![StepView {
                 node_id: "open_pr".into(),
                 attempt: 1,
@@ -3470,7 +3470,7 @@ mod tests {
         )
         .unwrap();
         let stored = super::super::ledger::get_circuit_run_inner(&db, 1).unwrap().unwrap();
-        let context = crate::autopilot::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+        let context = crate::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
         assert_eq!(stored.state, "completed");
         assert_eq!(context.get("pr.number"), Some("314"));
         assert_eq!(context.get("pr.head_ref"), Some("feature/circuit"));
@@ -3494,7 +3494,7 @@ mod tests {
 
     #[test]
     fn open_pr_recheck_after_not_performed_reconciles_without_losing_attestation() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
         };
         let mut db = Connection::open_in_memory().unwrap();

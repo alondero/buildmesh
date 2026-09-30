@@ -24,13 +24,13 @@ import { invalidateOpenPrForNode } from './useOpenPr';
  *   3. When an event finally does arrive, the freshness window suppresses
  *      it — the chips stay stale for up to the full window.
  *
- * The same shape bites after an autopilot wrap-up opens a PR: the cached
+ * The same shape bites after a Circuit OpenPr action succeeds: the cached
  * `null` is fresh, so the `PR #N` chip lags. This closes the "wiring that
  * up is a v1.1" TODO in `useOpenPr.ts`.
  *
  * Call this at the moments the cached answer becomes structurally wrong —
  * `node-spawn-completed` (the worktree now exists) and
- * `autopilot-pr-created` (a PR now exists) — not on every git event; the
+ * `circuit-pr-ready` (an open PR is available) — not on every git event; the
  * window is doing its job everywhere else.
  *
  * Lives in `src/hooks/` next to the two cache clients (both are

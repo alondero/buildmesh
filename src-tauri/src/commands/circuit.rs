@@ -1,4 +1,4 @@
-//! Autopilot Circuits IPC surface (spec #1205 / walking skeleton #1206).
+//! Circuit IPC surface (spec #1205 / walking skeleton #1206).
 //!
 //! Minimal milestone-1 contract: list / create / enable / delete
 //! circuits, Trigger Now, and read back runs with their step ledger. The
@@ -9,10 +9,10 @@
 
 use tauri::{command, AppHandle, Emitter};
 
-use crate::autopilot::circuit::model::{
+use crate::circuit::model::{
     trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
 };
-pub use crate::autopilot::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
+pub use crate::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
 /// User-requested movement in the pending Circuit Run queue: adjacent
@@ -204,7 +204,7 @@ pub fn list_circuit_probe(
 /// selects the root node (see [`CircuitTriggerKind`]). All domain
 /// restrictions — the review blueprint's GitHub-issue-label trigger
 /// requirement, concurrency floors, interval clamp, label trim — live in
-/// [`crate::autopilot::circuit::model::validate_circuit_request`].
+/// [`crate::circuit::model::validate_circuit_request`].
 /// This Tauri command is a dumb router: parse → call the model →
 /// persist → wake the GitHub poll for labelled circuits.
 // Tauri IPC commands carry every primitive as a separate wire parameter;
@@ -228,19 +228,6 @@ pub fn create_circuit(
     }
     let blueprint = blueprint.unwrap_or(CircuitBlueprintKind::WalkingSkeleton);
 
-    // Mesh policy gate: the review blueprint's wrap-up path opens a PR;
-    // a mesh configured with `action_on_success = "none"` has no PR
-    // pipeline to feed. Lives outside the domain model because it's
-    // mesh-level configuration, not a blueprint property.
-    if matches!(blueprint, CircuitBlueprintKind::IssueDrivenAutopilotReview)
-        && crate::services::autopilot::configured_action_on_success(mesh_id) == "none"
-    {
-        return Err(
-            "the issue-driven Autopilot review blueprint requires a pull-request wrap-up policy"
-                .to_string(),
-        );
-    }
-
     let validated = validate_circuit_request(
         blueprint,
         trigger_kind,
@@ -257,12 +244,12 @@ pub fn create_circuit(
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
             // Guarded above: the model rejected every other trigger;
             // we still defensively unwrap the label here.
-            let crate::autopilot::circuit::model::CircuitNodeKind::GithubIssueLabel {
+            let crate::circuit::model::CircuitNodeKind::GithubIssueLabel {
                 label,
             } = &kind
             else {
                 return Err(
-                    "the issue-driven Autopilot review blueprint requires an issue-label trigger"
+                    "the issue-driven Circuit review blueprint requires an issue-label trigger"
                         .to_string(),
                 );
             };
@@ -416,7 +403,7 @@ fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
 fn release_circuit_source(run_id: i64) {
     if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
         .and_then(|run| run.source_agent_node_id) {
-        crate::autopilot::evaluator::unregister(source);
+        crate::circuit::evaluator::unregister(source);
     }
 }
 
@@ -534,7 +521,7 @@ pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), Stri
         release_circuit_source(*run_id);
     }
     for source in &batch.sources {
-        crate::autopilot::evaluator::unregister(*source);
+        crate::circuit::evaluator::unregister(*source);
     }
     crate::services::circuit_worker::wake_circuit_worker();
     let cleanup = retire_cancelled_agents(batch.agents);
@@ -678,7 +665,7 @@ fn trigger_circuit_now_prepared_locked(
     }
     if graph.is_issue_driven_autopilot_review() {
         return Err(
-            "issue-driven Autopilot review circuits are triggered by labelled GitHub issues; Trigger Now requires issue context"
+            "issue-driven Circuit review runs are triggered by labelled GitHub issues; Trigger Now requires issue context"
                 .to_string(),
         );
     }
@@ -692,12 +679,12 @@ fn trigger_circuit_now_prepared_locked(
             .unwrap_or_default()
             .as_millis()
     );
-    let mut context = crate::autopilot::circuit::context::CircuitContext::new();
+    let mut context = crate::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     context.set("review.provider", preferences.reviewer_provider.as_deref().unwrap_or(""));
     let action =
-        crate::services::autopilot::configured_action_on_success_inner(conn, circuit.mesh_id);
-    context.with_autopilot_finish_prompt(None, Some(action.as_str()));
+        "draft_pr".to_string();
+    context.with_circuit_finish_prompt(None, Some(action.as_str()));
     let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
         conn,
         circuit.id,
@@ -744,7 +731,7 @@ pub fn trigger_circuit_from_node(
         return Err("Review loops require an AI agent.".into());
     }
     let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
-    crate::autopilot::evaluator::register_circuit(node_id);
+    crate::circuit::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?
         .map(|run| run.state)
@@ -804,7 +791,7 @@ pub async fn continue_circuit_review(app: AppHandle, run_id: i64, additional_rou
             .map(|run| run.state).unwrap_or_else(|| "pending".into());
         Ok((next_id, state))
     }).await?;
-    crate::autopilot::evaluator::register_circuit(source_id);
+    crate::circuit::evaluator::register_circuit(source_id);
     crate::services::circuit_worker::wake_circuit_worker();
     let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
         run_id: next_id, state,

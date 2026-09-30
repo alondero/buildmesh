@@ -3,7 +3,7 @@ import { memo, Suspense, lazy, useMemo, useState, type KeyboardEvent } from 'rea
 import { useShallow } from 'zustand/react/shallow';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { activityRootId, activityStatus, indexAgentNodes } from '../../lib/nodeActivities';
-import { resolveAutopilotOutcome } from '../../lib/autopilotNodePresentation';
+import { resolveCircuitOutcome } from '../../lib/circuitNodePresentation';
 import { useNodeActivityStore, type UtilityMode } from '../../stores/nodeActivityStore';
 import { AgentTerminal } from '../Terminal/Terminal';
 import { GridNodeHeader } from './GridNodeHeader';
@@ -86,19 +86,17 @@ function NodeCardView({ nodeId, memberIds: memberIdsProp, isActive, onActivate, 
   // nodes' semantic-turn state doesn't cascade into this card.
   const semanticTurn = useAgentNodeStore((s) => s.semanticTurns[selectedId]);
   // Per-member satellite state for the header outcome chip. Selecting the
-  // member ids' entries (not the whole map) keeps unrelated nodes' autopilot
+  // member ids' entries (not the whole map) keeps unrelated nodes' Circuit
   // writes from re-rendering this card — same intent as the per-id node
   // subscription above.
-  const memberAutopilotStates = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.autopilotStates[id])));
   const memberCircuitOwnerships = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.circuitOwnerships[id])));
   const memberSemanticTurns = useAgentNodeStore(useShallow(s => stableMemberIds.map(id => s.semanticTurns[id])));
   const outcomeSources = useMemo(() => ({
-    autopilotStates: toIdRecord(stableMemberIds, memberAutopilotStates),
     circuitOwnerships: toIdRecord(stableMemberIds, memberCircuitOwnerships),
     semanticTurns: toIdRecord(stableMemberIds, memberSemanticTurns),
-  }), [stableMemberIds, memberAutopilotStates, memberCircuitOwnerships, memberSemanticTurns]);
+  }), [stableMemberIds, memberCircuitOwnerships, memberSemanticTurns]);
   const attentionOutcome = useMemo(
-    () => resolveAutopilotOutcome(members, outcomeSources, selectedId),
+    () => resolveCircuitOutcome(members, outcomeSources, selectedId),
     [members, outcomeSources, selectedId],
   );
   const writeToAgent = useAgentNodeStore((s) => s.writeToAgent);

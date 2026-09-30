@@ -1,0 +1,39 @@
+//! Autopilot Circuits — the composable trigger-action graph feature
+//! (spec #1205, walking skeleton #1206).
+//!
+//! Sub-modules:
+//! - [`model`] — the Graph Blueprint AST (serialised as
+//!   `autopilot_circuits.graph_json`).
+//! - [`vocabulary`] — run/step ledger strings, `Queued` ↔ `pending_slot`,
+//!   terminal predicates (issue #1660).
+//! - [`capacity`] — admission + step-slot + pool arithmetic (ADR-0028).
+//! - [`context`] — Mustache-style template context (`circuit.*`,
+//!   `node.*`; milestone-2 namespaces resolve empty today).
+//! - [`stepper`] — the pure decision core: `advance(run, event) →
+//!   (writes, effects)`, unit-tested with no DB or network.
+//!
+//! The impure seam (worker thread + effect execution) lives in
+//! `services::circuit_worker`.
+
+pub mod capacity;
+pub mod context;
+pub mod model;
+pub mod model_node_review;
+pub mod stepper;
+pub mod vocabulary;
+pub mod observation;
+
+#[cfg(test)]
+mod blueprint_contract;
+
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub mod security;
+pub mod compatibility;
+pub mod evaluator;
+pub mod finish;
+pub(crate) mod delivery;
+pub(crate) mod verification;
+pub(crate) mod launch;
+pub(crate) mod issue_dependencies;

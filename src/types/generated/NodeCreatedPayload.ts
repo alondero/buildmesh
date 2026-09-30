@@ -2,7 +2,7 @@
 
 /**
  * Payload of the `node-created` Tauri event. Emitted by [`create_issue_node`]
- * after the `pending` row is committed, by the autopilot spawn path, and by
+ * after the `pending` row is committed, by the Circuit spawn path, and by
  * the HTTP-based E2E test server (`commands::test::handle_inject_test_output`'s
  * sibling). The frontend `agentNodeStore` refetches the node list on receipt
  * (issue #490 renamed this from `session-created`).

@@ -161,7 +161,7 @@ fn query_sql_lives_in_domain_modules() {
 
 #[test]
 fn terminal_run_state_defers_to_stepper() {
-    use crate::autopilot::circuit::stepper::RunState;
+    use crate::circuit::stepper::RunState;
     for state in ["completed", "failed", "cancelled", "paused", "running", "pending", "nope"] {
         assert_eq!(
             crate::db::is_terminal_run_state(state),

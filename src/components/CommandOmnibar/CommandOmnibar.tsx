@@ -122,7 +122,7 @@ function OmnibarPalette({ mode, onClose }: { mode: OmnibarMode; onClose: () => v
 
   // Issue #1384 — `useAllAgentNodes` is the canonical derived selector.
   // The omnibar indexes every node by name/provider; useShallow on the
-  // underlying selector keeps unrelated writes (autopilot pill, closing
+  // underlying selector keeps unrelated writes (Circuit indicator, closing
   // flag) from churning the index builder below.
   const agentNodes = useAllAgentNodes();
   const meshesById = useMeshStore((s) => s.meshesById);

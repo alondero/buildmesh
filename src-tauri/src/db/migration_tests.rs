@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn saved_issue_review_contract_upgrades_stock_preserves_custom_and_defers_active_runs() {
-        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
+        use crate::circuit::model::{CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn.execute("INSERT INTO meshes (id, name, path) VALUES (1, 'review', 'C:/review')", []).unwrap();
@@ -146,23 +146,23 @@ mod tests {
             [],
         ).unwrap();
 
-        let mut legacy = crate::autopilot::circuit::model::CircuitGraph::agent_review_with_provider(Some("codex"), None, None, 3);
+        let mut legacy = crate::circuit::model::CircuitGraph::agent_review_with_provider(Some("codex"), None, None, 3);
         let reviewer_prompt = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
         let feedback_prompt = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
         for node in &mut legacy.nodes {
             match &mut node.kind {
-                crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } if node.id == "reviewer" => *prompt = reviewer_prompt.to_string(),
-                crate::autopilot::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } if node.id == "feedback" => *prompt = feedback_prompt.to_string(),
+                crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } if node.id == "reviewer" => *prompt = reviewer_prompt.to_string(),
+                crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } if node.id == "feedback" => *prompt = feedback_prompt.to_string(),
                 _ => {}
             }
         }
         let legacy_json = legacy.to_json().unwrap();
         let mut custom = legacy.clone();
         for node in &mut custom.nodes {
-            if let crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
+            if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
                 if node.id == "reviewer" { *prompt = "custom reviewer prompt".to_string(); }
             }
-            if let crate::autopilot::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
+            if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
                 if node.id == "feedback" { *prompt = "custom feedback".to_string(); }
             }
         }
@@ -191,8 +191,8 @@ mod tests {
         conn.execute("UPDATE autopilot_circuit_runs SET state = 'completed' WHERE id = 10", []).unwrap();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         let upgraded: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
-        let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&upgraded).unwrap();
-        assert_eq!(graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+        let graph = crate::circuit::model::CircuitGraph::from_json(&upgraded).unwrap();
+        assert_eq!(graph.node("reviewer").and_then(|n| match &n.kind { crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::circuit::model::CircuitGraph::local_review_prompt());
         assert_eq!(
             conn.query_row(
                 "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
@@ -215,8 +215,8 @@ mod tests {
         let third: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
         assert_eq!(second, third);
         let late_legacy: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
-        let late_graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&late_legacy).unwrap();
-        assert_eq!(late_graph.node("reviewer").and_then(|n| match &n.kind { crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::autopilot::circuit::model::CircuitGraph::local_review_prompt());
+        let late_graph = crate::circuit::model::CircuitGraph::from_json(&late_legacy).unwrap();
+        assert_eq!(late_graph.node("reviewer").and_then(|n| match &n.kind { crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::circuit::model::CircuitGraph::local_review_prompt());
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
         )
         .unwrap();
 
-        let stale = crate::autopilot::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+        let stale = crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
             "buildmesh:run",
         );
         let mut raw: serde_json::Value = serde_json::from_str(&stale.to_json().unwrap()).unwrap();
@@ -278,16 +278,16 @@ mod tests {
         let stale_json = serde_json::to_string(&raw).unwrap();
 
         // An explicitly authored policy must survive the migration unchanged.
-        let mut explicit_graph = crate::autopilot::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+        let mut explicit_graph = crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
             "buildmesh:other",
         );
         if let Some(node) = explicit_graph.nodes.iter_mut().find(|node| node.id == "open_pr") {
-            if let crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
+            if let crate::circuit::model::CircuitNodeKind::GithubAction {
                 open_pr_policy,
                 ..
             } = &mut node.kind
             {
-                *open_pr_policy = Some(crate::autopilot::circuit::model::OpenPrPolicy::CreateIfMissing);
+                *open_pr_policy = Some(crate::circuit::model::OpenPrPolicy::CreateIfMissing);
             }
         }
         let explicit = explicit_graph.to_json().unwrap();
@@ -323,19 +323,19 @@ mod tests {
             )
             .unwrap()
         };
-        let migrated = crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json(1)).unwrap();
+        let migrated = crate::circuit::model::CircuitGraph::from_json(&graph_json(1)).unwrap();
         assert!(matches!(
             migrated.node("open_pr").map(|node| &node.kind),
-            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-                open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
+            Some(crate::circuit::model::CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(crate::circuit::model::OpenPrPolicy::RequireExisting),
                 ..
             })
         ));
-        let explicit_graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&graph_json(2)).unwrap();
+        let explicit_graph = crate::circuit::model::CircuitGraph::from_json(&graph_json(2)).unwrap();
         assert!(matches!(
             explicit_graph.node("open_pr").map(|node| &node.kind),
-            Some(crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-                open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::CreateIfMissing),
+            Some(crate::circuit::model::CircuitNodeKind::GithubAction {
+                open_pr_policy: Some(crate::circuit::model::OpenPrPolicy::CreateIfMissing),
                 ..
             })
         ));

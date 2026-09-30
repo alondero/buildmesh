@@ -679,8 +679,8 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // would have FK off by default and need this explicit DELETE to
     // avoid an orphan. Removing the row also frees the issue for a
     // poller retry if it is still open + labelled.
-    crate::autopilot::evaluator::unregister(session_id);
-    db::delete_autopilot_run(session_id)?;
+    crate::circuit::evaluator::unregister(session_id);
+    db::legacy_retirement::delete_history(session_id)?;
 
     // Only the row delete (and its atomic worktree enqueue) is skipped when the
     // row is already gone — every per-node cleanup above still runs, so a
@@ -1736,7 +1736,7 @@ mod tests {
         //   * Completed — autopilot-finished wrap-up (#485). The agent
         //     PTY is still alive at the moment of `complete_autopilot_run`
         //     (knowledge claim, not unit-tested: see
-        //     autopilot::pipeline::complete_autopilot_run — the function
+        //     circuit::verification::complete_autopilot_run — the function
         //     never calls `kill_agent`), so we route through the
         //     kill+respawn path. `decide_resume` reuses the captured
         //     `cli_session_id` so a same-harness Regenerate picks up

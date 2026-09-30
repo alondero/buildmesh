@@ -1,8 +1,8 @@
 //! GitHub effects for the circuit worker (issue #1660).
 //! A new GitHub action kind is added here, not in the observe-step-commit loop.
 
-use crate::autopilot::circuit::model::CircuitNodeKind;
-use crate::autopilot::circuit::stepper::{CircuitEvent, RunView};
+use crate::circuit::model::CircuitNodeKind;
+use crate::circuit::stepper::{CircuitEvent, RunView};
 use crate::db;
 
 
@@ -13,9 +13,9 @@ use crate::db;
 pub(super) fn determine_github_target(
     view: &RunView,
     node_id: &str,
-    action: crate::autopilot::circuit::model::GithubActionKind,
+    action: crate::circuit::model::GithubActionKind,
 ) -> Result<(&'static str, i64), String> {
-    use crate::autopilot::circuit::model::GithubActionKind;
+    use crate::circuit::model::GithubActionKind;
     if action == GithubActionKind::CloseIssue {
         let num = view
             .context
@@ -71,8 +71,8 @@ pub(super) fn determine_github_target(
 pub(super) fn ensure_open_pr(
     view: &RunView,
     node_id: &str,
-    policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
-    observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
+    policy: Option<crate::circuit::model::OpenPrPolicy>,
+    observe: impl FnOnce(i64) -> Result<crate::circuit::verification::WrapupState, String>,
     find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
     create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
 ) -> Result<CircuitEvent, String> {
@@ -82,8 +82,8 @@ pub(super) fn ensure_open_pr(
 pub(super) fn ensure_open_pr_with_target(
     view: &RunView,
     node_id: &str,
-    policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
-    observe: impl FnOnce(i64) -> Result<crate::autopilot::pipeline::WrapupState, String>,
+    policy: Option<crate::circuit::model::OpenPrPolicy>,
+    observe: impl FnOnce(i64) -> Result<crate::circuit::verification::WrapupState, String>,
     record_target: impl FnOnce(&str) -> Result<(), String>,
     find: impl FnOnce(&str) -> Result<Option<crate::services::github::PullRequest>, String>,
     create: impl FnOnce(&str, &str) -> Result<crate::services::github::PullRequest, String>,
@@ -92,7 +92,7 @@ pub(super) fn ensure_open_pr_with_target(
         .resolve_open_pr_agent(node_id)
         .ok_or_else(|| "OpenPr requires a spawned agent earlier in this run".to_string())?;
     let wrapup = observe(agent_node_id)?;
-    let reasons = crate::autopilot::pipeline::wrapup_reasons(&wrapup);
+    let reasons = crate::circuit::verification::wrapup_reasons(&wrapup);
     if !reasons.is_empty() {
         return Err(format!(
             "autopilot wrap-up verification failed: {}",
@@ -292,15 +292,15 @@ pub(super) fn call_github_effect(
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
     node_id: &str,
-    action: crate::autopilot::circuit::model::GithubActionKind,
+    action: crate::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
 ) -> Result<CircuitEvent, String> {
-    use crate::autopilot::circuit::model::GithubActionKind;
+    use crate::circuit::model::GithubActionKind;
     use crate::services::github::GitHubClient;
 
     if action == GithubActionKind::OpenPr
-        && crate::autopilot::circuit::stepper::resolve_upstream_spawn_agent(
+        && crate::circuit::stepper::resolve_upstream_spawn_agent(
             &view.graph,
             &view.steps,
             node_id,
@@ -391,12 +391,6 @@ pub(super) fn call_github_effect(
             })
         }
         GithubActionKind::OpenPr => {
-            if open_pr_policy.is_some_and(|policy| policy.requires_existing())
-                && crate::services::autopilot::configured_action_on_success(active.run.mesh_id)
-                    == "none"
-            {
-                return Err("this OpenPr action requires a pull-request wrap-up policy".to_string());
-            }
             let body = resolved_comment.unwrap_or_default();
             let mut target_revision = None;
             let result = ensure_open_pr_with_target(
@@ -412,7 +406,7 @@ pub(super) fn call_github_effect(
                                 .to_string(),
                         );
                     }
-                    Ok(crate::autopilot::pipeline::observe_wrapup_git_state(
+                    Ok(crate::circuit::verification::observe_wrapup_git_state(
                         &agent_node,
                     ))
                 },

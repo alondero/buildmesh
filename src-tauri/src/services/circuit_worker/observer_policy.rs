@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn opencode_policy_advertises_no_authoritative_evidence() {
-        use crate::autopilot::circuit::observation::{
+        use crate::circuit::observation::{
             CircuitObservation, ObservationDisposition, ObservationIdentity, ObservedWorkFact,
             WorkEvidence,
         };

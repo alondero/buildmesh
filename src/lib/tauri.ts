@@ -10,9 +10,6 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
-import type { AutopilotMode } from '../types/generated/AutopilotMode';
-import type { AutopilotCompatibility } from '../types/generated/AutopilotCompatibility';
-import type { AutopilotRunStateRow } from '../types/generated/AutopilotRunState';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../types/generated/DeviceSession';
@@ -32,7 +29,6 @@ import type { GitSyncResult } from '../types/generated/GitSyncResult';
 import type { HoldingWorktree } from '../types/generated/HoldingWorktree';
 import type { IssueNodeDraft } from '../types/generated/IssueNodeDraft';
 import type { MeshRow } from '../types/generated/MeshRow';
-import type { LoopStatusDto } from '../types/generated/LoopStatus';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { NetworkStatus } from '../types/generated/NetworkStatus';
@@ -200,108 +196,11 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
 
-/** Every live Autopilot run's `(node_id, state)` — the header pill's data.
- *  Fetched alongside the node list in `fetchAgentNodes`. */
-export const listAutopilotRuns = () =>
-  _invoke<AutopilotRunStateRow[]>('list_autopilot_runs');
-
-export const listSemanticTurns = () =>
-  _invoke<import('../types/generated/SemanticTurnPayload').SemanticTurnPayload[]>('list_semantic_turns');
-
-/** Persist a mesh's Autopilot Policy in one write (issue #481, PRD #480).
- *  Dedicated typed command like `updateMeshSandbox` — the backend
- *  range-checks the concurrency limit (1..=8) and collapses blank
- *  label/provider/action strings to NULL (poller defaults apply). */
-export const updateMeshAutopilot = (
-  meshId: number,
-  enabled: boolean,
-  triggerLabel: string | null,
-  concurrencyLimit: number,
-  provider: string | null,
-  actionOnSuccess: string | null
-) =>
-  _invoke<void>('update_mesh_autopilot', {
-    meshId,
-    enabled,
-    triggerLabel,
-    concurrencyLimit,
-    provider,
-    actionOnSuccess,
-  });
-
-/** Persist a mesh's circuit-run capacity in one write (issue #1467).
- *  Narrow single-column write for `meshes.circuit_run_capacity` —
- *  sibling to `setMeshAutopilotEnabled`, deliberately split from the
- *  five-column `updateMeshAutopilot` atomic write so toggling the run
- *  cap can't clobber the user's autopilot policy. The backend
- *  range-checks `capacity` to `1..=8` and surfaces a "mesh not found"
- *  error when zero rows are updated. */
+/** Set the per-mesh limit on admitted Circuit Runs (1..8). */
 export const updateMeshCircuitRunCapacity = (meshId: number, capacity: number) =>
   _invoke<void>('update_mesh_circuit_run_capacity', { meshId, capacity });
 
-/** Persist a mesh's Looping Autopilot config in one write (wayfinder #990,
- *  ticket #991 backend / #994 UI). Dedicated typed command like
- *  `updateMeshAutopilot` — the backend trims blank prompts to NULL and
- *  range-checks `maxIterations >= 1 when Some`,
- *  `intervalSeconds >= 0`, `consecutiveFailures >= 0`; the six
- *  `loop_*` + `autopilot_mode` columns land atomically so the loop
- *  scheduler (#992) reads them as one config. The mode toggle
- *  (Issue-Driven vs Looping) and every numeric/prompt control funnel
- *  through this command — there is no per-field write path for loops. */
-export const updateMeshLoopConfig = (
-  meshId: number,
-  mode: AutopilotMode,
-  initialPrompt: string | null,
-  suffixPrompt: string | null,
-  maxIterations: number | null,
-  intervalSeconds: number,
-  consecutiveFailures: number
-) =>
-  _invoke<void>('update_mesh_loop_config', {
-    meshId,
-    mode,
-    initialPrompt,
-    suffixPrompt,
-    maxIterations,
-    intervalSeconds,
-    consecutiveFailures,
-  });
-
-/** Looping Autopilot Start/Stop — flips ONLY `autopilot_enabled` (ticket #994).
- *  The poller (`services::autopilot`) spawns iterations for any mesh in Looping
- *  mode where this flag is true AND a non-empty `loop_initial_prompt` is set;
- *  the change takes effect on the next poll pass (≤ 2 min), no restart. Narrow
- *  dedicated command so Start/Stop can't clobber the issue-driven policy columns
- *  (`updateMeshAutopilot` owns those). */
-export const setMeshAutopilotEnabled = (meshId: number, enabled: boolean) =>
-  _invoke<void>('set_mesh_autopilot_enabled', { meshId, enabled });
-
-/** Looping Autopilot runtime status for the Autopilot Probe tab's badge
- *  (ticket #994) — the `autopilot_enabled` flag + the loop-iteration ledger
- *  projected into Active N / Idle / Stopped. Thin wrapper over `get_loop_status`;
- *  the DB is the source of truth (there is no separate scheduler state). */
-export const getLoopStatus = (meshId: number) =>
-  _invoke<LoopStatusDto>('get_loop_status', { meshId });
-
-/** Autopilot compatibility verdict for a Mesh (issue #1152). Pure
- *  read-side command — walks the resolved Autopilot Spawn Option
- *  (explicit Autopilot selection → mesh default → app default →
- *  "claude" fallback) and the harness capability contract, returning a
- *  structured verdict. The Probe UI gates enable/start controls on this;
- *  the backend `update_mesh_autopilot` and `set_mesh_autopilot_enabled`
- *  commands enforce the same verdict on the write side. Refetch on every
- *  relevant change (default provider, explicit Autopilot selection,
- *  worktree toggle, harness availability). */
-export const getAutopilotCompatibility = (meshId: number) =>
-  _invoke<AutopilotCompatibility>('get_autopilot_compatibility', { meshId });
-
-/** Per-mesh target for the pre-spawn Worktree Pool
- *  (`services::warm_pool`, issue #611). `0` disables the pool for the
- *  mesh; `1..=5` is the target the worker fills to. Dedicated command
- *  so the typed integer + `0..=5` invariant are enforced at the IPC
- *  boundary (the catch-all `update_mesh_column` is intentionally
- *  unvalidated). The Worktrees Probe's ConfigurationCard toggle
- *  derives `enabled = poolSize > 0`; the size input clamps to 1..5. */
+/** Set the mesh's pre-spawn worktree pool target. */
 export const updateMeshPoolSize = (meshId: number, poolSize: number) =>
   _invoke<void>('update_mesh_pool_size', { meshId, poolSize });
 
@@ -625,18 +524,6 @@ export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
   _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
-
-/** Add or remove a label on a mesh's GitHub issue (issue #979).
- *  Errors from a missing-repo-label 422 surface as a typed
- *  `GitHubError::LabelNotFound` message — see `commands::pr::set_issue_label`
- *  for the full contract. */
-export const setIssueLabel = (
-  meshId: number,
-  issueNumber: number,
-  label: string,
-  action: 'add' | 'remove',
-): Promise<void> =>
-  _invoke<void>('set_issue_label', { meshId, issueNumber, label, action });
 
 // GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
 // from the Rust structs (src-tauri/src/commands/pr.rs) into
@@ -984,10 +871,10 @@ export const setAppReviewerProvider = (provider: string | null) =>
 export const setAppNamingProvider = (provider: string | null) =>
   _invoke('set_app_naming_provider', { provider });
 
-/** App-wide autopilot pool cap (`null` = uncapped, `0` = pause new spawns).
- *  Semantics documented on `AppPreferences::autopilot_pool_size`. */
-export const setAppAutopilotPoolSize = (size: number | null) =>
-  _invoke('set_app_autopilot_pool_size', { size });
+/** App-wide Circuit agent pool cap (`null` = uncapped, `0` = pause new spawns).
+ *  Semantics documented on `AppPreferences::circuit_agent_pool_size`. */
+export const setAppCircuitAgentPoolSize = (size: number | null) =>
+  _invoke('set_app_circuit_agent_pool_size', { size });
 
 /** Whether to confirm before quitting with active agent sessions (issue #1501).
  *  `true` (default) surfaces the exit-confirmation modal; `false` closes
@@ -1410,3 +1297,10 @@ export const approveCircuitStep = (runId: number, nodeId: string) =>
 
 export const listCircuitRuns = (circuitId: number, limit?: number) =>
   _invoke<CircuitRunDetail[]>('list_circuit_runs', { circuitId, limit });
+
+/** Select the host-native Claude Code configuration used by Circuit classifiers. */
+export const setCircuitClassifierProvider = (provider: string | null) =>
+  _invoke<void>('set_circuit_classifier_provider', { provider });
+
+export const listSemanticTurns = () =>
+  _invoke<import('../types/generated/SemanticTurnPayload').SemanticTurnPayload[]>('list_semantic_turns');

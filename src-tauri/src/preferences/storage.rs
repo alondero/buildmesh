@@ -367,18 +367,18 @@ pub fn worktree_directory() -> Option<String> {
 }
 
 /// The global autopilot pool size — the app-wide cap on concurrently active
-/// autopilot nodes across every mesh (see [`AppPreferences::autopilot_pool_size`]).
+/// autopilot nodes across every mesh (see [`AppPreferences::circuit_agent_pool_size`]).
 /// `None` means "no global cap" — the per-mesh `autopilot_concurrency_limit`
 /// values are the only gate, which was the behaviour before this setting
 /// existed. A load failure is logged and treated as "no cap" for the same
 /// reason as [`default_provider`]: the poller must keep working even when
 /// preferences are unreadable.
-pub fn autopilot_pool_size() -> Option<u32> {
+pub fn circuit_agent_pool_size() -> Option<u32> {
     match load() {
-        Ok(prefs) => prefs.autopilot_pool_size,
+        Ok(prefs) => prefs.circuit_agent_pool_size,
         Err(e) => {
             tracing::warn!(
-                "preferences::autopilot_pool_size load failed, treating as uncapped: {}",
+                "preferences::circuit_agent_pool_size load failed, treating as uncapped: {}",
                 e
             );
             None

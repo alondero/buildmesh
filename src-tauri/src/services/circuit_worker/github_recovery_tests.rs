@@ -1,9 +1,9 @@
 use super::*;
-use crate::autopilot::circuit::context::CircuitContext;
-use crate::autopilot::circuit::model::{
+use crate::circuit::context::CircuitContext;
+use crate::circuit::model::{
     CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, GithubActionKind,
 };
-use crate::autopilot::circuit::stepper::{
+use crate::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
 };
 use crate::db::circuit::evidence::{EffectIntent, EffectKind, EvidenceWrite};
@@ -27,7 +27,7 @@ fn inherited_retry_attempt_can_commit_github_result() {
     ]).unwrap();
     let mut view = running_view(fixture.run_id);
     let transition = advance(&mut view, &CircuitEvent::Tick(
-        crate::autopilot::circuit::stepper::Capacity { circuit_free_slots: 4, agent_free_slots: 4 }));
+        crate::circuit::stepper::Capacity { circuit_free_slots: 4, agent_free_slots: 4 }));
     persist_transition(fixture.run_id, &mut view, &transition).unwrap();
     assert_eq!(view.step("open_pr").unwrap().attempt, 2);
     assert_eq!(view.step("open_pr").unwrap().status, StepStatus::Running);
@@ -515,7 +515,7 @@ impl HeldOpenPrEndpoint {
 fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     use std::sync::{Arc, Mutex};
 
-    use crate::autopilot::circuit::stepper::Effect;
+    use crate::circuit::stepper::Effect;
 
     let fixture = open_pr_fixture();
     let run_id = fixture.run_id;
@@ -920,7 +920,7 @@ fn dispatch_open_pr(
         "open_pr",
         None,
         |_agent| {
-            Ok(crate::autopilot::pipeline::WrapupState {
+            Ok(crate::circuit::verification::WrapupState {
                 dirty: false,
                 pushed: true,
                 branch: Some(DISPATCH_HEAD.into()),
@@ -1077,7 +1077,7 @@ fn resume_queued_recheck(run_id: i64) -> RunView {
     let mut view = view_from_active(&active);
     let transition = advance(
         &mut view,
-        &CircuitEvent::Tick(crate::autopilot::circuit::stepper::Capacity {
+        &CircuitEvent::Tick(crate::circuit::stepper::Capacity {
             circuit_free_slots: 4,
             agent_free_slots: 4,
         }),
@@ -1085,7 +1085,7 @@ fn resume_queued_recheck(run_id: i64) -> RunView {
     assert!(
         transition.effects.iter().any(|effect| matches!(
             effect,
-            crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } if node_id == "open_pr"
+            crate::circuit::stepper::Effect::CallGithub { node_id, .. } if node_id == "open_pr"
         )),
         "the queued recheck is rescheduled as a read-only GitHub call"
     );

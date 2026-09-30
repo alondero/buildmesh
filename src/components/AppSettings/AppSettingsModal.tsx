@@ -68,7 +68,7 @@ type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
  *  `account-*` / `add-custom-form` (Providers). The default-provider /
  *  reviewer / auto-naming selects save immediately and are never dirty. */
 function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'autopilot-pool' || site === 'worktree-dir' || site === 'probe-prompts') return 'general';
+  if (site === 'circuit-agent-pool' || site === 'worktree-dir' || site === 'probe-prompts') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }
@@ -675,6 +675,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [reviewerProvider, setReviewerProvider] = useState<string>(NO_OVERRIDE);
   const [saving, setSaving] = useState(false);
   const [reviewerSaving, setReviewerSaving] = useState(false);
+  const [classifierProvider, setClassifierProvider] = useState<string | null>(null);
+  const [classifierSaving, setClassifierSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Issue #1534 — replace the global `loaded: boolean` with per-resource
   // status. The previous flag was set true even on full failure (the
@@ -712,9 +714,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
       const storedReviewer = prefs.reviewer_provider;
       setReviewerProvider(storedReviewer && storedReviewer.length > 0 ? storedReviewer : NO_OVERRIDE);
+      setClassifierProvider(prefs.circuit_classifier_provider ?? null);
       const storedNaming = prefs.naming_provider;
       setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
-      const storedPool = prefs.autopilot_pool_size == null ? '' : String(prefs.autopilot_pool_size);
+      const storedPool = prefs.circuit_agent_pool_size == null ? '' : String(prefs.circuit_agent_pool_size);
       setPoolDraft(storedPool);
       poolSavedRef.current = storedPool;
       const storedWorktreeDir = prefs.worktree_directory?.trim() ?? '';
@@ -806,7 +809,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
-  // Autopilot pool size (app-wide cap on concurrent autopilot nodes). The
+  // Circuit agent pool size (app-wide cap on concurrent Circuit agents). The
   // draft is a string so the input can hold a cleared/in-progress value;
   // `''` means "no global cap". Committed on blur / Enter rather than per
   // keystroke — a half-typed "1" of "10" must not briefly cap the pool at 1.
@@ -1456,9 +1459,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     }
   };
 
-  // Commit the autopilot pool-size draft (blur / Enter). `''` clears the
+  // Commit the Circuit pool-size draft (blur / Enter). `''` clears the
   // global cap; anything else is clamped to a non-negative integer (0 =
-  // pause new autopilot spawns). Optimistic with rollback, mirroring the
+  // pause new Circuit spawns). Optimistic with rollback, mirroring the
   // other settings writes; the dirty site clears optimistically too so a
   // successful save never leaves a phantom discard banner.
   const commitPoolSize = async () => {
@@ -1469,27 +1472,27 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // ''), but guards the IPC from ever carrying NaN if the input type
       // changes: revert to the saved value rather than sending garbage.
       setPoolDraft(poolSavedRef.current);
-      siteDirtyChange('autopilot-pool', false);
+      siteDirtyChange('circuit-agent-pool', false);
       return;
     }
     const parsed = trimmed === '' ? null : Math.max(0, Math.floor(numeric));
     const canonical = parsed === null ? '' : String(parsed);
     setPoolDraft(canonical);
     if (canonical === poolSavedRef.current) {
-      siteDirtyChange('autopilot-pool', false);
+      siteDirtyChange('circuit-agent-pool', false);
       return;
     }
     const previous = poolSavedRef.current;
     poolSavedRef.current = canonical;
-    siteDirtyChange('autopilot-pool', false);
+    siteDirtyChange('circuit-agent-pool', false);
     setPoolSaving(true);
     setError(null);
     try {
-      await api.setAppAutopilotPoolSize(parsed);
+      await api.setAppCircuitAgentPoolSize(parsed);
       // Issue #1534 (review round 5) — refresh via the loader so a
       // failed `get_app_preferences` (or a backend normalisation
       // e.g. server-side cap adjustment) surfaces in the preferences
-      // banner rather than leaving the optimistic `autopilot_pool_size`
+      // banner rather than leaving the optimistic `circuit_agent_pool_size`
       // silently stale.
       await loadPreferences();
     } catch (e) {
@@ -1888,35 +1891,32 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           }
         >
           <SettingsRow
-            label="Autopilot pool size"
-            htmlFor="autopilot-pool-size"
-            summary="Global cap on concurrent autopilot nodes across all meshes."
+            label="Circuit agent pool size"
+            htmlFor="circuit-agent-pool-size"
+            summary="Global cap on Circuit agents across all meshes."
             controlClassName="w-48 shrink-0"
             details={
               <>
-                The most autopilot nodes allowed to run at once across{' '}
-                <span className="font-medium">all</span> meshes. Each mesh still
-                respects its own concurrency limit (set in Project Settings) — this
-                caps the total, so ten meshes with two slots each can't put twenty
-                agents on your machine. Leave empty for no global cap; 0 pauses new
-                autopilot spawns. Running nodes are never stopped — lowering the cap
-                just holds new spawns until slots free up.
+                The most Circuit agents allowed to run at once across all meshes.
+                Each mesh's run capacity is configured in Circuits. Leave empty for
+                no global cap; 0 pauses new agent launches. Lowering the cap holds
+                new launches until slots free up; running agents are retained.
               </>
             }
           >
             <input
-              id="autopilot-pool-size"
+              id="circuit-agent-pool-size"
               type="number"
               min={0}
               step={1}
               inputMode="numeric"
-              aria-label="Autopilot pool size"
+              aria-label="Circuit agent pool size"
               placeholder="No global cap"
               value={poolDraft}
               disabled={!prefsLoaded || poolSaving}
               onChange={e => {
                 setPoolDraft(e.target.value);
-                siteDirtyChange('autopilot-pool', e.target.value.trim() !== poolSavedRef.current);
+                siteDirtyChange('circuit-agent-pool', e.target.value.trim() !== poolSavedRef.current);
               }}
               onBlur={commitPoolSize}
               onKeyDown={e => {
@@ -2139,6 +2139,23 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               disabled={!prefsLoaded || !providersLoaded || saving}
               onSelect={next => handleSave(next ?? NO_OVERRIDE)}
             />
+          </SettingsRow>
+
+          <SettingsRow label="Circuit classifier provider" htmlFor="circuit-classifier-provider"
+            summary="Background model used to classify Circuit agent reports."
+            details={<>Independent of agent spawn defaults. Requires a host-native Claude Code launch configuration.</>}>
+            <SpawnOptionPicker id="circuit-classifier-provider" size="md" ariaLabel="Circuit classifier provider" unsetValue={null}
+              providers={providers} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
+              disabled={!prefsLoaded || !providersLoaded || classifierSaving}
+              filter={(option) => option.harness_id === 'claude' || option.harness_id === 'anthropic'}
+              onSelect={(next) => {
+                setClassifierSaving(true);
+                setError(null);
+                void api.setCircuitClassifierProvider(next)
+                  .then(() => setClassifierProvider(next))
+                  .catch((cause: unknown) => setError(formatError(cause)))
+                  .finally(() => setClassifierSaving(false));
+              }} />
           </SettingsRow>
 
           <SettingsRow

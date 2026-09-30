@@ -133,7 +133,7 @@ mod lifecycle_snapshot_tests {
             VALUES (1,1,'node','C:/mesh','running','unavailable')", []).unwrap();
         for (kind, status) in [(LifecycleKind::WorkResumed, SessionStatus::Running),
             (LifecycleKind::SessionExited, SessionStatus::Idle),
-            (LifecycleKind::AutopilotCompleted, SessionStatus::Completed)] {
+            (LifecycleKind::TurnCompleted, SessionStatus::Completed)] {
             let mut payload = LifecycleChangedPayload::new(1, kind, status, &HookSignalDetail::default(), "local event");
             assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
             assert_eq!(payload.signal_health, SignalHealth::Unavailable);
@@ -1082,7 +1082,7 @@ pub(crate) struct CircuitRecoveryFence {
     pub step_id: String,
     pub attempt: i32,
     pub agent_node_id: i64,
-    pub graph: crate::autopilot::circuit::model::CircuitGraph,
+    pub graph: crate::circuit::model::CircuitGraph,
 }
 
 pub(crate) fn recover_circuit_agent_turn_inner(
@@ -1092,7 +1092,7 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
     use rusqlite::OptionalExtension;
-    use crate::autopilot::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
+    use crate::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
     if payload.session_id != fence.agent_node_id { return Ok(false); }
     if !matches!(payload.status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
     let Some((state, context)) = conn.query_row(

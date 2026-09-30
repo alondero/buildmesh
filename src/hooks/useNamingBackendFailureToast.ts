@@ -21,7 +21,7 @@ export const NAMING_BACKEND_FAILED_EVENT = 'naming-backend-failed';
  * payload to `onFailure`. The parent decides how to render — `App.tsx`
  * passes its local `addToast` so the existing toast primitive renders the
  * failure with the rest of the runtime-warning stream (Sync, Worktree,
- * Autopilot). Extracted as a hook so the listener contract is unit-tested
+ * Circuit). Extracted as a hook so the listener contract is unit-tested
  * without mounting `App.tsx` — mirrors the `useProviderListInvalidation`
  * shape.
  *

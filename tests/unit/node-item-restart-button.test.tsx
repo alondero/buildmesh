@@ -50,7 +50,7 @@ function renderNode(node: AgentNode, onSelectNode: (nodeId: number, meshId: numb
 describe('NodeItem restart button', () => {
   beforeEach(() => {
     useAgentNodeStore.setState({ nodesById: {}, nodeIds: [],activeNodeId: null,
-      autopilotStates: {},
+      circuitOwnerships: {},
       loading: false,
       error: null,
     });
@@ -61,7 +61,7 @@ describe('NodeItem restart button', () => {
     const node = makeNode({ status: 'suspended', cli_session_id: null });
     const { rerender } = renderNode(node);
     expect(screen.getByRole('img', { name: 'Missing session ID' })).toBeTruthy();
-    useAgentNodeStore.setState({ autopilotStates: { [node.id]: 'implementing' } });
+    useAgentNodeStore.setState({ circuitOwnerships: { [node.id]: { node_id: node.id, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null } } });
     rerender(<NodeItem node={node} meshColor={{ name: 'default', hex: '#000', textOnDark: '#fff' }}
       onSelectNode={vi.fn()} onDeleteNode={vi.fn()} />);
     expect(screen.queryByRole('img', { name: 'Missing session ID' })).toBeNull();
@@ -203,7 +203,6 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   it('restartFreshAgent calls spawn_agent with a Fresh intent when node has a cli_session_id', async () => {
     mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
     mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
-    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
     seedAgentNodes([node]);
@@ -225,7 +224,6 @@ describe('AgentNodeStore restartFreshAgent (issue #1306)', () => {
   it('restartFreshAgent passes custom rows/cols when provided', async () => {
     mockInvoke.mockResolvedValueOnce(undefined); // spawn_agent
     mockInvoke.mockResolvedValueOnce([]);        // list_agent_nodes
-    mockInvoke.mockResolvedValueOnce([]);        // list_autopilot_runs
 
     const node = makeNode({ id: 42, status: 'error', cli_session_id: 'stale-uuid-1234' });
     seedAgentNodes([node]);

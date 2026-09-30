@@ -786,8 +786,8 @@ reopen. [#1911](https://github.com/alondero/buildmesh/issues/1911) covers the
 transition they skip: a crash *during* owned-agent cleanup, when part of the
 cleanup is durable and part is not, followed by the retry the next launch
 performs. The scenarios live in
-`src-tauri/src/services/autopilot/retirement_crash_tests.rs` and drive the
-production sweep (`services::autopilot::retire_legacy_automation`, the call
+`src-tauri/src/services/legacy_retirement/retirement_crash_tests.rs` and drive the
+production sweep (`services::legacy_retirement::retire_legacy_automation`, the call
 `lib.rs` `setup` makes before crash recovery).
 
 Each phase runs in its own process, so the sweep gets the database singleton and

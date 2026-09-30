@@ -1,10 +1,10 @@
 // Shared helpers for the user-driven recovery affordances on Suspended
 // agent nodes (sidebar `NodeItem` + main-panel `GridNodeHeader`). The
 // `Suspended` status has three origins (crash recovery, app-exit
-// graceful shutdown, autopilot-gate approval) that share a badge but
-// mean different things; the autopilot-gate case has no captured
+// graceful shutdown, Circuit-gate approval) that share a badge but
+// mean different things; the Circuit-gate case has no captured
 // `cli_session_id` because the agent never ran. Surfacing a Resume
-// button on autopilot-gate rows would land on the backend's
+// button on Circuit-gate rows would land on the backend's
 // "cannot resume node X: no CLI session ID is stored" error
 // (spawn.rs:1095-1098) as a confusing toast — so the visibility gate
 // is `cli_session_id` non-empty, with the data column as the
@@ -27,7 +27,7 @@ export function canResumeSuspendedNode(node: Pick<AgentNode, 'status' | 'cli_ses
 }
 export function hasLostConversation(
   node: Pick<AgentNode, 'status' | 'cli_session_id'>,
-  isAutopilot: boolean,
+  isCircuitManaged: boolean,
 ): boolean {
-  return node.status === 'suspended' && !canResumeSuspendedNode(node) && !isAutopilot;
+  return node.status === 'suspended' && !canResumeSuspendedNode(node) && !isCircuitManaged;
 }

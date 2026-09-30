@@ -18,7 +18,7 @@ source_agent_node_id: number | null,
 trigger_identity: string, 
 /**
  * RunState wire token (`pending` | `running` | `paused` | `completed` |
- * `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
+ * `failed` | `cancelled`). See `circuit::vocabulary`.
  */
 state: string, 
 /**

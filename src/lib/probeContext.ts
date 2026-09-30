@@ -5,13 +5,11 @@ import { getNodeGitPath } from './paths';
 // generated wire enum) because it's a pure UI concern — no backend serialises
 // it. `usage` was added in issue #601 as the dedicated glanceable surface
 // for Usage Meters (subscription quota + cash balance), reached from a
-// meter icon in the sidebar header. `autopilot` was added in wayfinder
-// #990 ticket #994 as the dedicated configure + monitor surface for the
-// Issue-Driven and Looping Autopilot modes. `circuits` was added for the
-// Autopilot Circuits walking skeleton (spec #1205 / issue #1206).
+// meter icon in the sidebar header. `circuits` was added for the Circuit
+// configure + monitor surface (spec #1205 / issue #1206).
 // Lives here (not in the store) so pure domain modules — probeWorkingSet,
 // this file — never import from `stores/`; `uiStore` re-exports it.
-export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'autopilot' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
+export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 /**
  * The three ownership lenses available to a Probe destination.
@@ -114,14 +112,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     baseline: 'mesh',
     stateful: true,
   },
-  autopilot: {
-    label: 'Autopilot',
-    lens: 'mesh',
-    followsSelection: true,
-    pinnable: true,
-    baseline: 'mesh',
-    stateful: true,
-  },
   circuits: {
     label: 'Circuits',
     lens: 'mesh',
@@ -185,7 +175,6 @@ export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
   'usage',
   'worktrees',
   'properties',
-  'autopilot',
   'circuits',
   'issues',
   'pulls',

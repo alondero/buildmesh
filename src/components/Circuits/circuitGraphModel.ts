@@ -447,7 +447,7 @@ export const MUSTACHE_GROUPS: readonly MustacheGroupSpec[] = [
   { namespace: 'node', label: 'Current Node', description: 'Identifier of the node whose template is being resolved.' },
   { namespace: 'issue', label: 'Issue Context', description: 'GitHub issue that fired the trigger (issue-label runs).' },
   { namespace: 'pr', label: 'Pull Request', description: 'PR payload — populated when a github_action opens or a PR-label trigger fires.' },
-  { namespace: 'autopilot', label: 'Autopilot', description: 'Rendered wrap-up prompt and mesh-level Autopilot policy.' },
+  { namespace: 'autopilot', label: 'Circuit', description: 'Rendered wrap-up prompt and Circuit policy.' },
   { namespace: 'verification', label: 'Verification', description: 'Last verification gate outcome (Green/Red) and command.' },
   { namespace: 'retry', label: 'Retries', description: 'Current retry attempt and the configured cap.' },
   { namespace: 'spawn_output', label: 'Node Outputs', description: 'Terminal output of upstream agent nodes (one chip per reachable spawn).' },

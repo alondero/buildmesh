@@ -158,21 +158,6 @@ export function CompassIcon({ className }: IconProps) {
   );
 }
 
-/** Lucide `repeat` — Autopilot (wayfinder #990 ticket #994). Reads as the
- *  loop the destination doc names for this tab; also advertises the
- *  generic Autopilot surface that the mode toggle inside the tab
- *  switches between issue-driven and looping. */
-export function AutopilotIcon({ className }: IconProps) {
-  return (
-    <Svg className={className}>
-      <path d="m17 2 4 4-4 4" />
-      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
-      <path d="m7 22-4-4 4-4" />
-      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
-    </Svg>
-  );
-}
-
 /** Lucide `workflow` — Autopilot Circuits (spec #1205). Reads as the
  *  trigger-action graph the circuit blueprint serialises. */
 export function CircuitsIcon({ className }: IconProps) {
@@ -222,7 +207,6 @@ export const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
   usage: UsageIcon,
   worktrees: WorktreesIcon,
   properties: PropertiesIcon,
-  autopilot: AutopilotIcon,
   circuits: CircuitsIcon,
   issues: IssuesIcon,
   pulls: PullsIcon,

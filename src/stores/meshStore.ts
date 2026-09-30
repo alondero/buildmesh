@@ -55,6 +55,8 @@ interface MeshState {
   loading: boolean;
   error: string | null;
   fetchMeshes: () => Promise<void>;
+  /** Refresh the mesh snapshot and reject on failure for callers that must confirm it succeeded. */
+  refreshMeshes: () => Promise<void>;
   addMesh: () => Promise<void>;
   addTestMesh: (name: string) => Promise<Mesh | null>;
   createMesh: (name: string, path: string, color?: string | null) => Promise<Mesh | null>;
@@ -82,14 +84,8 @@ interface MeshState {
   getDefaultProvider: (meshId: number) => Promise<string>;
 }
 
-export const useMeshStore = create<MeshState>((set) => ({
-  meshes: [],
-  meshesById: new Map(),
-  selectedMeshId: null,
-  loading: false,
-  error: null,
-
-  fetchMeshes: async () => {
+export const useMeshStore = create<MeshState>((set) => {
+  const loadMeshes = async (rejectOnError: boolean) => {
     set({ loading: true, error: null });
     try {
       const meshes = await api.listMeshes();
@@ -97,8 +93,19 @@ export const useMeshStore = create<MeshState>((set) => ({
       set({ meshes, meshesById, loading: false });
     } catch (e) {
       set({ error: formatError(e), loading: false });
+      if (rejectOnError) throw e;
     }
-  },
+  };
+
+  return ({
+  meshes: [],
+  meshesById: new Map(),
+  selectedMeshId: null,
+  loading: false,
+  error: null,
+
+  fetchMeshes: () => loadMeshes(false),
+  refreshMeshes: () => loadMeshes(true),
 
   addMesh: async () => {
     try {
@@ -333,4 +340,5 @@ export const useMeshStore = create<MeshState>((set) => ({
       return 'claude';
     }
   },
-}));
+  });
+});

@@ -30,10 +30,8 @@ describe('tool discovery grid traversal', () => {
   ];
 
   it('matches the rendered per-group two-column rows', () => {
-    // Issue #1460 split "Code" into Code (files, review) + Project
-    // (properties, worktrees). Both groups are two tiles, so the per-group
-    // row layout is unchanged even though the grouping moved.
-    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 2, 2, 1]);
+    // Legacy Autopilot removal leaves the Automate group with the Circuit tile.
+    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 1, 2, 1]);
   });
 
   it('groups the two project destinations together, not with code browsing', () => {

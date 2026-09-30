@@ -64,7 +64,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => {
 });
 
 import { GridNodeHeader } from '../../src/components/AgentNodeView/GridNodeHeader';
-import { resolveAutopilotOutcome } from '../../src/lib/autopilotNodePresentation';
+import { resolveCircuitOutcome } from '../../src/lib/circuitNodePresentation';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
 const NODE: AgentNode = {
@@ -97,7 +97,7 @@ const MESH: Mesh = {
 describe('GridNodeHeader contextual information and actions', () => {
   beforeEach(() => {
     seedAgentNodes([NODE], NODE.id);
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     useUIStore.setState({ viewMode: 'mesh', probeOpen: false, probeTab: 'files', pendingCircuitRunFocus: null });
     summaryMock.mockReturnValue({ total: 6, added: 3, modified: 2, deleted: 1 });
@@ -176,7 +176,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     const pill = screen.getByTestId('circuit-run-pill');
     expect(pill.textContent).toBe('Review workflow · #2');
     expect(pill.className).toContain('text-accent-violet');
-    expect(pill.getAttribute('title')).toContain('Autopilot is driving');
+    expect(pill.getAttribute('title')).toContain('Circuit is driving');
   });
 
   it('links circuit ownership to the run in the Circuits Probe', () => {
@@ -211,23 +211,6 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.getByRole('img', { name: 'Attention signal unavailable' })).toBeTruthy();
   });
 
-  it.each([
-    ['implementing', 'autopilot'],
-    ['finishing', 'autopilot · wrap-up'],
-    ['suffix_pending', 'autopilot · suffix'],
-    ['completed', 'autopilot · complete'],
-    ['merged', 'autopilot · merged'],
-    ['failed', 'autopilot ✗'],
-  ] as const)('keeps the %s Autopilot status visible in the details menu with its tooltip', (state, label) => {
-    useAgentNodeStore.setState({ autopilotStates: { 1: state } });
-    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
-    const pill = screen.getByTestId('autopilot-pill');
-    expect(pill.textContent).toContain(label);
-    expect(pill.getAttribute('title')).toContain('Autopilot:');
-    expect(pill.className).toContain('ring-');
-  });
-
   it('keeps git summary additions, modifications, and deletions semantically coloured in details', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     fireEvent.click(screen.getByRole('button', { name: 'Agent node actions' }));
@@ -238,11 +221,10 @@ describe('GridNodeHeader contextual information and actions', () => {
 
   it('renders the resolver outcome for the focused attention session', () => {
     const awaiting = { ...NODE, id: 2, status: 'awaiting_input' as const };
-    const attentionOutcome = resolveAutopilotOutcome(
+    const attentionOutcome = resolveCircuitOutcome(
       [awaiting],
       {
-        autopilotStates: { 2: 'finishing' },
-        circuitOwnerships: {},
+        circuitOwnerships: {2: { node_id: 2, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }},
         semanticTurns: { 2: { node_id: 2, kind: 'permission_request', description: 'approve the deploy' } },
       },
       2,
@@ -251,114 +233,99 @@ describe('GridNodeHeader contextual information and actions', () => {
     render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }}
       attentionOutcome={attentionOutcome} onReveal={onReveal} onBuildRun={() => {}} />);
     expect(screen.getByRole('status', { name: 'Needs input' })).toBeTruthy();
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     expect(chip.dataset.outcome).toBe('needs_input');
-    expect(chip.getAttribute('title')).toBe('Autopilot is waiting for you: approve the deploy.');
+    expect(chip.getAttribute('title')).toBe('Circuit is waiting for you: approve the deploy.');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Needs input. Autopilot is waiting for you: approve the deploy. Show this session.');
+      .toBe('Needs input. Circuit is waiting for you: approve the deploy. Show this session.');
     fireEvent.click(chip);
     expect(onReveal).toHaveBeenCalledOnce();
   });
 
   it('renders a failure chip from the resolver', () => {
-    const attentionOutcome = resolveAutopilotOutcome(
+    const attentionOutcome = resolveCircuitOutcome(
       [{ ...NODE, status: 'error' as const }],
-      { autopilotStates: { 1: 'failed' }, circuitOwnerships: {}, semanticTurns: {} },
+      { circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }}, semanticTurns: {} },
     );
     render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     expect(chip.dataset.outcome).toBe('failed');
-    expect(chip.textContent).toContain('Autopilot failed');
+    expect(chip.textContent).toContain('Circuit failed');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Autopilot failed. Autopilot failed and needs a human. Show this session.');
+      .toBe('Circuit failed. Circuit failed and needs a human. Show this session.');
     expect(chip.className).toContain('ring-1');
   });
 
   it('summarizes every attention session and advertises cycling', () => {
     const awaiting = { ...NODE, id: 2, status: 'awaiting_input' as const };
     const failed = { ...NODE, id: 3, status: 'error' as const };
-    const attentionOutcome = resolveAutopilotOutcome(
+    const attentionOutcome = resolveCircuitOutcome(
       [awaiting, failed],
       {
-        autopilotStates: { 2: 'finishing', 3: 'failed' },
-        circuitOwnerships: {},
+        circuitOwnerships: {2: { node_id: 2, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }, 3: { node_id: 3, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }},
         semanticTurns: { 2: { node_id: 2, kind: 'permission_request', description: 'approve the deploy' } },
       },
       2,
     );
     render(<GridNodeHeader nodeId={NODE.id} attentionOutcome={attentionOutcome} onBuildRun={() => {}} />);
-    const chip = screen.getByTestId('autopilot-outcome-chip');
+    const chip = screen.getByTestId('circuit-outcome-chip');
     // The focused session wins the copy; the count covers every session needing attention.
     expect(chip.dataset.outcome).toBe('needs_input');
     expect(chip.textContent).toContain('2');
     expect(chip.getAttribute('aria-label'))
-      .toBe('Needs input (2 sessions). Autopilot is waiting for you: approve the deploy. Show next session.');
+      .toBe('Needs input (2 sessions). Circuit is waiting for you: approve the deploy. Show next session.');
   });
 
   it('renders no outcome chip when the card has nothing actionable', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.queryByTestId('autopilot-outcome-chip')).toBeNull();
+    expect(screen.queryByTestId('circuit-outcome-chip')).toBeNull();
   });
 
   it('reserves the ownership cell without rendering an unpiloted indicator', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cell = screen.getByTestId('autopilot-indicator-cell');
+    const cell = screen.getByTestId('circuit-indicator-cell');
     expect(cell.className).toContain('w-3.5');
-    expect(cell.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+    expect(cell.querySelector('[data-testid="circuit-indicator"]')).toBeNull();
   });
 
-  it('renders the shared active indicator for a driving legacy Autopilot run', () => {
-    useAgentNodeStore.setState({ autopilotStates: { 1: 'implementing' } });
-    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const indicator = screen.getByRole('img', { name: 'Autopilot active' });
-    expect(indicator).toBeTruthy();
-    expect(indicator.getAttribute('title')).toBe('Autopilot is driving this Agent Node.');
-    expect(indicator.querySelector('svg')?.getAttribute('class')).toContain('motion-reduce:animate-none');
-  });
 
   it('renders Circuit terminal ownership as Done', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'completed', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Autopilot done/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit done/ })).toBeTruthy();
   });
 
   it('opens the run in the Circuits Probe from the title-bar Pilot light', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const indicator = screen.getByRole('button', { name: /Autopilot active/ });
+    const indicator = screen.getByRole('button', { name: /Circuit active/ });
     expect(indicator.getAttribute('aria-label'))
-      .toBe('Autopilot active. Open this Circuit run in the Circuits Probe.');
+      .toBe('Circuit active. Open this Circuit run in the Circuits Probe.');
     fireEvent.click(indicator);
     expect(useUIStore.getState().probeTab).toBe('circuits');
     expect(useUIStore.getState().probeOpen).toBe(true);
     expect(useUIStore.getState().pendingCircuitRunFocus).toBe(2);
   });
 
-  it('leaves a legacy Autopilot run’s Pilot light non-interactive', () => {
-    useAgentNodeStore.setState({ autopilotStates: { 1: 'implementing' } });
-    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.queryByRole('button', { name: /Autopilot active/ })).toBeNull();
-    expect(screen.getByRole('img', { name: 'Autopilot active' })).toBeTruthy();
-  });
 
   it('renders waiting and failure tones without changing the ownership cell', () => {
     seedAgentNodes([{ ...NODE, status: 'awaiting_input' }], NODE.id);
-    useAgentNodeStore.setState({ autopilotStates: { 1: 'finishing' } });
+    useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     const { rerender } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Autopilot waiting' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit waiting/ })).toBeTruthy();
 
-    useAgentNodeStore.setState({ autopilotStates: { 1: 'failed' } });
+    useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }} });
     rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Autopilot needs attention' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit needs attention/ })).toBeTruthy();
   });
 
   it('keeps cancelled Circuit history out of the compact indicator', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'cancelled', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByTestId('autopilot-indicator-cell').querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
+    expect(screen.getByTestId('circuit-indicator-cell').querySelector('[data-testid="circuit-indicator"]')).toBeNull();
   });
 });
 describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {
@@ -611,7 +578,7 @@ describe('GridNodeHeader PR chip', () => {
 describe('GridNodeHeader resume affordance', () => {
   beforeEach(() => {
     seedAgentNodes([NODE], NODE.id);
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     useMeshStore.setState({
       meshesById: new Map([[MESH.id, MESH]]),
       selectedMeshId: MESH.id,
@@ -621,10 +588,10 @@ describe('GridNodeHeader resume affordance', () => {
     openUrlMock.mockClear();
   });
 
-  it('shows a lost-conversation badge for missing identity outside Autopilot', () => {
+  it('shows a lost-conversation badge for missing identity outside Circuit', () => {
     const node = { ...NODE, status: 'suspended' as const, cli_session_id: '' };
     seedAgentNodes([node], node.id);
-    useAgentNodeStore.setState({ autopilotStates: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     const { getByText, queryByTestId } = render(<GridNodeHeader nodeId={node.id} onBuildRun={vi.fn()} />);
     expect(getByText('No session')).toBeTruthy();
     expect(queryByTestId('grid-resume-button')).toBeNull();
@@ -653,9 +620,9 @@ describe('GridNodeHeader resume affordance', () => {
     expect(screen.getAllByTestId('grid-resume-button')).toHaveLength(1);
   });
 
-  it('does NOT render a Resume button when Suspended but cli_session_id is null (autopilot gate)', () => {
-    // Autopilot-gate Suspended rows are parked at creation with no
-    // session id — the autopilot's own "Approve Sandbox Run" action
+  it('does NOT render a Resume button when Suspended but cli_session_id is null (Circuit gate)', () => {
+    // Circuit-gate Suspended rows are parked at creation with no
+    // session id — the Circuit's "Approve Sandbox Run" action
     // is the recovery surface there. Same gate as the sidebar
     // NodeItem's `showResume` (see its docblock).
     const node = { ...NODE, status: 'suspended' as const, cli_session_id: null };
@@ -710,7 +677,7 @@ describe('GridNodeHeader resume affordance', () => {
 describe('GridNodeHeader observed Muse session telemetry (issue #1680)', () => {
   beforeEach(() => {
     seedAgentNodes([{ ...NODE, provider: 'muse' }], NODE.id);
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     useMeshStore.setState({ meshesById: new Map([[MESH.id, MESH]]), selectedMeshId: MESH.id });
     summaryMock.mockReturnValue(null);
     prMock.mockReturnValue(null);

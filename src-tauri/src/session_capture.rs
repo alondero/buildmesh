@@ -21,7 +21,7 @@
 //! 2. **UTF-8 corruption**: per-chunk `String::from_utf8_lossy` replaces any
 //!    multi-byte UTF-8 sequence split across two reads with U+FFFD, corrupting
 //!    text fed to `session_naming::on_output` (rename buffer sent to the LLM)
-//!    and `autopilot::evaluator::on_output`. Frontend display is unaffected
+//!    and `circuit::evaluator::on_output`. Frontend display is unaffected
 //!    (raw bytes are base64'd separately in `agent::spawn`'s reader thread).
 //!
 //! [`ChunkCapture`] is the stateful wrapper that holds a small carry-over
@@ -140,7 +140,7 @@ impl ChunkCapture {
     /// Feed a PTY chunk. Returns:
     ///
     /// - The decoded text downstream consumers (session_naming,
-    ///   autopilot::evaluator) should process. Clean UTF-8 — no U+FFFD
+    ///   circuit::evaluator) should process. Clean UTF-8 — no U+FFFD
     ///   corruption from split multi-byte chars.
     /// - The captured session UUID, if this chunk (or the carried-over
     ///   tail + this chunk) matched the regex. Once non-`None`, the
@@ -351,7 +351,7 @@ mod tests {
     /// character `█`) split as `[0xe2, 0x96]` in one chunk and `[0x88]` in
     /// the next. The per-chunk `from_utf8_lossy` path used to substitute
     /// U+FFFD, corrupting the text handed to `session_naming::on_output`
-    /// and `autopilot::evaluator::on_output`. The wrapper holds back the
+    /// and `circuit::evaluator::on_output`. The wrapper holds back the
     /// trailing incomplete sequence so the downstream text contains the
     /// real character once the carry-over is pushed past it.
     #[test]

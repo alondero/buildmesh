@@ -18,8 +18,8 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
-import { getAutopilotNodePresentation, hasActiveAutopilotOwnership } from '../../lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { getCircuitNodePresentation, hasActiveCircuitOwnership } from '../../lib/circuitNodePresentation';
+import { CircuitNodeIndicatorCell } from '../shared/CircuitNodeIndicator';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -85,11 +85,10 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   // re-renders only the rows whose bit actually changed; every other row's
   // selector result is identical and zustand skips the render.
   const isActive = useAgentNodeStore((s) => s.activeNodeId === node.id);
-  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);
-  const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
-  const isAutopilot = hasActiveAutopilotOwnership(autopilotState, circuitOwnership);
-  const lostConversation = hasLostConversation(node, isAutopilot);
+  const circuitPresentation = getCircuitNodePresentation(node, circuitOwnership);
+  const isCircuitManaged = hasActiveCircuitOwnership(circuitOwnership);
+  const lostConversation = hasLostConversation(node, isCircuitManaged);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
   // Issue #1306 — "Start Fresh" escape hatch for error nodes with stale session IDs.
@@ -120,10 +119,9 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   //      `cli_session_id`, and was parked by `recover_from_crash`
   //      (`session_lifecycle.rs`). The Resume button re-attempts the
   //      resume via `spawn_agent`.
-  //   2. Autopilot gate (`autopilot::GateDecision::RequireApproval`) —
-  //      the node was parked at creation, no agent ever ran, so
-  //      `cli_session_id` is NULL. The autopilot's own "Approve
-  //      Sandbox Run" action is the recovery surface; a generic
+  //   2. Circuit compatibility gate — the node was parked at creation,
+  //      no agent ever ran, so `cli_session_id` is NULL. The Circuit's
+  //      "Approve Sandbox Run" action is the recovery surface; a generic
   //      Resume click here would surface "no CLI session ID is
   //      stored" as a toast.
   // The data column (`cli_session_id`) is the disambiguator — see the
@@ -425,7 +423,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
       >
         {config.dot}
       </span>
-      <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
+      <CircuitNodeIndicatorCell presentation={circuitPresentation} />
       {/* Issue #1364 §3 — node-level status-reporting fault (see GridNodeHeader). */}
       {isSignalHealthProblem(node.signal_health) && <SignalHealthBadge compact health={node.signal_health} />}
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />

@@ -185,7 +185,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
   it('uses generic provider wording for ordinary spawn nodes', () => {
     renderNode(spawnNode());
     expect(screen.getByText('Provider override')).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Default (mesh autopilot)' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Default (mesh provider)' })).toBeTruthy();
   });
 
   it('uses reviewer fallback wording only for a spawn targeted by ReviewVerdict', () => {
@@ -518,7 +518,7 @@ describe('InspectorPanel — SpawnAgentNode harness integration (issue #1358)', 
     expect((lastCall as { timeout_seconds: number | null }).timeout_seconds).toBeNull();
   });
 
-  it('clears overrides when switching back to Default (mesh autopilot)', () => {
+  it('clears overrides when switching back to Default (mesh provider)', () => {
     const onChange = vi.fn();
     renderNode(
       spawnNode({

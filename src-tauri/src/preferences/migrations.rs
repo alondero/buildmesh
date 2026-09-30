@@ -27,6 +27,11 @@ pub(crate) fn migrate_prefs_json(value: &mut serde_json::Value) -> bool {
         return false;
     };
     let mut changed = false;
+    if let Some(legacy_pool) = root.remove("autopilot_pool_size") {
+        root.entry("circuit_agent_pool_size").or_insert(legacy_pool);
+        changed = true;
+    }
+
 
     let claude_harness = claude_harness_id_from_json(root.get("harness_profiles"));
     let already_migrated = root
@@ -249,4 +254,31 @@ fn migrate_kimi_companion_json(root: &mut serde_json::Map<String, serde_json::Va
     }
     accounts.remove(companion_idx);
     true
+}
+
+#[cfg(test)]
+mod circuit_pool_tests {
+    use super::migrate_prefs_json;
+
+    #[test]
+    fn circuit_pool_migration_preserves_pause_limit_and_uncapped_values() {
+        for pool in [serde_json::json!(0), serde_json::json!(5), serde_json::Value::Null] {
+            let mut value = serde_json::json!({"autopilot_pool_size": pool});
+            migrate_prefs_json(&mut value);
+            assert_eq!(value["circuit_agent_pool_size"], pool);
+            assert!(value.get("autopilot_pool_size").is_none());
+            migrate_prefs_json(&mut value);
+            assert_eq!(value["circuit_agent_pool_size"], pool);
+            let preferences: super::super::model::AppPreferences = serde_json::from_value(value).unwrap();
+            assert_eq!(preferences.circuit_agent_pool_size, pool.as_u64().map(|v| v as u32));
+        }
+    }
+
+    #[test]
+    fn explicit_circuit_pool_takes_precedence_over_legacy_storage() {
+        let mut value = serde_json::json!({"autopilot_pool_size": 5, "circuit_agent_pool_size": 0});
+        migrate_prefs_json(&mut value);
+        assert_eq!(value["circuit_agent_pool_size"], 0);
+        assert!(value.get("autopilot_pool_size").is_none());
+    }
 }

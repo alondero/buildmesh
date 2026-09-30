@@ -68,7 +68,7 @@ const PROVIDERS: SpawnOption[] = [];
 beforeEach(() => {
   ietRenders.count = 0;
   seedAgentNodes([]);
-  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, activeNodeId: null });
+  useAgentNodeStore.setState({ circuitOwnerships: {}, activeNodeId: null });
 });
 
 describe('NodeItem memo (issue #1748)', () => {

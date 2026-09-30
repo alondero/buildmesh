@@ -186,4 +186,3 @@ DOM: a positive assertion must name an element that exists, a `toHaveCount(0)`
 must name one that does not, and a selector naming a node the fixtures do not
 define fails rather than passing. Renaming a testid without updating the driver
 fails the unit suite.
-

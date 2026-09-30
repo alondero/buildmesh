@@ -89,7 +89,7 @@ function mockWithFailure(failingCmd: string, errorMessage: string) {
           default_provider: 'anthropic',
           minimax_api_key: null,
           naming_provider: null,
-          autopilot_pool_size: 5,
+          circuit_agent_pool_size: 5,
           worktree_directory: '',
           confirm_before_quit: true,
           harness_defaults: {},
@@ -189,7 +189,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     expect(defaultProvider.textContent).toContain('Anthropic (built-in default)');
 
     // The other preference-backed controls also disable.
-    expect(screen.getByLabelText('Autopilot pool size').hasAttribute('disabled')).toBe(true);
+    expect(screen.getByLabelText('Circuit agent pool size').hasAttribute('disabled')).toBe(true);
     expect(screen.getByLabelText('Worktree directory').hasAttribute('disabled')).toBe(true);
     expect(
       screen.getByRole('checkbox', { name: /confirm before quitting/i }).hasAttribute('disabled'),
@@ -400,7 +400,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
           return Promise.resolve({
             default_provider: null,
             naming_provider: null,
-            autopilot_pool_size: null,
+            circuit_agent_pool_size: null,
             worktree_directory: '',
             confirm_before_quit: true,
             harness_defaults: {},
@@ -463,7 +463,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
           return Promise.resolve({
             default_provider: null,
             naming_provider: null,
-            autopilot_pool_size: null,
+            circuit_agent_pool_size: null,
             worktree_directory: '',
             confirm_before_quit: true,
             harness_defaults: {},
@@ -530,7 +530,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
           return Promise.resolve({
             default_provider: null,
             naming_provider: null,
-            autopilot_pool_size: null,
+            circuit_agent_pool_size: null,
             worktree_directory: '',
             confirm_before_quit: true,
             harness_defaults: {},
@@ -659,7 +659,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
           return Promise.resolve({
             default_provider: null,
             naming_provider: null,
-            autopilot_pool_size: null,
+            circuit_agent_pool_size: null,
             worktree_directory: '',
             confirm_before_quit: true,
             harness_defaults: {},
@@ -714,7 +714,7 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
           return Promise.resolve({
             default_provider: null,
             naming_provider: null,
-            autopilot_pool_size: null,
+            circuit_agent_pool_size: null,
             worktree_directory: '',
             confirm_before_quit: true,
             harness_defaults: {},

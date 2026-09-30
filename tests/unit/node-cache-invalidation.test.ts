@@ -14,7 +14,7 @@ import type { useAgentNodeStore as UseAgentNodeStore, AgentNode } from '../../sr
 // the path is missing (`src-tauri/src/commands/file_watcher.rs`), and once a
 // real event finally arrives the cache's `minRefetchIntervalMs` window (60s
 // for the PR, 2s for the summary) suppresses it. The store now invalidates
-// both caches on `node-spawn-completed` / `autopilot-pr-created`, which is
+// both caches on `node-spawn-completed` / `circuit-pr-ready`, which is
 // exactly the moment the cached `null` becomes structurally wrong.
 //
 // Every assertion below deliberately runs WITHOUT advancing the clock, so a
@@ -74,9 +74,8 @@ async function attachListeners(node: AgentNode = makeNode()) {
 }
 
 describe('node cache invalidation (issue #1004)', () => {
-  it('refetches the open PR on node-spawn-completed, inside the 60s freshness window', async () => {
-    // Mount-time fetch: the worktree does not exist yet, so the backend
-    // reports no PR and the cache stamps that `null` as fresh.
+
+  it('refetches the open PR when a Circuit OpenPr action completes', async () => {
     mockInvoke.mockResolvedValue(null);
     const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
     await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_open_pr_for_node', { nodeId: 7 }));
@@ -84,10 +83,9 @@ describe('node cache invalidation (issue #1004)', () => {
 
     await attachListeners();
 
-    // Stage-2 finished: the worktree exists and the branch now has a PR.
     replyWith(PR);
     await act(async () => {
-      await emit('node-spawn-completed', { node_id: 7 });
+      await emit('circuit-pr-ready', { run_id: 1, node_id: 7 });
     });
 
     await waitFor(() => expect(result.current.pr).toEqual(PR));
@@ -109,22 +107,6 @@ describe('node cache invalidation (issue #1004)', () => {
     await waitFor(() => expect(result.current.summary).toEqual(SUMMARY));
   });
 
-  it('refetches the open PR on autopilot-pr-created (the v1.1 TODO in useOpenPr)', async () => {
-    mockInvoke.mockResolvedValue(null);
-    const { result } = renderHook(() => useOpenPr(7, GIT_PATH));
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('get_open_pr_for_node', { nodeId: 7 }));
-    expect(result.current.pr).toBeNull();
-
-    await attachListeners(makeNode({ status: 'running' }));
-
-    // The autopilot wrap-up just opened the PR.
-    replyWith(PR);
-    await act(async () => {
-      await emit('autopilot-pr-created', { node_id: 7, pr_url: PR.url });
-    });
-
-    await waitFor(() => expect(result.current.pr).toEqual(PR));
-  });
 
   it('leaves other nodes alone when one node finishes spawning', async () => {
     mockInvoke.mockResolvedValue(null);

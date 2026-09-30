@@ -345,7 +345,7 @@ export function isRunStale(
  *      steps the circuit may run at once. A `pending_slot` step is
  *      parked here.
  *   3. **Circuit agent slots** — the run's durable blueprint lease,
- *      optionally bounded by the app-wide Autopilot process pool. A step
+ *      optionally bounded by the app-wide Circuit agent pool. A step
  *      needing a fresh agent with no circuit slot to spare gets parked on
  *      this too. The legacy mesh node setting is not a circuit budget.
  *

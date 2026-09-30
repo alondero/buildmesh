@@ -114,7 +114,7 @@ function mockBackend(opts: {
         return Promise.resolve({
           default_provider: null,
           minimax_api_key: null,
-          autopilot_pool_size: null,
+          circuit_agent_pool_size: null,
           harness_defaults: defaults,
         });
       case 'get_coordinator_status':

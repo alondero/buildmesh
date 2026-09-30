@@ -148,7 +148,6 @@ export const defaultFixtures = {
   list_providers: [
     { id: 'anthropic', name: 'Claude', description: 'Anthropic Claude Code', icon: null, available: true, kind: 'cwrap' },
   ],
-  list_autopilot_runs: [],
   list_circuit_agent_ownerships: [],
   list_semantic_turns: [],
   list_circuits_with_runs: circuitsWithRuns,

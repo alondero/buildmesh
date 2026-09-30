@@ -155,7 +155,7 @@ fn accumulate(
 
 /// Flip the node back to `running` and broadcast `attention-cleared` — the
 /// same fan-out every other clear path performs (`http::ws`,
-/// `coordinator::drive`, `autopilot::pipeline`). Routes through
+/// `coordinator::drive`, `circuit::delivery`). Routes through
 /// `SessionLifecycle` (issue #132) for the DB write + desktop emit; the
 /// mobile broadcast (`http::events`) is a separate channel kept here.
 fn clear_now(node_id: i64) {

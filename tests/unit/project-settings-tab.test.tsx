@@ -577,16 +577,10 @@ describe('ProjectSettingsTab (issue #1460)', () => {
     expect(sandboxes).toHaveLength(1);
   });
 
-  // ── Regression: Autopilot Policy moved to AutopilotProbeTab (#1013) ────â”€
-  // The `update_mesh_autopilot` IPC and its four-policy-fields shape were
-  // intentionally moved out of Mesh Properties (ticket #1013, follow-up to
-  // #994). The Mesh Properties tab is no longer the configure surface for
-  // Autopilot Policy — that role lives on `AutopilotProbeTab`. The pre-#1013
-  // behavioural assertions for the old policy section moved with it (see
-  // `autopilot-probe-tab.test.tsx`). The test below pins the regression so a
-  // future change can't silently re-introduce the dual-edit surface.
+  // Legacy Autopilot policy controls were removed from the application.
+  // Keep Project Settings free of the retired fields and IPC calls.
 
-  it('does NOT render Autopilot Policy fields (issue #1013)', async () => {
+  it('does not render legacy Autopilot policy fields', async () => {
     openProbeDestination('properties');
 
     // Master toggle + 4 policy fields, none of which should be in the DOM.

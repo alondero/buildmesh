@@ -1,6 +1,7 @@
 # Autopilot ModeSpec — Event-Driven Agent Node Provisioning and Self-Correction Loop
 
-Status: accepted
+Status: Superseded. The legacy Autopilot mode was retired; Circuits now own
+automated execution. Retained here as historical design context.
 
 ## Problem Statement
 

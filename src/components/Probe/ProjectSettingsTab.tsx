@@ -32,9 +32,8 @@
  *   - Project preset (auto-fill build / run)
  *   - Build / run commands, plus the per-context root overrides
  *
- * Autopilot Policy (trigger label / concurrency / provider override /
- * on-success action) was removed in ticket #1013 — it lives on the dedicated
- * `AutopilotProbeTab` and persists atomically through `update_mesh_autopilot`.
+ * Legacy Autopilot policy was removed from the application; Circuit settings
+ * live in the Circuits destination.
  *
  * Reactivity model matches the legacy panel: text fields save on blur,
  * selects, radios, and toggles save on change. Two error channels, both

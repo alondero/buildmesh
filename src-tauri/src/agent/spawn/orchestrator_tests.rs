@@ -72,7 +72,7 @@ fn every_non_resume_intent_replaces_a_stored_conversation() {
 /// Issue #1180 — `SpawnIntent::initial_prompt` is the single source
 /// of truth for the GitHub-issue prefill. The spawn seam (`spawn_with_intent`)
 /// routes through it; so does the desktop draft response and the
-/// Autopilot watcher. Pin the wording here so any future drift would
+/// Circuit worker. Pin the wording here so any future drift would
 /// surface as a unit-test failure before the agent gets the wrong
 /// prompt.
 #[test]

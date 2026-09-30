@@ -1,7 +1,7 @@
 /**
  * Runtime Circuit ledger vocabulary (issue #1660).
  *
- * Wire unions come from the ts-rs twins of `autopilot::circuit::vocabulary`.
+ * Wire unions come from the ts-rs twins of `circuit::vocabulary`.
  * Display labels and IN-list helpers live here so the canvas, diagnostics,
  * and Probe never re-spell `pending_slot` / terminal run states.
  */
@@ -86,7 +86,7 @@ export function stepStatusLabel(status: string): string {
 
 /**
  * Which budget binds a queued step. Must match
- * `autopilot::circuit::capacity::queued_step_bind`.
+ * `circuit::capacity::queued_step_bind`.
  */
 export function queuedStepBind(concurrencyLimit: number, runningSteps: number): CapacityBind {
   if (concurrencyLimit > 0 && runningSteps >= concurrencyLimit) {
@@ -97,7 +97,7 @@ export function queuedStepBind(concurrencyLimit: number, runningSteps: number): 
 
 /**
  * Which budget binds a parked run. Must match
- * `autopilot::circuit::capacity::pending_run_bind`. Returns `null` when
+ * `circuit::capacity::pending_run_bind`. Returns `null` when
  * no bind is in effect (free run slot) — only `mesh_run_admission`
  * ever binds a pending run.
  */

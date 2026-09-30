@@ -93,7 +93,7 @@ function harnessIdFromProvider(provider: string | null | undefined): InspectorHa
   if (provider == null) return null;
   // Issue #1362 review: the backend's `non_empty_trim` collapses
   // whitespace-only and empty `provider` strings to `None` (cascade
-  // falls through to the mesh's default autopilot). Mirror that
+  // falls through to the mesh's default provider). Mirror that
   // semantic here so an empty / whitespace / unknown id never gets
   // rendered as if the user had picked a harness — keep "no provider
   // selected" honest in the UI.
@@ -126,7 +126,7 @@ const inputClass =
 
 /**
  * Mirrors `MAX_STEP_TIMEOUT_SECONDS` in
- * `src-tauri/src/autopilot/circuit/model.rs` (#1219). One week gives
+ * `src-tauri/src/circuit/model.rs` (#1219). One week gives
  * every realistic circuit room to wait (a flaky CI run, a long-running
  * PR review) while bounding the user-typable range so a typo like
  * `999999999` doesn't ship a value the orchestrator's eventual
@@ -852,7 +852,7 @@ function SpawnAgentNodeFields({
           <option value="">
             {isReviewerSpawn
               ? 'Default (Reviewer provider/source agent)'
-              : 'Default (mesh autopilot)'}
+              : 'Default (mesh provider)'}
           </option>
           {configurations && kind.provider && !selected && (
             <option value={kind.provider}>{kind.provider} (saved selection)</option>

@@ -77,7 +77,7 @@ pub async fn recover_suspended_node(node: AgentNode) -> Result<bool, String> {
             || !crate::preferences::resolve_harness_provider(&node.provider).adapter().auto_resume_on_startup()
             // A suspended Autopilot node without an identity may be awaiting
             // sandbox approval and must never be started by transcript matching.
-            || crate::db::get_autopilot_run(node.id).map_err(|e| e.to_string())?.is_some()
+            || crate::db::legacy_retirement::has_history(node.id).map_err(|e| e.to_string())?
         {
             return Ok(false);
         }

@@ -75,7 +75,7 @@ pub(crate) enum WorktreePolicy {
 
 /// The authoritative initial prompt a [`SpawnIntent`] will hand to the
 /// harness (issue #1180). Built once, at the spawn seam, so the desktop
-/// draft, the background launch, and the Autopilot watcher all derive
+/// draft, the background launch, and the Circuit worker all derive
 /// from the same source — there's no longer a free function to
 /// accidentally diverge from the live spawn path.
 ///
@@ -83,7 +83,7 @@ pub(crate) enum WorktreePolicy {
 /// accidentally concatenate, slice, or re-format it; the only ways out
 /// are `as_str()` (borrow) and `into_string()` (consume, for transport
 /// paths that need an owned `String` like the desktop `IssueNodeDraft`
-/// wire shape or the Autopilot watcher's prefill buffer).
+/// wire shape or the Circuit worker's prefill buffer).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InitialPrompt(String);
 
@@ -106,7 +106,7 @@ impl InitialPrompt {
 
     /// Consume the wrapper, returning the owned `String`. Used by the
     /// desktop draft response (`IssueNodeDraft.prefill`) and the
-    /// Autopilot watcher's prefill buffer, both of which need ownership
+    /// Circuit worker's prefill buffer, both of which need ownership
     /// to outlive their `SpawnIntent` builder.
     pub(crate) fn into_string(self) -> String {
         self.0
@@ -133,7 +133,7 @@ pub(crate) enum SpawnIntent {
 impl SpawnIntent {
     /// Build the authoritative initial prompt once, at the spawn seam
     /// (issue #1180, #1561). Every consumer — desktop draft, background launch,
-    /// Autopilot watcher — routes through this method instead of
+    /// Circuit worker — routes through this method instead of
     /// recomputing from a free function. The truth table:
     ///
     /// | Variant                            | Result                                          |
@@ -201,7 +201,7 @@ impl SpawnIntent {
 /// (issue #1155). Highest precedence in the spawn-config cascade:
 ///
 /// 1. **Explicit Agent Node spawn argument** — values the caller passed for
-///    this one spawn (e.g. an autopilot-side override, a future
+///    this one spawn (e.g. a Circuit-side override, a future
 ///    `--model <x> --effort <y>` CLI flag, a mobile HTTP request body).
 /// 2. Mesh row value (`meshes.model` / `meshes.effort`).
 /// 3. Application-level default (`preferences::harness_defaults`).
@@ -320,7 +320,7 @@ pub(crate) enum SpawnOutcome {
 }
 
 /// Format the GitHub-issue prefill. Single source of truth (issue #1180):
-/// every caller (desktop draft, background launch, Autopilot watcher)
+/// every caller (desktop draft, background launch, Circuit worker)
 /// routes through [`SpawnIntent::initial_prompt`] which calls this
 /// helper. Public-within-crate so `commands::agent::IssueNodeDraft` tests
 /// can construct equivalent `InitialPrompt` values for comparison.
@@ -519,7 +519,7 @@ mod tests {
     /// `Please work on GitHub issue #N — Title\n<canonical URL>` with the
     /// title trimmed. A future change here would silently shift what every
     /// transport surfaces — desktop draft, background launch, and the
-    /// Autopilot watcher — so the wording is locked to this exact shape.
+    /// Circuit worker — so the wording is locked to this exact shape.
     #[test]
     fn issue_prefill_uses_canonical_github_url_and_trimmed_title() {
         let intent = SpawnIntent::Issue(IssueContext {
@@ -846,7 +846,7 @@ https://github.com/alondero/buildmesh/issues/7"
 
     /// A carried custom template renders through `initial_prompt()` - the
     /// same intent value the desktop draft, the background launch, and
-    /// the Autopilot watcher all share, so they agree by construction.
+    /// the Circuit worker all share, so they agree by construction.
     #[test]
     fn carried_issue_template_renders_through_initial_prompt() {
         let intent = SpawnIntent::Issue(IssueContext {

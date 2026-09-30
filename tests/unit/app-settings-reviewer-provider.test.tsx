@@ -13,6 +13,7 @@ const tauriMocks = vi.hoisted(() => ({
   listDeviceSessions: vi.fn(),
   getNetworkStatus: vi.fn(),
   setAppReviewerProvider: vi.fn(),
+  setCircuitClassifierProvider: vi.fn(),
 }));
 
 vi.mock('../../src/lib/tauri', async (importOriginal) => ({
@@ -25,6 +26,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   listDeviceSessions: tauriMocks.listDeviceSessions,
   getNetworkStatus: tauriMocks.getNetworkStatus,
   setAppReviewerProvider: tauriMocks.setAppReviewerProvider,
+  setCircuitClassifierProvider: tauriMocks.setCircuitClassifierProvider,
 }));
 
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -61,12 +63,13 @@ describe('AppSettingsModal reviewer provider', () => {
 
   beforeEach(() => {
     storedReviewer = 'codex';
+    tauriMocks.setCircuitClassifierProvider.mockReset().mockResolvedValue(undefined);
     tauriMocks.getAppPreferences.mockReset().mockImplementation(() =>
       Promise.resolve({
         default_provider: null,
         reviewer_provider: storedReviewer,
         naming_provider: null,
-        autopilot_pool_size: null,
+        circuit_agent_pool_size: null,
         worktree_directory: null,
         harness_defaults: {},
         provider_pairings: [],
@@ -164,4 +167,31 @@ describe('AppSettingsModal reviewer provider', () => {
     // The plain shell is absent entirely: it is not an agent at all.
     expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
   });
+  it('configures the Circuit classifier independently of the Codex reviewer and excludes other harnesses', async () => {
+    await renderModal();
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole('button', { name: 'Circuit classifier provider' });
+    await user.click(trigger);
+    expect(screen.queryByRole('menuitem', { name: 'Codex' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+    await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenCalledWith('anthropic'));
+    expect(tauriMocks.setAppReviewerProvider).not.toHaveBeenCalled();
+    await waitFor(() => expect(trigger.textContent).toContain('Anthropic'));
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Claude Code (built-in default)' }));
+    await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenLastCalledWith(null));
+  });
+
+  it('keeps the classifier selection when persistence fails and shows the error', async () => {
+    tauriMocks.setCircuitClassifierProvider.mockRejectedValue(new Error('classifier save failed'));
+    await renderModal();
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole('button', { name: 'Circuit classifier provider' });
+    await user.click(trigger);
+    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
+    expect(await screen.findByText('classifier save failed')).toBeTruthy();
+    expect(trigger.textContent).toContain('Claude Code (built-in default)');
+  });
+
 });

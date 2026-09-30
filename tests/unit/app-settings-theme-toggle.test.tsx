@@ -71,7 +71,7 @@ function mockBackendIpc() {
           minimax_api_key: null,
           google_cloud_project: null,
           naming_provider: null,
-          autopilot_pool_size: null,
+          circuit_agent_pool_size: null,
           harness_order: [],
           provider_pairings: [],
           harness_profiles: [],

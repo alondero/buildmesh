@@ -58,12 +58,10 @@ pub(crate) use auth::{COORDINATOR_DRIVE_TOKEN_KEY, COORDINATOR_READ_TOKEN_KEY};
 #[allow(unused_imports)]
 pub(crate) use mesh::{
     get_mesh_by_id_inner,
-    count_active_autopilot_nodes_total_inner,
     get_mesh_scratchpad_inner,
     set_mesh_scratchpad_inner,
     set_mesh_sandbox_inner,
     set_mesh_worktree_directory_inner,
-    COUNT_ACTIVE_AUTOPILOT_SQL
 };
 
 #[allow(unused_imports)]
@@ -403,7 +401,7 @@ static DB: OnceCell<Database> = OnceCell::new();
 //     auto-pause threshold (`loop_consecutive_failures` check vs a
 //     descending walk of `(loop_iteration, state)`); (c) interval-delay
 //     pacing (`loop_interval_seconds` check vs `MAX(updated_at)` of
-//     loop rows). All three checks happen in `services::autopilot`
+//     loop rows). These were enforced by the retired legacy poller.
 //     (`evaluate_loop_continuation`), reading through the hydration
 //     helper `list_loop_history`. See `ensure_autopilot_run_loop_iteration`
 //     for the additive safety net.
@@ -680,14 +678,14 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        -- Autopilot runs (issue #482, PRD #480). One row per auto-spawned
+        -- Retired Autopilot runs (issue #482, PRD #480). One row per auto-spawned
         -- Agent Node, keyed by the node so close/delete cascades. Kept as a
         -- satellite table (not an agent_nodes column) so the positional
         -- AGENT_NODE_COLUMNS projection and its consumers stay untouched.
         -- `state` is the wrap-up pipeline machine: implementing (agent working
         -- on the issue) -> finishing (wrap-up prompt injected, attempt N) ->
         -- completed | failed. `attempts` counts wrap-up/self-correction
-        -- injections (capped by autopilot::MAX_FINISH_ATTEMPTS).
+        -- injections (capped by the former finish-attempt limit).
         CREATE TABLE IF NOT EXISTS autopilot_runs (
             node_id INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE,
             mesh_id INTEGER NOT NULL,
@@ -717,7 +715,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
         -- table. Canonical indexes are installed after schema evolution:
         --   * autopilot_circuits — the blueprint rows. `graph_json` holds
         --     the serialised Graph Blueprint AST (see
-        --     autopilot::circuit::model); no per-node-kind migration — the
+        --     circuit::model); no per-node-kind migration — the
         --     AST evolves inside the JSON. `enabled` defaults to 0
         --     (draft-first, issue #1356) so a freshly created circuit
         --     cannot fire GitHub/interval pollers until the user opts in.

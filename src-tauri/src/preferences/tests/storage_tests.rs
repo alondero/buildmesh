@@ -122,7 +122,7 @@ fn type_invalid_preferences_are_not_overwritten_by_a_read() {
 #[test]
 fn deleted_launch_configuration_is_not_accepted_as_reviewer_provider() {
     with_temp_dir(|_| {
-        let error = crate::autopilot::compatibility::validate_reviewer_provider_id("launch/deleted")
+        let error = crate::circuit::compatibility::validate_reviewer_provider_id("launch/deleted")
             .unwrap_err();
         assert_eq!(
             error,

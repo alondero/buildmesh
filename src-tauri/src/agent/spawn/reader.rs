@@ -238,7 +238,7 @@ pub(super) fn start_reader(
     // `session id: <uuid>` regex can match a banner that straddles an
     // 8 KiB read boundary, and so multi-byte UTF-8 sequences split
     // across reads aren't corrupted to U+FFFD before being handed to
-    // `session_naming::on_output` and `autopilot::evaluator::on_output`.
+    // `session_naming::on_output` and `circuit::evaluator::on_output`.
     // `captured` is a plain `bool` (not `AtomicBool`) because the
     // reader thread is the only writer — the `AtomicBool` here used to
     // be load-bearing for `start_reader`'s outer scope but it's now
@@ -304,7 +304,7 @@ pub(super) fn start_reader(
                     maybe_buffer_for_naming(is_plain_terminal, session_id, &text);
                     // Autopilot state evaluator tail (issue #483) — one in-memory
                     // set lookup for non-piloted nodes.
-                    crate::autopilot::evaluator::on_output(session_id, &text);
+                    crate::circuit::evaluator::on_output(session_id, &text);
                     // Stale-attention safety net (issue #878) — one map lookup for
                     // unarmed nodes.
                     crate::attention_autoclear::on_output(session_id, data.len());

@@ -219,7 +219,7 @@ pub fn merge_detected_profiles(detected: Vec<HarnessProfile>) -> Result<usize, S
 /// typed `SpawnOptionId` — it skips the redundant `&str` → `SpawnOptionId`
 /// re-parse that this `&str` overload performs internally (issue #1730
 /// review fix-up: previously `services::agent_node::decide_resume` and
-/// `autopilot::compatibility::resolve_autopilot_spawn_option` each parsed
+/// `circuit::compatibility::resolve_circuit_spawn_option` each parsed
 /// `new_provider` twice across the two calls).
 pub fn resolve_harness_provider(profile_id: &str) -> Provider {
     let selected = super::super::launch_configurations::selection_option(profile_id).unwrap_or_else(|_| profile_id.into());

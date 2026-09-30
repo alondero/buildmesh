@@ -71,7 +71,6 @@ const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ de
 const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
 const ProjectSettingsTab = lazy(() => import('./ProjectSettingsTab').then((m) => ({ default: m.ProjectSettingsTab })));
 const RepositoryTab = lazy(() => import('./RepositoryTab').then((m) => ({ default: m.RepositoryTab })));
-const AutopilotProbeTab = lazy(() => import('./AutopilotProbeTab').then((m) => ({ default: m.AutopilotProbeTab })));
 const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
 const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
 const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
@@ -409,7 +408,6 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <ProjectSettingsTab />;
-  if (tab === 'autopilot') return <AutopilotProbeTab />;
   if (tab === 'circuits') return <CircuitsProbeTab />;
   if (tab === 'worktrees') return <RepositoryTab />;
   if (tab === 'issues') return <GitIssuesTab />;
