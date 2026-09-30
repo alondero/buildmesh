@@ -165,6 +165,75 @@ export function nodeInputContext(node: Pick<AgentNode, 'status' | 'lifecycle'>):
 }
 
 // ---------------------------------------------------------------------------
+// Input request semantics (issue #1966)
+// ---------------------------------------------------------------------------
+//
+// An `awaiting_input` node is blocked on *something*, and the normalized
+// lifecycle kind says what. Only a `permission_requested` observation is
+// evidence for a yes/no decision: sending `y`/`n` at a question is a guess
+// about a harness prompt Buildmesh never read, and a rejected guess reads to
+// the user as "the agent refused my answer". An unobserved or unclassifiable
+// request is the same case with even less evidence, so it gets the same
+// treatment.
+
+/** How a node's pending input request should be answered. */
+export type InputRequestMode =
+  /** The harness asked for a tool-approval decision. */
+  | 'permission'
+  /** The harness asked a question, with or without an answer list. */
+  | 'question'
+  /** The harness yielded for input without saying what it needs. */
+  | 'unknown';
+
+export interface NodeInputRequest {
+  /**
+   * Identity of *this* request, not of the node. A node that asks a second
+   * question while still `awaiting_input` gets a new key, so action state
+   * recorded against the previous request cannot disable the new one. Falls
+   * back to a constant for unobserved requests — those are also un-actionable,
+   * so nothing to carry over either way.
+   */
+  key: string;
+  mode: InputRequestMode;
+  /** What the harness asked, when the observation carried a description. */
+  message?: string;
+  /**
+   * Answers the harness enumerated, in harness order. Empty unless the
+   * observation carried a request schema, so callers can never render a
+   * choice list they inferred from prose.
+   */
+  choices: string[];
+}
+
+/**
+ * Describe the input a node is blocked on, or `undefined` when it is not
+ * blocked on user input at all.
+ */
+export function nodeInputRequest(
+  node: Pick<AgentNode, 'status' | 'lifecycle'>,
+): NodeInputRequest | undefined {
+  if (node.status !== 'awaiting_input') return undefined;
+  // A snapshot only describes the current status revision; the DB read drops
+  // it otherwise, and a stale kind must not decide today's reply controls.
+  const observed = node.lifecycle?.status === node.status ? node.lifecycle : undefined;
+  const choices = observed?.request?.choices ?? [];
+  const mode: InputRequestMode =
+    observed?.kind === 'permission_requested'
+      ? 'permission'
+      : observed?.kind === 'question_requested'
+        ? 'question'
+        : 'unknown';
+  return {
+    key: observed ? `${observed.kind}@${observed.timestamp}` : 'unobserved',
+    mode,
+    message: observed?.semantic_turn?.description ?? observed?.message ?? undefined,
+    // Only a question can carry a choice list. A permission decision that
+    // somehow arrives with one is a yes/no prompt, not a menu.
+    choices: mode === 'question' ? choices : [],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // File-diff status meta (issue #725). The badge "A/M/D/R/? + coloured letter"
 // shown on a file card / tree row was duplicated three ways before this
 // consolidation: `<Diff>` owned the table, `ChangedFilesSection` held two

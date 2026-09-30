@@ -29,19 +29,40 @@ export default async function ({ page, invoke }) {
       });
       expect(response.ok).toBe(true);
     };
+    // Issue #1966 — a callback whose shape Buildmesh cannot interpret still
+    // needs the user, but it names no request, so the card must not invent one.
     const background = create('Reviewing with background agents');
     const question = create('Waiting for your answer');
+    const permission = create('Waiting for approval');
+    const unknown = create('Waiting for unclassified input');
     const ready = create('Ready for the next instruction');
-    for (const node of [background, question, ready]) await hook(node, 'UserPromptSubmit');
+    for (const node of [background, question, permission, unknown, ready]) await hook(node, 'UserPromptSubmit');
     await hook(background, 'SubagentStart', { agent_id: 'review-one' });
     await hook(background, 'SubagentStart', { agent_id: 'review-two' });
     await hook(background, 'Stop');
     const prompt = 'Should the deployment target staging or production?';
-    await hook(question, 'PreToolUse', { tool_name: 'AskUserQuestion', tool_use_id: 'question-one', tool_input: { questions: [{ question: prompt }] } });
+    await hook(question, 'PreToolUse', {
+      tool_name: 'AskUserQuestion', tool_use_id: 'question-one',
+      tool_input: { questions: [{ question: prompt, options: [{ label: 'Staging' }, { label: 'Production' }] }] },
+    });
+    await hook(permission, 'PermissionRequest', { tool_name: 'Edit', tool_input: { file_path: 'src/lib/auth.ts' } });
+    // A body `hook()` cannot express: no tool, no question, no approval — only
+    // a notification message, which classifies to no request kind at all.
+    const raw = await fetch(`http://127.0.0.1:2992/api/attention/${unknown.id}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hook_event_name: 'Notification', session_id: unknown.session, message: 'still working' }),
+      signal: AbortSignal.timeout(10000),
+    });
+    expect(raw.ok).toBe(true);
     await hook(ready, 'Stop');
     const read = (node) => invoke('get_agent_node', { nodeId: node.id });
     expect((await read(background)).lifecycle.kind).toBe('background_running');
     expect((await read(question)).lifecycle.kind).toBe('question_requested');
+    expect((await read(question)).lifecycle.request.choices).toEqual(['Staging', 'Production']);
+    expect((await read(permission)).lifecycle.kind).toBe('permission_requested');
+    // A permission decision is not a menu: the payload omits `request`
+    // entirely, which is the signal a client must not read as "no choices".
+    expect((await read(permission)).lifecycle.request).toBeUndefined();
     expect((await read(ready)).status).toBe('ready');
 
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -59,7 +80,45 @@ export default async function ({ page, invoke }) {
     await expect(mobile.getByText(prompt, { exact: true }).first()).toBeVisible();
     await mobile.reload({ waitUntil: 'domcontentloaded' });
     await expect(mobile.getByText(prompt, { exact: true }).first()).toBeVisible();
-    await mobile.getByTestId(`attn-card-${question.id}`).screenshot({ path: `${shots}/node-status-question.png` });
+
+    // Issue #1966 — reply controls follow the request, after a live event and
+    // after this cold reload alike.
+    // A question: the harness's own answers as text, one explicit
+    // open-to-answer action, and no yes/no chips to send at a prompt
+    // Buildmesh never read.
+    const questionCard = mobile.getByTestId(`attn-card-${question.id}`);
+    await expect(questionCard.getByTestId('attn-open')).toContainText('Answer in terminal');
+    await expect(questionCard.getByTestId('attn-choices')).toContainText('Staging');
+    await expect(questionCard.getByTestId('attn-choices')).toContainText('Production');
+    await expect(questionCard.getByTestId('attn-approve')).toHaveCount(0);
+    await expect(questionCard.getByTestId('attn-reject')).toHaveCount(0);
+    await questionCard.screenshot({ path: `${shots}/node-status-question.png` });
+
+    // A permission request keeps its approval controls.
+    const permissionCard = mobile.getByTestId(`attn-card-${permission.id}`);
+    await expect(permissionCard.getByTestId('attn-approve')).toContainText('Approve (Y)');
+    await expect(permissionCard.getByTestId('attn-reject')).toContainText('Reject (N)');
+    await expect(permissionCard.getByTestId('attn-choices')).toHaveCount(0);
+
+    // An input request Buildmesh could not classify: open the terminal, and
+    // still no yes/no chips.
+    const unknownCard = mobile.getByTestId(`attn-card-${unknown.id}`);
+    await expect(unknownCard.getByTestId('attn-open')).toContainText('Open terminal to respond');
+    await expect(unknownCard.getByTestId('attn-approve')).toHaveCount(0);
+    await expect(unknownCard.getByTestId('attn-reject')).toHaveCount(0);
+
+    // The harness answers that question and immediately asks another, without
+    // the node ever leaving `awaiting_input` — the replacement must be
+    // actionable, not inherit the previous request's state.
+    const nextPrompt = 'Which branch should the hotfix target?';
+    await hook(question, 'PreToolUse', {
+      tool_name: 'AskUserQuestion', tool_use_id: 'question-two',
+      tool_input: { questions: [{ question: nextPrompt, options: [{ label: 'Hotfix' }, { label: 'main' }] }] },
+    });
+    await expect(questionCard.getByText(nextPrompt, { exact: true })).toBeVisible();
+    await expect(questionCard.getByTestId('attn-choices')).toContainText('Hotfix');
+    await expect(questionCard.getByTestId('attn-open')).toBeEnabled();
+
     await mobile.locator('nav button').filter({ hasText: 'Work' }).click();
     await mobile.getByRole('textbox', { name: 'Search work' }).fill('Node status verification');
     await expect(mobile.getByText('Waiting for background work', { exact: true }).first()).toBeVisible();
@@ -72,7 +131,7 @@ export default async function ({ page, invoke }) {
     await hook(background, 'SubagentStop', { agent_id: 'review-two' });
     expect((await read(background)).status).toBe('ready');
     await expect(mobile.getByTestId(`node-${background.id}`)).toContainText('Ready');
-    console.log('PASS: real backend preserves question and background observations across reload; final child alone makes node ready.');
+    console.log('PASS: real backend preserves question and background observations across reload; mobile reply controls follow the request; final child alone makes node ready.');
   } finally {
     await browser?.close();
     db.close();

@@ -62,6 +62,37 @@ function makeNode(id: number, status: NodeStatus): AgentNode {
   };
 }
 
+/**
+ * An awaiting-input node carrying the lifecycle observation that decides its
+ * reply controls (issue #1966). Without one the card cannot claim a yes/no
+ * decision, so a test that exercises the approval chips must say the harness
+ * asked for a permission.
+ */
+function waitingNode(
+  id: number,
+  overrides: Partial<NonNullable<AgentNode["lifecycle"]>> = {},
+  status: NodeStatus = "awaiting_input",
+): AgentNode {
+  return {
+    ...makeNode(id, status),
+    lifecycle: {
+      session_id: id,
+      provider: "anthropic",
+      kind: "permission_requested",
+      message: "Allow npm install?",
+      provider_event: "PermissionRequest",
+      provider_session_id: null,
+      completion_reason: null,
+      transcript_path: null,
+      timestamp: "2026-06-11T00:00:00Z",
+      signal_health: "ok",
+      semantic_turn: null,
+      ...overrides,
+      status,
+    },
+  };
+}
+
 function mockApi(
   nodes: AgentNode[],
   opts?: { status?: number; providers?: Provider[] },
@@ -141,7 +172,7 @@ describe("NodeList", () => {
   });
 
   it("triage card shows repo, branch, prompt placeholder and one-tap chips (issue #1377)", async () => {
-    mockApi([{ ...makeNode(3, "awaiting_input"), branch: "feature/deck" }]);
+    mockApi([{ ...waitingNode(3), branch: "feature/deck" }]);
 
     const onOpenNode = vi.fn();
     render(
@@ -163,20 +194,18 @@ describe("NodeList", () => {
     expect(body.textContent).toContain("buildmesh");
     expect(body.textContent).toContain("Mesh: buildmesh");
     expect(body.textContent).toContain("feature/deck");
-    // No lifecycle event yet → the placeholder prompt line, not silence.
+    // A permission observation carries the request text.
     expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Waiting for the agent's prompt",
+      "Allow npm install?",
     );
-    // The two action chips. (Issue #1377, post-review: the redundant
-    // "Focus terminal" chip was dropped — the card body is the focus
-    // target, so an explicit chip was competing for the same 120px.)
+    // The two action chips, because the harness asked for a decision.
     expect(screen.getByTestId("attn-approve-3").textContent).toContain(
       "Approve (Y)",
     );
     expect(screen.getByTestId("attn-reject-3").textContent).toContain(
       "Reject (N)",
     );
-    expect(screen.queryByTestId("attn-focus-3")).toBeNull();
+    expect(screen.queryByTestId("attn-open-3")).toBeNull();
 
     // Focus (card body) opens the node's terminal.
     fireEvent.click(screen.getByTestId("node-3"));
@@ -184,12 +213,115 @@ describe("NodeList", () => {
     expect(onOpenNode.mock.calls[0][0].id).toBe(3);
   });
 
+  it("offers an open-to-answer action and no yes/no chips for a question (issue #1966)", async () => {
+    mockApi([
+      waitingNode(3, {
+        kind: "question_requested",
+        provider_event: "PreToolUse",
+        message: "Should the deployment target staging or production?",
+      }),
+    ]);
+
+    const onOpenNode = vi.fn();
+    render(
+      <NodeList
+        onOpenNode={onOpenNode}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // The question text is on the card…
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Should the deployment target staging or production?",
+    );
+    // …and the ONLY control is the explicit open-to-answer action. Approving
+    // or rejecting a question would send y/n at a prompt Buildmesh never read.
+    expect(screen.queryByTestId("attn-approve-3")).toBeNull();
+    expect(screen.queryByTestId("attn-reject-3")).toBeNull();
+    const open = screen.getByTestId("attn-open-3");
+    expect(open.textContent).toContain("Answer in terminal");
+    // No choice list without a request schema from the harness.
+    expect(screen.queryByTestId("attn-choices-3")).toBeNull();
+
+    // The action opens the node so the user answers in the harness's own UI.
+    fireEvent.click(open);
+    expect(onOpenNode).toHaveBeenCalledTimes(1);
+    expect(onOpenNode.mock.calls[0][1]).toContain("staging or production");
+  });
+
+  it("lists the answers the harness supplied, without turning them into one-tap actions (issue #1966)", async () => {
+    mockApi([
+      waitingNode(3, {
+        kind: "question_requested",
+        provider_event: "PreToolUse",
+        message: "Where should this deploy?",
+        request: { choices: ["Staging", "Production"] },
+      }),
+    ]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    const choices = screen.getByTestId("attn-choices-3");
+    expect(choices.textContent).toContain("Staging");
+    expect(choices.textContent).toContain("Production");
+    // Choices are the harness's own wording, presented as text: a button here
+    // would claim to select the option in the agent's prompt.
+    expect(choices.querySelectorAll("button")).toHaveLength(0);
+    expect(screen.getByTestId("attn-open-3")).toBeTruthy();
+  });
+
+  it("never infers yes/no semantics for an unclassified input request (issue #1966)", async () => {
+    // A node marked awaiting_input with no observation at all: the user is
+    // needed, but nothing says what for. Less evidence than a question, so
+    // the same refusal to guess.
+    mockApi([makeNode(3, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId("attn-approve-3")).toBeNull();
+    expect(screen.queryByTestId("attn-reject-3")).toBeNull();
+    expect(screen.getByTestId("attn-open-3").textContent).toContain(
+      "Open terminal to respond",
+    );
+  });
+
   it("Approve/Reject chips POST y/n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
     // The chips send a one-shot POST — not a terminal WS — because the
     //    previous WS-based path was racing the server's read loop and could
     //    drop the keystroke before delivery. The 200 OK on the POST is the
     //    delivery proof. (#1377, post-review rewrite)
-    const fetch = mockApi([makeNode(3, "awaiting_input")]);
+    const fetch = mockApi([waitingNode(3)]);
 
     render(
       <NodeList
@@ -242,7 +374,7 @@ describe("NodeList", () => {
   });
 
   it("Reject chip POSTs n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
-    const fetch = mockApi([makeNode(5, "awaiting_input")]);
+    const fetch = mockApi([waitingNode(5)]);
 
     render(
       <NodeList
@@ -635,7 +767,7 @@ describe("NodeList", () => {
           ok: true,
           status: 200,
           json: async () => [
-            { ...makeNode(3, nodeStatus), branch: "feature/deck" },
+            { ...waitingNode(3, {}, nodeStatus), branch: "feature/deck" },
           ],
         };
       }
@@ -741,8 +873,128 @@ describe("NodeList", () => {
     // Prompt placeholder restored — no stale WS-event prompt carried
     // over from the previous turn.
     expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Waiting for the agent's prompt",
+      "Allow npm install?",
     );
+  });
+
+  it("clears the sent action when the harness replaces the request on the same node (issue #1966)", async () => {
+    // The node never leaves `awaiting_input` across this boundary, so no
+    // lifecycle transition and no `attention-cleared` event fires — the
+    // status-keyed sweep from the previous test cannot notice anything. Only
+    // a request-keyed marker can tell the two asks apart.
+    let question = "Should the deployment target staging or production?";
+    let timestamp = "2026-06-11T00:00:00Z";
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            waitingNode(3, {
+              kind: "question_requested",
+              provider_event: "PreToolUse",
+              message: question,
+              request: { choices: ["Staging", "Production"] },
+              timestamp,
+            }),
+          ],
+        };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // First question: the harness is asking which environment to deploy to.
+    // A permission decision here is a mistake, so there is no Y/N chip to
+    // send — the only control is the open-to-answer action.
+    expect(screen.queryByTestId("attn-approve-3")).toBeNull();
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "staging or production",
+    );
+
+    // The harness answers that question and immediately asks a second one,
+    // still `awaiting_input`, no intermediate running event.
+    question = "Which branch should the hotfix target?";
+    timestamp = "2026-06-11T00:05:00Z";
+    fireEvent.click(screen.getByTestId("attn-open-3"));
+    const scroller = screen.getByTestId("node-list");
+    fireEvent.touchStart(scroller, { touches: [{ clientX: 100, clientY: 200 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientX: 100, clientY: 400 }] });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 100, clientY: 400 }],
+    });
+
+    // The replacement request is live and actionable: the new question is on
+    // the card and the open-to-answer action is not disabled by the previous
+    // request's state.
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+        "Which branch should the hotfix target?",
+      );
+    });
+    expect(
+      (screen.getByTestId("attn-open-3") as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+
+  it("keeps a sent permission action disabled while the same request is outstanding (issue #1966)", async () => {
+    // The other half of the contract: a marker must not evaporate on an
+    // unrelated re-render either, or a user could double-approve.
+    const fetch = mockApi([waitingNode(7)]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("attn-approve-7"));
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-7").textContent).toContain(
+        "Approved",
+      );
+    });
+
+    // The POST-triggered refetch returns the SAME observation, so the same
+    // request is still outstanding and both chips stay disabled.
+    expect(fetch.mock.calls.some(([url]: [string]) => String(url).includes("/input"))).toBe(true);
+    expect(
+      (screen.getByTestId("attn-approve-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("disables BOTH action chips after a successful send (issue #1377 review)", async () => {
@@ -751,7 +1003,7 @@ describe("NodeList", () => {
     // button and fire an `n\r` immediately after approving. Post-review:
     // `sent` is an enum ("approve" | "reject"), both chips disable on
     // any send, the active chip shows the action-specific label.
-    mockApi([makeNode(7, "awaiting_input")]);
+    mockApi([waitingNode(7)]);
 
     render(
       <NodeList
