@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   compareVersions,
@@ -193,7 +194,9 @@ test('base resolution falls back when no release commit carries the tag', () => 
 test('the real repository resolves its own base to the v1.3.0 boundary', () => {
   // Guards the actual bug: if this ever regresses to reachability, the draft
   // silently includes hundreds of already-shipped commits.
-  const repoRoot = new URL('../..', import.meta.url).pathname.replace(/^\//, '');
+  // fileURLToPath, not a manual leading-slash strip: that would turn
+  // `/home/runner/...` into a relative path and `git` would fail with ENOENT.
+  const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
   const version = String(JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version).replace(/-.*$/, '');
   const tags = execFileSync('git', ['tag', '--list', 'v*'], { cwd: repoRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
   const log = execFileSync('git', ['log', '--first-parent', '--format=%s%x1f%H', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
