@@ -23,7 +23,13 @@ import { groupByHarness } from "../../lib/groups";
 import { LaunchConfigurations } from "../../components/Providers/LaunchConfigurations";
 import { launchConfigurationApi } from "../api";
 import CaptureIdea from "./CaptureIdea";
-import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext } from "../../lib/status";
+import {
+  getNodeStatusConfig,
+  isSignalHealthProblem,
+  nodeInputContext,
+  nodeInputRequest,
+  type NodeInputRequest,
+} from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode, prompt?: string) => void;
@@ -41,6 +47,16 @@ type Props = {
 // calls in NodeList can avoid the `.tsx` JSX-vs-generic ambiguity that
 // comes with back-to-back `<Map<...>>(...)` expressions.
 type SentAction = "approve" | "reject";
+
+/**
+ * A delivered action, bound to the request it answered (issue #1966).
+ *
+ * The node id alone is not enough: a node stays `awaiting_input` across
+ * request boundaries, so a second question on the same node would inherit
+ * the first one's disabled chips after a reconnect. Carrying the request key
+ * means the recorded action only applies to the request it was sent for.
+ */
+type SentMarker = { requestKey: string; action: SentAction };
 
 // Issue #328 — the badge and the provider picker both consume the live
 // `listProviders()` payload directly (no fallback list). Before the fetch
@@ -78,16 +94,16 @@ export default function NodeList({
   // Per-card quick-action state (issue #1377, post-review rewrite).
   // `keyBusy` = which chip is currently in flight ("approve"/"reject" maps
   //   to the tap that opened the POST /api/nodes/{id}/input).
-  // `keySent` = the LAST action the user took on this node ("approve" /
-  //   "reject"). Tracking the action — not just a boolean — is what lets
-  //   the right chip keep its label ("Approved ✓" / "Rejected ✗") while the
-  //   *other* chip stays usable for a second-tap retraction… except the
-  //   agent already saw the CR/LF, so a retraction would be confusing.
-  //   The disable-after-send rule covers both chips with `sent !== undefined`
-  //   so a user can't double-fire. Cleared on status reconciliation:
-  //   on any node reconciliation that drops the node out of
-  //   `awaiting_input` AND on a fresh `agent-lifecycle` /
-  //   `attention-cleared` event.
+  // `keySent` = the LAST action the user took on this node, bound to the
+  //   request it answered (issue #1966). Tracking the action — not just a
+  //   boolean — is what lets the right chip keep its label ("Approved ✓" /
+  //   "Rejected ✗") while the *other* chip stays usable for a second-tap
+  //   retraction… except the agent already saw the CR/LF, so a retraction
+  //   would be confusing. The disable-after-send rule covers both chips with
+  //   `sent !== undefined` so a user can't double-fire. Cleared on status
+  //   reconciliation: on any node reconciliation that drops the node out of
+  //   `awaiting_input`, when the request itself is replaced, AND on a fresh
+  //   `agent-lifecycle` / `attention-cleared` event.
   //
   // The map types use the module-scope `SentAction` alias (see top of
   // file) — the inline `Map<number, "approve" | "reject">` form tripped
@@ -95,7 +111,7 @@ export default function NodeList({
   // followed each other (the second `<Map` was mis-interpreted as a JSX
   // element opening).
   const [keyBusy, setKeyBusy] = useState<Map<number, SentAction>>(new Map());
-  const [keySent, setKeySent] = useState<Map<number, SentAction>>(new Map());
+  const [keySent, setKeySent] = useState<Map<number, SentMarker>>(new Map());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -184,19 +200,25 @@ export default function NodeList({
   // `/api/nodes/{id}/input` route returns 200 OK with `{"ok":true}` only
   // after the bytes hit the PTY — so the await here is the delivery proof
   // (no more "Sent ✓" lying about a race-loser keystroke). On success we
-  // record the action in `keySent` (which disables BOTH chips; see
-  // `AttentionCard` below) and fire a refetch so the status transition
-  // surfaces.
+  // record the action in `keySent` against the request that received it
+  // (which disables BOTH chips; see `AttentionCard` below) and fire a refetch
+  // so the status transition surfaces.
+  //
+  // The `requestKey` is captured at tap time, not read back afterwards: a
+  // replacement request can land while the POST is in flight, and binding the
+  // marker to the *new* request would disable a request the user never
+  // answered (issue #1966).
   const sendQuickAction = async (
     nodeId: number,
-    action: "approve" | "reject",
+    requestKey: string,
+    action: SentAction,
   ) => {
-    if (keyBusy.has(nodeId) || keySent.has(nodeId)) return;
+    if (keyBusy.has(nodeId) || keySent.get(nodeId)?.requestKey === requestKey) return;
     setKeyBusy((prev) => new Map(prev).set(nodeId, action));
     try {
       await sendNodeKeys(nodeId, action === "approve" ? "y\r" : "n\r");
       if (!mountedRef.current) return;
-      setKeySent((prev) => new Map(prev).set(nodeId, action));
+      setKeySent((prev) => new Map(prev).set(nodeId, { requestKey, action }));
       void refresh(() => true);
     } catch (e) {
       if (!mountedRef.current) return;
@@ -300,6 +322,13 @@ export default function NodeList({
   // attention ask on that same node would inherit a stale prompt and
   // a still-disabled chip.
   //
+  // Issue #1966 extends the sweep to a second, more common case: a node
+  // stays `awaiting_input` across a request boundary. A harness that answers
+  // one question and immediately asks another never leaves the status, so no
+  // event fires and the id-keyed sweep below could not tell the two requests
+  // apart. The sweep is therefore keyed on the request (`id:key`), not the
+  // node, which covers a replaced request and a resumed node in one rule.
+  //
   // Round-2 review: synchronizing state from other state via useEffect
   // IS an anti-pattern. The right shape is to prune inside the
   // authoritative transition points (`refresh()` and the WS handler).
@@ -308,29 +337,32 @@ export default function NodeList({
   // but the effect's dep MUST be a stable reference: an inline
   // `new Set(...)` would change identity on every render and fire
   // the effect on every render — a React 101 violation. Memoizing on
-  // the sorted id list (the canonical serialization of "which nodes
-  // are awaiting") gives us stable identity until the set actually
-  // changes.
-  const awaitingIdList = useMemo(
-    () => attentionNodes.map((n) => n.id).join(","),
+  // the sorted `id:requestKey` list (the canonical serialization of "which
+  // requests are outstanding") gives us stable identity until the set
+  // actually changes.
+  const liveRequestList = useMemo(
+    () =>
+      attentionNodes
+        .map((n) => `${n.id}:${nodeInputRequest(n)?.key ?? ""}`)
+        .join(","),
     [attentionNodes],
   );
-  const awaitingIds = useMemo(
-    () => new Set(awaitingIdList ? awaitingIdList.split(",").map(Number) : []),
-    [awaitingIdList],
+  const liveRequests = useMemo(
+    () => new Set(liveRequestList ? liveRequestList.split(",") : []),
+    [liveRequestList],
   );
   useEffect(() => {
     setKeySent((prev) => {
-      let next: Map<number, "approve" | "reject"> | null = null;
-      for (const id of prev.keys()) {
-        if (!awaitingIds.has(id)) {
+      let next: Map<number, SentMarker> | null = null;
+      for (const [id, marker] of prev) {
+        if (!liveRequests.has(`${id}:${marker.requestKey}`)) {
           if (next === null) next = new Map(prev);
           next.delete(id);
         }
       }
       return next ?? prev;
     });
-  }, [awaitingIds]);
+  }, [liveRequests]);
 
   // Bucket the remaining nodes by mesh. Attention nodes are EXCLUDED here
   // because they're already rendered in the "Needs attention" section above;
@@ -560,26 +592,44 @@ export default function NodeList({
                     className={`deck${attentionNodes.length === 1 ? " deck-single" : ""}`}
                     data-testid="attention-deck"
                   >
-                    {attentionNodes.map((node) => (
-                      <AttentionCard
-                        key={`attn-${node.id}`}
-                        node={node}
-                        meshName={
-                          meshes.find((m) => m.id === node.mesh_id)?.name
-                        }
-                        prompt={nodeInputContext(node)}
-                        providers={providers}
-                        busy={keyBusy.get(node.id)}
-                        sent={keySent.get(node.id)}
-                        onApprove={() =>
-                          void sendQuickAction(node.id, "approve")
-                        }
-                        onReject={() => void sendQuickAction(node.id, "reject")}
-                        onFocus={() =>
-                          onOpenNode(node, nodeInputContext(node))
-                        }
-                      />
-                    ))}
+                    {attentionNodes.map((node) => {
+                      // Every `awaiting_input` node is blocked on a request;
+                      // `undefined` here would mean the filter above is lying,
+                      // so skip the card rather than render reply controls the
+                      // observation cannot justify (issue #1966).
+                      const request = nodeInputRequest(node);
+                      if (!request) return null;
+                      // A marker only applies to the request it answered.
+                      const marker = keySent.get(node.id);
+                      return (
+                        <AttentionCard
+                          key={`attn-${node.id}`}
+                          node={node}
+                          meshName={
+                            meshes.find((m) => m.id === node.mesh_id)?.name
+                          }
+                          request={request}
+                          providers={providers}
+                          busy={keyBusy.get(node.id)}
+                          sent={
+                            marker?.requestKey === request.key
+                              ? marker.action
+                              : undefined
+                          }
+                          onApprove={() =>
+                            void sendQuickAction(
+                              node.id,
+                              request.key,
+                              "approve",
+                            )
+                          }
+                          onReject={() =>
+                            void sendQuickAction(node.id, request.key, "reject")
+                          }
+                          onOpen={() => onOpenNode(node, request.message)}
+                        />
+                      );
+                    })}
                   </div>
                 </section>
               )}
@@ -880,44 +930,58 @@ function SheetButton({
   );
 }
 
-// Triage deck card (issue #1377, post-review rewrite): one awaiting-input
-// node with its context (mesh/repo, branch, last prompt) and one-tap
-// answers. The whole upper body is the "Focus Terminal" tap target;
-// Approve/Reject answer the prompt via the dedicated `/api/nodes/{id}/input`
-// HTTP route without ever opening the terminal.
+// Triage deck card (issue #1377, post-review rewrite; request semantics
+// #1966): one awaiting-input node with its context (mesh/repo, branch, request
+// text) and the reply controls its request actually supports.
+//
+// The controls are chosen from the normalized lifecycle kind, never from the
+// bare `awaiting_input` status (issue #1966). `y`/`n` are a guess about a
+// harness's own approval prompt, so they ship only against a
+// `permission_requested` observation. A question gets an explicit
+// open-to-answer action — the harness's question UI is where its answer is
+// actually accepted, and Buildmesh cannot tell a keystroke apart from an
+// accepted answer. Enumerated choices, when the harness supplied them, are
+// shown as the answer list, never as pre-filled chips that would have to
+// guess how the harness selects an option. An unobserved or unclassified
+// request gets the same open-to-answer action: less evidence, same treatment.
 //
 // State machine (review feedback): `sent` is the SPECIFIC action the user
-// took on this card — "approve" or "reject". When set, BOTH chips are
+// took on THIS request — "approve" or "reject". When set, BOTH chips are
 // disabled (the agent already saw the CR/LF — a retraction would either be
 // ignored or worse, send an opposite prompt into a stream the agent has
 // already moved past). The chip whose action was sent shows the success
 // label; the other stays greyed out. `busy` (in-flight POST) still takes
-// precedence over `sent` so the "Sending…" feedback isn't lost.
+// precedence over `sent` so the "Sending…" feedback isn't lost. Both are
+// resolved by the parent against the request key, so a replacement request
+// arrives with live controls instead of inheriting this one's disabled state.
 //
 // The previous design had a separate "Focus terminal" chip alongside the
 // card-body tap target — two competing buttons doing the same thing on a
-// 120px card, and they took width away from the action chips. Dropped; the
-// card body is the focus target.
+// 120px card, and they took width away from the action chips. Dropped while
+// Approve/Reject owned the chip row (issue #1377); restored as the single
+// labelled control now that question and unknown requests have no quick
+// action to offer, because an unlabelled card body does not tell the user
+// that answering means opening the terminal (issue #1966).
 function AttentionCard({
   node,
   meshName,
-  prompt,
+  request,
   providers,
   busy,
   sent,
   onApprove,
   onReject,
-  onFocus,
+  onOpen,
 }: {
   node: AgentNode;
   meshName?: string;
-  prompt?: string;
+  request: NodeInputRequest;
   providers?: Provider[];
   busy?: SentAction;
   sent?: SentAction;
   onApprove: () => void;
   onReject: () => void;
-  onFocus: () => void;
+  onOpen: () => void;
 }) {
   // Same live-provider lookup contract as `NodeRow` (issue #328): the label
   // and chip colour come from the fetched `listProviders()` payload, with a
@@ -945,14 +1009,17 @@ function AttentionCard({
       : sent === "reject"
         ? "Rejected ✗"
         : "Reject (N)";
+  // A permission decision is the only request with a yes/no answer Buildmesh
+  // can honestly put on a chip.
+  const isPermission = request.mode === "permission";
   return (
     <div className="deck-card" data-testid={`attn-card-${node.id}`}>
       <button
         type="button"
         className="deck-body"
         data-testid={`node-${node.id}`}
-        aria-label={`Open ${node.name} details`}
-        onClick={onFocus}
+        aria-label={`Open ${node.name} terminal to respond`}
+        onClick={onOpen}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <ProviderIcon
@@ -1011,28 +1078,56 @@ function AttentionCard({
             overflowWrap: "anywhere",
           }}
         >
-          {prompt ?? "Waiting for the agent's prompt…"}
+          {request.message ?? "Waiting for the agent's prompt…"}
         </div>
       </button>
+      {request.choices.length > 0 && (
+        // The answer list the harness offered, as text. Presentational on
+        // purpose: tapping a label cannot be verified to select the option
+        // in the harness's own prompt, so a chip here would promise a
+        // one-tap answer Buildmesh cannot deliver (issue #1966). It sits
+        // outside the card-body button because a button may only contain
+        // phrasing content, and this list is not a control.
+        <ul data-testid={`attn-choices-${node.id}`} className="attn-choices">
+          {request.choices.map((choice) => (
+            <li key={choice}>{choice}</li>
+          ))}
+        </ul>
+      )}
       <div className="deck-chips">
-        <button
-          type="button"
-          className="deck-chip approve"
-          data-testid={`attn-approve-${node.id}`}
-          disabled={chipsDisabled}
-          onClick={onApprove}
-        >
-          {approveLabel}
-        </button>
-        <button
-          type="button"
-          className="deck-chip reject"
-          data-testid={`attn-reject-${node.id}`}
-          disabled={chipsDisabled}
-          onClick={onReject}
-        >
-          {rejectLabel}
-        </button>
+        {isPermission ? (
+          <>
+            <button
+              type="button"
+              className="deck-chip approve"
+              data-testid={`attn-approve-${node.id}`}
+              disabled={chipsDisabled}
+              onClick={onApprove}
+            >
+              {approveLabel}
+            </button>
+            <button
+              type="button"
+              className="deck-chip reject"
+              data-testid={`attn-reject-${node.id}`}
+              disabled={chipsDisabled}
+              onClick={onReject}
+            >
+              {rejectLabel}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="deck-chip"
+            data-testid={`attn-open-${node.id}`}
+            onClick={onOpen}
+          >
+            {request.mode === "question"
+              ? "Answer in terminal"
+              : "Open terminal to respond"}
+          </button>
+        )}
       </div>
     </div>
   );

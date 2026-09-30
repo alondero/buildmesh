@@ -7,8 +7,11 @@
  * hardcoded fallback, so newly-configured harnesses reach mobile.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 import NodeList from "../../src/mobile/screens/NodeList";
 import type {
   AgentNode,
@@ -16,6 +19,12 @@ import type {
   NodeStatus,
   Provider,
 } from "../../src/mobile/api";
+
+const REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+);
 
 let sockets: FakeWebSocket[] = [];
 
@@ -62,6 +71,37 @@ function makeNode(id: number, status: NodeStatus): AgentNode {
   };
 }
 
+/**
+ * An awaiting-input node carrying the lifecycle observation that decides its
+ * reply controls (issue #1966). Without one the card cannot claim a yes/no
+ * decision, so a test that exercises the approval chips must say the harness
+ * asked for a permission.
+ */
+function waitingNode(
+  id: number,
+  overrides: Partial<NonNullable<AgentNode["lifecycle"]>> = {},
+  status: NodeStatus = "awaiting_input",
+): AgentNode {
+  return {
+    ...makeNode(id, status),
+    lifecycle: {
+      session_id: id,
+      provider: "anthropic",
+      kind: "permission_requested",
+      message: "Allow npm install?",
+      provider_event: "PermissionRequest",
+      provider_session_id: null,
+      completion_reason: null,
+      transcript_path: null,
+      timestamp: "2026-06-11T00:00:00Z",
+      signal_health: "ok",
+      semantic_turn: null,
+      ...overrides,
+      status,
+    },
+  };
+}
+
 function mockApi(
   nodes: AgentNode[],
   opts?: { status?: number; providers?: Provider[] },
@@ -103,6 +143,162 @@ describe("NodeList", () => {
     vi.unstubAllGlobals();
   });
 
+  /**
+   * The real-SPA driver in `tests/integration/ui-shot-node-status.steps.mjs`
+   * needs a running dev backend, so nothing in the automated suite proves its
+   * selectors resolve. That gap once shipped a driver whose positive
+   * assertions could only time out and whose `toHaveCount(0)` negatives passed
+   * vacuously (#1966 review) — Playwright's `getByTestId` matches the whole
+   * attribute, so `attn-approve` never matches the rendered
+   * `attn-approve-2`.
+   *
+   * This test closes that gap: it renders each request kind for real, collects
+   * the `data-testid` values actually in the DOM, and checks every selector the
+   * driver uses against them. A positive assertion must name an element that
+   * exists; a `toHaveCount(0)` must name one that does not. Renaming a testid
+   * in the component without updating the driver now fails here.
+   */
+  it("keeps the real-SPA driver's selectors in sync with the rendered cards (issue #1966)", async () => {
+    const CARDS = [
+      {
+        driver: "questionCard",
+        node: "question",
+        id: 3,
+        lifecycle: {
+          kind: "question_requested" as const,
+          provider_event: "PreToolUse",
+          message: "Should the deployment target staging or production?",
+          request: { choices: ["Staging", "Production"] },
+        },
+      },
+      {
+        driver: "permissionCard",
+        node: "permission",
+        id: 4,
+        lifecycle: { kind: "permission_requested" as const },
+      },
+      {
+        driver: "unknownCard",
+        node: "unknown",
+        id: 5,
+        // Mirrors the driver's raw Notification body: the route cannot
+        // classify it, so the observation commits `input_required` at degraded
+        // health — a request the user is needed for, with no kind to justify
+        // yes/no chips.
+        lifecycle: { kind: "input_required", signal_health: "degraded" },
+      },
+    ];
+
+    // The driver's own source, read so the check below cannot drift from it.
+    const source = readFileSync(
+      path.join(REPO_ROOT, "tests", "integration", "ui-shot-node-status.steps.mjs"),
+      "utf8",
+    );
+
+    for (const card of CARDS) {
+      // Collect the driver's lines for this card: from its `const <driver> =`
+      // declaration until a line that scopes to a different card. A line
+      // belongs to this card only if every `*Card` handle it mentions is this
+      // one — so the replacement-request section, which goes back to
+      // `questionCard`, correctly re-attaches to the question card instead of
+      // being swallowed by whichever block it happens to follow.
+      const lines = source.split("\n");
+      const start = lines.findIndex((line) =>
+        line.includes(`const ${card.driver} =`),
+      );
+      expect(
+        start,
+        `${card.driver} must still be declared in the driver`,
+      ).toBeGreaterThan(-1);
+      const owned: string[] = [];
+      for (const line of lines.slice(start)) {
+        const handles = Array.from(
+          line.matchAll(/\b(\w+Card)\b/g),
+          (m) => m[1],
+        );
+        if (handles.some((handle) => handle !== card.driver)) break;
+        owned.push(line);
+      }
+
+      mockApi([waitingNode(card.id, card.lifecycle)]);
+      render(
+        <NodeList
+          onOpenNode={noop}
+          onOpenAgentNodes={noop}
+          onOpenIssues={noop}
+          onOffline={noop}
+          onAuthFailed={noop}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByTestId(`attn-card-${card.id}`)).toBeTruthy();
+      });
+      const rendered = new Set(
+        Array.from(document.querySelectorAll("[data-testid]"), (el) =>
+          el.getAttribute("data-testid") as string,
+        ),
+      );
+      const unrender = () => {
+        act(() => cleanup());
+        sockets = [];
+      };
+
+      // Resolve the driver's template literal, e.g. `attn-approve-${question.id}`.
+      // Every `${<node>.id}` is substituted from the fixture ids, so a selector
+      // that is cross-wired to the wrong node still resolves to a real
+      // element and is checked honestly. An unresolvable placeholder is a
+      // failure, not a skip: a selector that cannot be evaluated must never
+      // pass as "correctly absent".
+      const ids = Object.fromEntries(CARDS.map((c) => [c.node, String(c.id)]));
+      const resolve = (raw: string) =>
+        raw.replaceAll(/\$\{(\w+)\.id\}/g, (_m, node: string) => ids[node] ?? `«unresolved:${node}»`);
+
+      // Each driver assertion is one line. A line whose matcher is
+      // `toHaveCount(0)` claims the card does NOT render that element; every
+      // other matcher claims it does.
+      //
+      // Both quote styles are matched. An earlier version of this test only
+      // recognised backticks and therefore skipped every single-quoted selector
+      // — which is exactly how the broken locators slipped through, so the
+      // filter has to be a superset of what the driver can write.
+      const assertionLines = owned
+        .map((line) => line.trim())
+        .filter((line) => line.includes("getByTestId("));
+
+      expect(
+        assertionLines.length,
+        `${card.driver} has assertions to check`,
+      ).toBeGreaterThan(0);
+
+      for (const line of assertionLines) {
+        const match = line.match(/getByTestId\((['`])([^'`]+)\1\)/);
+        expect(
+          match,
+          `could not read the selector out of: ${line}`,
+        ).not.toBeNull();
+        const selector = resolve(match![2]);
+        expect(
+          selector,
+          `selector in "${line}" references a node the fixture does not define`,
+        ).not.toMatch(/«unresolved:/);
+        const absent = /toHaveCount\(\s*0\s*\)/.test(line);
+        const found = rendered.has(selector);
+        if (absent) {
+          expect(
+            found,
+            `${card.driver}: driver asserts ${selector} is absent, but the card renders it`,
+          ).toBe(false);
+        } else {
+          expect(
+            found,
+            `${card.driver}: driver asserts on ${selector}, which the card does not render (rendered: ${[...rendered].join(", ")})`,
+          ).toBe(true);
+        }
+      }
+      unrender();
+    }
+  });
+
   it("hides archived nodes and pins awaiting-input nodes in the attention section", async () => {
     mockApi([
       makeNode(1, "running"),
@@ -141,7 +337,7 @@ describe("NodeList", () => {
   });
 
   it("triage card shows repo, branch, prompt placeholder and one-tap chips (issue #1377)", async () => {
-    mockApi([{ ...makeNode(3, "awaiting_input"), branch: "feature/deck" }]);
+    mockApi([{ ...waitingNode(3), branch: "feature/deck" }]);
 
     const onOpenNode = vi.fn();
     render(
@@ -163,20 +359,18 @@ describe("NodeList", () => {
     expect(body.textContent).toContain("buildmesh");
     expect(body.textContent).toContain("Mesh: buildmesh");
     expect(body.textContent).toContain("feature/deck");
-    // No lifecycle event yet → the placeholder prompt line, not silence.
+    // A permission observation carries the request text.
     expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Waiting for the agent's prompt",
+      "Allow npm install?",
     );
-    // The two action chips. (Issue #1377, post-review: the redundant
-    // "Focus terminal" chip was dropped — the card body is the focus
-    // target, so an explicit chip was competing for the same 120px.)
+    // The two action chips, because the harness asked for a decision.
     expect(screen.getByTestId("attn-approve-3").textContent).toContain(
       "Approve (Y)",
     );
     expect(screen.getByTestId("attn-reject-3").textContent).toContain(
       "Reject (N)",
     );
-    expect(screen.queryByTestId("attn-focus-3")).toBeNull();
+    expect(screen.queryByTestId("attn-open-3")).toBeNull();
 
     // Focus (card body) opens the node's terminal.
     fireEvent.click(screen.getByTestId("node-3"));
@@ -184,12 +378,115 @@ describe("NodeList", () => {
     expect(onOpenNode.mock.calls[0][0].id).toBe(3);
   });
 
+  it("offers an open-to-answer action and no yes/no chips for a question (issue #1966)", async () => {
+    mockApi([
+      waitingNode(3, {
+        kind: "question_requested",
+        provider_event: "PreToolUse",
+        message: "Should the deployment target staging or production?",
+      }),
+    ]);
+
+    const onOpenNode = vi.fn();
+    render(
+      <NodeList
+        onOpenNode={onOpenNode}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // The question text is on the card…
+    expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+      "Should the deployment target staging or production?",
+    );
+    // …and the ONLY control is the explicit open-to-answer action. Approving
+    // or rejecting a question would send y/n at a prompt Buildmesh never read.
+    expect(screen.queryByTestId("attn-approve-3")).toBeNull();
+    expect(screen.queryByTestId("attn-reject-3")).toBeNull();
+    const open = screen.getByTestId("attn-open-3");
+    expect(open.textContent).toContain("Answer in terminal");
+    // No choice list without a request schema from the harness.
+    expect(screen.queryByTestId("attn-choices-3")).toBeNull();
+
+    // The action opens the node so the user answers in the harness's own UI.
+    fireEvent.click(open);
+    expect(onOpenNode).toHaveBeenCalledTimes(1);
+    expect(onOpenNode.mock.calls[0][1]).toContain("staging or production");
+  });
+
+  it("lists the answers the harness supplied, without turning them into one-tap actions (issue #1966)", async () => {
+    mockApi([
+      waitingNode(3, {
+        kind: "question_requested",
+        provider_event: "PreToolUse",
+        message: "Where should this deploy?",
+        request: { choices: ["Staging", "Production"] },
+      }),
+    ]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    const choices = screen.getByTestId("attn-choices-3");
+    expect(choices.textContent).toContain("Staging");
+    expect(choices.textContent).toContain("Production");
+    // Choices are the harness's own wording, presented as text: a button here
+    // would claim to select the option in the agent's prompt.
+    expect(choices.querySelectorAll("button")).toHaveLength(0);
+    expect(screen.getByTestId("attn-open-3")).toBeTruthy();
+  });
+
+  it("never infers yes/no semantics for an unclassified input request (issue #1966)", async () => {
+    // A node marked awaiting_input with no observation at all: the user is
+    // needed, but nothing says what for. Less evidence than a question, so
+    // the same refusal to guess.
+    mockApi([makeNode(3, "awaiting_input")]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    expect(screen.queryByTestId("attn-approve-3")).toBeNull();
+    expect(screen.queryByTestId("attn-reject-3")).toBeNull();
+    expect(screen.getByTestId("attn-open-3").textContent).toContain(
+      "Open terminal to respond",
+    );
+  });
+
   it("Approve/Reject chips POST y/n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
     // The chips send a one-shot POST — not a terminal WS — because the
     //    previous WS-based path was racing the server's read loop and could
     //    drop the keystroke before delivery. The 200 OK on the POST is the
     //    delivery proof. (#1377, post-review rewrite)
-    const fetch = mockApi([makeNode(3, "awaiting_input")]);
+    const fetch = mockApi([waitingNode(3)]);
 
     render(
       <NodeList
@@ -242,7 +539,7 @@ describe("NodeList", () => {
   });
 
   it("Reject chip POSTs n+Enter to /api/nodes/{id}/input (issue #1377)", async () => {
-    const fetch = mockApi([makeNode(5, "awaiting_input")]);
+    const fetch = mockApi([waitingNode(5)]);
 
     render(
       <NodeList
@@ -635,7 +932,7 @@ describe("NodeList", () => {
           ok: true,
           status: 200,
           json: async () => [
-            { ...makeNode(3, nodeStatus), branch: "feature/deck" },
+            { ...waitingNode(3, {}, nodeStatus), branch: "feature/deck" },
           ],
         };
       }
@@ -741,8 +1038,141 @@ describe("NodeList", () => {
     // Prompt placeholder restored — no stale WS-event prompt carried
     // over from the previous turn.
     expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
-      "Waiting for the agent's prompt",
+      "Allow npm install?",
     );
+  });
+
+  it("clears the sent action when the harness replaces the request on the same node (issue #1966)", async () => {
+    // The node never leaves `awaiting_input` across this boundary, so no
+    // lifecycle transition and no `attention-cleared` event fires — the
+    // status-keyed sweep from the previous test cannot notice anything. Only
+    // a request-keyed marker can tell the two asks apart.
+    //
+    // Both requests are permission decisions on purpose: only a permission
+    // card has the chips whose `disabled` state the marker controls. A
+    // question card has no quick action, so it could not demonstrate the
+    // stale state at all — and asserting on its (never-disabled) open-to-answer
+    // button would prove nothing.
+    let message = "Allow the deploy to run?";
+    let timestamp = "2026-06-11T00:00:00Z";
+    const fetch = vi.fn().mockImplementation(async (url: string) => {
+      if (url.includes("/api/nodes")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [waitingNode(3, { message, timestamp })],
+        };
+      }
+      if (url.includes("/api/meshes")) {
+        return { ok: true, status: 200, json: async () => [mesh] };
+      }
+      if (url.includes("/api/ws-ticket")) {
+        return { ok: true, status: 200, json: async () => ({ ticket: "t" }) };
+      }
+      if (url.includes("/api/providers")) {
+        return { ok: true, status: 200, json: async () => [] };
+      }
+      return { ok: true, status: 200, json: async () => [] };
+    });
+    vi.stubGlobal("fetch", fetch);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    // Answer the first request. The POST returning 200 is the delivery proof
+    // that a marker now exists for this request.
+    fireEvent.click(screen.getByTestId("attn-approve-3"));
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-3").textContent).toContain(
+        "Approved",
+      );
+    });
+    expect(
+      fetch.mock.calls.some(([url]: [string]) => String(url).includes("/input")),
+    ).toBe(true);
+    // The marker disables BOTH chips for this request.
+    expect(
+      (screen.getByTestId("attn-approve-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-3") as HTMLButtonElement).disabled,
+    ).toBe(true);
+
+    // The harness answers that and immediately asks a second time. Same node,
+    // still `awaiting_input`, no intermediate running event — only the
+    // observation's timestamp changes, which is what the request key is built
+    // from.
+    message = "Allow the migration to run?";
+    timestamp = "2026-06-11T00:05:00Z";
+    const scroller = screen.getByTestId("node-list");
+    fireEvent.touchStart(scroller, { touches: [{ clientX: 100, clientY: 200 }] });
+    fireEvent.touchMove(scroller, { touches: [{ clientX: 100, clientY: 400 }] });
+    fireEvent.touchEnd(scroller, {
+      changedTouches: [{ clientX: 100, clientY: 400 }],
+    });
+
+    // The replacement request is actionable: its own text, its own fresh chip
+    // labels, and live chips. An id-keyed marker would still be disabling them
+    // here, because node 3 never stopped being `awaiting_input`.
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-prompt-3").textContent).toContain(
+        "Allow the migration to run?",
+      );
+    });
+    const approve = screen.getByTestId("attn-approve-3") as HTMLButtonElement;
+    const reject = screen.getByTestId("attn-reject-3") as HTMLButtonElement;
+    expect(approve.textContent).toContain("Approve (Y)");
+    expect(approve.textContent).not.toContain("Approved");
+    expect(approve.disabled).toBe(false);
+    expect(reject.disabled).toBe(false);
+  });
+
+  it("keeps a sent permission action disabled while the same request is outstanding (issue #1966)", async () => {
+    // The other half of the contract: a marker must not evaporate on an
+    // unrelated re-render either, or a user could double-approve.
+    const fetch = mockApi([waitingNode(7)]);
+
+    render(
+      <NodeList
+        onOpenNode={noop}
+        onOpenAgentNodes={noop}
+        onOpenIssues={noop}
+        onOffline={noop}
+        onAuthFailed={noop}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("attention-deck")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("attn-approve-7"));
+    await waitFor(() => {
+      expect(screen.getByTestId("attn-approve-7").textContent).toContain(
+        "Approved",
+      );
+    });
+
+    // The POST-triggered refetch returns the SAME observation, so the same
+    // request is still outstanding and both chips stay disabled.
+    expect(fetch.mock.calls.some(([url]: [string]) => String(url).includes("/input"))).toBe(true);
+    expect(
+      (screen.getByTestId("attn-approve-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(
+      (screen.getByTestId("attn-reject-7") as HTMLButtonElement).disabled,
+    ).toBe(true);
   });
 
   it("disables BOTH action chips after a successful send (issue #1377 review)", async () => {
@@ -751,7 +1181,7 @@ describe("NodeList", () => {
     // button and fire an `n\r` immediately after approving. Post-review:
     // `sent` is an enum ("approve" | "reject"), both chips disable on
     // any send, the active chip shows the action-specific label.
-    mockApi([makeNode(7, "awaiting_input")]);
+    mockApi([waitingNode(7)]);
 
     render(
       <NodeList

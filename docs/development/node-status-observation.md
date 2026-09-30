@@ -134,13 +134,56 @@ as successful work.
 Tracked follow-ups: [real-runner delivery validation #1964](https://github.com/alondero/buildmesh/issues/1964),
 [durable observation revisions and incarnation fencing #1965](https://github.com/alondero/buildmesh/issues/1965),
 and [harness-owned normalizers #1879](https://github.com/alondero/buildmesh/issues/1879).
-Mobile reply controls also need to follow request semantics instead of offering
-Y/N approval for questions: [#1966](https://github.com/alondero/buildmesh/issues/1966).
+
+## Reply controls follow the request
+
+An `awaiting_input` status says the user is needed, not what the harness is asking
+for. Mobile reply controls are chosen from the normalized kind, not from the bare
+status (issue [#1966](https://github.com/alondero/buildmesh/issues/1966)):
+
+| Observation | Reply control |
+| --- | --- |
+| `permission_requested` | Approve / Reject, which send `y\r` / `n\r` |
+| `question_requested` with an enumerated answer list | The harness's answers as text, plus one open-to-answer action |
+| `question_requested` with no answer list | One open-to-answer action |
+| Unclassified, or no observation at all | One open-to-answer action |
+
+`y` and `n` are a guess about a harness's own approval prompt, so they ship only
+against a permission observation. An unclassified request has less evidence than a
+question and gets the same refusal to guess. Answers the harness enumerated travel on
+the observation as `request.choices`, parsed only from the structured
+`questions[].options[].label` list the question text already comes from; an open
+question, a permission decision, and an unparseable shape all carry no request at
+all. Choices are displayed as the harness's own wording rather than as one-tap
+actions, because a keystroke delivered to the PTY is not evidence that the harness
+accepted an answer.
+
+Delivered-action state is keyed to the request, not the node. A node stays
+`awaiting_input` across request boundaries, so a harness that answers one question
+and asks another never fires an intermediate transition; without a request key the
+replacement would inherit the previous request's disabled controls after a
+reconnect. The key is the observation's kind and timestamp, so a replaced request
+clears stale state on its own.
 
 The real dev-backend driver `tests/integration/ui-shot-node-status.steps.mjs`
 sends synthetic native callbacks through HTTP, reads the committed observations,
-and checks desktop/mobile rendering plus mobile reload and final-child completion.
+and checks desktop/mobile rendering, per-request reply controls, a replaced request,
+mobile reload and final-child completion.
 It uses a short-lived pairing ticket for the mobile browser. This verifies the
 production delivery/read path; it does not launch a real model or prove a CLI's
 hook configuration. Synthetic nodes have no PTY, so opening their terminals can
 produce expected resize errors and adds no lifecycle evidence.
+
+Because that driver needs a running dev backend, nothing in `npm test` would
+otherwise prove its selectors resolve — a gap that once shipped a driver whose
+positive assertions could only time out and whose `toHaveCount(0)` negatives
+passed vacuously, because Playwright's `getByTestId` matches the whole attribute
+and the card renders node-scoped ids like `attn-approve-2`. The guard
+`keeps the real-SPA driver's selectors in sync with the rendered cards` in
+`tests/unit/mobile-node-list.test.tsx` reads the driver, renders each request
+kind, and checks every selector against the `data-testid` values actually in the
+DOM: a positive assertion must name an element that exists, a `toHaveCount(0)`
+must name one that does not, and a selector naming a node the fixtures do not
+define fails rather than passing. Renaming a testid without updating the driver
+fails the unit suite.
+
