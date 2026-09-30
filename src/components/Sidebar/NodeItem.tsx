@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { SignalHealthBadge } from '../shared/SignalHealthBadge';
-import { getNodeStatusConfig } from '../../lib/status';
+import { getNodeStatusConfig, isSignalHealthProblem } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { getMeshColor } from '../../lib/meshColors';
@@ -426,8 +426,8 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         {config.dot}
       </span>
       <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
-      {/* Issue #1364 §3 — node-level hook-health warning (see GridNodeHeader). */}
-      {node.signal_health && <SignalHealthBadge compact health={node.signal_health} />}
+      {/* Issue #1364 §3 — node-level status-reporting fault (see GridNodeHeader). */}
+      {isSignalHealthProblem(node.signal_health) && <SignalHealthBadge compact health={node.signal_health} />}
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />
       <InlineEditableText
         // `id` anchors the menu's `aria-labelledby` to a name-only

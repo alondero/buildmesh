@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentNode, isAuthError, listNodes, sendNodeKeys } from "../api";
-import { getNodeStatusConfig, nodeInputContext } from "../../lib/status";
+import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext, signalHealthNote } from "../../lib/status";
 import { AppBar } from "../ui";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
@@ -191,10 +191,9 @@ export default function NodeOverview({
             </p>
           </section>
         )}
-        {node.signal_health && node.signal_health !== "ok" && (
+        {isSignalHealthProblem(node.signal_health) && (
           <p className="health-note">
-            Status reporting is {node.signal_health}. Check the terminal for
-            current activity.
+            {signalHealthNote(node.signal_health)}
           </p>
         )}
         <dl className="work-context">

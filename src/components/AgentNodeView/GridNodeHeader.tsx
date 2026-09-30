@@ -16,7 +16,7 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { useAnchoredPosition } from '../../hooks/useAnchoredPosition';
 import { getNodeGitPath } from '../../lib/paths';
-import { getNodeStatusConfig } from '../../lib/status';
+import { getNodeStatusConfig, isSignalHealthProblem, signalHealthNote } from '../../lib/status';
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { SignalHealthBadge } from '../shared/SignalHealthBadge';
@@ -128,7 +128,13 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
   const autopilotPill = autopilotState ? getAutopilotPillDetails(node, autopilotState) : null;
   const circuitPill = circuitOwnership ? getCircuitPillDetails(node, circuitOwnership) : null;
-  const signalUnavailable = node.signal_health != null && node.signal_health !== 'ok';
+  const signalUnavailable = isSignalHealthProblem(node.signal_health);
+  // The dot's tooltip is the only place an unproven signal can surface, since
+  // `unverified` deliberately earns no badge (DESIGN.md principle 6). The
+  // activity label still wins the visible text, so only the note is appended.
+  const healthNote = signalHealthNote(node.signal_health);
+  const statusDotLabel = activity?.label ?? getNodeStatusConfig(node).label;
+  const statusDotTitle = healthNote ? `${statusDotLabel}. ${healthNote}` : statusDotLabel;
   const compactHeader = width < HEADER_TIER_BREAKPOINTS.compact;
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
   const handleToggleSolo = () => {
@@ -176,8 +182,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
       className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'touch-none cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}14` }}>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        <span role="status" aria-label={activity?.label ?? getNodeStatusConfig(node).label}
-          title={activity?.label ?? getNodeStatusConfig(node).label}
+        <span role="status" aria-label={statusDotLabel}
+          title={statusDotTitle}
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getNodeStatusConfig(titleNode).bgColor}`} />
         <AutopilotNodeIndicatorCell presentation={autopilotPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
@@ -187,7 +193,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             className="text-sm font-semibold text-text-primary" />
         </span>
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
-        {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health ?? undefined} />}
+        {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
       </div>
         {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onReveal?.(); }}

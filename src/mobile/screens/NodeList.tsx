@@ -23,7 +23,7 @@ import { groupByHarness } from "../../lib/groups";
 import { LaunchConfigurations } from "../../components/Providers/LaunchConfigurations";
 import { launchConfigurationApi } from "../api";
 import CaptureIdea from "./CaptureIdea";
-import { getNodeStatusConfig, nodeInputContext } from "../../lib/status";
+import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext } from "../../lib/status";
 
 type Props = {
   onOpenNode: (node: AgentNode, prompt?: string) => void;
@@ -263,8 +263,7 @@ export default function NodeList({
   const problemNodes = visibleNodes.filter(
     (n) =>
       n.status === "error" ||
-      (n.status !== "awaiting_input" &&
-        (n.signal_health != null && n.signal_health !== "ok")),
+      (n.status !== "awaiting_input" && isSignalHealthProblem(n.signal_health)),
   );
   const runningCount = visibleNodes.filter(
     (n) => n.status === "running",

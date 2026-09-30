@@ -106,6 +106,23 @@ describe('GridNodeHeader contextual information and actions', () => {
     openInFileManagerMock.mockClear();
   });
 
+  it('surfaces an unproven signal in the status-dot tooltip, not as a badge', () => {
+    // The dot's tooltip is the only place `unverified` can surface now that it
+    // earns no badge (DESIGN.md principle 6)  a regression here silently
+    // removes the information entirely.
+    seedAgentNodes([{ ...NODE, signal_health: 'unverified' }], NODE.id);
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    const dot = screen.getByRole('status');
+    expect(dot.getAttribute('title')).toContain('not confirmed yet');
+    expect(screen.queryByRole('img', { name: /Signal/ })).toBeNull();
+  });
+
+  it('keeps a broken signal badged and its own fault in the tooltip', () => {
+    seedAgentNodes([{ ...NODE, signal_health: 'unavailable' }], NODE.id);
+    render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Attention signal unavailable' })).toBeTruthy();
+    expect(screen.getByRole('status').getAttribute('title')).toContain('No status signal is reaching Buildmesh');
+  });
   it('keeps metadata available on demand without repeating it in the title', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     const header = screen.getByTestId('grid-node-header');

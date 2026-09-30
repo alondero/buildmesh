@@ -23,6 +23,24 @@ confirmed by an observation; `ok` means an accepted observation was received;
 provisioning failed or no supported observer exists. None of these is a delivery
 SLA. The observation timestamp is the last accepted observation, not a heartbeat.
 
+Health is a property of the harness integration, not of the process, so two rules
+bound it. Only a payload the harness actually produced may move the column: a
+local process observation (exit, idle, resume) carries no delivery evidence and
+must neither repair nor degrade health, even though its stored snapshot reports
+the absence of evidence as `unverified`. And installation is an expectation, not
+evidence, so a successful install may only replace another expectation — a
+health that is still unknown, or the `unavailable` a *failed* previous install
+recorded, which a later success supersedes. A health earned by a delivered
+callback (`ok`, `degraded`) is evidence and is never downgraded, and an
+uninterpretable callback is evidence even when it carries no provider event
+name, so it still records `degraded`.
+
+`unverified` earns no title-bar badge and no problem-bucket placement. It is the
+normal state of a healthy session between turns, and badging it trained users to
+ignore the amber that does mean something; it rides in the status tooltip
+instead. See [DESIGN.md principle 6](../../DESIGN.md#principles) and
+`isSignalHealthProblem` in `src/lib/status.ts`.
+
 ## Owners and seams
 
 1. The harness adapter provisions its native integration or advertises a passive

@@ -35,6 +35,14 @@ the same change.
    see [Accessibility](#accessibility).
 5. **Borders are hairlines.** 1px white-alpha (dark) / black-alpha (light)
    lines that composite cleanly on any elevation. No pre-mixed border hexes.
+6. **Prominent space is scarce space.** A node's title bar is the most
+   persistent, most-glanced-at strip in the product, and it competes with the
+   terminal for the same horizontal room. It carries the essentials only: the
+   node's identity, its status, and a fault the user can act on. Everything
+   else — provenance, configuration detail, and states that merely mean *not
+   yet known* — belongs in a tooltip, a detail panel, or nowhere. A permanent
+   badge is a standing claim on attention; spend it only when there is
+   something to do. See [Pills, badges, chips](#pills-badges-chips).
 
 ## Colour
 
@@ -108,6 +116,15 @@ for chip/badge fills.
 
 File-diff status letters (A/M/D/R/?) map to green/amber/red/violet/muted via
 `fileDiffStatusMeta` in the same file — the same mapping applies on mobile.
+
+**Signal health** (`signal_health` on the node) is a separate layer from status:
+`ok` (an observation was accepted), `degraded` (a callback arrived but could not
+be interpreted), `unavailable` (setup failed, or the harness declares no
+observer), and `unverified` (installed, not yet observed). Only
+`isSignalHealthProblem` — `degraded` and `unavailable` — earns a title-bar
+badge. `unverified` is a statement about the *absence* of evidence, so it is
+carried in the status tooltip (`signalHealthNote`) and never in a list's problem
+bucket. Treating "not yet known" as a warning trains users to ignore amber.
 
 ### Borders
 
@@ -185,6 +202,17 @@ status-colour text, 30% ring (`bg-accent-green/10 text-accent-green ring-1
 ring-inset ring-accent-green/30`). Compact variant: `rounded-md` square chip.
 Micro-badges (2xs status letters) use `px-1 py-px rounded text-2xs`. A pill
 never invents a colour outside the status/accent tables.
+
+**The node title bar is not a diagnostics strip.** Per
+[principle 6](#principles), a node header badge is reserved for a condition the
+user can act on. `unverified` signal health — hooks installed, nothing observed
+yet — is the normal state of a healthy session between turns, so it gets no
+badge and no problem-bucket placement; it rides in the status dot's tooltip
+instead. Reserve the amber warning glyph for `degraded` and `unavailable`
+signal health and for a genuinely lost conversation. The shared predicate is
+`isSignalHealthProblem` in `src/lib/status.ts` — desktop and mobile must both
+use it so a node is never badged on one client and sorted as healthy on the
+other.
 
 ### Menus and list rows
 

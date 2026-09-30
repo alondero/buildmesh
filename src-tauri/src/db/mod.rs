@@ -73,6 +73,7 @@ pub(crate) use agent_node::{
     set_agent_node_pinned_inner,
     toggle_agent_node_pinned_inner,
     update_agent_node_signal_health_inner,
+    mark_agent_node_signal_unverified_inner,
     clear_cli_session_id_inner,
     agent_turn_stamp,
     set_cli_session_id_if_missing_inner,
