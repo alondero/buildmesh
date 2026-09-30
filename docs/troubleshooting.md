@@ -85,10 +85,11 @@ child or background work is still pending. Questions and approvals have separate
 labels. These observations survive reconnects; the mobile agent overview shows
 the last observation time and event source.
 
-`Status unverified` means configuration exists but delivery has not yet been
-observed. `Signal degraded` means a callback could not be interpreted reliably.
+`Signal degraded` means a callback could not be interpreted reliably.
 `Signal unavailable` means setup failed or the harness has no supported observer.
-An old observation is not a heartbeat. See the
+An old observation is not a heartbeat. Where delivery is merely not confirmed
+yet, the node's status tooltip says so instead of showing a warning badge — an
+unproven signal is the normal state between turns, not a fault. See the
 [status observation contract](development/node-status-observation.md) for limits.
 
 The terminal is the source of truth. Attention signals depend on the harness

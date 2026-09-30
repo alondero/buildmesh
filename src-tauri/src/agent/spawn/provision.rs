@@ -635,11 +635,15 @@ pub(super) async fn provision_workspace(
                     Some(crate::agent::session_lifecycle::SignalHealth::Unavailable),
                 );
                 emit_signal_unavailable(&format!("attention hooks unavailable: {e}"));
+            } else if trust_ok && (needs_attention_hook || passive_observer) {
+                // Installed but not yet proven. This is an expectation, not
+                // evidence, so it may only fill an empty column — resuming a
+                // session must not erase a delivery it already demonstrated.
+                let _ = crate::db::mark_agent_node_signal_unverified(session_id);
             } else {
                 let _ = crate::db::update_agent_node_signal_health(
                     session_id,
-                    Some(if trust_ok && (needs_attention_hook || passive_observer) { crate::agent::session_lifecycle::SignalHealth::Unverified }
-                        else { crate::agent::session_lifecycle::SignalHealth::Unavailable }),
+                    Some(crate::agent::session_lifecycle::SignalHealth::Unavailable),
                 );
             }
         }

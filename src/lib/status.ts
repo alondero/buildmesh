@@ -1,5 +1,6 @@
 import type { FileDiffStatus } from './tauri';
 import type { AgentNode } from '../types/generated/AgentNode';
+import type { SignalHealth } from '../types/generated/SignalHealth';
 
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
@@ -121,17 +122,41 @@ export function getStatusConfig(status: string | undefined | null) {
 }
 
 /** One vocabulary for live events and reconnect snapshots on both clients. */
-export function getNodeStatusConfig(node: Pick<AgentNode, 'status' | 'lifecycle'>) {
+export function getNodeStatusConfig(node: Pick<AgentNode, 'status' | 'lifecycle' | 'signal_health'>) {
   const config = getStatusConfig(node.status);
   const observation = node.lifecycle;
-  if (!observation || observation.status !== node.status) return { ...config, title: config.label };
+  // Absent unless there is something to add: a node with no signal-health note
+  // keeps its exact previous title, so the clause never becomes stray punctuation.
+  const suffix = signalHealthNote(node.signal_health);
+  const note = suffix ? `. ${suffix}` : '';
+  if (!observation || observation.status !== node.status) return { ...config, title: `${config.label}${note}` };
   const labels: Partial<Record<typeof observation.kind, string>> = {
     background_running: 'Waiting for background work',
     question_requested: 'Needs an answer',
     permission_requested: 'Needs permission',
   };
   const label = labels[observation.kind] ?? config.label;
-  return { ...config, label, title: `${label}. Last observed ${observation.timestamp}${observation.provider_event ? ` (${observation.provider_event})` : ''}` };
+  return { ...config, label, title: `${label}. Last observed ${observation.timestamp}${observation.provider_event ? ` (${observation.provider_event})` : ''}${note}` };
+}
+
+/**
+ * Whether a node's status reporting has a problem the user can act on.
+ *
+ * `unverified` is deliberately excluded: it records that hooks are installed but
+ * this process has not delivered an event yet, which is the normal state of a
+ * healthy session between turns. Painting it as a warning put an unactionable
+ * amber glyph on every node. It stays available in the status tooltip instead.
+ */
+export function isSignalHealthProblem(health: SignalHealth | null | undefined): health is 'degraded' | 'unavailable' {
+  return health === 'degraded' || health === 'unavailable';
+}
+
+/** Tooltip clause describing signal health, or undefined when there is nothing to say. */
+export function signalHealthNote(health: SignalHealth | null | undefined): string | undefined {
+  if (health === 'degraded') return 'A status signal arrived but could not be interpreted; check the terminal for current activity.';
+  if (health === 'unavailable') return 'No status signal is reaching Buildmesh; watch the terminal directly.';
+  if (health === 'unverified') return 'Status reporting is not confirmed yet; the terminal is the source of truth.';
+  return undefined;
 }
 
 export function nodeInputContext(node: Pick<AgentNode, 'status' | 'lifecycle'>): string | undefined {

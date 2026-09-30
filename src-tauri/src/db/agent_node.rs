@@ -142,6 +142,77 @@ mod lifecycle_snapshot_tests {
             assert_eq!(node.lifecycle.unwrap().kind, kind);
         }
     }
+
+    /// A process transition carries no harness evidence, so it must never
+    /// manufacture a durable `unverified`. It used to: the snapshot normaliser
+    /// substituted `Unverified` for an unknown column, that synthesised value
+    /// then looked harness-reported, and the CAS persisted it — pinning a
+    /// status warning on a node that had never been provisioned.
+    #[test]
+    fn local_process_observation_does_not_manufacture_unverified_health() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
+
+        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::ProcessIdle, SessionStatus::Idle, &HookSignalDetail::default(), "no live agent process");
+        assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
+
+        // The snapshot still reports the honest "nothing observed yet"…
+        assert_eq!(payload.signal_health, SignalHealth::Unverified);
+        // …but an unprovisioned node keeps an unknown health, not a sticky warning.
+        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health, None);
+    }
+
+    /// An uninterpretable callback (a garbage body reaches the route with no
+    /// provider event but an explicit `Degraded` health) is real harness
+    /// evidence and must still reach the column — the guard added for the case
+    /// above cannot swallow it.
+    #[test]
+    fn uninterpretable_callback_still_records_degraded_health() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
+
+        let detail = HookSignalDetail { signal_health: SignalHealth::Degraded, ..Default::default() };
+        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::ProcessIdle, SessionStatus::Idle, &detail, "unparseable hook payload");
+        assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
+        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health, Some(SignalHealth::Degraded));
+    }
+
+    /// Re-provisioning a resumed session is an expectation, not evidence. It may
+    /// replace another expectation — an unknown health, or the `unavailable` a
+    /// *failed* previous install recorded — but never a health the node earned
+    /// from an accepted observation.
+    #[test]
+    fn provisioning_never_downgrades_proven_delivery_health() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
+        let health = |conn: &Connection| get_agent_node_by_id_inner(conn, 1).unwrap().signal_health;
+
+        // An unproven node adopts the expectation…
+        assert!(mark_agent_node_signal_unverified_inner(&conn, 1).unwrap());
+        assert_eq!(health(&conn), Some(SignalHealth::Unverified));
+        // …and re-provisioning an already-unproven node is a harmless no-op.
+        assert!(!mark_agent_node_signal_unverified_inner(&conn, 1).unwrap());
+
+        // A successful install supersedes a failed one: otherwise a node whose
+        // hooks once failed to install would keep warning forever.
+        update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Unavailable)).unwrap();
+        assert!(mark_agent_node_signal_unverified_inner(&conn, 1).unwrap());
+        assert_eq!(health(&conn), Some(SignalHealth::Unverified));
+
+        // `ok` and `degraded` both mean a callback actually arrived — evidence.
+        for proven in [SignalHealth::Ok, SignalHealth::Degraded] {
+            update_agent_node_signal_health_inner(&conn, 1, Some(proven)).unwrap();
+            assert!(!mark_agent_node_signal_unverified_inner(&conn, 1).unwrap(),
+                "{proven:?} delivery evidence must survive re-provisioning");
+            assert_eq!(health(&conn), Some(proven));
+        }
+    }
 }
 
 fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
@@ -734,6 +805,14 @@ pub(crate) fn commit_agent_lifecycle_inner(
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
     forbidden: &[SessionStatus],
 ) -> SqlResult<bool> {
+    // Delivery health describes the harness integration, not the process, so
+    // only a payload the harness actually produced may move the column. Read
+    // that before `lifecycle_snapshot_inner` normalises a local process
+    // observation's health from the node's current value: afterwards the
+    // synthesised `Unverified` would look harness-reported and get persisted,
+    // pinning a warning no callback ever earned.
+    let harness_reported_health = payload.provider_event.is_some()
+        || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok;
     let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
     let forbidden_json = serde_json::to_string(&forbidden.iter().map(SessionStatus::to_db_str).collect::<Vec<_>>())
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -742,7 +821,7 @@ pub(crate) fn commit_agent_lifecycle_inner(
             signal_health=CASE WHEN ?4 THEN ?5 ELSE signal_health END
          WHERE id=?6 AND status NOT IN (SELECT value FROM json_each(?7))",
         params![payload.status.to_db_str(), payload.timestamp, snapshot,
-            payload.provider_event.is_some() || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok,
+            harness_reported_health,
             payload.signal_health.to_db_str(), payload.session_id, forbidden_json],
     )?;
     Ok(changed > 0)
@@ -887,6 +966,34 @@ pub(crate) fn update_agent_node_signal_health_inner(
     Ok(())
 }
 
+/// Record "hooks are installed, this process has not delivered yet" without
+/// discarding what the node already proved. Installation is an expectation, not
+/// evidence, so it may only replace a value that likewise records an
+/// expectation: an unknown (NULL) health, or `unavailable` from a *previous*
+/// provisioning attempt, which a successful install supersedes. A health earned
+/// by a delivered callback (`ok`, `degraded`) is evidence and is never
+/// downgraded. Returns whether this call wrote that expectation.
+pub fn mark_agent_node_signal_unverified(id: i64) -> SqlResult<bool> {
+    let db = write_conn();
+    mark_agent_node_signal_unverified_inner(&db, id)
+}
+
+pub(crate) fn mark_agent_node_signal_unverified_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<bool> {
+    // Only the two expectation-valued states are writable, so re-provisioning an
+    // already-unproven node matches no row and the return value stays honest
+    // (SQLite counts a row as changed even when the value is identical, so a
+    // wider predicate would report a write that did not happen).
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET signal_health = 'unverified' \
+         WHERE id = ?1 AND (signal_health IS NULL OR signal_health = 'unavailable')",
+        [id],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Update the persisted CLI session id for an agent node. For the fill-only
 /// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
@@ -1005,13 +1112,17 @@ pub(crate) fn recover_circuit_agent_turn_inner(
         || step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) != Some(fence.agent_node_id) {
         return Ok(false);
     }
+    // Same rule as `commit_agent_lifecycle_inner`: a local process observation
+    // must not persist a normalised health the harness never reported.
+    let harness_reported_health = payload.provider_event.is_some()
+        || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok;
     let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
     Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4,lifecycle_snapshot=?5,
             signal_health=CASE WHEN ?6 THEN ?7 ELSE signal_health END
         WHERE id=?1 AND status='running'
         AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at,'')=?2",
         params![fence.agent_node_id, stamp, payload.status.to_db_str(), payload.timestamp, snapshot,
-            payload.provider_event.is_some() || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok,
+            harness_reported_health,
             payload.signal_health.to_db_str()])? == 1)
 }
 
