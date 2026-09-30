@@ -898,7 +898,9 @@ mod tests {
             other => panic!("expected Hook, got {other:?}"),
         }
         assert!(!cline.supports_passive_turn_watcher);
-        assert!(!cline.produces_readable_transcript);
+        // Issue #1776 — the `<id>.messages.json` reader is wired, which is what
+        // makes the Node Digest rich layer and the archive `resumable` flag work.
+        assert!(cline.produces_readable_transcript);
         assert!(cline.supports_model_override);
         assert!(cline.supports_effort_override);
         assert!(cline.supports_extra_args);

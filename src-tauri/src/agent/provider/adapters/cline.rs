@@ -65,8 +65,15 @@
 //! node's clean process exit is still observed through PTY EOF, exactly as it
 //! was before this change.
 //!
-//! **Transcript**: not wired yet (`#1776`), so `produces_readable_transcript`
-//! stays `false` and the digest degrades to a spine-only read.
+//! **Transcript** (issue #1776): wired. Cline persists a per-session history
+//! tree at `<cline data dir>/sessions/<session-id>/`; the reader parses the
+//! `<id>.messages.json` document there, so `produces_readable_transcript` is
+//! `true` and both the Node Digest rich layer and the archived-node resume
+//! picker (`resumable`) work. Cline's `sessions.db` is *not* the turn source —
+//! it stores no message content. Session **usage** (`metadata.usage` /
+//! `metadata.aggregateUsage`) stays an observed-session total and is
+//! deliberately not surfaced by this reader: it must never be presented as an
+//! account-level quota.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -457,6 +464,26 @@ impl AgentProvider for ClineAdapter {
         true
     }
 
+    /// Issue #1776 — `true`. Cline persists a per-session history tree at
+    /// `<cline data dir>/sessions/<id>/`, and
+    /// [`services::transcript_reader::adapters::cline`] parses the
+    /// `<id>.messages.json` document there into the shared `Turn` shape. This
+    /// is what makes two downstream products work:
+    ///
+    /// - the **Node Digest rich layer** (`coordinator::enrichment`), which
+    ///   carries real turn content instead of the spine-only read; and
+    /// - the **archived-node resume picker**, whose `resumable` flag is
+    ///   `supports_resume() && produces_readable_transcript()`.
+    ///
+    /// The reader degrades explicitly rather than silently: a node whose
+    /// session directory, messages document, or document version is missing or
+    /// unparseable yields a typed `UnavailableReason` (`NoTranscript` /
+    /// `NoSession` / `ShapeChanged`), which the digest reports as a flagged
+    /// degrade, never as an omission.
+    fn produces_readable_transcript(&self) -> bool {
+        true
+    }
+
     /// Windows, macOS, Linux. WSL is deliberately absent from the supported
     /// story for this slice (see the module docstring).
     fn available_on(&self) -> &'static [Platform] {
@@ -683,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_descriptor_advertises_attention_and_honest_empty_transcript() {
+    fn capabilities_descriptor_advertises_attention_and_a_readable_transcript() {
         let caps = CLINE.capabilities();
         assert_eq!(caps.harness_id, "cline");
         assert!(caps.supports_resume);
@@ -695,8 +722,16 @@ mod tests {
             crate::agent::capabilities::AttentionCapability::Hook { .. }
         ));
         assert!(!caps.supports_passive_turn_watcher);
-        // The transcript reader is issue #1776 — still honest-empty.
-        assert!(!caps.produces_readable_transcript);
+        // Issue #1776 — the `<id>.messages.json` reader is wired, which is what
+        // turns on both the Node Digest rich layer and `resumable` in the
+        // archived-node resume picker.
+        assert!(caps.produces_readable_transcript);
+        // The resolver must agree, or the digest would flag a wiring gap.
+        assert_eq!(
+            crate::services::transcript_reader::TranscriptFormat::for_harness(&caps.harness_id),
+            Some(crate::services::transcript_reader::TranscriptFormat::Cline),
+            "an advertised reader must resolve to a real transcript format"
+        );
         assert!(caps.supports_model_override);
         assert!(caps.supports_effort_override);
         assert!(caps.supports_extra_args);

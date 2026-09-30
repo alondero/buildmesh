@@ -472,9 +472,10 @@ pub trait AgentProvider: Send + Sync {
     /// is parsed via `TranscriptFormat::Codex` (issue #887); Cursor's
     /// workspace-scoped JSONL via `TranscriptFormat::Cursor`; AGY, Grok,
     /// mcode, OpenCode (issue #1296 SQLite reader), Muse (issue #1708 JSONL
-    /// reader), and Command Code have dedicated readers as well.
+    /// reader), Cline (issue #1776 single-JSON-document reader), and Command
+    /// Code have dedicated readers as well.
     /// Providers with no wired transcript reader (Kimi, dsh, freebuff,
-    /// cline, terminal) return `false`; their digest degrades to spine-only
+    /// terminal) return `false`; their digest degrades to spine-only
     /// with enrichment explicitly flagged `unsupported`, never silently
     /// omitted.
     fn produces_readable_transcript(&self) -> bool {

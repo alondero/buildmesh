@@ -196,6 +196,17 @@ pub enum Environment {
 }
 
 impl Environment {
+    /// The `EnvType` tag for this environment. Resolvers that resolve a path for
+    /// the *current* process take an `EnvType` so a future per-environment
+    /// override shape has a discriminator; this is the honest tag to pass, as
+    /// opposed to a literal variant that would misdescribe the environment.
+    pub(crate) fn env_type(self) -> EnvType {
+        match self {
+            Environment::Windows => EnvType::Windows,
+            Environment::Wsl => EnvType::Wsl,
+        }
+    }
+
     /// Detect the current environment by checking for WSL signature
     pub fn detect() -> Self {
         if cfg!(target_os = "windows") {
@@ -1058,6 +1069,41 @@ pub(crate) fn cline_db_path_for_host(env_type: EnvType, spawn_path: &str) -> Opt
 /// above are the only ones that need to reason about guest vs host).
 pub fn cline_dir() -> PathBuf {
     cline_dir_with_resolver(current_env(), |key| env::var_os(key))
+}
+
+/// Cline's **data directory** for the current (running) Buildmesh environment:
+/// `CLINE_DATA_DIR` when it resolves to a non-blank path, otherwise
+/// `<cline home>/data`.
+///
+/// Cline treats the override as the data directory *itself* (its `--data-dir`
+/// default is `~/.cline/data`, and the flag is documented as a directory rather
+/// than a home), so the same post-trim, non-empty normalisation
+/// [`cline_data_dir_override_for_env`] applies is applied here. This is the
+/// root both the session store (`db/sessions.db`) and the per-session history
+/// tree (`sessions/<id>/`) hang off, so the transcript reader resolves its
+/// paths from here and can never disagree with the capture poller about which
+/// store Buildmesh is looking at.
+///
+/// Returns `None` only if the home itself is unresolvable; the resolver layers
+/// a concrete default, so in practice this is always `Some`.
+pub fn cline_data_dir() -> Option<PathBuf> {
+    cline_data_dir_with_resolver(current_env(), |key| env::var_os(key))
+}
+
+/// Injectable core of [`cline_data_dir`]: the override wins, otherwise the
+/// home's default `data` subdirectory. Split out so a test can exercise both
+/// arms without mutating process state.
+pub(crate) fn cline_data_dir_with_resolver<F: Fn(&str) -> Option<std::ffi::OsString>>(
+    environment: Environment,
+    get: F,
+) -> Option<PathBuf> {
+    // The override lookup is env_type-parameterised for future per-env shapes,
+    // so pass *this* environment's tag. Hardcoding a variant here would bake in
+    // a Windows assumption that silently misdescribes a WSL-guest resolution.
+    if let Some(override_dir) = cline_data_dir_override_for_env(environment.env_type(), &get) {
+        return Some(override_dir);
+    }
+    Some(cline_dir_with_resolver(environment, &get).join("data"))
 }
 
 /// Cline's own home precedence (`resolveClineDir()` in
