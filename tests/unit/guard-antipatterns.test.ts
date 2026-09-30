@@ -163,7 +163,7 @@ describe("checkContentViolations — bare-rounded rules (#733)", () => {
 
   it("allows bare `rounded` with the `// allow-bare-rounded` escape comment", () => {
     const v = checkContentViolations(
-      "src/components/Probe/WorktreeManagerTab.tsx",
+      "src/components/Probe/RepositoryTab.tsx",
       'className={`px-1 py-px rounded text-[9px] ${color}`} // allow-bare-rounded — 9px status badge',
     );
     expect(v).toHaveLength(0);

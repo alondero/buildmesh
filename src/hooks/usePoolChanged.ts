@@ -24,9 +24,10 @@ export const POOL_COUNT_CHANGED_EVENT = 'pool-count-changed';
 
 /**
  * Subscribes to the `pool-count-changed` Tauri event and calls
- * `refresh` whenever any mesh's pre-spawn pool mutates. The Worktrees
- * Probe's per-mesh badge (`WorktreeManagerTab`) uses this to re-fetch
- * its `get_mesh_pool_count` value without polling.
+ * `refresh` whenever any mesh's pre-spawn pool mutates. The Project
+ * Settings worktree-strategy section's per-mesh badge
+ * (`WorktreeStrategySection` inside `ProjectSettingsTab`) uses this to
+ * re-fetch its `get_mesh_pool_count` value without polling.
  *
  * **Payload is `{ mesh_id: number }`** — currently ignored. A future
  * per-mesh listener can short-circuit without a DB hit by comparing

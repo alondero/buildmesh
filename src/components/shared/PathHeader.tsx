@@ -2,7 +2,7 @@
  * Header strip showing the active directory path + a one-click jump to
  * the OS file manager. Shared between the Probe Panel's Files and Changes
  * tabs so the chrome (mono-font path, folder-open button) lives in one
- * place — WorktreeManagerTab (per-row copies) and GridNodeHeader
+ * place — RepositoryTab (per-row copies) and GridNodeHeader
  * (agent node title bar) consume the extracted `FolderOpenIcon` for
  * the glyph itself, then wrap it in their own button semantics.
  */

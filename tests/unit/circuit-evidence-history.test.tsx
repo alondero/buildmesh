@@ -167,6 +167,24 @@ it('offers read-only evidence recheck for a recorded OpenPr target', async () =>
   }));
 });
 
+it('offers agent handoff recovery before history and retains a rejected reason for retry', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [entry], coverage: [],
+    checkpoints: [{ node_id: 'await_fixes', attempt: 2, actions: ['recheck', 'completed'] }] });
+  vi.mocked(recordCircuitOutcome).mockRejectedValue(new Error('The run changed. Refresh its evidence before acting.'));
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  const button = await screen.findByRole('button', { name: 'Record completed' });
+  expect(button.matches(':disabled')).toBe(true);
+  const reason = screen.getByLabelText('Reason and supporting evidence');
+  expect(reason.compareDocumentPosition(screen.getByTestId('history-entry-7')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  fireEvent.change(reason, { target: { value: 'Inspected the finished fixes; continue to the independent review.' } });
+  fireEvent.click(button);
+  expect((await screen.findByRole('alert')).textContent).toContain('The run changed');
+  expect((reason as HTMLTextAreaElement).value).toContain('Inspected the finished fixes');
+  expect(recordCircuitOutcome).toHaveBeenCalledWith({ run_id:3, node_id:'await_fixes', attempt:2,
+    expected_revision:7, action:'completed', reason:'Inspected the finished fixes; continue to the independent review.' });
+});
+
 it('ignores an older run history arriving after the selected run changes', async () => {
   let resolveOld!: (value: CircuitEvidenceView) => void;
   vi.mocked(circuitRunHistory).mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))

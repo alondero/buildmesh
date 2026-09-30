@@ -1,15 +1,18 @@
 /**
- * Tests for the 🌳 Worktree Manager tab — issue #377.
+ * Tests for the Repository destination — issue #1460 (was the 🌳 Worktree
+ * Manager tab, issue #377).
  *
- * The tab ports the legacy `<BranchesWorktreesSection>` (which used to live
- * at the bottom of the old MeshPropertiesPanel drawer) into the unified
- * Probe Panel. The migration is "lifted sections" — the new tab drops the
- * collapsible header (the probe already provides the surface chrome) and
- * the always-visible one-liner (the probe header shows the tab name).
+ * The destination keeps the legacy `<BranchesWorktreesSection>` surface
+ * (health, recovery, branch/worktree cleanup, remote-tracking prune) and
+ * #1460 removed everything else from it: the worktree-configuration card
+ * moved to `project-settings-tab.test.tsx`, because changing where new
+ * worktrees are cut is a strategy decision, not a maintenance action.
+ * This suite therefore owns maintenance only, and owns the negative
+ * assertions that keep the two surfaces from merging again.
  *
  * Rendering strategy: mount the full `ProbePanel` with the worktrees
- * destination opened via `openProbeTab`, the same way the existing
- * `mesh-properties-tab.test.tsx` does. This keeps the routing wiring in
+ * destination opened via `openProbeTab`, the same way the
+ * `project-settings-tab.test.tsx` does. This keeps the routing wiring in
  * `ProbePanel.tsx` covered by the same suite — a separate routing test
  * would have to know the tab's internal structure.
  */
@@ -18,14 +21,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { MeshRow } from '../../src/types/generated/MeshRow';
-import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
-import { WORKTREE_DIR_CHANGED_EVENT } from '../../src/lib/events';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
 
@@ -246,8 +246,8 @@ beforeEach(() => {
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
 });
 
-describe('WorktreeManagerTab (issue #377)', () => {
-  it('renders the 🌳 tab body when clicked (no longer the "coming soon" placeholder)', async () => {
+describe('RepositoryTab (issue #1460)', () => {
+  it('renders the tab body when clicked (no longer the "coming soon" placeholder)', async () => {
     mockBackend();
     openProbeDestination('worktrees');
 
@@ -258,13 +258,88 @@ describe('WorktreeManagerTab (issue #377)', () => {
     expect(screen.queryByRole('button', { name: /Branches & Worktrees/i })).toBeNull();
   });
 
-  it('shows the Worktree Manager label in the probe header', async () => {
+  it('shows the Repository label in the probe header', async () => {
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'worktrees' });
     render(<ProbePanel />);
 
     const header = screen.getByRole('region', { name: 'Probe panel' });
-    expect(header.textContent).toContain('Worktree Manager');
+    expect(header.textContent).toContain('Repository');
+    // Issue #1460: the destination was renamed from "Worktree Manager" so it
+    // no longer advertises configuration it no longer owns. Assert the old
+    // name is gone, or the rename silently reverts to a label that promises
+    // worktree strategy controls that moved to Project Settings.
+    expect(header.textContent).not.toContain('Worktree Manager');
+  });
+
+  // Issue #1460 — the split's core regression guard. The strategy controls
+  // moved to Project Settings; this destination must never grow them back,
+  // or the two surfaces become one undifferentiated surface again.
+  it('carries no worktree-configuration controls (they belong to Project Settings)', async () => {
+    mockBackend();
+    openProbeDestination('worktrees');
+
+    // Wait for the maintenance list so the negative assertions are stable.
+    expect(await screen.findByText('main')).toBeTruthy();
+
+    expect(screen.queryByLabelText('Use worktree')).toBeNull();
+    expect(screen.queryByLabelText('Pre-spawn warm worktrees')).toBeNull();
+    expect(screen.queryByLabelText(/Fresh — start new session/i)).toBeNull();
+    expect(screen.queryByLabelText(/Head — resume last session/i)).toBeNull();
+    expect(screen.queryByLabelText(/^Branched/)).toBeNull();
+    expect(screen.queryByLabelText(/^Detached/)).toBeNull();
+    expect(screen.queryByLabelText('Worktree directory')).toBeNull();
+    expect(screen.queryByTestId('pool-status')).toBeNull();
+  });
+
+  it('separates health and recovery from cleanup into two labelled sections', async () => {
+    mockBackend({ health: DRIFTED_HEALTH });
+    openProbeDestination('worktrees');
+
+    // Both sections are always present, in this order: recovery repairs, the
+    // cleanup section deletes. Naming them is what makes the risk level
+    // legible (issue #1460 AC3).
+    const health = await screen.findByTestId('repository-health-section');
+    const cleanup = await screen.findByTestId('repository-cleanup-section');
+    expect(health.getAttribute('aria-label')).toBe('Health and recovery');
+    expect(cleanup.getAttribute('aria-label')).toBe('Branches and worktrees');
+    expect(
+      health.compareDocumentPosition(cleanup) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // The destructive controls live in the cleanup section, the repair
+    // controls in the health one.
+    expect(health.textContent).toContain('Restore root to main');
+    expect(cleanup.textContent).toContain('Delete Selected');
+    expect(health.textContent).not.toContain('Delete Selected');
+  });
+
+  it('states that maintenance acts on the project root, not the focused worktree', async () => {
+    mockBackend();
+    openProbeDestination('worktrees');
+
+    const note = await screen.findByTestId('probe-scope-note');
+    expect(note.textContent).toContain('/repos/demo');
+    expect(note.textContent).toMatch(/project root/i);
+  });
+
+  it('reports a healthy project explicitly instead of omitting the health section', async () => {
+    mockBackend({ health: HEALTHY });
+    openProbeDestination('worktrees');
+
+    // Wait for the prune list so the assertion is stable (health also lands
+    // after `get_mesh_health` resolves).
+    expect(await screen.findByText('main')).toBeTruthy();
+
+    // Issue #1460: pre-split, a healthy project rendered NO health block at
+    // all, which was indistinguishable from "not checked yet". The section
+    // is now always present with an explicit clean state.
+    const healthy = await screen.findByTestId('repository-healthy');
+    expect(healthy.textContent).toMatch(/no drift/i);
+    expect(screen.getByTestId('repository-health-section')).toBeTruthy();
+    // Still no repair buttons when there is nothing to repair.
+    expect(screen.queryByRole('button', { name: /Restore root to/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Free main/i })).toBeNull();
   });
 
   it('lists local branches and worktrees returned by get_git_prune_info', async () => {
@@ -277,19 +352,6 @@ describe('WorktreeManagerTab (issue #377)', () => {
     expect(screen.getByText('feature/done')).toBeTruthy();
     // The worktree directory name (`orphan`) is the last path segment.
     expect(screen.getByText('orphan')).toBeTruthy();
-  });
-
-  it('shows no HealthBlock when the mesh is clean (no drift / no hostage)', async () => {
-    mockBackend({ health: HEALTHY });
-    openProbeDestination('worktrees');
-
-    // Wait for the prune list to render so the negative assertion is stable
-    // (the health block also mounts after `get_mesh_health` resolves).
-    expect(await screen.findByText('main')).toBeTruthy();
-
-    // No drift badge, no Restore / Free buttons when the mesh is healthy.
-    expect(screen.queryByRole('button', { name: /Restore root to/i })).toBeNull();
-    expect(screen.queryByRole('button', { name: /Free main/i })).toBeNull();
   });
 
   it('shows the HealthBlock with Restore + Free buttons when the mesh is drifted with a hostage', async () => {
@@ -349,6 +411,19 @@ describe('WorktreeManagerTab (issue #377)', () => {
     // Click "Delete Selected" — should open the confirmation dialog.
     await user.click(screen.getByRole('button', { name: /Delete Selected/i }));
     const confirm = await screen.findByRole('button', { name: /^Delete$/ });
+
+    // Issue #1460 (AC4): the shared confirmation must state the scope and the
+    // recovery story, not just that the action cannot be undone. Assert the
+    // counts, the project name, and the reflog escape hatch.
+    const dialog = confirm.closest('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    const dialogText = dialog?.textContent ?? '';
+    expect(dialogText).toContain('1 branch');
+    expect(dialogText).toContain('1 worktree');
+    expect(dialogText).toContain('demo');
+    expect(dialogText).toMatch(/reflog/i);
+    expect(dialogText).toMatch(/cannot be undone/i);
+
     await user.click(confirm);
 
     await waitFor(() => {
@@ -549,7 +624,7 @@ describe('WorktreeManagerTab (issue #377)', () => {
   });
 });
 
-describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
+describe('ProbePanel routing for the Repository destination (issue #1460)', () => {
   beforeEach(() => {
     mockBackend();
   });
@@ -580,153 +655,12 @@ describe('ProbePanel routing for the 🌳 tab (issue #377)', () => {
   });
 });
 
-describe('WorktreeManagerTab Configuration card (issue #451)', () => {
+describe('RepositoryTab cleanup rows (issue #1460)', () => {
   // The Configuration card ports the worktree-config sub-section that
   // used to live at the top of the legacy `MeshPropertiesPanel` (deleted
   // in #380). The card has three controls: a `use_worktree` checkbox,
   // a "Starting point" radio (Fresh/Head â†” origin/main/HEAD on the
   // wire), and a "Worktree mode" radio (Branched/Detached).
-
-  it('initial load populates the form from get_mesh_properties', async () => {
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // Wait for the form to populate from the load effect.
-    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
-    expect(checkbox.checked).toBe(true);
-    // Default base_ref is origin/main â†’ Fresh; default mode is branched.
-    const fresh = (await screen.findByLabelText(/Fresh — start new session/i)) as HTMLInputElement;
-    expect(fresh.checked).toBe(true);
-    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
-    expect(branched.checked).toBe(true);
-
-    // The load IPC was issued with the active mesh id.
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('get_mesh_properties', { meshId: 42 });
-    });
-  });
-
-  it('toggling the use_worktree checkbox calls update_mesh_use_worktree and collapses the radios', async () => {
-    const user = userEvent.setup();
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // Wait for the form to populate.
-    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
-    expect(checkbox.checked).toBe(true);
-
-    await user.click(checkbox);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_use_worktree', {
-        meshId: 42,
-        useWorktree: false,
-      });
-    });
-    // The radios are gated on the checkbox; collapsing it removes the
-    // section from the DOM (matches the legacy panel's
-    // `{form.useWorktree && <div className="pl-4 border-l …">…}` block).
-    expect(checkbox.checked).toBe(false);
-    expect(screen.queryByText('Starting point')).toBeNull();
-    expect(screen.queryByText('Worktree mode')).toBeNull();
-  });
-
-  it('selecting the Head radio calls update_worktree_base_ref with HEAD on the wire', async () => {
-    const user = userEvent.setup();
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // The default is Fresh (base_ref: origin/main). Click Head to flip.
-    const headRadio = (await screen.findByLabelText(/Head — resume last session/i)) as HTMLInputElement;
-    await user.click(headRadio);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_worktree_base_ref', {
-        meshId: 42,
-        baseRef: 'HEAD',
-      });
-    });
-    expect(headRadio.checked).toBe(true);
-    // The Fresh radio is no longer checked.
-    const fresh = screen.getByLabelText(/Fresh — start new session/i) as HTMLInputElement;
-    expect(fresh.checked).toBe(false);
-  });
-
-  it('selecting the Detached radio calls update_mesh_column with column=worktree_mode', async () => {
-    const user = userEvent.setup();
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // The default is branched. Click Detached to flip.
-    const detachedRadio = (await screen.findByLabelText(/Detached/i)) as HTMLInputElement;
-    await user.click(detachedRadio);
-
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_mesh_column', {
-        meshId: 42,
-        column: 'worktree_mode',
-        value: 'detached',
-      });
-    });
-    expect(detachedRadio.checked).toBe(true);
-    // The Branched radio is no longer checked.
-    const branched = screen.getByLabelText(/Branched/i) as HTMLInputElement;
-    expect(branched.checked).toBe(false);
-  });
-
-  it('collapsing use_worktree hides the two radio groups', async () => {
-    const user = userEvent.setup();
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // Both group labels are present while use_worktree is true.
-    expect(await screen.findByText('Starting point')).toBeTruthy();
-    expect(screen.getByText('Worktree mode')).toBeTruthy();
-
-    // Toggle use_worktree off.
-    const checkbox = screen.getByLabelText('Use worktree') as HTMLInputElement;
-    await user.click(checkbox);
-
-    // Both group labels are gone.
-    expect(screen.queryByText('Starting point')).toBeNull();
-    expect(screen.queryByText('Worktree mode')).toBeNull();
-  });
-
-  it('save failure surfaces inline and does NOT revert the form state', async () => {
-    const user = userEvent.setup();
-    mockBackend({ saveUseWorktreeFails: true });
-    openProbeDestination('worktrees');
-
-    const checkbox = (await screen.findByLabelText('Use worktree')) as HTMLInputElement;
-    expect(checkbox.checked).toBe(true);
-
-    await user.click(checkbox);
-
-    // The save error appears below the card, in the same inline-error
-    // style as the prune error at `WorktreeManagerTab.tsx:304`.
-    const error = await screen.findByText(/Failed to update use_worktree/);
-    expect(error).toBeTruthy();
-    expect(error.className).toContain('text-status-error');
-
-    // The form was *not* reverted: the checkbox stays unchecked even
-    // though the backend rejected the save. This matches the legacy
-    // "form mirrors user intent" rule — the user retries by toggling
-    // again rather than the UI silently undoing their click.
-    expect(checkbox.checked).toBe(false);
-  });
-
-  it('null worktree_mode defaults to branched on load', async () => {
-    // A fresh mesh row returns `worktree_mode: null` from the wire.
-    // The card must fall back to the default rather than rendering
-    // an empty radio group.
-    mockBackend({ meshRow: { worktree_mode: null } });
-    openProbeDestination('worktrees');
-
-    const branched = (await screen.findByLabelText(/Branched/i)) as HTMLInputElement;
-    expect(branched.checked).toBe(true);
-    const detached = screen.getByLabelText(/Detached/i) as HTMLInputElement;
-    expect(detached.checked).toBe(false);
-  });
 
   // ── Open-in-file-explorer (regression for the lost affordance) ────â”€
   // The 🌳 tab used to host an open-in-OS-file-manager action per
@@ -968,175 +902,7 @@ describe('WorktreeManagerTab Configuration card (issue #451)', () => {
 // refresh test relies on the event handler firing AFTER the initial
 // fetch has resolved.
 
-describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
-  // Capture every Tauri event handler the probe attaches so individual
-  // tests can fire the pool-count-changed event and assert the badge
-  // re-fetches. Other tests in this file don't care about events, so
-  // we keep the capture scoped to this describe block.
-  let poolEventHandler: ((e: { payload: unknown }) => void) | null = null;
-  const listenMock = vi.fn();
-
-  beforeEach(() => {
-    poolEventHandler = null;
-    listenMock.mockClear();
-    // Default mock: no-op unlisten + capture only the pool-count-changed
-    // handler. Other events (none today, but future-proof) are ignored.
-    // The `listenMock(event, handler)` call mirrors the
-    // `useProviderListInvalidation` test fixture so a future
-    // `expect(listenMock).toHaveBeenCalledWith(POOL_COUNT_CHANGED_EVENT, …)`
-    // has something to assert against.
-    vi.mocked(listen).mockImplementation((event: string, handler: (e: unknown) => void) => {
-      listenMock(event, handler);
-      if (event === POOL_COUNT_CHANGED_EVENT) {
-        poolEventHandler = handler as (e: { payload: unknown }) => void;
-      }
-      return Promise.resolve(() => {});
-    });
-  });
-
-  it('hides the badge when preSpawnPoolSize === 0 (pool disabled)', async () => {
-    // Default meshRow has pre_spawn_pool_size: 0; mockBackend default
-    // poolCount: 0. The badge must NOT render.
-    mockBackend();
-    openProbeDestination('worktrees');
-
-    // Wait for the config card to render so the negative assertion is
-    // stable (the badge mounts after the form populates from the load).
-    await screen.findByLabelText('Pre-spawn warm worktrees');
-    expect(screen.queryByTestId('pool-status')).toBeNull();
-  });
-
-  it('shows "X / Y ready" when the pool is enabled', async () => {
-    mockBackend({
-      meshRow: { pre_spawn_pool_size: 3 },
-      poolCount: 2,
-    });
-    openProbeDestination('worktrees');
-
-    // The badge uses the live count (2) and the persisted target (3).
-    const status = await screen.findByTestId('pool-status');
-    expect(status).toBeTruthy();
-    const text = screen.getByTestId('pool-status-text');
-    expect(text.textContent).toBe('2 / 3 ready');
-    // role="status" + aria-live="polite" so screen readers announce
-    // pool-count-changed events without interrupting other speech.
-    expect(status.getAttribute('role')).toBe('status');
-    expect(status.getAttribute('aria-live')).toBe('polite');
-    expect(status.getAttribute('aria-label')).toBe(
-      '2 of 3 pre-spawn worktrees ready',
-    );
-  });
-
-  it('shows "0 / Y ready" with a present-but-empty bar when the pool is enabled but empty', async () => {
-    // After a shrink (target 3 â†’ 0 â†’ 1) the badge must show 0 / 1 ready,
-    // not "…/1 ready" (the count IS known, just zero). The Plan agent's
-    // synchronous-drain UX fix is what makes this settle immediately on
-    // a config change — but the badge format itself is tested here.
-    mockBackend({
-      meshRow: { pre_spawn_pool_size: 1 },
-      poolCount: 0,
-    });
-    openProbeDestination('worktrees');
-
-    const text = await screen.findByTestId('pool-status-text');
-    expect(text.textContent).toBe('0 / 1 ready');
-  });
-
-  it('re-fetches the pool count when pool-count-changed fires', async () => {
-    // Seed the initial fetch with 1 ready, then fire the event and
-    // assert the badge updated to 4 (simulating the Rust side emitting
-    // pool-count-changed after a successful prewarm_one).
-    mockBackend({
-      meshRow: { pre_spawn_pool_size: 5 },
-      poolCount: 1,
-    });
-    openProbeDestination('worktrees');
-
-    // Sanity check: initial fetch resolved.
-    await waitFor(() => {
-      expect(screen.getByTestId('pool-status-text').textContent).toBe(
-        '1 / 5 ready',
-      );
-    });
-
-    // Override get_mesh_pool_count so the NEXT call (the one triggered
-    // by the event) returns 4. The flag flips inside the override's
-    // closure, so the initial fetch (already done) isn't affected by
-    // this swap.
-    let eventFired = false;
-    const prevImpl = vi.mocked(invoke).getMockImplementation();
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_mesh_pool_count') {
-        return Promise.resolve(eventFired ? 4 : 1);
-      }
-      return prevImpl?.(cmd, args) ?? Promise.resolve({});
-    });
-
-    // Fire the pool-count-changed event from the backend.
-    eventFired = true;
-    poolEventHandler?.({ payload: 42 });
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pool-status-text').textContent).toBe(
-        '4 / 5 ready',
-      );
-    });
-    // And the listener was actually attached (not just lying around).
-    expect(listenMock).toHaveBeenCalledWith(
-      POOL_COUNT_CHANGED_EVENT,
-      expect.any(Function),
-    );
-  });
-
-  it('re-fetches when activeMeshId switches', async () => {
-    // Seed mesh 42 with 2 ready; switch to mesh 7 with 4 ready. The
-    // badge must re-fetch (via the useAsyncEffect on activeMeshId) and
-    // land on 4 / 3 ready.
-    mockBackend({
-      meshRow: { pre_spawn_pool_size: 3 },
-      poolCount: 2,
-    });
-    openProbeDestination('worktrees');
-    await waitFor(() => {
-      expect(screen.getByTestId('pool-status-text').textContent).toBe(
-        '2 / 3 ready',
-      );
-    });
-
-    // Switch to a second mesh and override the response.
-    const mesh2: Mesh = {
-      ...MESH,
-      id: 7,
-      name: 'demo2',
-      path: '/repos/demo2',
-    };
-    useMeshStore.setState({
-      meshes: [MESH, mesh2],
-      meshesById: new Map([
-        [MESH.id, MESH],
-        [mesh2.id, mesh2],
-      ]),
-      selectedMeshId: mesh2.id,
-    });
-    // Override get_mesh_pool_count for the new mesh's id.
-    const impl = vi.mocked(invoke).getMockImplementation();
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_mesh_pool_count') {
-        // Differentiate by meshId from the args.
-        const a = args as { meshId?: number } | undefined;
-        if (a?.meshId === mesh2.id) return Promise.resolve(4);
-        return Promise.resolve(2);
-      }
-      return impl?.(cmd, args) ?? Promise.resolve({});
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId('pool-status-text').textContent).toBe(
-        '4 / 3 ready',
-      );
-    });
-  });
-
+describe('RepositoryTab branches held in a worktree (issue #1460)', () => {
   // ── checked_out_in_worktree (orphan-worktree branch protection) ──────
 
   /**
@@ -1316,88 +1082,5 @@ describe('WorktreeManagerTab Pre-spawn Pool badge', () => {
     });
     expect(selectRecommended.textContent).toMatch(/\(1\)/);
     expect(selectRecommended.textContent).not.toMatch(/\(2\)/);
-  });
-});
-
-describe('WorktreeManagerTab worktree directory reactivity (issue #1519)', () => {
-  // Capture the worktree-directory-changed handler the tab attaches so tests
-  // can fire it with mesh-scoped / app-wide payloads.
-  let dirEventHandler: ((e: { payload: unknown }) => void) | null = null;
-
-  beforeEach(() => {
-    dirEventHandler = null;
-    vi.mocked(listen).mockImplementation((event: string, handler: (e: unknown) => void) => {
-      if (event === WORKTREE_DIR_CHANGED_EVENT) {
-        dirEventHandler = handler as (e: { payload: unknown }) => void;
-      }
-      return Promise.resolve(() => {});
-    });
-  });
-
-  it('refreshes the inherited effective value when the app default changes elsewhere', async () => {
-    mockBackend();
-    // The backend's effective dir moves after mount (simulating a Settings
-    // change to the app-wide default while the probe is open).
-    let effective = '/repos/demo/.claude/worktrees';
-    const prevImpl = vi.mocked(invoke).getMockImplementation();
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_worktree_directory_config') {
-        return Promise.resolve({
-          mesh_directory: '',
-          app_directory: null,
-          effective_directory: effective,
-        });
-      }
-      return prevImpl?.(cmd, args) ?? Promise.resolve({});
-    });
-    openProbeDestination('worktrees');
-
-    // Initial load shows the inherited legacy default.
-    const input = (await screen.findByLabelText('Worktree directory')) as HTMLInputElement;
-    expect(input.value).toBe('');
-    await waitFor(() => {
-      expect(screen.getByText('/repos/demo/.claude/worktrees')).toBeTruthy();
-    });
-
-    // App default moves (null payload = every inheriting mesh may have moved).
-    effective = '/repos/demo/custom-wt';
-    dirEventHandler?.({ payload: null });
-
-    await waitFor(() => {
-      expect(screen.getByText('/repos/demo/custom-wt')).toBeTruthy();
-    });
-    // And the event name is the shared constant (drift guard).
-    const { WORKTREE_DIR_CHANGED_EVENT: evt } = await import(
-      '../../src/lib/events'
-    );
-    expect(evt).toBe('worktree-directory-changed');
-  });
-
-  it('ignores worktree-directory-changed for other meshes', async () => {
-    mockBackend();
-    const prevImpl = vi.mocked(invoke).getMockImplementation();
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_worktree_directory_config') {
-        return Promise.resolve({
-          mesh_directory: '',
-          app_directory: null,
-          effective_directory: '/repos/demo/.claude/worktrees',
-        });
-      }
-      return prevImpl?.(cmd, args) ?? Promise.resolve({});
-    });
-    openProbeDestination('worktrees');
-    await screen.findByLabelText('Worktree directory');
-
-    const callsBefore = vi
-      .mocked(invoke)
-      .mock.calls.filter(([cmd]) => cmd === 'get_worktree_directory_config').length;
-    // A change scoped to mesh 999 must not refetch mesh 42's config.
-    dirEventHandler?.({ payload: 999 });
-    await new Promise((r) => setTimeout(r, 50));
-    const callsAfter = vi
-      .mocked(invoke)
-      .mock.calls.filter(([cmd]) => cmd === 'get_worktree_directory_config').length;
-    expect(callsAfter).toBe(callsBefore);
   });
 });

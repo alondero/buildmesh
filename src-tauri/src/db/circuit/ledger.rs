@@ -1531,6 +1531,15 @@ pub(crate) fn commit_circuit_advance_inner(
     for op in step_ops {
         super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status,
             Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
+        if op.status == "unverified" {
+            if let Some(Some(reason)) = &op.error {
+                // The current error is replaced on recheck/cancellation. Keep
+                // the original delivery or evidence failure diagnosable.
+                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt),
+                    "checkpoint_reason", &crate::secret_scrubber::SecretScrubber::scrub(reason),
+                    Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some("waiting"))?;
+            }
+        }
         let effect_state = match op.status.as_str() {
             "completed" => Some("acknowledged"),
             "unverified" => Some("uncertain"),
@@ -1560,8 +1569,8 @@ pub(crate) fn commit_circuit_advance_inner(
              ON CONFLICT(run_id, node_id) DO UPDATE SET \
                  status = excluded.status, \
                  attempt = excluded.attempt, \
-                  outcome = CASE WHEN ?8 THEN NULL \
-                      WHEN ?9 THEN excluded.outcome \
+                  outcome = CASE WHEN ?9 THEN excluded.outcome \
+                      WHEN ?8 THEN NULL \
                       ELSE autopilot_circuit_run_steps.outcome END, \
                    error_message = CASE WHEN ?8 THEN NULL \
                       WHEN ?10 THEN excluded.error_message \

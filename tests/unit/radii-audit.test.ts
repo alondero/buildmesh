@@ -24,7 +24,7 @@ const COMPONENTS_ROOT = join(process.cwd(), "src", "components");
 //     chip's visual intent).
 const ALLOWED_BARE_ROUNDED = [
   {
-    file: "Probe/WorktreeManagerTab.tsx",
+    file: "Probe/RepositoryTab.tsx",
     // 2xs status Badge — `rounded` is intentional, no interaction.
     // Token was `text-[9px]` pre-#733 modernization; now `text-2xs`
     // (the new `--font-size-2xs` token, same 10px value).
@@ -173,7 +173,7 @@ describe("radii audit — no stray bare `rounded` in src/components (#733)", () 
   });
 
   it("ALLOWED_BARE_ROUNDED is itself minimal (regression: don't silently grow the list)", () => {
-    // The one intentional decorative chip (WorktreeManagerTab status
+    // The one intentional decorative chip (RepositoryTab status
     // badge). The two GitPullRequestsTab entries were removed when the
     // merge-status pill and retry control moved to `rounded-md`.
     expect(ALLOWED_BARE_ROUNDED.length).toBe(1);

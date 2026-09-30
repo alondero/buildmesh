@@ -158,10 +158,10 @@ interface RefreshControlProps {
   /** Visual treatment. `'default'` is the cyan accent used by fetch-
    *  driven tabs (Issues, PRs, Archive, Usage); `'muted'` sits visually
    *  quieter so it doesn't compete with adjacent destructive actions
-   *  (e.g. WorktreeManagerTab's Refresh next to Delete Selected). */
+   *  (e.g. RepositoryTab's Refresh next to Delete Selected). */
   variant?: 'default' | 'muted';
   /** External disable independent of `isRefreshing`. Used when a sibling
-   *  long-running operation (e.g. WorktreeManagerTab's deletion pass)
+   *  long-running operation (e.g. RepositoryTab's deletion pass)
    *  would race the refresh's `load()` — the inline button this replaces
    *  honored `loading || deleting` and we preserve that contract here. */
   disabled?: boolean;
