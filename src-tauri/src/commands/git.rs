@@ -805,7 +805,7 @@ pub struct MeshGitStatic {
 
 /// Compute the static trio in one IPC. `check_gh_auth` is composed
 /// (delegated to the existing `commands::github::check_gh_auth`) so the
-/// mobile `/git/auth` HTTP route and `MeshPropertiesTab.tsx` keep using
+/// mobile `/git/auth` HTTP route and `ProjectSettingsTab.tsx` keep using
 /// the same source of truth — the snapshot just bundles it with the
 /// repo-only fields the panel needs.
 ///
@@ -814,7 +814,7 @@ pub struct MeshGitStatic {
 /// round-trip per TTL window instead of N. The cache lives HERE, not in
 /// `commands::github::check_gh_auth` itself, because that command is also
 /// called by the mobile `/git/auth` HTTP route and by
-/// `MeshPropertiesTab.tsx` on a user-triggered re-check — both want a
+/// `ProjectSettingsTab.tsx` on a user-triggered re-check — both want a
 /// fresh value, not a 30s-stale snapshot.
 ///
 /// Offloaded to the blocking pool via `run_blocking`: the

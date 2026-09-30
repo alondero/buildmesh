@@ -18,7 +18,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  *              the user actually sees the problem
  *
  * This is the same shape `ScratchpadTab.tsx` inlines for its single
- * field. Extracted here so `MeshPropertiesTab` (which has 7 auto-save
+ * field. Extracted here so `ProjectSettingsTab` (which has 7 auto-save
  * fields — Name, Model, Effort, Build, Run, Provider, Sandbox) can
  * share the transitions without re-implementing them. Future probe
  * tabs that auto-save should reach for this hook rather than
@@ -32,7 +32,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * would also produce 7 stacked tiny indicators competing for the
  * same attention as the form. The issue's `and/or` wording
  * (indicator inline per field *and/or* a global SaveIndicator) and
- * the existing `WorktreeManagerTab` single-banner precedent both
+ * the existing `RepositoryTab` single-banner precedent both
  * point at the cleaner single-instance path. The cross-talk cost
  * is real but bounded: a fast Model save flipping to "Saved" can
  * briefly mask a slow Build save's "Save failed", but in practice
@@ -41,7 +41,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * would be a candidate to revisit this design.
  *
  * The accompanying `wrappedSave(op)` adapter in
- * `MeshPropertiesTab.tsx` adds a *mesh-switch guard* on top of the
+ * `ProjectSettingsTab.tsx` adds a *mesh-switch guard* on top of the
  * single-instance hook: it captures `activeMeshId` at IPC start and
  * discards late results so a slow save from mesh A can't surface
  * its error on mesh B. The hook itself stays general-purpose; the

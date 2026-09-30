@@ -9,7 +9,7 @@ import type { DetectedProject, ProjectPreset } from '../lib/projectPresets';
 export type { MeshRow } from '../lib/tauri';
 import type { MeshRow } from '../lib/tauri';
 
-/// The set of fields the MeshPropertiesTab can auto-save. The union is the
+/// The set of fields the ProjectSettingsTab can auto-save. The union is the
 /// store's switch table — adding a field means one new entry below + one new
 /// case in `save()`, not a new closure in the render component (issue #283).
 ///

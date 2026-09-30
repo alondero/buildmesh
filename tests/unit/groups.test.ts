@@ -11,7 +11,7 @@ import {
 // Issue #583 cleanup — `groupByHarness`, `mapBackendProviders`, and the
 // `SpawnOption` projection are the canonical helpers for the
 // harness-grouped Spawn Menu (issue #575 / ADR-0016). They replaced
-// three inline bucketing sites (GroupedProviderMenu, MeshPropertiesTab,
+// three inline bucketing sites (GroupedProviderMenu, ProjectSettingsTab,
 // mobile ProviderPicker) and four inline 8-field projections
 // (Sidebar, ArchivedNodesTab, GitIssuesTab, GitPullRequestsTab). The
 // tests below pin the contracts those call sites depend on.

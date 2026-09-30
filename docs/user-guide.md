@@ -222,15 +222,48 @@ correct or safe by itself:
 
 - Review diffs before merging, pushing, or opening a pull request.
 - A node's Build and Run utilities can run in the node worktree; root commands
-  can be configured separately in Mesh Properties.
+  can be configured separately in Project Settings.
 - Closing a node removes it from the UI first and cleans its worktree in the
   background. A cleanup warning means the directory may still exist; do not
   recreate or manually delete it until you have checked the warning.
 - The Mesh may sync from its configured upstream before a new node is created.
-  A sync warning does not silently discard the local worktree; inspect the Mesh
-  health and Git status before retrying.
-- Use the Worktrees view to understand which branch and path belong to which
+  A sync warning does not silently discard the local worktree; inspect the
+  Mesh health and Git status before retrying.
+- Use the Repository view to understand which branch and path belong to which
   node. Do not move a live worktree behind Buildmesh's back.
+
+## Project Settings and Repository
+
+Two separate views cover everything you can do to a Mesh, and they never mix:
+**Project Settings** is where you configure the project, **Repository** is
+where you repair or clean it up. Open either from the command palette, or from
+the **More** disclosure at the right of the title bar.
+
+**Project Settings** is grouped so you can tell at a glance what kind of
+change you are making:
+
+| Section | Use it for |
+|---|---|
+| General | The project's display name and its directory on disk |
+| Agent runtime | The default provider and whether agents run sandboxed |
+| Build and run | Build and Run commands, plus optional Root overrides and project presets |
+| Worktree strategy | Whether new nodes get a worktree, the starting point and mode, the pre-spawn warm pool, and the worktree directory |
+| Danger zone | Deleting the project |
+
+Everything here applies to the project root. A focused node's worktree is a
+different path, and these settings never change it retroactively.
+
+**Repository** covers maintenance, and separates repairing from deleting:
+
+- **Health and recovery** reports drift, a base branch held by a node, and
+  unpushed commits, and offers the one-click Restore and Free actions. A
+  healthy project says so explicitly rather than showing nothing.
+- **Branches and worktrees** lists local branches and worktrees per
+  repository, selects the merged/orphaned/clean ones for you, and prunes
+  remote-tracking references. Deleting asks for confirmation first, naming how
+  many branches and worktrees it will remove.
+
+Both views act on the project root, never on a focused node's worktree.
 
 ## Launch Configurations
 
@@ -315,7 +348,7 @@ enabling it for untrusted prompts.
 
 ## Build and Run
 
-Configure **Build command** and **Run command** in Mesh Properties, or choose a
+Configure **Build command** and **Run command** in Project Settings, or choose a
 detected project preset. Optional Root Build and Root Run commands execute from
 the Mesh root; leaving them blank falls back to the ordinary commands. Build
 and Run use separate utility processes from agent processes and do not survive

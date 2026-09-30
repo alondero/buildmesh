@@ -24,7 +24,7 @@ const healthClient = createDualKeyCache<number, MeshHealth>({
  * The snapshot includes drift detection (HEAD not on the Base Ref's branch),
  * the base-branch hostage (a worktree holding the Base Ref's branch checked
  * out), unpushed-ahead count, and the dirty working-tree flag. The sidebar
- * `!` badge and the `WorktreeManagerTab` health block both read from
+ * `!` badge and the `RepositoryTab` health block both read from
  * this hook so they cannot disagree about the mesh's state.
  *
  * Refetches on mount, when the file watcher reports a change for the mesh
