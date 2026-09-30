@@ -41,8 +41,10 @@ pub(crate) fn prepare(
             }
     });
     let finished = report.as_ref().is_ok_and(|report| report.turn_finished) || evidence.is_some();
+    let declared = report.as_ref().is_ok_and(|report|
+        report_contract::declares_completion(view, node_id, &report.text));
     let yielded = matches!(agent.status, SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput);
-    if !finished && !yielded && step.status != StepStatus::Unverified { return Ok(None); }
+    if !finished && !declared && !yielded && step.status != StepStatus::Unverified { return Ok(None); }
     let session_id = agent.cli_session_id.as_deref().filter(|id| !id.is_empty()).ok_or(Blocker::SessionIdentityUnavailable)?;
     let incarnation = stamp.and_then(|stamp| stamp.split_once(':')).map(|(incarnation, _)| incarnation)
         .ok_or(Blocker::SessionIdentityUnavailable)?;
@@ -53,7 +55,8 @@ pub(crate) fn prepare(
         InputUnavailable::UnknownInput => Blocker::InputUncertain,
         InputUnavailable::Paste => Blocker::InputPaste,
     })?;
-    let status = if finished { SessionStatus::Ready } else { agent.status };
+    // Explicit handoff is report readiness, not native lifecycle verification.
+    let status = if finished || declared { SessionStatus::Ready } else { agent.status };
     if let Ok(report) = &report {
         if report.published_at_ms < incarnation_ms
             || view.context.get(&format!("agent.{}.previous_report_revision", agent.id)).is_some_and(|previous|
@@ -62,8 +65,8 @@ pub(crate) fn prepare(
         }
         if !report.is_current() { return Err(Blocker::ReportUnavailable { reason: ReportReadError::ChangedDuringRead.reason().into() }); }
         // A native finished report supersedes a misleading Running projection.
-        // Without a native boundary we still require a yielded harness.
-        if !yielded && !finished { return Ok(None); }
+        // Otherwise require a yielded harness or an explicit final report result.
+        if !yielded && !finished && !declared { return Ok(None); }
         return Ok(Some(Candidate {
             output: report.text.clone(), status,
             binding: ClassificationBinding {

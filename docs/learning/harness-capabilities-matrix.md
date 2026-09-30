@@ -197,13 +197,13 @@ the rest:
   report source in the circuit worker, and it is what re-reads a turn that
   completed while capture was offline.
 
-Separately, the review **verdict** is always an LLM classification — the
-`ReviewVerdict` gate has no clean-lifecycle shortcut, unlike `AwaitAgentTurn`,
-which short-circuits on `ready`/`completed`. That classification shells out to
-the `claude` CLI in `--print` mode
-(`src-tauri/src/autopilot/evaluator.rs`) routed through the Mesh's configured
-Autopilot provider. So a review Circuit needs the Claude Code CLI on the host
-regardless of which harness does the reviewing.
+The review **verdict** remains separate from lifecycle readiness. Circuit dispatch
+requests a versioned final review result; a valid result routes without a second
+model call after evidence binding. Free-form reports use the Mesh's configured
+Autopilot classifier, with a deterministic verdict fallback for clean yielded
+reports when that backend is unavailable. A clean lifecycle alone does not approve
+a review, and an explicit result does not prove native owned-work completion.
+See [node review circuits](../development/agent-node-circuits.md).
 
 ## Effort control vocabulary
 
