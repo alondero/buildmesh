@@ -47,6 +47,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useMeshStore } from '../../stores/meshStore';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useAsyncEffect } from '../../hooks/useAsyncEffect';
@@ -264,40 +265,84 @@ export function ProjectSettingsTab() {
   // name" fallback chain runs at mount only; the user can still rename
   // later via the Name field.
   //
-  // The same call also hydrates the worktree-strategy fields. The dep
-  // discipline is inherited from the Worktree Manager tab (issue #451):
+  // Applies a loaded directory config to the form state. Shared by the
+  // orchestrated mount loader below (guarded by its AbortSignal) and the
+  // `worktree-directory-changed` listener further down (guarded by its own
+  // `cancelled` flag) so a Settings change elsewhere refreshes this tab
+  // instead of leaving a stale inherited value until remount (issue #1519).
+  // Declared before the loader so the loader can call it in one pass.
+  const applyWorktreeDirConfig = useCallback(
+    (
+      config: { worktree_directory?: string | null },
+      prefs: AppPreferences | null,
+      dirConfig: WorktreeDirectoryConfig | null,
+    ) => {
+      const meshDir = config.worktree_directory?.trim() ?? '';
+      setWorktreeDirectory(meshDir);
+      const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
+      setWorktreeDirAppDefault(appDir);
+      setWorktreeDirEffective(
+        dirConfig?.effective_directory ??
+          getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir),
+      );
+    },
+    [activeMeshPath],
+  );
+
+  // One orchestrated load per mesh selection (issue #1460). `getMeshProperties`
+  // is called ONCE and its single result feeds the form, the worktree
+  // strategy, and the directory resolution. The pre-split tab fetched it from
+  // two effects with only one of them under `loading`, so the destination
+  // could render the previous project's worktree-directory override for a
+  // frame after `loading` flipped.
+  //
+  // Dep discipline is inherited from the Worktree Manager tab (issue #451):
   // the form state is deliberately NOT a dependency, or every save would
   // re-fire the load and overwrite the user's in-flight edits.
-  useAsyncEffect((signal) => {
-    if (activeMeshId === null || !activeMeshPath) return;
-    setLoading(true);
-    getMeshProperties(activeMeshId)
-      .then((config) => {
-        if (signal.aborted) return;
-        const folderName = activeMeshPath.split(/[/\\]/).pop() ?? '';
-        const resolvedName = config.name || mesh?.name || folderName;
-        setForm({
-          name: resolvedName,
-          buildCommand: config.build_command ?? '',
-          runCommand: config.run_command ?? '',
-          rootBuildCommand: config.root_build_command ?? '',
-          rootRunCommand: config.root_run_command ?? '',
-          defaultProvider: config.default_provider ?? '',
-          sandbox: config.sandbox,
+  useAsyncEffect(
+    (signal) => {
+      if (activeMeshId === null || !activeMeshPath) return;
+      setLoading(true);
+      Promise.all([
+        getMeshProperties(activeMeshId),
+        // The two secondary reads are individually best-effort: a failure to
+        // resolve preferences or the directory config must degrade the
+        // "Effective:" display, never blank the whole form.
+        getAppPreferences().catch(() => null),
+        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
+      ])
+        .then(([config, prefs, dirConfig]) => {
+          if (signal.aborted) return;
+          const folderName = activeMeshPath.split(/[/\\]/).pop() ?? '';
+          const resolvedName = config.name || mesh?.name || folderName;
+          setForm({
+            name: resolvedName,
+            buildCommand: config.build_command ?? '',
+            runCommand: config.run_command ?? '',
+            rootBuildCommand: config.root_build_command ?? '',
+            rootRunCommand: config.root_run_command ?? '',
+            defaultProvider: config.default_provider ?? '',
+            sandbox: config.sandbox,
+          });
+          setUseWorktree(config.use_worktree);
+          setBaseRef(wireToFormBaseRef(config.base_ref));
+          setWorktreeMode(wireToFormMode(config.worktree_mode));
+          setPreSpawnPoolSize(config.pre_spawn_pool_size);
+          // Issue #1519 — the directory override and its resolved effective
+          // path hydrate in the same pass, so nothing is left showing the
+          // previous project's value.
+          applyWorktreeDirConfig(config, prefs, dirConfig);
+          setLoading(false);
+        })
+        .catch(() => {
+          if (!signal.aborted) setLoading(false);
         });
-        setUseWorktree(config.use_worktree);
-        setBaseRef(wireToFormBaseRef(config.base_ref));
-        setWorktreeMode(wireToFormMode(config.worktree_mode));
-        setPreSpawnPoolSize(config.pre_spawn_pool_size);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (!signal.aborted) setLoading(false);
-      });
-    // Dep array intentionally excludes `mesh?.name` (see comment above).
-    // `mesh` is captured at effect-run time, which is fine for the
-    // fallback chain — the user can rename later via the form itself.
-  }, [activeMeshId, activeMeshPath]);
+      // Dep array intentionally excludes `mesh?.name` (see comment above).
+      // `mesh` is captured at effect-run time, which is fine for the
+      // fallback chain — the user can rename later via the form itself.
+    },
+    [activeMeshId, activeMeshPath, applyWorktreeDirConfig],
+  );
 
   // Keep `mountedRef` ONLY for the blur handlers' "save-after-unmount"
   // guard. The 3 IPC effects above use `useAsyncEffect`'s AbortSignal
@@ -454,53 +499,92 @@ export function ProjectSettingsTab() {
     await applyPreset(preset);
   };
 
-  // ── Worktree-strategy save handlers (moved from the Worktree Manager
-  //    tab, issue #1460). Each: (1) update form state optimistically,
-  //    (2) clear any prior save error, (3) call the typed wrapper,
-  //    (4) on reject, surface the error inline WITHOUT reverting the
-  //    form. The "do not revert" rule matches the legacy panel — for a
-  //    binary control like a checkbox, reverting would silently undo
-  //    the user's click and they would have no idea why.
-  const handleToggleUseWorktree = useCallback(
-    async (next: boolean) => {
-      if (activeMeshId === null) return;
-      setUseWorktree(next);
-      setStrategyError(null);
+  /**
+   * Mesh-switch guard for the worktree-strategy saves, which is the same rule
+   * `wrappedSave` applies with two differences: the failure lands in the
+   * section-local `strategyError` (it must name the column that refused the
+   * write), and the control is NOT reverted on failure (the "form mirrors
+   * user intent" rule).
+   *
+   * `saveMeshId` is captured at the moment the IPC starts and compared against
+   * the ref on settle. Without this, a write for the outgoing project would
+   * paint its error over the incoming project's form — and, in
+   * `handleChangeWorktreeDirectory`, would write the outgoing project's
+   * directory config into the incoming project's fields.
+   *
+   * Returns whether the write succeeded so the caller can gate its own
+   * post-save refresh on the same boundary.
+   */
+  const strategySave = useCallback(
+    async (saveMeshId: number, op: () => Promise<unknown>, failurePrefix: string) => {
       try {
-        await updateMeshUseWorktree(activeMeshId, next);
+        await op();
+        return true;
       } catch (e) {
-        setStrategyError(`Failed to update use_worktree: ${formatError(e)}`);
+        if (activeMeshIdRef.current !== saveMeshId) {
+          // Audit trail only — the user is looking at a different project's
+          // form, so the section stays clean.
+          console.error('Worktree strategy save failed after mesh switch:', e);
+          return false;
+        }
+        setStrategyError(`${failurePrefix}: ${formatError(e)}`);
+        return false;
       }
     },
-    [activeMeshId],
+    [],
+  );
+
+  // ── Worktree-strategy save handlers (moved from the Worktree Manager
+  //    tab, issue #1460). Each: (1) update form state optimistically,
+  //    (2) clear any prior save error, (3) call the typed wrapper through
+  //    `strategySave` so the mesh-switch boundary is respected, (4) on
+  //    reject, surface the error inline WITHOUT reverting the form. The
+  //    "do not revert" rule matches the legacy panel — for a binary control
+  //    like a checkbox, reverting would silently undo the user's click and
+  //    they would have no idea why.
+  const handleToggleUseWorktree = useCallback(
+    async (next: boolean) => {
+      const saveMeshId = activeMeshId;
+      if (saveMeshId === null) return;
+      setUseWorktree(next);
+      setStrategyError(null);
+      await strategySave(
+        saveMeshId,
+        () => updateMeshUseWorktree(saveMeshId, next),
+        'Failed to update use_worktree',
+      );
+    },
+    [activeMeshId, strategySave],
   );
 
   const handleChangeBaseRef = useCallback(
     async (next: BaseRefForm) => {
-      if (activeMeshId === null) return;
+      const saveMeshId = activeMeshId;
+      if (saveMeshId === null) return;
       setBaseRef(next);
       setStrategyError(null);
-      try {
-        await updateWorktreeBaseRef(activeMeshId, formToWireBaseRef(next));
-      } catch (e) {
-        setStrategyError(`Failed to update base_ref: ${formatError(e)}`);
-      }
+      await strategySave(
+        saveMeshId,
+        () => updateWorktreeBaseRef(saveMeshId, formToWireBaseRef(next)),
+        'Failed to update base_ref',
+      );
     },
-    [activeMeshId],
+    [activeMeshId, strategySave],
   );
 
   const handleChangeWorktreeMode = useCallback(
     async (next: WorktreeModeForm) => {
-      if (activeMeshId === null) return;
+      const saveMeshId = activeMeshId;
+      if (saveMeshId === null) return;
       setWorktreeMode(next);
       setStrategyError(null);
-      try {
-        await updateMeshColumn(activeMeshId, 'worktree_mode', next);
-      } catch (e) {
-        setStrategyError(`Failed to update worktree_mode: ${formatError(e)}`);
-      }
+      await strategySave(
+        saveMeshId,
+        () => updateMeshColumn(saveMeshId, 'worktree_mode', next),
+        'Failed to update worktree_mode',
+      );
     },
-    [activeMeshId],
+    [activeMeshId, strategySave],
   );
 
   // Pre-spawn pool size save (issue #611). Single handler for both the
@@ -512,17 +596,18 @@ export function ProjectSettingsTab() {
   // actionable.
   const handleChangePoolSize = useCallback(
     async (next: number) => {
-      if (activeMeshId === null) return;
+      const saveMeshId = activeMeshId;
+      if (saveMeshId === null) return;
       const clamped = Math.max(0, Math.min(5, Math.trunc(next) || 0));
       setPreSpawnPoolSize(clamped);
       setStrategyError(null);
-      try {
-        await updateMeshPoolSize(activeMeshId, clamped);
-      } catch (e) {
-        setStrategyError(`Failed to update pool size: ${formatError(e)}`);
-      }
+      await strategySave(
+        saveMeshId,
+        () => updateMeshPoolSize(saveMeshId, clamped),
+        'Failed to update pool size',
+      );
     },
-    [activeMeshId],
+    [activeMeshId, strategySave],
   );
 
   // Per-Mesh worktree directory save (issue #1519). `''`/blank clears the
@@ -531,92 +616,45 @@ export function ProjectSettingsTab() {
   // backend-side for same-environment (native vs WSL) with an actionable
   // error. Like the other handlers, the form keeps the typed value on
   // failure. On success, refresh the effective display from the backend so
-  // the inherited value can't drift from the precedence rule.
+  // the inherited value can't drift from the precedence rule — and re-check
+  // the mesh boundary after each await, because that refresh is the one place
+  // this handler writes three fields from a second project's response.
   const handleChangeWorktreeDirectory = useCallback(
     async (next: string) => {
-      if (activeMeshId === null) return;
+      const saveMeshId = activeMeshId;
+      if (saveMeshId === null) return;
       setWorktreeDirectory(next);
       setStrategyError(null);
+      const trimmed = next.trim();
+      const saved = await strategySave(
+        saveMeshId,
+        () => updateMeshWorktreeDirectory(saveMeshId, trimmed === '' ? null : trimmed),
+        'Failed to update worktree directory',
+      );
+      if (!saved || activeMeshIdRef.current !== saveMeshId) return;
       try {
-        const trimmed = next.trim();
-        await updateMeshWorktreeDirectory(activeMeshId, trimmed === '' ? null : trimmed);
-        try {
-          const cfg = await getWorktreeDirectoryConfig(activeMeshId);
-          setWorktreeDirEffective(cfg.effective_directory);
-          setWorktreeDirAppDefault(cfg.app_directory);
-          setWorktreeDirectory(cfg.mesh_directory?.trim() ?? '');
-        } catch {
-          // Keep the optimistic form on config-refresh failure — the save
-          // itself succeeded; the effective display refreshes on next load.
-          const fallback = getEffectiveWorktreeDir(
-            activeMeshPath ?? '',
-            trimmed,
-            worktreeDirAppDefault,
-          );
-          setWorktreeDirEffective(fallback);
-        }
-      } catch (e) {
-        setStrategyError(`Failed to update worktree directory: ${formatError(e)}`);
+        const cfg = await getWorktreeDirectoryConfig(saveMeshId);
+        if (activeMeshIdRef.current !== saveMeshId) return;
+        setWorktreeDirEffective(cfg.effective_directory);
+        setWorktreeDirAppDefault(cfg.app_directory);
+        setWorktreeDirectory(cfg.mesh_directory?.trim() ?? '');
+      } catch {
+        // Keep the optimistic form on config-refresh failure — the save
+        // itself succeeded; the effective display refreshes on next load.
+        if (activeMeshIdRef.current !== saveMeshId) return;
+        setWorktreeDirEffective(
+          getEffectiveWorktreeDir(activeMeshPath ?? '', trimmed, worktreeDirAppDefault),
+        );
       }
     },
-    [activeMeshId, activeMeshPath, worktreeDirAppDefault],
-  );
-
-  // Applies a loaded directory config to the form state. Shared by the mount
-  // hydration below (guarded by its AbortSignal) and the
-  // `worktree-directory-changed` listener (guarded by its own `cancelled`
-  // flag) so a Settings change elsewhere refreshes this tab instead of leaving
-  // a stale inherited value until remount (issue #1519).
-  const applyWorktreeDirConfig = useCallback(
-    (
-      config: { worktree_directory?: string | null },
-      prefs: AppPreferences | null,
-      dirConfig: WorktreeDirectoryConfig | null,
-    ) => {
-      const meshDir = config.worktree_directory?.trim() ?? '';
-      setWorktreeDirectory(meshDir);
-      const appDir = (prefs?.worktree_directory?.trim() ?? '') || null;
-      setWorktreeDirAppDefault(appDir);
-      setWorktreeDirEffective(
-        dirConfig?.effective_directory ??
-          getEffectiveWorktreeDir(activeMeshPath ?? '', meshDir, appDir),
-      );
-    },
-    [activeMeshPath],
-  );
-
-  // Mount hydration for the worktree directory (issue #1519). The field must
-  // show the project's stored override and the resolved effective path on
-  // FIRST open, not only after a save or a change event — otherwise the
-  // section reads as "unset" for a project that has an override, and the user
-  // cannot tell an inherited path from a missing one. Moved here with the
-  // rest of the strategy block (issue #1460).
-  useAsyncEffect(
-    (signal) => {
-      if (activeMeshId === null) return;
-      Promise.all([
-        getMeshProperties(activeMeshId),
-        getAppPreferences().catch(() => null),
-        getWorktreeDirectoryConfig(activeMeshId).catch(() => null),
-      ])
-        .then(([config, prefs, dirConfig]) => {
-          if (signal.aborted) return;
-          applyWorktreeDirConfig(config, prefs, dirConfig);
-        })
-        .catch(() => {
-          // Swallow — keep the existing form state. Mirrors the legacy
-          // "form mirrors user intent" rule and matches the load-failure
-          // behaviour of the rest of the form.
-        });
-    },
-    [activeMeshId, activeMeshPath, applyWorktreeDirConfig],
+    [activeMeshId, activeMeshPath, worktreeDirAppDefault, strategySave],
   );
 
   // Re-resolve when the directory config changes outside this destination
   // (e.g. the app-wide default edited in Settings while the probe is
   // open). Skips events for other meshes; `null` (app default moved)
-  // refreshes any mesh. Guarded by its own `cancelled` flag (the mount effect
-  // above has the AbortSignal for the same race).
+  // refreshes any mesh. Guarded by its own `cancelled` flag (the mount loader
+  // has the AbortSignal for the same race).
   useEffect(() => {
     if (activeMeshId === null) return;
     let cancelled = false;
@@ -701,6 +739,24 @@ export function ProjectSettingsTab() {
     setShowDeleteConfirm(false);
     toggleProbe();
   };
+
+  // Agent Node count for the Delete Mesh confirmation (issue #1460 AC4). The
+  // danger zone says the consequence before the user commits, and "its 3
+  // agent nodes" is a scope statement while "its agent nodes" is a vague one —
+  // the user cannot tell a two-node project from a thirty-node one. The
+  // normalized store (#1384) keeps `nodeIds` as the canonical
+  // `(mesh_id, position)` order, so count through it rather than
+  // `Object.values(nodesById)`. Returns a primitive, so this re-renders only
+  // when the count itself changes.
+  const agentNodeCount = useAgentNodeStore((s) => {
+    if (activeMeshId === null) return 0;
+    let count = 0;
+    for (const id of s.nodeIds) {
+      const node = s.nodesById[id];
+      if (node?.mesh_id === activeMeshId) count += 1;
+    }
+    return count;
+  });
 
   // Human label for the app-wide default the `<Default>` inherit row would
   // route to (falls back to the raw id when the row isn't resolvable, e.g. a
@@ -1006,7 +1062,11 @@ export function ProjectSettingsTab() {
       {showDeleteConfirm && mesh && (
         <ConfirmDialog
           title="Delete Mesh"
-          message={`Delete "${mesh.name}" and all its agent nodes? Their sessions end and this project disappears from Buildmesh; the directory at ${mesh.path} stays on disk and can be added again as a new project. This cannot be undone.`}
+          // Names the project, the exact node count, and what survives — the
+          // two facts a user needs to decide (issue #1460 AC4). A zero-node
+          // project reads "and its 0 agent nodes", which is still accurate and
+          // avoids a branch the reader has to interpret.
+          message={`Delete "${mesh.name}" and its ${agentNodeCount} agent node${agentNodeCount === 1 ? '' : 's'}? Their sessions end and this project disappears from Buildmesh; the directory at ${mesh.path} stays on disk and can be added again as a new project. This cannot be undone.`}
           confirmLabel="Delete"
           onConfirm={handleDelete}
           onCancel={() => setShowDeleteConfirm(false)}

@@ -29,6 +29,7 @@ import { ProbePanel } from '../../src/components/Probe/ProbePanel';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import type { AgentNode } from '../../src/types/generated/AgentNode';
 import { POOL_COUNT_CHANGED_EVENT } from '../../src/hooks/usePoolChanged';
 
 const MESH: Mesh = {
@@ -49,6 +50,19 @@ const MESH: Mesh = {
   scratchpad: '',
   sandbox: false,
 };
+
+/** Minimal Agent Node fixture. Only `id` / `mesh_id` matter to the Delete
+ *  Mesh confirmation's node count, so callers override just those. */
+function nodeFixture(overrides: Partial<AgentNode> = {}): AgentNode {
+  return {
+    id: 1,
+    mesh_id: 42,
+    name: 'node-1',
+    path: '/repos/demo/.worktrees/node-1',
+    status: 'idle',
+    ...overrides,
+  } as AgentNode;
+}
 
 const MESH_CONFIG = {
   name: 'demo',
@@ -735,7 +749,7 @@ describe('ProjectSettingsTab — Delete Mesh danger zone (issue #1460)', () => {
     // The dialog's unique confirmation copy — the trigger button never has
     // this text, so this matcher is unambiguous.
     expect(
-      await screen.findByText(/all its agent nodes/i)
+      await screen.findByText(/agent node/)
     ).toBeTruthy();
     // The dialog heading is an <h2>; the trigger is a <button>, so this
     // assertion also distinguishes the two "Delete Mesh" text nodes.
@@ -750,18 +764,51 @@ describe('ProjectSettingsTab — Delete Mesh danger zone (issue #1460)', () => {
     ).toBeTruthy();
   });
 
+  it('names the exact agent node count in the confirmation (issue #1460 AC4)', async () => {
+    const user = userEvent.setup();
+    // Two nodes belong to mesh 42; one belongs to a different project and must
+    // not be counted, or the confirmation overstates the blast radius.
+    seedAgentNodes([
+      nodeFixture({ id: 1, mesh_id: 42 }),
+      nodeFixture({ id: 2, mesh_id: 42 }),
+      nodeFixture({ id: 3, mesh_id: 99 }),
+    ]);
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByRole('button', { name: /delete mesh/i }));
+
+    // Issue #1460 review finding: the release note claimed the confirmation
+    // "names the project and the node count" while the message said only "all
+    // its agent nodes". The count is the actionable part.
+    const dialog = (await screen.findByRole('button', { name: 'Delete', exact: true }))
+      .closest('[role="dialog"]');
+    const text = dialog?.textContent ?? '';
+    expect(text).toContain('demo');
+    expect(text).toContain('its 2 agent nodes');
+    expect(text).not.toContain('all its agent nodes');
+  });
+
+  it('uses the singular for a one-node project', async () => {
+    const user = userEvent.setup();
+    seedAgentNodes([nodeFixture({ id: 1, mesh_id: 42 })]);
+    openProbeDestination('properties');
+
+    await user.click(await screen.findByRole('button', { name: /delete mesh/i }));
+    await screen.findByText(/its 1 agent node\?/);
+  });
+
   it('cancels without deleting when Cancel is pressed', async () => {
     const user = userEvent.setup();
     openProbeDestination('properties');
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
-    await screen.findByText(/all its agent nodes/i);
+    await screen.findByText(/agent node/);
 
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
 
     await waitFor(() => {
-      expect(screen.queryByText(/all its agent nodes/i)).toBeNull();
+      expect(screen.queryByText(/agent node/)).toBeNull();
     });
     // The trigger is still in the DOM (no destructive call happened).
     expect(
@@ -781,7 +828,7 @@ describe('ProjectSettingsTab — Delete Mesh danger zone (issue #1460)', () => {
 
     const trigger = await screen.findByRole('button', { name: /delete mesh/i });
     await user.click(trigger);
-    await screen.findByText(/all its agent nodes/i);
+    await screen.findByText(/agent node/);
 
     await user.click(
       screen.getByRole('button', { name: 'Delete', exact: true })
@@ -997,6 +1044,51 @@ describe('ProjectSettingsTab — save feedback (issue #729)', () => {
     expect(screen.queryByText(/Save failed.*boom-after-switch/)).toBeNull();
     // And the `console.error` from the adapter's stale-rejection path
     // is the only visible trace of the failure (the indicator stays clean).
+  });
+
+  it('discards a stale worktree-strategy save failure when the user switches meshes (issue #1460 review)', async () => {
+    const user = userEvent.setup();
+    useMeshStore.setState({
+      meshes: [MESH, MESH_B],
+      meshesById: new Map<number, Mesh>([
+        [MESH.id, MESH],
+        [MESH_B.id, MESH_B],
+      ]),
+      selectedMeshId: MESH.id,
+    });
+    // Arm the FIRST `update_mesh_use_worktree` to reject on a delay so the
+    // switch happens while it is still in flight.
+    let armed = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (armed && cmd === 'update_mesh_use_worktree') {
+        armed = false;
+        return new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('boom-strategy-after-switch')), 50),
+        );
+      }
+      if (cmd === 'list_providers') return Promise.resolve([]);
+      if (cmd === 'get_mesh_properties') return Promise.resolve(MESH_CONFIG);
+      if (cmd === 'detect_mesh_project') return Promise.resolve({ preset_id: null, label: null, node_scripts: null });
+      if (cmd === 'detect_ai_context') return Promise.resolve({ claude_md_exists: false, agents_md_exists: false, skills_dir_exists: false, skill_count: 0, agents_skills_exists: false });
+      if (cmd === 'get_mesh_health') return Promise.resolve({ is_dirty: false, is_drifted: false, unpushed_ahead: 0, base_branch_holder: null, local_base_branch: 'main', current_branch: 'main', current_short_sha: 'abc1234', authenticated: false });
+      if (cmd === 'list_meshes') return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+
+    openProbeDestination('properties');
+    await user.click(await screen.findByLabelText('Use worktree'));
+
+    // Switch projects before the delayed rejection lands.
+    await act(async () => {
+      useMeshStore.getState().selectMesh(MESH_B.id);
+    });
+    await new Promise((r) => setTimeout(r, 120));
+
+    // Mesh A's failure must not surface in mesh B's form. The section-local
+    // error channel needs the same mesh-switch guard `wrappedSave` has, or the
+    // `useEffect([activeMeshId])` reset is immediately undone by the late
+    // reject.
+    expect(screen.queryByText(/Failed to update use_worktree/)).toBeNull();
   });
 
   it('clears the previous "Save failed" indicator when a subsequent save succeeds', async () => {

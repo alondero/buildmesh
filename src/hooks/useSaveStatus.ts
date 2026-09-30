@@ -32,7 +32,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * would also produce 7 stacked tiny indicators competing for the
  * same attention as the form. The issue's `and/or` wording
  * (indicator inline per field *and/or* a global SaveIndicator) and
- * the existing `RepositoryTab` single-banner precedent both
+ * the pre-#1460 single-banner precedent in the same tab both
  * point at the cleaner single-instance path. The cross-talk cost
  * is real but bounded: a fast Model save flipping to "Saved" can
  * briefly mask a slow Build save's "Save failed", but in practice

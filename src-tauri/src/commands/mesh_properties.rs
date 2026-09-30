@@ -253,8 +253,8 @@ pub fn update_mesh_pool_size(
 }
 
 /// Return the number of `available` warm pool entries for `mesh_id`.
-/// Powers the Worktrees Probe's per-mesh pool badge
-/// (`usePoolChanged` listener + `RepositoryTab` UI). Thin wrapper
+/// Powers Project Settings' worktree-strategy pool badge
+/// (`usePoolChanged` listener + `WorktreeStrategySection` UI). Thin wrapper
 /// over `db::count_available_warm_for_mesh` — the DB layer is the
 /// single source of truth for pool state, so the IPC command is just
 /// the typed edge.
