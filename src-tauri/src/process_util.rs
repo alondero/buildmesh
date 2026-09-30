@@ -368,7 +368,7 @@ impl Drop for JobHandle {
 ///
 /// **Mutex recovery is intentionally NOT this helper's job.** Each
 /// worker-static has its own per-module lock helper
-/// (`db::write_conn()`, `services::autopilot::lock_planner_set`,
+/// (`db::write_conn()`, `services::circuit_worker::lock_circuit_worker_static`,
 /// `services::circuit_worker::lock_circuit_worker_static`) introduced
 /// in #1224 — those wrap the poison recovery in worker-specific logging.
 /// `run_worker_pass` covers the orthogonal concern: keep the THREAD alive

@@ -177,7 +177,7 @@ describe('NodeItem', () => {
   });
 
   it('keeps the 14px ownership cell aligned while hiding unpiloted indicators', () => {
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {} });
     const { container, rerender } = render(
       <NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />,
     );
@@ -185,13 +185,13 @@ describe('NodeItem', () => {
     expect(cell.className).toContain('w-3.5');
     expect(cell.querySelector('[data-testid="autopilot-indicator"]')).toBeNull();
 
-    useAgentNodeStore.setState({ autopilotStates: { 10: 'implementing' } });
+    useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot active' })).toBeTruthy();
   });
 
   it('uses Circuit ownership for the terminal Done indicator', () => {
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
+    useAgentNodeStore.setState({ circuitOwnerships: {
       10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
     } });
     render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
@@ -200,7 +200,7 @@ describe('NodeItem', () => {
 
   it('does not suppress lost-conversation recovery for terminal Circuit history', () => {
     const node = makeNode({ status: 'suspended', cli_session_id: '' });
-    useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {
+    useAgentNodeStore.setState({ circuitOwnerships: {
       10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
     } });
     render(<NodeItem node={node} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
@@ -208,11 +208,11 @@ describe('NodeItem', () => {
   });
 
   it('uses the same waiting and failure presentations as the canvas header', () => {
-    useAgentNodeStore.setState({ autopilotStates: { 10: 'finishing' }, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot waiting' })).toBeTruthy();
 
-    useAgentNodeStore.setState({ autopilotStates: { 10: 'failed' }, circuitOwnerships: {} });
+    useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }} });
     rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
     expect(screen.getByRole('img', { name: 'Autopilot needs attention' })).toBeTruthy();
   });

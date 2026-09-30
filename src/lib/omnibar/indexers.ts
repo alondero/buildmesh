@@ -188,18 +188,6 @@ export const PROBE_DESTINATION_COMMANDS: Record<`probe-${ProbeTab}`, AppCommand>
     icon: 'properties',
     keywords: ['project', 'properties', 'build', 'run'],
   },
-  'probe-autopilot': {
-    // ADR-0030 "one name per destination" — the palette label carries the
-    // inspector header (`Autopilot`) under the established `Open <Header>`
-    // pattern (Open Project Settings, Open GitHub Issues, ...). The previous
-    // `Open Automation: Autopilot` form added a namespace the inspector
-    // header did not share, breaking the palette ↔ header parity rule.
-    id: 'probe-autopilot',
-    label: 'Open Autopilot',
-    subtitle: 'Inspect retained legacy settings',
-    icon: 'autopilot',
-    keywords: ['automation', 'policies', 'loops', 'issue-driven'],
-  },
   'probe-circuits': {
     // See probe-autopilot above — the `Automation:` prefix was a one-off
     // namespace that did not appear in the inspector header, so the palette

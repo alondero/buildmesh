@@ -22,7 +22,6 @@ import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { SignalHealthBadge } from '../shared/SignalHealthBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
-import type { AutopilotRunState } from '../../types/generated/AutopilotRunStateKind';
 import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { RegenerateProviderMenu } from '../Providers/RegenerateProviderMenu';
@@ -33,8 +32,8 @@ import { openInFileManager } from '../../lib/tauri';
 import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
-import { getAutopilotNodePresentation, getAutopilotRunDetails, hasActiveAutopilotOwnership, type AutopilotIndicatorTone, type AutopilotOutcome } from '../../lib/autopilotNodePresentation';
-import { AutopilotIndicatorGlyph, AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { getCircuitNodePresentation, hasActiveCircuitOwnership, type CircuitIndicatorTone, type CircuitOutcome } from '../../lib/circuitNodePresentation';
+import { CircuitIndicatorGlyph, CircuitNodeIndicatorCell } from '../shared/CircuitNodeIndicator';
 import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
 import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
@@ -48,11 +47,11 @@ interface GridNodeHeaderProps {
   titleNodeId?: number;
   activity?: ActivityStatus;
   /// Card-level attention outcome covering every member that needs a human
-  /// (aggregated by `resolveAutopilotOutcome`, which describes the focused
+  /// (aggregated by `resolveCircuitOutcome`, which describes the focused
   /// session and exposes the rest for cycling). Null/absent renders no chip.
   /// Replaces the old bare "N needs attention" count, which named neither the
   /// outcome nor the action required.
-  attentionOutcome?: AutopilotOutcome | null;
+  attentionOutcome?: CircuitOutcome | null;
   /// Focus the next attention session; the card owns cycling through every
   /// member the chip aggregates.
   onReveal?: () => void;
@@ -63,22 +62,16 @@ interface GridNodeHeaderProps {
   dragHandleProps?: Record<string, unknown>;
 }
 
-const AUTOPILOT_PILL_CLASSES: Record<AutopilotIndicatorTone, string> = {
+const AUTOPILOT_PILL_CLASSES: Record<CircuitIndicatorTone, string> = {
   automation: 'bg-accent-violet/15 text-accent-violet ring-accent-violet/40',
   warning: 'bg-accent-amber/15 text-accent-amber ring-accent-amber/40',
   success: 'bg-accent-green/10 text-accent-green ring-accent-green/30',
   error: 'bg-status-error-bg text-status-error ring-status-error/40',
 };
 
-function getAutopilotPillDetails(node: AgentNode, state: AutopilotRunState) {
-  const presentation = getAutopilotNodePresentation(node, state);
-  const copy = getAutopilotRunDetails(state);
-  return { ...copy, className: AUTOPILOT_PILL_CLASSES[presentation?.tone ?? 'automation'] };
-}
-
 function getCircuitPillDetails(node: AgentNode, ownership: CircuitAgentOwnership) {
-  const presentation = getAutopilotNodePresentation(node, undefined, ownership);
-  const tone: AutopilotIndicatorTone = presentation?.tone
+  const presentation = getCircuitNodePresentation(node, ownership);
+  const tone: CircuitIndicatorTone = presentation?.tone
     ?? (ownership.state === 'cancelled' ? 'warning' : 'error');
   const stateLabel = ownership.state.replace(/_/g, ' ');
   return {
@@ -104,7 +97,6 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const deleteAgentNode = useAgentNodeStore(s => s.deleteAgentNode);
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
-  const autopilotState = useAgentNodeStore(s => s.autopilotStates[nodeId]);
   const circuitOwnership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
   const meshesById = useMeshStore(s => s.meshesById);
   const isSingleMode = useUIStore(s => s.viewMode === 'single');
@@ -124,9 +116,8 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const mesh = meshesById.get(titleNode.mesh_id);
   const meshColor = getMeshColor(titleNode.mesh_id, mesh?.color);
   const canResume = canResumeSuspendedNode(node);
-  const lostConversation = hasLostConversation(node, hasActiveAutopilotOwnership(autopilotState, circuitOwnership));
-  const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
-  const autopilotPill = autopilotState ? getAutopilotPillDetails(node, autopilotState) : null;
+  const lostConversation = hasLostConversation(node, hasActiveCircuitOwnership(circuitOwnership));
+  const autopilotPresentation = getCircuitNodePresentation(node, circuitOwnership);
   const circuitPill = circuitOwnership ? getCircuitPillDetails(node, circuitOwnership) : null;
   const signalUnavailable = isSignalHealthProblem(node.signal_health);
   // The dot's tooltip is the only place an unproven signal can surface, since
@@ -185,7 +176,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         <span role="status" aria-label={statusDotLabel}
           title={statusDotTitle}
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getNodeStatusConfig(titleNode).bgColor}`} />
-        <AutopilotNodeIndicatorCell presentation={autopilotPresentation} action={circuitRunAction} />
+        <CircuitNodeIndicatorCell presentation={autopilotPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
           title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">
@@ -201,7 +192,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         title={attentionOutcome.detail}
         data-testid="autopilot-outcome-chip" data-outcome={attentionOutcome.kind}
         className={`flex h-7 shrink-0 items-center gap-1 rounded-full px-1.5 text-2xs font-medium ring-1 ${AUTOPILOT_PILL_CLASSES[attentionOutcome.tone]}`}>
-        <AutopilotIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
+        <CircuitIndicatorGlyph phase={attentionOutcome.phase} tone={attentionOutcome.tone} className="h-3 w-3 shrink-0" />
         {width >= HEADER_TIER_BREAKPOINTS.attentionLabel && <span className="truncate">{attentionOutcome.label}</span>}
         {outcomeCount > 1 && <span aria-hidden="true" className="tabular-nums">{outcomeCount}</span>}
       </button>}
@@ -224,8 +215,6 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
             <div className="truncate font-medium text-text-primary" title={node.name}>{node.name}</div>
             <div className="mt-1 text-text-muted">{mesh?.name} · #{node.id} · {node.provider}</div>
             <div className="truncate text-text-muted" title={gitPath ?? undefined}>{node.use_worktree ? 'Worktree' : 'Repository root'} · {node.branch}</div>
-            {!circuitOwnership && autopilotPill && <div data-testid="autopilot-pill" title={autopilotPill.title}
-              className={`mt-1 inline-flex rounded-sm px-1.5 py-0.5 text-2xs ring-1 ${autopilotPill.className}`}>{autopilotPill.label}</div>}
             {summary && <div data-testid="git-summary-details" className="mt-1 text-text-muted">
               <span>{summary.total} changed files · </span>
               <span className={summary.added ? 'text-accent-green' : 'text-text-muted'}>+{summary.added}</span>{' '}

@@ -3,10 +3,10 @@
 //! by code-mode calls, so it cannot establish ownership coverage.
 
 use super::{CircuitEvent, CircuitNodeKind, RunView, StepView};
-use crate::autopilot::circuit::observation::{
+use crate::circuit::observation::{
     CircuitObservation, ObservationIdentity, ObservedWorkFact,
 };
-use crate::autopilot::circuit::stepper::ObservationInputFence;
+use crate::circuit::stepper::ObservationInputFence;
 
 pub(super) fn observe(
     view: &RunView,
@@ -66,7 +66,7 @@ pub(super) fn observe(
         snapshot.completion.final_report.clone(),
     );
     if let Some(evidence) = view.context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-        .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok()) {
+        .and_then(|json| serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json).ok()) {
         append_foreground_reconciliation(&mut event, &evidence, chrono::Utc::now().timestamp_millis());
     }
     if let CircuitEvent::ObservationBatch { input_guard: Some(guard), .. } = &mut event {
@@ -76,7 +76,7 @@ pub(super) fn observe(
 }
 
 fn recheck_unavailable(view: &RunView, step: &StepView, reason: &str) -> Option<CircuitEvent> {
-    (step.status == crate::autopilot::circuit::stepper::StepStatus::Running
+    (step.status == crate::circuit::stepper::StepStatus::Running
         && view.context.get(&format!("node.{}.recheck_only", step.node_id)) == Some("1"))
     .then(|| CircuitEvent::EffectUncertain {
         node_id: step.node_id.clone(),
@@ -107,7 +107,7 @@ pub(super) fn freshness_rejection_recheck(
         && view.context.get(&format!("node.{}.recheck_only", expected.step_id)) == Some("1")
         && expected.run_id == view.run_id
         && expected.attempt == step.attempt
-        && step.status == crate::autopilot::circuit::stepper::StepStatus::Running
+        && step.status == crate::circuit::stepper::StepStatus::Running
         && step
             .agent_node_id
             .or_else(|| view.resolve_target_agent(&expected.step_id))
@@ -127,10 +127,10 @@ pub(super) fn freshness_rejection_recheck(
 
 fn append_foreground_reconciliation(
     event: &mut CircuitEvent,
-    evidence: &crate::autopilot::circuit::observation::WorkEvidence,
+    evidence: &crate::circuit::observation::WorkEvidence,
     observed_at_ms: i64,
 ) {
-    use crate::autopilot::circuit::observation::EvidenceConflictKind;
+    use crate::circuit::observation::EvidenceConflictKind;
     let CircuitEvent::ObservationBatch { expected, observations, input_guard: Some(_), stale: false, .. } = event else { return; };
     // Only this adapter's validated exact-session pull can issue this fact.
     // Resolving foreground uncertainty never supplies owned-work coverage.
@@ -204,7 +204,7 @@ fn normalize(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autopilot::circuit::{
+    use crate::circuit::{
         context::CircuitContext,
         model::CircuitGraph,
         stepper::{advance, RunState, StepStatus},
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn codex_recheck_resolves_only_the_exact_foreground_conflict_and_retains_ownership_limit() {
-        use crate::autopilot::circuit::observation::{WorkEvidence, ObservationDisposition};
+        use crate::circuit::observation::{WorkEvidence, ObservationDisposition};
         let identity = ObservationIdentity { run_id: 42, step_id: "spawn".into(), attempt: 1, agent_node_id: 9,
             session_incarnation: Some("1000".into()), session_id: Some("session".into()), turn_id: Some("turn".into()), report_revision: None };
         let mut evidence = WorkEvidence::default();
@@ -298,7 +298,7 @@ mod tests {
             .observations
             .iter()
             .all(|record| record.disposition
-                == crate::autopilot::circuit::observation::ObservationDisposition::Duplicate));
+                == crate::circuit::observation::ObservationDisposition::Duplicate));
         // A recheck restores this attempt and retains observation deduplication.
         run.steps[0].status = StepStatus::Running;
         run.context.set("node.spawn.recheck_only", "1");
@@ -310,7 +310,7 @@ mod tests {
             &mut run,
             &CircuitEvent::TurnClassified { binding: None,
                 node_id: "spawn".into(),
-                classification: Some(crate::autopilot::evaluator::Classification::Completed),
+                classification: Some(crate::circuit::evaluator::Classification::Completed),
                 output: Some("Completed".into()),
             },
         );
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn codex_recheck_without_current_completion_returns_to_unverified_same_attempt() {
-        use crate::autopilot::circuit::{
+        use crate::circuit::{
             model::CircuitGraph,
             stepper::{advance, RunState, StepStatus, StepView},
         };

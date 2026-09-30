@@ -3,7 +3,7 @@
  * (issue #1469 — "add contract coverage for every built-in blueprint").
  *
  * The Rust contract test
- * (`src-tauri/src/autopilot/circuit/blueprint_contract.rs::tests::built_in_catalog_covers_every_blueprint_kind`)
+ * (`src-tauri/src/circuit/blueprint_contract.rs::tests::built_in_catalog_covers_every_blueprint_kind`)
  * is the drift gate on the backend: adding a new `CircuitBlueprintKind`
  * variant without a fixture fails the suite there. This test mirrors
  * that discipline on the TS side: the Probe UI's blueprint selector

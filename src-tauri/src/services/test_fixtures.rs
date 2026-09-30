@@ -4,8 +4,8 @@
 //! assembly belongs here so it can use the production persistence seams while
 //! keeping test setup out of command adapters.
 
-use crate::autopilot::circuit::context::CircuitContext;
-use crate::autopilot::circuit::model::StepOutcome;
+use crate::circuit::context::CircuitContext;
+use crate::circuit::model::StepOutcome;
 use crate::db::CircuitStepOp;
 use crate::models::{EnvType, SessionStatus};
 use serde_json::Value;
@@ -122,7 +122,7 @@ fn create_review_activity_pair(
         }
         ReviewFixtureKind::IssueDriven => {
             let graph =
-                crate::autopilot::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+                crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
                     "ready-for-agent",
                 );
             let circuit = crate::db::create_autopilot_circuit(

@@ -36,7 +36,7 @@ export function toolTileId(tab: ProbeTab): string {
 
 const CODE_TABS = ['files', 'review', 'worktrees', 'properties'] as const;
 const GITHUB_TABS = ['issues', 'pulls'] as const;
-const AUTOMATE_TABS = ['autopilot', 'circuits'] as const;
+const AUTOMATE_TABS = ['circuits'] as const;
 const REMEMBER_TABS = ['sessions', 'scratchpad'] as const;
 const APP_TABS = ['usage'] as const;
 

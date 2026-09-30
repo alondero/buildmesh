@@ -28,7 +28,6 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 // it adds `env`, `source_issue`, and the `archived` status the hand-written
 // interface omitted.
 import type { AgentNode } from '../types/generated/AgentNode';
-import type { AutopilotRunState } from '../types/generated/AutopilotRunStateKind';
 import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
 import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
@@ -299,11 +298,6 @@ interface AgentNodeState {
   //                 by the shallow reconciliation in `fetchAgentNodes`.
   nodesById: Record<number, AgentNode>;
   nodeIds: number[];
-  // Autopilot pipeline state per piloted node id ('implementing' /
-  // 'finishing' / 'completed' / 'failed' / 'merged'). Absent key = not an
-  // autopilot node. Drives the header's Autopilot pill; refreshed with the
-  // node list and nudged by the `autopilot-*` lifecycle events.
-  autopilotStates: Record<number, AutopilotRunState>;
   // Circuit ownership comes from the run-step satellite ledger. Every Agent
   // Node spawned by one run resolves to the same run id shown in its header.
   circuitOwnerships: Record<number, CircuitAgentOwnership>;
@@ -440,7 +434,6 @@ interface AgentNodeState {
   // one-liner that the store can also expose to other callers if a
   // future refactor needs the same seam.
   patchAgentNode: (id: number, patch: Partial<AgentNode>) => void;
-  patchAutopilotState: (id: number, state: AutopilotRunState) => void;
   patchCircuitOwnershipState: (runId: number, state: string) => void;
   /// Re-read just the Circuit ownership ledger, without the full
   /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
@@ -540,9 +533,8 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     try {
       // Satellite reads fail independently. A transient failure preserves
       // the last known satellite state instead of clearing a live path.
-      const [agentNodes, autopilotRuns, circuitOwnerships, semanticTurns] = await Promise.all([
+      const [agentNodes, circuitOwnerships, semanticTurns] = await Promise.all([
         api.listAgentNodes(),
-        api.listAutopilotRuns().catch(() => null),
         api.listCircuitAgentOwnerships().catch(() => null),
         api.listSemanticTurns().catch(() => null),
       ]);
@@ -552,9 +544,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         void fetchAgentNodes();
         return;
       }
-      const autopilotStates = !Array.isArray(autopilotRuns)
-        ? get().autopilotStates
-        : Object.fromEntries(autopilotRuns.map((r) => [r.node_id, r.state]));
       // Issue #1384 — shallow reconciliation. For each incoming node, check
       // against the existing entry under the same id; if all reconciled
       // fields match, keep the old object reference. The new `nodesById`
@@ -612,7 +601,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       set({
         nodesById: newById,
         nodeIds: newIds,
-        autopilotStates,
         circuitOwnerships: reconciledOwnerships,
         semanticTurns: !Array.isArray(semanticTurns)
           ? get().semanticTurns
@@ -675,7 +663,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   return {
   nodesById: {},
   nodeIds: [],
-  autopilotStates: {},
   circuitOwnerships: {},
   semanticTurns: {},
   activeNodeId: null,
@@ -717,9 +704,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         nodesById: { ...state.nodesById, [id]: { ...current, ...patch } },
       };
     });
-  },
-  patchAutopilotState: (id, state) => {
-    set((s) => ({ autopilotStates: { ...s.autopilotStates, [id]: state } }));
   },
   patchCircuitOwnershipState: (runId, state) => {
     // Any recognised run-state event is newer than an in-flight satellite
@@ -763,7 +747,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           refreshIfStale: get().refreshIfStale,
           setActiveNode: get().setActiveNode,
           patchAgentNode: get().patchAgentNode,
-          patchAutopilotState: get().patchAutopilotState,
           patchCircuitOwnershipState: get().patchCircuitOwnershipState,
           refreshCircuitOwnerships: get().refreshCircuitOwnerships,
           setSemanticTurn: get().setSemanticTurn,

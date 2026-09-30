@@ -231,7 +231,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
 
     expect(screen.getByTestId('probe-rail-all-tools').getAttribute('aria-expanded')).toBe('true');
-    expect(screen.getAllByRole('menuitemradio')).toHaveLength(11);
+    expect(screen.getAllByRole('menuitemradio')).toHaveLength(10);
     expect(screen.getByTestId('probe-tool-menu-files').getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('Code')).toBeTruthy();
     expect(screen.getByText('App-wide')).toBeTruthy();

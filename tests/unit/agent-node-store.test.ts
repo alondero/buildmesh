@@ -14,8 +14,8 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
-import { getAutopilotNodePresentation } from '../../src/lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../../src/components/shared/AutopilotNodeIndicator';
+import { getCircuitNodePresentation } from '../../src/lib/circuitNodePresentation';
+import { CircuitNodeIndicatorCell } from '../../src/components/shared/CircuitNodeIndicator';
 
 // Issue #647: `agentNodeStore.deleteAgentNode` disposes the xterm terminal
 // BEFORE the `delete_agent_node` IPC commits. On failure the restored row
@@ -67,12 +67,12 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   };
 }
 
-function StoreBackedAutopilotIndicator({ nodeId }: { nodeId: number }) {
+function StoreBackedCircuitIndicator({ nodeId }: { nodeId: number }) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
   return node
-    ? createElement(AutopilotNodeIndicatorCell, {
-      presentation: getAutopilotNodePresentation(node, undefined, ownership),
+    ? createElement(CircuitNodeIndicatorCell, {
+      presentation: getCircuitNodePresentation(node, ownership),
     })
     : null;
 }
@@ -106,7 +106,7 @@ describe('useAgentNodeStore', () => {
       nodesById: {},
       nodeIds: [],
       activeNodeId: null,
-      autopilotStates: {},
+      circuitOwnerships: {},
       circuitOwnerships: {},
       loading: false,
       error: null,
@@ -241,7 +241,6 @@ describe('useAgentNodeStore', () => {
       const ownership = { node_id: 12, run_id: 4, circuit_id: 2, circuit_name: 'Review', state: 'running', parent_node_id: null };
       const semanticTurn = { node_id: 12, kind: 'turn_finished' as const, description: 'ready for review' };
       useAgentNodeStore.setState({
-        autopilotStates: { 12: 'implementing' },
         circuitOwnerships: { 12: ownership },
         semanticTurns: { 12: semanticTurn },
       });
@@ -252,7 +251,6 @@ describe('useAgentNodeStore', () => {
 
       await useAgentNodeStore.getState().fetchAgentNodes();
 
-      expect(useAgentNodeStore.getState().autopilotStates[12]).toBe('implementing');
       expect(useAgentNodeStore.getState().circuitOwnerships[12]).toEqual(ownership);
       expect(useAgentNodeStore.getState().semanticTurns[12]).toEqual(semanticTurn);
     });
@@ -561,14 +559,14 @@ describe('useAgentNodeStore', () => {
       });
       const circuitStates = ['running', 'paused', 'running'] as const;
       const phases = [];
-      render(createElement(StoreBackedAutopilotIndicator, { nodeId: 11 }));
+      render(createElement(StoreBackedCircuitIndicator, { nodeId: 11 }));
       const visibleLabels = ['Autopilot active', 'Autopilot waiting', 'Autopilot active'];
       for (const [index, state] of circuitStates.entries()) {
         ledgerState = state;
         await mockEmit('circuit-run-updated', { run_id: 1, state });
         await waitFor(() => expect(screen.getByRole('img', { name: visibleLabels[index] })).toBeTruthy());
         const ownership = useAgentNodeStore.getState().circuitOwnerships[11];
-        phases.push(getAutopilotNodePresentation(circuitNode, undefined, ownership)?.phase);
+        phases.push(getCircuitNodePresentation(circuitNode, ownership)?.phase);
       }
       expect(phases).toEqual(['active', 'waiting', 'active']);
       expect(mockInvoke).toHaveBeenCalledWith('list_circuit_agent_ownerships');
@@ -595,49 +593,6 @@ describe('useAgentNodeStore', () => {
     // and the store must drop it from nodeIds/nodesById. Presence in the
     // cache must never guard that eviction — even with a seconds-fresh
     // snapshot, the closed node has to leave the grid.
-    it('evicts the archived node on autopilot-node-closed despite a fresh snapshot', async () => {
-      const node = makeNode({ id: 7, status: 'running' });
-      mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'list_agent_nodes') return Promise.resolve([node]);
-        return Promise.resolve([]);
-      });
-      // Stamp a fresh snapshot with the node present.
-      await useAgentNodeStore.getState().fetchAgentNodes();
-      expect(useAgentNodeStore.getState().nodeIds).toContain(7);
-
-      // The backend archived the row: snapshots from here on exclude it.
-      mockInvoke.mockImplementation((cmd: string) => {
-        if (cmd === 'list_agent_nodes') return Promise.resolve([]);
-        return Promise.resolve([]);
-      });
-      // Attach with the real store surface (self-contained: unlisten
-      // afterwards so no handler leaks into sibling tests).
-      const s = useAgentNodeStore.getState();
-      const unlisten = await attachAgentNodeListeners({
-        fetchAgentNodes: s.fetchAgentNodes,
-        refreshIfStale: s.refreshIfStale,
-        setActiveNode: s.setActiveNode,
-        patchAgentNode: s.patchAgentNode,
-        patchAutopilotState: s.patchAutopilotState,
-        patchCircuitOwnershipState: s.patchCircuitOwnershipState,
-        refreshCircuitOwnerships: s.refreshCircuitOwnerships,
-        setSemanticTurn: s.setSemanticTurn,
-        findAgentNode: s.findAgentNode,
-        removeAgentNode: s.removeAgentNode,
-      });
-      try {
-        await mockEmit('autopilot-node-closed', { node_id: 7, pr_number: 12 });
-
-        await waitFor(() => {
-          expect(useAgentNodeStore.getState().nodeIds).not.toContain(7);
-        });
-        expect(useAgentNodeStore.getState().nodesById[7]).toBeUndefined();
-        expect(useAgentNodeStore.getState().getAgentNodes()).toEqual([]);
-        expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
-      } finally {
-        unlisten();
-      }
-    });
   });
 
   // Regression: starting a review from a node's title bar creates the run and
@@ -668,8 +623,8 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().circuitOwnerships[11]).toEqual(ownership);
       // The indicator now resolves to a live "waiting" presentation for the
       // freshly-owned node — an immediate signal, not a silent gap.
-      expect(getAutopilotNodePresentation(
-        node, undefined, useAgentNodeStore.getState().circuitOwnerships[11],
+      expect(getCircuitNodePresentation(
+        node, useAgentNodeStore.getState().circuitOwnerships[11],
       )).toMatchObject({ phase: 'waiting', label: 'Autopilot waiting' });
       // Satellite read only — the node list is not refetched.
       expect(mockInvoke).not.toHaveBeenCalledWith('list_agent_nodes');

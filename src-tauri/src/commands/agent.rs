@@ -2,7 +2,7 @@
 //!
 //! After issue #1052 this module owns only the **spawn-orchestration** surface
 //! (`spawn_agent`, `spawn_issue_agent`, `create_issue_node`, `create_pr_node`,
-//! `spawn_handover_agent`, `auto_resume_agent_nodes`, `list_autopilot_runs`) +
+//! `spawn_handover_agent`, `auto_resume_agent_nodes`) +
 //! the helpers that wrap their inputs (`validate_pr_spawn_inputs`) + the matching wire types.
 //! The GitHub-issue / GitHub-PR prefill helpers (`format_issue_prefill`,
 //! `format_pr_prefill`) used to live here; both were consolidated into
@@ -614,30 +614,7 @@ pub fn create_issue_node(
     Ok(IssueNodeDraft { node, prefill })
 }
 
-/// One Autopilot-managed node's pipeline position, for the header pill.
-/// `state` is the typed `autopilot_runs.state` union
-/// (`implementing`/`finishing`/`completed`/`failed`/`merged`).
-#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
-#[ts(export, export_to = "AutopilotRunState.ts")]
-pub struct AutopilotRunStateRow {
-    #[ts(as = "i32")]
-    pub node_id: i64,
-    pub state: crate::db::AutopilotRunState,
-}
 
-/// Every live (non-archived) Autopilot run, so the frontend can badge
-/// piloted nodes. Fetched alongside the node list; kept fresh by the
-/// `autopilot-*` lifecycle events triggering a refetch.
-#[command]
-pub fn list_autopilot_runs() -> Result<Vec<AutopilotRunStateRow>, String> {
-    db::list_autopilot_run_states()
-        .map(|rows| {
-            rows.into_iter()
-                .map(|(node_id, state)| AutopilotRunStateRow { node_id, state })
-                .collect()
-        })
-        .map_err(|e| e.to_string())
-}
 
 // ---------------------------------------------------------------------------
 // Two-stage PR spawn (fast stage-1 + background stage-2) — issue #420

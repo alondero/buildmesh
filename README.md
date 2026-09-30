@@ -78,7 +78,7 @@ Inside:
 | `buildmesh.db` | SQLite database (meshes, Agent Nodes, settings). |
 | `logs\buildmesh.log` | Rotating Rust + frontend log, size-bounded and name-stable. The `/use`, `/verify`, and `scripts\tail-dev-log.ps1` helpers tail this exact file. |
 | `logs\panic.log` | External crash-watchdog dump (Windows only). |
-| `autopilot\finish.md` | Per-mesh autopilot wrap-up template. |
+| `circuits\finish.md` | Shared Circuit wrap-up template. |
 
 OAuth secrets for each provider are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory).
 

@@ -278,10 +278,9 @@ pub(super) async fn prepare_context(
     // shared mesh root cannot do. The ledger row is written before stage-2
     // starts, so this read is ordered correctly. The node row itself already
     // carries `use_worktree = true` (spawn override in `services::autopilot`).
-    let is_autopilot = db::get_autopilot_run(session_id).ok().flatten().is_some();
     let force_branched = matches!(worktree_policy, WorktreePolicy::ForceBranched);
-    let use_worktree = use_worktree || is_autopilot || force_branched;
-    let worktree_mode = if is_autopilot || force_branched {
+    let use_worktree = use_worktree || force_branched;
+    let worktree_mode = if force_branched {
         "branched"
     } else {
         worktree_mode

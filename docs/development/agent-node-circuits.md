@@ -195,7 +195,7 @@ still apply. This is report-based handoff, not verified lifecycle completion.
 Dispatch appends the contract to saved/custom prompts without changing their
 review scope. Existing historical reports are not rewritten or auto-approved.
 
-The implementation lives in `autopilot/circuit/node_review.rs`, the pure
+The implementation lives in `circuit/node_review.rs`, the pure
 stepper, and the existing Circuit worker. The built-in review graph is a
 per-Mesh preset row (`is_preset = 1`) reused by every invocation and excluded
 from user-authored blueprint lists; old duplicate preset rows are collapsed by

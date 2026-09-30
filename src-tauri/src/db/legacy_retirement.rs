@@ -66,6 +66,19 @@ fn complete_stop_locked(db: &mut Connection, node_id: i64) -> super::SqlResult<(
     tx.commit()
 }
 
+/// Compatibility fence: retired nodes without a session identity must not auto-start.
+pub(crate) fn has_history(node_id: i64) -> rusqlite::Result<bool> {
+    let conn = super::read_conn();
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id=?1)", [node_id], |row| row.get(0))
+}
+
+/// Remove retained legacy history only when its agent node is explicitly deleted.
+pub(crate) fn delete_history(node_id: i64) -> rusqlite::Result<()> {
+    let conn = super::write_conn();
+    conn.execute("DELETE FROM autopilot_runs WHERE node_id=?1", [node_id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

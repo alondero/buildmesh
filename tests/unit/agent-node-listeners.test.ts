@@ -46,7 +46,6 @@ function makeSurface(nodes: AgentNode[] = []): SpySurface {
     refreshIfStale: spy('refreshIfStale', async () => undefined),
     setActiveNode: spy('setActiveNode', () => {}),
     patchAgentNode: spy('patchAgentNode', () => {}),
-    patchAutopilotState: spy('patchAutopilotState', () => {}),
     patchCircuitOwnershipState: spy('patchCircuitOwnershipState', () => {}),
     refreshCircuitOwnerships: spy('refreshCircuitOwnerships', async () => undefined),
     setSemanticTurn: spy('setSemanticTurn', () => {}),
@@ -95,17 +94,13 @@ describe('attachAgentNodeListeners', () => {
       'node-activated',
       'node-spawn-completed',
       'node-spawn-failed',
-      'autopilot-finishing',
-      'autopilot-pr-created',
-      'autopilot-finish-failed',
-      'autopilot-node-closed',
       'circuit-run-updated',
     ]));
     // No `attention-needed` store listener: the backend emits
     // `agent-lifecycle` on every mark transition (issue #1364), so a
     // second listener would duplicate the state mutations.
     expect(eventNames).not.toContain('attention-needed');
-    expect(eventNames).toHaveLength(13);
+    expect(eventNames).toHaveLength(9);
   });
 
   it('returns a single unlisten handle that detaches every registered handler', async () => {
@@ -124,11 +119,11 @@ describe('attachAgentNodeListeners', () => {
 
     expect(typeof unlisten).toBe('function');
     // One unlisten per registered event, including Circuit ownership changes.
-    expect(mockListen).toHaveBeenCalledTimes(13);
+    expect(mockListen).toHaveBeenCalledTimes(9);
     expect(unlistenFns).toHaveLength(0);
 
     unlisten();
-    expect(unlistenFns).toHaveLength(13);
+    expect(unlistenFns).toHaveLength(9);
   });
 
   it('reconciles Circuit ownership for every live and terminal run transition', async () => {
@@ -424,69 +419,8 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('autopilot-finishing dispatches patchAutopilotState', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'autopilot-finishing') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
 
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
 
-    capturedHandler!({ payload: { node_id: 17 } });
-
-    expect(surface.__calls).toEqual([
-      { method: 'patchAutopilotState', args: [17, 'finishing'] },
-    ]);
-  });
-
-  it('autopilot-pr-created dispatches patchAutopilotState + findAgentNode (cache invalidation)', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'autopilot-pr-created') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface([
-      { id: 17, mesh_id: 1, name: 'n17', path: '/p/17', branch: 'main', env: 'windows', provider: 'anthropic', status: 'running', created_at: '', use_worktree: true, position: 0, is_pinned: false },
-    ]);
-    await attachAgentNodeListeners(surface);
-
-    capturedHandler!({ payload: { node_id: 17, pr_url: 'https://example/pr/1' } });
-
-    expect(surface.__calls.map(c => c.method)).toEqual([
-      'patchAutopilotState',
-      'findAgentNode',
-    ]);
-    expect(surface.__calls[0].args).toEqual([17, 'completed']);
-  });
-
-  it('autopilot-finish-failed dispatches patchAutopilotState with failed', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'autopilot-finish-failed') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
-
-    capturedHandler!({ payload: { node_id: 23 } });
-
-    expect(surface.__calls).toEqual([
-      { method: 'patchAutopilotState', args: [23, 'failed'] },
-    ]);
-  });
 
   it('node-created triggers refreshIfStale with the new id (issue #1751)', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
@@ -536,28 +470,6 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
-  it('autopilot-node-closed triggers fetchAgentNodes (no dispose, never scoped)', async () => {
-    const mockListen = listen as ReturnType<typeof vi.fn>;
-    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
-    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
-      if (eventName === 'autopilot-node-closed') {
-        capturedHandler = handler;
-      }
-      return Promise.resolve(() => {});
-    });
-
-    const surface = makeSurface();
-    await attachAgentNodeListeners(surface);
-
-    await capturedHandler!({ payload: { node_id: 7 } });
-
-    // Archive keeps the row/branch/scrollback; only refetch. The
-    // terminal-persistence rule says only delete disposes. This stays a
-    // full fetch on purpose (issue #1751 review): an archive is an
-    // eviction, and presence in the cache must never guard the fetch
-    // that purges it — a scoped skip would strand a zombie card.
-    expect(surface.__calls.map(c => c.method)).toEqual(['fetchAgentNodes']);
-  });
 
   it('node-spawn-failed dispatches patchAgentNode with status error', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;

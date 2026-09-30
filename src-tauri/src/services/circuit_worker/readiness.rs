@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::agent::process::InputUnavailable;
-use crate::autopilot::circuit::observation::{CircuitObservationBlocker as Blocker, ObservationIdentity};
-use crate::autopilot::circuit::stepper::{ClassificationBinding, ObservationInputFence};
+use crate::circuit::observation::{CircuitObservationBlocker as Blocker, ObservationIdentity};
+use crate::circuit::stepper::{ClassificationBinding, ObservationInputFence};
 use crate::services::transcript_reader::report_snapshot::{ReportReadError, ReportSnapshot};
 
 pub(crate) struct Candidate {

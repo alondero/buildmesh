@@ -222,7 +222,6 @@ export const PROBE_TAB_ICONS: Record<ProbeTab, ProbeIcon> = {
   usage: UsageIcon,
   worktrees: WorktreesIcon,
   properties: PropertiesIcon,
-  autopilot: AutopilotIcon,
   circuits: CircuitsIcon,
   issues: IssuesIcon,
   pulls: PullsIcon,

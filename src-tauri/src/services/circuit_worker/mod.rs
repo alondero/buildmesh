@@ -1,6 +1,6 @@
 //! The Autopilot Circuits worker (spec #1205 / walking skeleton #1206):
 //! the impure seam around the pure stepper
-//! (`autopilot::circuit::stepper`).
+//! (`circuit::stepper`).
 //!
 //! ## Shape: dedicated OS thread + hybrid wakeups
 //!
@@ -19,7 +19,7 @@
 //! For each active run the pass:
 //! 1. **Observes** live state (agent-node status, process liveness,
 //!    capacity counters) and turns it into pure [`CircuitEvent`]s;
-//! 2. **Steps** via [`advance`](autopilot::circuit::stepper::advance) —
+//! 2. **Steps** via [`advance`](circuit::stepper::advance) —
 //!    no DB, no I/O;
 //! 3. **Commits** the decided writes atomically through the Circuit
 //!    evidence transaction; local `SetNodeStatus` changes commit with their
@@ -48,12 +48,12 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
 
-use crate::autopilot::circuit::capacity;
-use crate::autopilot::circuit::context::CircuitContext;
-use crate::autopilot::circuit::model::{
+use crate::circuit::capacity;
+use crate::circuit::context::CircuitContext;
+use crate::circuit::model::{
     CircuitGraph, CircuitNodeKind, StepOutcome as GraphStepOutcome,
 };
-use crate::autopilot::circuit::stepper::{
+use crate::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod github;
@@ -293,7 +293,7 @@ static APPROVALS: Lazy<Mutex<Vec<(i64, String)>>> = Lazy::new(|| Mutex::new(Vec:
 /// on `PoisonError` permanently bricks the worker: the next pass would
 /// panic the spawned thread, `wake_circuit_worker()` would silently fail
 /// to wake anyone, and the entire circuit poller would stall. The recover
-/// shape matches `db::write_conn()` and `services::autopilot::lock_planner_set`.
+/// shape matches `db::write_conn()` and `services::circuit_worker::lock_circuit_worker_static`.
 fn lock_circuit_worker_static<T>(mutex: &'static Mutex<T>) -> std::sync::MutexGuard<'static, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -515,18 +515,17 @@ fn observe_capacity(active: &db::ActiveCircuitRun, global_pool: Option<u32>) -> 
     let global_free_slots = match global_pool {
         None => i64::MAX,
         Some(pool) => {
-            let legacy_total = db::count_active_autopilot_nodes_total();
             let circuit_total = db::count_active_circuit_agent_nodes_total();
             let retained_total = db::count_retained_circuit_agent_nodes_total();
-            match (legacy_total, circuit_total, retained_total) {
-                (Ok(legacy), Ok(circuits), Ok(retained)) => {
+            match (circuit_total, retained_total) {
+                (Ok(circuits), Ok(retained)) => {
                     capacity::global_agent_free_slots(
                         Some(pool),
-                        legacy.saturating_add(retained),
+                        retained,
                         circuits,
                     )
                 }
-                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                (Err(e), _) | (_, Err(e)) => {
                     tracing::warn!(
                         "circuits: global Autopilot pool count failed, failing closed: {}",
                         e
@@ -585,15 +584,13 @@ fn run_pass(app: &AppHandle) {
             }
         }
     }
-    let global_pool = crate::preferences::autopilot_pool_size();
+    let global_pool = crate::preferences::circuit_agent_pool_size();
     // Active circuit runs are represented by their lease. Terminal runs do
     // not hold a lease, but retained implementation PTYs still consume host
     // optional app-wide pool until their agent rows are archived/deleted;
     // include those non-leased agents in the global baseline.
     let retained_total = db::count_retained_circuit_agent_nodes_total().unwrap_or(i64::MAX);
-    let unleased_slots = db::count_active_autopilot_nodes_total()
-        .unwrap_or(i64::MAX)
-        .saturating_add(retained_total);
+    let unleased_slots = retained_total;
     let mut reserved_circuit_slots =
         db::count_reserved_circuit_agent_slots_total().unwrap_or(i64::MAX);
     for active in runs {
@@ -730,7 +727,7 @@ fn drive_run(
             // the next pass will retry the commit anyway.
             let _ = db::commit_circuit_advance(
                 active.run.id,
-                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
                 None,
                 &[op],
             );
@@ -747,7 +744,7 @@ fn drive_run(
             let op = corrupt_payload_step_op("__context__", &reason);
             let _ = db::commit_circuit_advance(
                 active.run.id,
-                Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
                 None,
                 &[op],
             );
@@ -775,7 +772,7 @@ fn drive_run(
     for step in &view.steps {
         let key = format!("node.{}.evidence.{}", step.node_id, step.attempt);
         let Some(mut evidence) = view.context.get(&key)
-            .and_then(|json| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(json).ok()) else { continue; };
+            .and_then(|json| serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json).ok()) else { continue; };
         if evidence.conflicts.iter().any(|conflict| conflict.status_projection.is_none())
             && db::circuit::evidence::restore_projection_conflicts(view.run_id, &step.node_id, step.attempt, &mut evidence)
                 .map_err(|error| error.to_string())? {
@@ -792,7 +789,7 @@ fn drive_run(
             db::commit_circuit_advance(active.run.id, Some("failed"), None, &[])
                 .map_err(|e| e.to_string())?;
             close_run_agents(&view);
-            crate::autopilot::evaluator::unregister(source);
+            crate::circuit::evaluator::unregister(source);
             let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
             return Ok(());
         }
@@ -840,7 +837,7 @@ fn drive_run(
                 )?;
                 close_run_agents(&view);
                 if let Some(source) = active.run.source_agent_node_id {
-                    crate::autopilot::evaluator::unregister(source);
+                    crate::circuit::evaluator::unregister(source);
                 }
                 let _ = app.emit(
                     "circuit-run-updated",
@@ -875,11 +872,11 @@ fn drive_run(
                     .effects
                     .iter()
                     .filter_map(|eff| match eff {
-                        crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id }
-                        | crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. }
-                        | crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
-                        | crate::autopilot::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
-                        | crate::autopilot::circuit::stepper::Effect::CallGithub { node_id, .. } => {
+                        crate::circuit::stepper::Effect::SpawnAgentNode { node_id }
+                        | crate::circuit::stepper::Effect::InjectPty { node_id, .. }
+                        | crate::circuit::stepper::Effect::ContinueAgentTurn { node_id, .. }
+                        | crate::circuit::stepper::Effect::CloseAgentNode { node_id, .. }
+                        | crate::circuit::stepper::Effect::CallGithub { node_id, .. } => {
                             Some(node_id.clone())
                         }
                         _ => None,
@@ -899,7 +896,7 @@ fn drive_run(
                     .collect::<Vec<_>>();
                 db::commit_circuit_advance(
                     active.run.id,
-                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
                     None,
                     &ops,
                 )
@@ -979,7 +976,7 @@ fn drive_run(
     }
     if view.state.is_terminal() {
         if let Some(source) = active.run.source_agent_node_id {
-            crate::autopilot::evaluator::unregister(source);
+            crate::circuit::evaluator::unregister(source);
         }
     }
     Ok(())
@@ -1018,7 +1015,7 @@ pub(super) fn persist_effect_outcome(
 /// Executes the follow-on effects a drained outcome collects.
 pub(super) type FollowOnExecutor<'a> = dyn FnMut(
     &mut RunView,
-    &[crate::autopilot::circuit::stepper::Effect],
+    &[crate::circuit::stepper::Effect],
 ) -> Result<Vec<CircuitEvent>, String> + 'a;
 
 /// Observes each committed outcome while draining.
@@ -1050,8 +1047,8 @@ pub(super) fn drain_effect_outcomes(
 enum TransitionPersistFailure {
     FreshnessRejected(String),
     AgentStatusEffectRejected {
-        expected: crate::autopilot::circuit::stepper::TransitionFence,
-        effects: Vec<crate::autopilot::circuit::stepper::Effect>,
+        expected: crate::circuit::stepper::TransitionFence,
+        effects: Vec<crate::circuit::stepper::Effect>,
         message: String,
     },
     Other(String),
@@ -1068,10 +1065,10 @@ impl TransitionPersistFailure {
 
 fn failed_effect_step_ops(
     view: &RunView,
-    effects: &[crate::autopilot::circuit::stepper::Effect],
+    effects: &[crate::circuit::stepper::Effect],
     message: &str,
 ) -> Vec<db::CircuitStepOp> {
-    use crate::autopilot::circuit::stepper::Effect;
+    use crate::circuit::stepper::Effect;
     let mut seen = HashSet::new();
     effects
         .iter()
@@ -1103,13 +1100,13 @@ fn failed_effect_step_ops(
 
 fn fail_rejected_agent_status_effects(
     view: &mut RunView,
-    expected: &crate::autopilot::circuit::stepper::TransitionFence,
-    effects: &[crate::autopilot::circuit::stepper::Effect],
+    expected: &crate::circuit::stepper::TransitionFence,
+    effects: &[crate::circuit::stepper::Effect],
     message: &str,
     mut persist: impl FnMut(
         &str,
         &[db::CircuitStepOp],
-        &crate::autopilot::circuit::stepper::TransitionFence,
+        &crate::circuit::stepper::TransitionFence,
     ) -> Result<(), String>,
 ) -> Result<(), String> {
     let steps = failed_effect_step_ops(view, effects, message);
@@ -1122,7 +1119,7 @@ fn fail_rejected_agent_status_effects(
     for op in steps {
         if let Some(step) = view.step_mut(&op.node_id) {
             step.status = StepStatus::Failed;
-            step.outcome = Some(crate::autopilot::circuit::model::StepOutcome::Failed);
+            step.outcome = Some(crate::circuit::model::StepOutcome::Failed);
             step.error = Some(message.to_string());
         }
     }
@@ -1131,12 +1128,12 @@ fn fail_rejected_agent_status_effects(
 
 fn effect_persistence_writes(
     view: &RunView,
-    effects: &[crate::autopilot::circuit::stepper::Effect],
+    effects: &[crate::circuit::stepper::Effect],
 ) -> Result<(
     Vec<db::circuit::evidence::EffectIntent>,
     Vec<db::circuit::evidence::AgentStatusEffect>,
 ), TransitionPersistFailure> {
-    use crate::autopilot::circuit::stepper::Effect;
+    use crate::circuit::stepper::Effect;
 
     let mut intents = Vec::new();
     let mut agent_status_effects = Vec::new();
@@ -1238,7 +1235,7 @@ fn persist_transition_checked_with(
             .iter()
             .filter_map(|write| {
                 let key = format!("node.{}.effect_reconciled_attempt", write.node_id);
-                (write.status == crate::autopilot::circuit::stepper::StepStatus::Completed
+                (write.status == crate::circuit::stepper::StepStatus::Completed
                     && view.context.get(&key).and_then(|attempt| attempt.parse::<i32>().ok())
                         == Some(write.attempt))
                 .then(|| db::circuit::evidence::ReconciledEffect {
@@ -1381,7 +1378,7 @@ fn close_run_agents(view: &RunView) {
                 error
             ),
         }
-        crate::autopilot::evaluator::unregister(agent_node_id);
+        crate::circuit::evaluator::unregister(agent_node_id);
     }
 }
 
@@ -1458,7 +1455,7 @@ where
     let result: Result<(), String> = (|| {
         kill()?;
         let runs = archive().map_err(|e| e.to_string())?;
-        crate::autopilot::evaluator::unregister(node_id);
+        crate::circuit::evaluator::unregister(node_id);
         for (run_id, state) in runs { on_archived(run_id, state); }
         Ok(())
     })();
@@ -1531,7 +1528,7 @@ fn observed_agent_for_step(
         return source_agent_id;
     }
     step.agent_node_id.or_else(|| {
-        crate::autopilot::circuit::stepper::resolve_target_agent(graph, steps, &step.node_id)
+        crate::circuit::stepper::resolve_target_agent(graph, steps, &step.node_id)
     })
 }
 
@@ -1539,10 +1536,10 @@ fn restore_run_evaluators(view: &RunView) {
     // Spawn steps complete at the first yield, but keep owning their agent
     // throughout finish/review. Restoring only Running steps loses those tails.
     for id in view.steps.iter().filter_map(|step| step.agent_node_id) {
-        crate::autopilot::evaluator::register_circuit(id);
+        crate::circuit::evaluator::register_circuit(id);
     }
     if let Some(source) = view.context.source_agent_id() {
-        crate::autopilot::evaluator::register_circuit(source);
+        crate::circuit::evaluator::register_circuit(source);
     }
 }
 
@@ -1630,8 +1627,8 @@ fn recover_run_observers_with(
         // Identity is needed to observe a yield for transcript-driven
         // harnesses. Recovery cannot itself depend on an observed yield.
         let key = "circuit:recover-observer";
-        let Some(probe) = crate::autopilot::evaluator::begin_circuit_wait_probe(id, key) else { continue; };
-        crate::autopilot::evaluator::note_circuit_probe(id, key, probe);
+        let Some(probe) = crate::circuit::evaluator::begin_circuit_wait_probe(id, key) else { continue; };
+        crate::circuit::evaluator::note_circuit_probe(id, key, probe);
         if let Err(error) = recover(id) {
             tracing::warn!("circuits: observer recovery for agent {id}: {error}");
         }
@@ -1641,11 +1638,11 @@ fn recover_run_observers_with(
 /// Observe the world and turn it into pure events for this run.
 fn observe_agent_projection(
     view: &RunView,
-    step: &crate::autopilot::circuit::stepper::StepView,
+    step: &crate::circuit::stepper::StepView,
     agent: &crate::models::AgentNode,
     events: &mut Vec<CircuitEvent>,
 ) {
-    use crate::autopilot::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
+    use crate::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
     let Ok(snapshot) = db::agent_node::agent_status_observation(agent.id) else { return; };
     let identity = ObservationIdentity {
         run_id: view.run_id, step_id: step.node_id.clone(), attempt: step.attempt,
@@ -1665,7 +1662,7 @@ fn observe_agent_projection(
         authoritative: false, fact,
     };
     let previous = view.context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-        .and_then(|s| serde_json::from_str::<crate::autopilot::circuit::observation::WorkEvidence>(s).ok())
+        .and_then(|s| serde_json::from_str::<crate::circuit::observation::WorkEvidence>(s).ok())
         .and_then(|e| e.latest);
     if previous.as_ref().is_none_or(|old| old.source != observation.source || old.source_id != observation.source_id) {
         events.push(CircuitEvent::Observed { expected: identity, observation: Box::new(observation) });
@@ -1747,7 +1744,7 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
                     events.push(CircuitEvent::AgentLost { agent_node_id });
                 }
                 SessionStatus::Error => {
-                    let tail = crate::autopilot::evaluator::cleaned_turn_tail(agent_node_id);
+                    let tail = crate::circuit::evaluator::cleaned_turn_tail(agent_node_id);
                     events.push(CircuitEvent::AgentFinished {
                         agent_node_id,
                         success: false,
@@ -1867,7 +1864,7 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
     // the optional app-wide pool is the only external agent backstop.
     events.push(observe_capacity(
         active,
-        crate::preferences::autopilot_pool_size(),
+        crate::preferences::circuit_agent_pool_size(),
     ));
 
     observe_waits(view, &mut events);
@@ -1907,8 +1904,8 @@ fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
             ("Waiting for your approval. This gate does not expire while you are away.".to_string(), APPROVAL_WAIT_MS)
         } else if let Some(id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
             let probe = format!("run:{}:wait:{}:{}", view.run_id, step.node_id, step.attempt);
-            let Some(generation) = crate::autopilot::evaluator::begin_circuit_wait_probe(id, &probe) else { continue; };
-            crate::autopilot::evaluator::note_circuit_probe(id, &probe, generation);
+            let Some(generation) = crate::circuit::evaluator::begin_circuit_wait_probe(id, &probe) else { continue; };
+            crate::circuit::evaluator::note_circuit_probe(id, &probe, generation);
             let Ok(node) = db::get_agent_node_by_id(id) else { continue; };
             progress = crate::coordinator::enrichment::assistant_report(&node).map(|r| r.revision);
             // #1791: a busy agent is only provably running once it has produced
@@ -2026,7 +2023,7 @@ fn observe_gates(
                     if let Some((stamp, revision, input_stamp)) = continuation {
                         events.push(CircuitEvent::ContinuationObserved { node_id: step.node_id.clone(), attempt: step.attempt, stamp, revision, input_stamp });
                     }
-                    if matches!(classification, Some(crate::autopilot::evaluator::Classification::Blocked))
+                    if matches!(classification, Some(crate::circuit::evaluator::Classification::Blocked))
                     {
                         let issue = view
                             .context
@@ -2034,8 +2031,8 @@ fn observe_gates(
                             .and_then(|number| number.parse::<i64>().ok())
                             .unwrap_or(0);
                         let _ = app.emit(
-                            "autopilot-blocked",
-                            crate::autopilot::pipeline::AutopilotBlockedPayload {
+                            "circuit-agent-blocked",
+                            CircuitAgentBlockedPayload {
                                 node_id: agent_node_id,
                                 issue,
                             },
@@ -2064,10 +2061,10 @@ fn observe_gates(
 /// Classify a yielded agent's report once per gate attempt. A readable
 /// transcript also recovers turns produced before restart restored buffering.
 struct ClassifiedTurn {
-    observation_blocker: Option<crate::autopilot::circuit::observation::CircuitObservationBlocker>,
-    binding: Option<crate::autopilot::circuit::stepper::ClassificationBinding>,
+    observation_blocker: Option<crate::circuit::observation::CircuitObservationBlocker>,
+    binding: Option<crate::circuit::stepper::ClassificationBinding>,
     agent_node_id: i64,
-    classification: Option<crate::autopilot::evaluator::Classification>,
+    classification: Option<crate::circuit::evaluator::Classification>,
     output: String,
     continuation: Option<(String, String, String)>,
     /// The gate deliberately did not classify this report because the agent is
@@ -2080,7 +2077,7 @@ fn classify_step_turn(
     view: &RunView,
     node_id: &str,
 ) -> Option<ClassifiedTurn> {
-    use crate::autopilot::evaluator;
+    use crate::circuit::evaluator;
     let step = view.step(node_id)?;
     let agent_node_id = step.agent_node_id.or_else(|| view.resolve_target_agent(node_id))?;
     if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
@@ -2116,10 +2113,9 @@ fn classify_step_turn(
         .is_some_and(|previous| previous != binding.report_revision);
     if !changed_revision && !should_classify_report(view, node_id, status, &output, since_evaluation_ms) { return None; }
     let classify = |prompt: &str| {
-        let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
-            .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
-            .unwrap_or_else(|| "claude".into());
-        let backend = crate::session_naming::naming_backend_env(&provider).ok()?;
+        let preferences = crate::preferences::load().ok()?;
+        let provider = classifier_provider(&preferences);
+        let backend = crate::session_naming::naming_backend_env(provider).ok()?;
         evaluator::classify_with_prompt(agent_node_id, &backend, prompt)
     };
     let readiness = reviewer_readiness(view, node_id, status, &output, classify);
@@ -2173,9 +2169,9 @@ fn classify_gate_report(
     node_id: &str,
     status: SessionStatus,
     output: &str,
-    classify: impl FnOnce(&str) -> Option<crate::autopilot::evaluator::Classification>,
-) -> Option<crate::autopilot::evaluator::Classification> {
-    use crate::autopilot::evaluator;
+    classify: impl FnOnce(&str) -> Option<crate::circuit::evaluator::Classification>,
+) -> Option<crate::circuit::evaluator::Classification> {
+    use crate::circuit::evaluator;
     if output.trim().is_empty()
         || !matches!(status, SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput)
     {
@@ -2285,9 +2281,9 @@ fn reviewer_readiness(
     node_id: &str,
     status: SessionStatus,
     output: &str,
-    readiness: impl Fn(&str) -> Option<crate::autopilot::evaluator::Classification>,
+    readiness: impl Fn(&str) -> Option<crate::circuit::evaluator::Classification>,
 ) -> ReviewerReadiness {
-    use crate::autopilot::evaluator::{reviewer_turn_prompt, Classification};
+    use crate::circuit::evaluator::{reviewer_turn_prompt, Classification};
     if !(is_reviewer_verdict_gate(view, node_id) || spawn_hands_off_report(view, node_id)) || status != SessionStatus::AwaitingInput {
         return ReviewerReadiness::Reportable;
     }
@@ -2343,20 +2339,20 @@ fn select_turn_report(
 /// records a live turn boundary after the process is attached.
 pub(super) fn prepare_turn_boundaries(
     view: &mut RunView,
-    effects: &[crate::autopilot::circuit::stepper::Effect],
+    effects: &[crate::circuit::stepper::Effect],
 ) -> Result<bool, String> {
     let mut seen = HashSet::new();
     let mut changed = false;
     for effect in effects {
         let agent_node_id = match effect {
-            crate::autopilot::circuit::stepper::Effect::InjectPty { node_id, .. } => {
+            crate::circuit::stepper::Effect::InjectPty { node_id, .. } => {
                 view.resolve_target_agent(node_id)
                     .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id))
             }
-            crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { target_agent_id, .. } => {
+            crate::circuit::stepper::Effect::ContinueAgentTurn { target_agent_id, .. } => {
                 crate::agent::process::PROCESS_REGISTRY.is_alive(target_agent_id).then_some(*target_agent_id)
             }
-            crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } => view
+            crate::circuit::stepper::Effect::SpawnAgentNode { node_id } => view
                 .step(node_id)
                 .and_then(|step| step.agent_node_id)
                 .filter(|id| crate::agent::process::PROCESS_REGISTRY.is_alive(id)),
@@ -2370,7 +2366,7 @@ pub(super) fn prepare_turn_boundaries(
         }
         let agent = db::get_agent_node_by_id(agent_node_id).map_err(|error| error.to_string())?;
         let continuation_node = effects.iter().find_map(|effect| match effect {
-            crate::autopilot::circuit::stepper::Effect::ContinueAgentTurn { node_id, target_agent_id, .. }
+            crate::circuit::stepper::Effect::ContinueAgentTurn { node_id, target_agent_id, .. }
                 if *target_agent_id == agent_node_id => Some(node_id),
             _ => None,
         });
@@ -2542,12 +2538,12 @@ pub(super) fn execute_call_github_effect(
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
     node_id: &str,
-    action: crate::autopilot::circuit::model::GithubActionKind,
+    action: crate::circuit::model::GithubActionKind,
     label: Option<&str>,
     comment: Option<&str>,
     github_client: Option<&crate::services::github::GitHubClient>,
 ) -> Result<Vec<CircuitEvent>, String> {
-    use crate::autopilot::circuit::model::GithubActionKind;
+    use crate::circuit::model::GithubActionKind;
     let attempt = view.step(node_id).map_or(1, |s| s.attempt);
     if view.context.get(&format!("node.{node_id}.recheck_only")) == Some("1") {
         if action == GithubActionKind::OpenPr {
@@ -2592,10 +2588,10 @@ pub(super) fn gated_dispatch_call_github(
     completing_transition: bool,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
-    effect: &crate::autopilot::circuit::stepper::Effect,
+    effect: &crate::circuit::stepper::Effect,
     github_client: Option<&crate::services::github::GitHubClient>,
 ) -> Result<Vec<CircuitEvent>, String> {
-    use crate::autopilot::circuit::stepper::Effect;
+    use crate::circuit::stepper::Effect;
     if batch.is_cancelled() {
         return Ok(Vec::new());
     }
@@ -2634,7 +2630,7 @@ pub(super) fn gated_dispatch_call_github(
 pub(super) fn run_github_effect_pass(
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
-    effect: &crate::autopilot::circuit::stepper::Effect,
+    effect: &crate::circuit::stepper::Effect,
     github_client: Option<&crate::services::github::GitHubClient>,
 ) -> Result<(Vec<CircuitEvent>, bool), String> {
     let batch = begin_circuit_effect_batch(active.run.id);
@@ -2658,9 +2654,9 @@ pub(super) fn execute_effects(
     app: &AppHandle,
     active: &db::ActiveCircuitRun,
     view: &mut RunView,
-    effects: &[crate::autopilot::circuit::stepper::Effect],
+    effects: &[crate::circuit::stepper::Effect],
 ) -> Result<Vec<CircuitEvent>, String> {
-    use crate::autopilot::circuit::stepper::Effect;
+    use crate::circuit::stepper::Effect;
     let mut outcome_events = Vec::new();
     let effect_batch = begin_circuit_effect_batch(active.run.id);
     let run_state = db::get_circuit_run(active.run.id)
@@ -2748,12 +2744,12 @@ pub(super) fn execute_effects(
                                 continue;
                             }
                         }
-                        crate::autopilot::evaluator::note_turn_start(target);
+                        crate::circuit::evaluator::note_turn_start(target);
                         let delivered = dispatch_prompt_and_acknowledge(
                             || {
                                 let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(target)
                                     .ok_or("Terminal input is already owned; prompt was not sent")?;
-                                crate::autopilot::pipeline::write_prompt_to_pty_guarded(
+                                crate::circuit::delivery::write_prompt_to_pty_guarded(
                                     &crate::agent::process::PROCESS_REGISTRY, target, &prompt, app, Some(&input),
                                 )
                             },
@@ -2809,7 +2805,7 @@ pub(super) fn execute_effects(
                 }
                 let expected = view.context.get(&format!("node.{node_id}.continuation.input"))
                     .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
-                match crate::autopilot::pipeline::write_prompt_to_pty_guarded(&crate::agent::process::PROCESS_REGISTRY, *target_agent_id, prompt, app, Some(expected)) {
+                match crate::circuit::delivery::write_prompt_to_pty_guarded(&crate::agent::process::PROCESS_REGISTRY, *target_agent_id, prompt, app, Some(expected)) {
                     Ok(true) => {
                         let _ = db::update_agent_node_status(*target_agent_id, SessionStatus::Running);
                         outcome_events.push(CircuitEvent::ContinuationDelivered {
@@ -2900,8 +2896,8 @@ pub(super) fn execute_effects(
 /// execution and check an in-memory cancellation token before each effect;
 /// terminal transitions retain only their synchronous cleanup and notification
 /// effects, while InjectPty is never allowed after completion.
-fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::autopilot::circuit::stepper::Effect) -> bool {
-    use crate::autopilot::circuit::stepper::Effect;
+fn effect_allowed_in_state(state: &str, completing_transition: bool, effect: &crate::circuit::stepper::Effect) -> bool {
+    use crate::circuit::stepper::Effect;
     RunState::is_live_db_str(state)
         // Synchronous terminal actions are emitted by the same transition
         // that completes the run, and must survive its commit-before-effects.
@@ -2993,7 +2989,7 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 tracing::warn!("circuits: run {} {}", active.run.id, reason);
                 let _ = db::commit_circuit_advance(
                     active.run.id,
-                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
                     None,
                     &[corrupt_payload_step_op("__graph__", &reason)],
                 );
@@ -3015,7 +3011,7 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 tracing::warn!("circuits: run {} {}", active.run.id, reason);
                 let _ = db::commit_circuit_advance(
                     active.run.id,
-                    Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+                    Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
                     None,
                     &[corrupt_payload_step_op("__context__", &reason)],
                 );
@@ -3139,7 +3135,7 @@ fn fail_run_step(
 ) -> Result<(), String> {
     db::commit_circuit_advance(
         *run_id,
-        Some(crate::autopilot::circuit::stepper::RunState::Failed.as_db_str()),
+        Some(crate::circuit::stepper::RunState::Failed.as_db_str()),
         None,
         &[db::CircuitStepOp {
             node_id: node_id.to_string(),
@@ -3224,11 +3220,11 @@ fn recover_native_turn(
 
 fn recover_quiet_turn(
     output: &str,
-    classify: impl FnOnce(&str) -> Option<crate::autopilot::evaluator::Classification>,
+    classify: impl FnOnce(&str) -> Option<crate::circuit::evaluator::Classification>,
     still_current: impl FnOnce() -> bool,
     publish: impl FnOnce(),
 ) {
-    use crate::autopilot::evaluator::{quiet_turn_prompt, Classification};
+    use crate::circuit::evaluator::{quiet_turn_prompt, Classification};
     // Kept at the publication boundary: review verdicts interpret WORKING as
     // changes requested, so background progress must never reach that gate.
     if !output.trim().is_empty()
@@ -3280,7 +3276,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             let Ok(node) = db::get_agent_node_by_id(agent_node_id) else {
                 continue;
             };
-            use crate::autopilot::evaluator;
+            use crate::circuit::evaluator;
             // Native completion is independent of PTY animation/quietness and
             // classifier availability. Probe it even when a Stop hook was lost.
             let native_key = format!("native-turn:{}", active.run.id);
@@ -3321,7 +3317,7 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                     });
                 }) { continue; }
             }
-            let quiet_ms = crate::autopilot::evaluator::millis_since_last_output(agent_node_id);
+            let quiet_ms = crate::circuit::evaluator::millis_since_last_output(agent_node_id);
             if !should_check_quiet_turn(
                 crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
                 quiet_ms,
@@ -3354,10 +3350,9 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
             ) else { continue; };
             recover_quiet_turn(&output, |prompt| {
                 if recovery_permit.is_cancelled() { return None; }
-                let provider = db::get_mesh_by_id(active.run.mesh_id).ok()
-                    .map(|mesh| crate::services::autopilot::configured_autopilot_provider(&mesh))
-                    .unwrap_or_else(|| "claude".into());
-                let launch = crate::session_naming::naming_backend_env(&provider).ok()?;
+                let preferences = crate::preferences::load().ok()?;
+                let provider = classifier_provider(&preferences);
+                let launch = crate::session_naming::naming_backend_env(provider).ok()?;
                 evaluator::classify_with_prompt(agent_node_id, &launch, prompt)
             }, || {
                 // Classification can take 30s. A hook, user input, or resumed
@@ -3425,20 +3420,20 @@ fn notification_severity(message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::autopilot::circuit::test_support::advance_with_report_evidence;
+    use crate::circuit::test_support::advance_with_report_evidence;
     use super::*;
     use super::github::*;
     use super::spawn::*;
     use crate::agent::spawn::ExplicitSpawnOverrides;
-    use crate::autopilot::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
+    use crate::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
     use rusqlite::{Connection, OptionalExtension};
 
     #[test]
     fn worker_effect_persistence_mapping_covers_every_effect_variant() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitEdge, CircuitNodeKind, GithubActionKind, SessionStatusKind,
         };
-        use crate::autopilot::circuit::stepper::Effect;
+        use crate::circuit::stepper::Effect;
 
         let view = RunView {
             run_id: 1908,
@@ -3557,7 +3552,7 @@ mod tests {
 
     #[test]
     fn prompt_submission_revision_allows_delivery_commit_without_weakening_fences() {
-        use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
+        use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
         for (stale_revision, cancelled) in [(true, false), (false, false), (false, true)] {
             let mut conn = Connection::open_in_memory().unwrap();
             crate::db::init_schema(&conn).unwrap();
@@ -3625,10 +3620,10 @@ mod tests {
 
     #[test]
     fn unavailable_set_node_status_target_fails_run_without_retrying_forever() {
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitEdge, CircuitGraph, CircuitNodeKind, EdgeCondition, SessionStatusKind,
         };
-        use crate::autopilot::circuit::stepper::{Capacity, Effect};
+        use crate::circuit::stepper::{Capacity, Effect};
 
         for (archived, cancel_before_failure_commit) in [(false, false), (true, false), (false, true)] {
             let mut conn = Connection::open_in_memory().unwrap();
@@ -3765,8 +3760,8 @@ mod tests {
 
     #[test]
     fn codex_recheck_input_fence_rejection_commits_unverified_without_stale_evidence() {
-        use crate::autopilot::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
-        use crate::autopilot::circuit::stepper::{ObservationInputFence, StepView};
+        use crate::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
+        use crate::circuit::stepper::{ObservationInputFence, StepView};
 
         let identity = ObservationIdentity {
             run_id: 42,
@@ -3862,7 +3857,7 @@ mod tests {
 
     #[test]
     fn circuit_completion_allows_its_terminal_actions_but_not_stale_effects_or_spawns() {
-        use crate::autopilot::circuit::stepper::Effect;
+        use crate::circuit::stepper::Effect;
         let notify = Effect::Notify { message: "approved".into() };
         let set_status = Effect::SetNodeStatus {
             node_id: "source-status".into(),
@@ -3958,8 +3953,8 @@ mod tests {
         recover_run_observers_with(&view, |_| true, |id| { recovered.push(id); Ok(()) });
         assert_eq!(recovered, vec![source]);
         recover_run_observers_with(&view, |_| true, |_| panic!("recovery must respect the probe cooldown"));
-        assert!(!crate::autopilot::evaluator::has_turn_start(source));
-        crate::autopilot::evaluator::unregister(source);
+        assert!(!crate::circuit::evaluator::has_turn_start(source));
+        crate::circuit::evaluator::unregister(source);
 
         restore_run_evaluators(&view);
         recover_run_observers_with(&view, |_| false, |_| panic!("dead processes must not acquire observers"));
@@ -3967,7 +3962,7 @@ mod tests {
         recover_run_observers_with(&view, |_| true, |_| panic!("cancelled runs must not acquire observers"));
         view.state = RunState::Paused;
         recover_run_observers_with(&view, |_| true, |_| panic!("paused runs must not acquire observers"));
-        crate::autopilot::evaluator::unregister(source);
+        crate::circuit::evaluator::unregister(source);
     }
 
     fn observer_node(provider: &str, session: Option<&str>) -> crate::models::AgentNode {
@@ -4052,7 +4047,7 @@ mod tests {
             recovered.contains(&muse_agent),
             "a muse agent must acquire an observer during recovery: {recovered:?}"
         );
-        crate::autopilot::evaluator::unregister(muse_agent);
+        crate::circuit::evaluator::unregister(muse_agent);
     }
 
     #[test]
@@ -4098,7 +4093,7 @@ mod tests {
 
     #[test]
     fn circuit_restart_restores_completed_spawn_ownership_at_every_downstream_gate() {
-        use crate::autopilot::evaluator;
+        use crate::circuit::evaluator;
         let id = 910_018;
         for gate in ["implementation_classifier", "finish_classifier", "review_classifier", "feedback_classifier"] {
             let spawn = if gate == "review_classifier" { "reviewer" } else { "implementer" };
@@ -4190,7 +4185,7 @@ mod tests {
             assert!(transition.effects.is_empty());
             assert_eq!(view.steps[0].status, StepStatus::Running);
             assert_eq!(transition.observations[0].disposition,
-                crate::autopilot::circuit::observation::ObservationDisposition::ReducedConfidence);
+                crate::circuit::observation::ObservationDisposition::ReducedConfidence);
             observe_agent_projection(&view, &view.steps[0], &node, &mut events);
             assert!(events.is_empty(), "unchanged pull snapshots must not grow history each tick");
         }
@@ -4202,7 +4197,7 @@ mod tests {
         let CircuitEvent::Observed { observation, .. } = &events[0] else { panic!("status projection") };
         assert_eq!(observation.observed_at_ms,1000);
         assert_eq!(observation.identity.session_incarnation.as_deref(),Some("123"));
-        assert_eq!(observation.fact,crate::autopilot::circuit::observation::ObservedWorkFact::NeedsInput);
+        assert_eq!(observation.fact,crate::circuit::observation::ObservedWorkFact::NeedsInput);
     }
 
     #[test]
@@ -4218,9 +4213,9 @@ mod tests {
         view.context.set("source.agent_id", node.id.to_string());
         view.context.set("source.review_preset", "1");
         advance(&mut view, &CircuitEvent::Triggered);
-        let capacity = crate::autopilot::circuit::stepper::Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
+        let capacity = crate::circuit::stepper::Capacity { circuit_free_slots: 2, agent_free_slots: 1 };
         advance(&mut view, &CircuitEvent::Tick(capacity));
-        crate::autopilot::evaluator::register_circuit(node.id);
+        crate::circuit::evaluator::register_circuit(node.id);
         for status in ["ready", "completed"] {
             db::write_conn().execute("UPDATE agent_nodes SET status=?2 WHERE id=?1", rusqlite::params![node.id, status]).unwrap();
             assert!(classify_step_turn(&active_run(85), &view, "await_source").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
@@ -4247,19 +4242,19 @@ mod tests {
         assert!(classify_step_turn(&active_run(85), &renamed, "handoff").is_none_or(|result| result.observation_blocker.is_some() && result.classification.is_none() && result.binding.is_none()),
             "renaming a step cannot bypass the evidence requirement");
         let transition = advance(&mut view, &CircuitEvent::TurnClassified { binding: None, node_id: "await_source".into(),
-            classification: Some(crate::autopilot::evaluator::Classification::Completed), output: Some("Looks done".into()) });
+            classification: Some(crate::circuit::evaluator::Classification::Completed), output: Some("Looks done".into()) });
         assert_eq!(view.step("await_source").unwrap().status, StepStatus::Unverified);
         assert!(transition.effects.is_empty());
         let scheduled = advance(&mut view, &CircuitEvent::Tick(capacity));
         assert!(!scheduled.effects.iter().any(|e| matches!(e,
-            crate::autopilot::circuit::stepper::Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
-        crate::autopilot::evaluator::unregister(node.id);
+            crate::circuit::stepper::Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+        crate::circuit::evaluator::unregister(node.id);
     }
 
     #[test]
     fn review_handoff_clean_turn_does_not_require_task_completion_or_classifier() {
-        use crate::autopilot::evaluator::Classification;
-        use crate::autopilot::circuit::stepper::{Capacity, Effect};
+        use crate::circuit::evaluator::Classification;
+        use crate::circuit::stepper::{Capacity, Effect};
         let mut view = RunView {
             run_id: 85,
             graph: CircuitGraph::agent_review(None, None, 3),
@@ -4294,7 +4289,7 @@ mod tests {
 
     #[test]
     fn review_handoff_keeps_permission_background_and_verdict_checks() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         view.graph = CircuitGraph::agent_review(None, None, 3);
         view.context.set("source.review_preset", "1");
@@ -4332,7 +4327,7 @@ mod tests {
 
     #[test]
     fn verdict_gate_waits_for_a_reviewer_that_yielded_mid_turn() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         view.graph = CircuitGraph::agent_review(None, None, 3);
         view.context.set("source.review_preset", "1");
@@ -4494,7 +4489,7 @@ mod tests {
         let mut view = report_gate_view();
         view.step_mut("finish_classifier").unwrap().status = StepStatus::Unverified;
         let report = "Finished.";
-        let binding = crate::autopilot::circuit::test_support::record_report_evidence_for_turn(
+        let binding = crate::circuit::test_support::record_report_evidence_for_turn(
             &mut view, "finish_classifier", report, "finished-native-turn");
         let transition = advance(&mut view, &CircuitEvent::TurnClassified {
             binding: Some(binding.clone()), node_id: "finish_classifier".into(),
@@ -4541,7 +4536,7 @@ mod tests {
 
     #[test]
     fn structured_review_routes_without_classifier() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         view.graph = CircuitGraph::agent_review(None, None, 3);
         for (verdict, expected) in [("APPROVE", Classification::Completed),
@@ -4558,7 +4553,7 @@ mod tests {
 
     #[test]
     fn review_verdict_falls_back_without_classifier_backend() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         view.graph = CircuitGraph::agent_review(None, None, 3);
         view.context.set("source.review_preset", "1");
@@ -4602,7 +4597,7 @@ mod tests {
 
     #[test]
     fn review_handoff_clean_completion_reconsiders_a_parked_report_after_restart() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         view.graph = CircuitGraph::agent_review(None, None, 3);
         view.context.set("source.agent_id", "900");
@@ -4625,8 +4620,8 @@ mod tests {
 
     #[test]
     fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_presets() {
-        use crate::autopilot::circuit::stepper::{Capacity, Effect};
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::stepper::{Capacity, Effect};
+        use crate::circuit::evaluator::Classification;
         for legacy in [false, true] {
             let mut view = RunView {
                 run_id: 85,
@@ -4666,7 +4661,7 @@ mod tests {
                 let reviewer_id = 4000 + i64::from(round);
                 view.attach_agent_node("reviewer", reviewer_id);
                 let report = format!("Round {round}: {}", if round == 3 { "Approved" } else { "Changes requested: add regression tests" });
-                crate::autopilot::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: reviewer_id, success: true, output: Some(report.clone()) });
+                crate::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: reviewer_id, success: true, output: Some(report.clone()) });
                 advance(&mut view, &CircuitEvent::Tick(capacity));
                 let classification = classify_gate_report(&view, "verdict", SessionStatus::Ready, &report, |_| {
                     Some(if round == 3 { Classification::Completed } else { Classification::Working })
@@ -4722,21 +4717,21 @@ mod tests {
         let mut view = report_gate_view();
         let report = "Still working";
         advance_with_report_evidence(&mut view, &CircuitEvent::TurnClassified { binding: None,
-            node_id: "finish_classifier".into(), classification: Some(crate::autopilot::evaluator::Classification::Working), output: Some(report.into()) });
+            node_id: "finish_classifier".into(), classification: Some(crate::circuit::evaluator::Classification::Working), output: Some(report.into()) });
         assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None));
         let old_revision = view.context.get("node.finish_classifier.classified_report_revision").unwrap().to_string();
-        let binding = crate::autopilot::circuit::test_support::record_report_evidence_for_turn(&mut view, "finish_classifier", report, "new-native-turn");
+        let binding = crate::circuit::test_support::record_report_evidence_for_turn(&mut view, "finish_classifier", report, "new-native-turn");
         assert_eq!(binding.report_revision, old_revision, "same text digest, different turn identity");
         assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None));
         assert!(has_unconsumed_classifier_evidence(&view, "finish_classifier"));
         advance(&mut view, &CircuitEvent::TurnClassified { binding: Some(binding), node_id: "finish_classifier".into(),
-            classification: Some(crate::autopilot::evaluator::Classification::Working), output: Some(report.into()) });
+            classification: Some(crate::circuit::evaluator::Classification::Working), output: Some(report.into()) });
         assert!(!has_unconsumed_classifier_evidence(&view, "finish_classifier"));
     }
 
     #[test]
     fn circuit_report_dedupe_is_durable_and_scoped_to_gate_attempt() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let mut view = report_gate_view();
         let report = "Still working; waiting for the requested credentials.";
         // The implementation gate consumed the same agent's output. That
@@ -4771,7 +4766,7 @@ mod tests {
         assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, Some(60_000)));
         assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, report, None), "restart permits recovery");
         advance_with_report_evidence(&mut view, &CircuitEvent::TurnClassified { binding: None,
-            node_id: "finish_classifier".into(), classification: Some(crate::autopilot::evaluator::Classification::Completed),
+            node_id: "finish_classifier".into(), classification: Some(crate::circuit::evaluator::Classification::Completed),
             output: Some(report.into()),
         });
         assert_eq!(view.step("finish_classifier").unwrap().status, StepStatus::Completed);
@@ -4782,7 +4777,7 @@ mod tests {
 
     #[test]
     fn circuit_report_selection_rejects_pre_prompt_transcript_and_resume_redraw() {
-        use crate::autopilot::evaluator;
+        use crate::circuit::evaluator;
         let id = 910_019;
         let old = "Implementation complete.";
         let old_report = || Some(crate::services::transcript_reader::AssistantReport { text: old.into(), revision: "turn-1".into() });
@@ -4815,7 +4810,7 @@ mod tests {
         let report = select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: "Done. PR updated.".into(), revision: "turn-2".into() }), Some("turn-1"), evaluator::has_turn_start(id), || evaluator::cleaned_turn_tail(id)).unwrap();
         assert_eq!(report, "Done. PR updated.");
         assert!(should_classify_report(&report_gate_view(), "finish_classifier", SessionStatus::AwaitingInput, &report, None));
-        assert!(crate::autopilot::evaluator::classify_prompt(&report).contains(&report));
+        assert!(crate::circuit::evaluator::circuit_classify_prompt(&report).contains(&report));
         assert_eq!(select_turn_report(Some(crate::services::transcript_reader::AssistantReport { text: old.into(), revision: "turn-2".into() }), Some("turn-1"), false, String::new), Some(old.into()), "identical text in a new assistant response is fresh");
         evaluator::unregister(id);
     }
@@ -4876,9 +4871,9 @@ mod tests {
         let mesh = crate::db::create_mesh("may-admit-defer", "/tmp/may-admit-defer").unwrap();
         // Two admitted runs saturate the expected review-flow capacity.
         crate::db::set_mesh_circuit_run_capacity(mesh.id, 2).unwrap();
-        let c1 = crate::db::create_autopilot_circuit(mesh.id, "c1", "", 4, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
-        let c2 = crate::db::create_autopilot_circuit(mesh.id, "c2", "", 4, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
-        let c3 = crate::db::create_autopilot_circuit(mesh.id, "c3", "", 4, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
+        let c1 = crate::db::create_autopilot_circuit(mesh.id, "c1", "", 4, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
+        let c2 = crate::db::create_autopilot_circuit(mesh.id, "c2", "", 4, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
+        let c3 = crate::db::create_autopilot_circuit(mesh.id, "c3", "", 4, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
 
         let mesh_row = crate::db::get_mesh_by_id(mesh.id).unwrap();
 
@@ -5027,12 +5022,12 @@ mod tests {
     fn observed_capacity_ignores_legacy_mesh_node_cap() {
         let path = init_temp_db_at("observe_capacity_legacy_mesh_cap");
         let mesh = crate::db::create_mesh("observe-capacity", "/tmp/observe-capacity").unwrap();
-        crate::db::set_mesh_autopilot(mesh.id, false, None, 1, None, None).unwrap();
+        crate::db::write_conn().execute("UPDATE meshes SET autopilot_concurrency_limit=1 WHERE id=?1", [mesh.id]).unwrap();
         let circuit = crate::db::create_autopilot_circuit(
             mesh.id,
             "observe-capacity-circuit",
             "",
-            2, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap(),
+            2, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap(),
         )
         .unwrap();
         let run_id = crate::db::create_circuit_run(
@@ -5115,19 +5110,10 @@ mod tests {
             sandbox: false,
             pre_spawn_pool_size: 0,
             color: None,
-            autopilot_enabled: false,
-            autopilot_trigger_label: None,
-            autopilot_concurrency_limit: 2,
-            autopilot_provider: None,
-            autopilot_action_on_success: None,
+
             root_build_command: None,
             root_run_command: None,
-            autopilot_mode: crate::models::AutopilotMode::IssueDriven,
-            loop_initial_prompt: None,
-            loop_suffix_prompt: None,
-            loop_max_iterations: None,
-            loop_interval_seconds: 0,
-            loop_consecutive_failures: 0,
+
             circuit_run_capacity: 2,
             worktree_directory: None,
         }
@@ -5406,7 +5392,7 @@ mod tests {
         // any step relying on upstream BFS lineage uses `None`, so this
         // case is the COMMON one — every non-explicit target resolves via
         // BFS.
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind,
         };
         let graph = CircuitGraph {
@@ -5487,7 +5473,7 @@ mod tests {
         // whose own `agent_node_id` is None (e.g. a `Notify` step)
         // must return None — startup_reconcile's `_` arm then leaves it
         // alone rather than falsely cancelling.
-        use crate::autopilot::circuit::model::{
+        use crate::circuit::model::{
             CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind,
         };
         let graph = CircuitGraph {
@@ -5526,8 +5512,8 @@ mod tests {
 
     #[test]
     fn watchdog_run_104_background_report_does_not_publish_a_turn() {
-        use crate::autopilot::circuit::stepper::Capacity;
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::stepper::Capacity;
+        use crate::circuit::evaluator::Classification;
         let report = "The tests are progressing (1-9 passed, including `controller_accessories`, `haptics_race_e2e`, `eeprom_exit_flush`, and `controller_pak_rom_filesystem`). Waiting for the final e2e tests to finish.";
         assert!(should_check_quiet_turn(true, Some(60_012), SessionStatus::Running));
         for classification in [Some(Classification::Working), Some(Classification::Continue), None] {
@@ -5548,7 +5534,7 @@ mod tests {
             advance(&mut view, &CircuitEvent::Tick(capacity));
             view.attach_agent_node("reviewer", 3923);
             recover_quiet_turn(report, |_| classification, || true, || {
-                crate::autopilot::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some(report.into()) });
+                crate::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some(report.into()) });
             });
             assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running,
                 "background/unknown evidence must not finish the reviewer step");
@@ -5557,7 +5543,7 @@ mod tests {
             assert!(view.step("verdict").is_none());
             // The eventual final report still releases the same reviewer.
             recover_quiet_turn("Review complete. Approved.", |_| Some(Classification::Completed), || true, || {
-                crate::autopilot::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some("Review complete. Approved.".into()) });
+                crate::circuit::test_support::advance_with_completion_evidence(&mut view, &CircuitEvent::AgentFinished { agent_node_id: 3923, success: true, output: Some("Review complete. Approved.".into()) });
             });
             advance(&mut view, &CircuitEvent::Tick(capacity));
             assert_eq!(view.step("verdict").unwrap().status, StepStatus::Running);
@@ -5566,7 +5552,7 @@ mod tests {
 
     #[test]
     fn watchdog_recovers_final_reports_and_real_input_requests() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         for (report, classification) in [
             ("Review complete. Changes requested: fix the shutdown flush.", Classification::Completed),
             ("May I run the test command?", Classification::Blocked),
@@ -5584,7 +5570,7 @@ mod tests {
 
     #[test]
     fn watchdog_discards_a_turn_that_changed_during_classification() {
-        use crate::autopilot::evaluator::Classification;
+        use crate::circuit::evaluator::Classification;
         let snapshot = || QuietTurnEvidence {
             lifecycle: Some("turn-1".into()), input: Some("input-1".into()), report: Some("report-1".into()),
         };
@@ -5778,7 +5764,7 @@ mod tests {
 
     // -- blueprint contract: per-blueprint worker seam (#1469) -----------
     //
-    // The blueprint contract matrix (`autopilot::circuit::blueprint_contract`)
+    // The blueprint contract matrix (`circuit::blueprint_contract`)
     // pins the walking skeleton as the canonical minimal preset. The
     // worker-seam helpers below are the impure-side equivalents: the
     // seam observes per-blueprint state and turns it into pure events.
@@ -5982,9 +5968,9 @@ mod tests {
             context: CircuitContext::new(), steps }
     }
 
-    fn pushed_implementation(agent: i64) -> Result<crate::autopilot::pipeline::WrapupState, String> {
+    fn pushed_implementation(agent: i64) -> Result<crate::circuit::verification::WrapupState, String> {
         assert_eq!(agent, 700);
-        Ok(crate::autopilot::pipeline::WrapupState {
+        Ok(crate::circuit::verification::WrapupState {
             dirty: false, pushed: true, branch: Some("renamed-implementation".into()), pr_url: None, pr_number: None,
             pr_required: false, repo_error: None,
         })
@@ -5999,7 +5985,7 @@ mod tests {
 
     fn set_open_pr_policy(
         run: &mut RunView,
-        policy: Option<crate::autopilot::circuit::model::OpenPrPolicy>,
+        policy: Option<crate::circuit::model::OpenPrPolicy>,
     ) {
         if let Some(node) = run.graph.nodes.iter_mut().find(|node| node.id == "open_pr") {
             if let CircuitNodeKind::GithubAction { open_pr_policy, .. } = &mut node.kind {
@@ -6011,7 +5997,7 @@ mod tests {
     #[test]
     fn open_pr_acknowledges_existing_pr_and_publishes_review_context() {
         let mut run = open_pr_run();
-        let event = github::ensure_open_pr(&run, "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
+        let event = github::ensure_open_pr(&run, "open_pr", Some(crate::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |head| { assert_eq!(head, "renamed-implementation"); Ok(Some(implementation_pr())) },
             |_, _| panic!("existing PR must not be created again"),
         ).unwrap();
@@ -6064,7 +6050,7 @@ mod tests {
 
     #[test]
     fn open_pr_review_requires_agent_pr_without_creating_one() {
-        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
+        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::circuit::model::OpenPrPolicy::RequireExisting), pushed_implementation,
             |_| Ok(None), |_, _| panic!("review blueprint delegates creation to its agent"),
         ).unwrap_err();
         assert!(error.contains("did not raise an open pull request"));
@@ -6107,7 +6093,7 @@ mod tests {
 
     #[test]
     fn open_pr_failed_git_observation_does_not_query_github() {
-        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
+        let error = github::ensure_open_pr(&open_pr_run(), "open_pr", Some(crate::circuit::model::OpenPrPolicy::RequireExisting),
             |_| Err("worktree unavailable".into()),
             |_| panic!("branch identity is unknown"), |_, _| panic!("branch identity is unknown"),
         ).unwrap_err();
@@ -6116,8 +6102,8 @@ mod tests {
 
     #[test]
     fn determine_github_target_routes_correctly() {
-        use crate::autopilot::circuit::model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
-        use crate::autopilot::circuit::stepper::{RunState, RunView};
+        use crate::circuit::model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
+        use crate::circuit::stepper::{RunState, RunView};
 
         let graph = CircuitGraph {
             version: 1,
@@ -6137,7 +6123,7 @@ mod tests {
                     id: "open_pr".into(),
                     kind: CircuitNodeKind::GithubAction {
                         action: GithubActionKind::OpenPr,
-                        open_pr_policy: Some(crate::autopilot::circuit::model::OpenPrPolicy::RequireExisting),
+                        open_pr_policy: Some(crate::circuit::model::OpenPrPolicy::RequireExisting),
                         label: None,
                         comment: None,
                     },
@@ -6787,8 +6773,8 @@ mod tests {
     ) -> i64 {
         let agent = db::create_agent_node(mesh_id, name, path, "main",
             crate::models::EnvType::Windows, provider, None, None, None, None, true, None, None, None).unwrap();
-        crate::autopilot::evaluator::unregister(agent.id);
-        crate::autopilot::evaluator::register_circuit(agent.id);
+        crate::circuit::evaluator::unregister(agent.id);
+        crate::circuit::evaluator::register_circuit(agent.id);
         agent.id
     }
 
@@ -6804,7 +6790,7 @@ mod tests {
 
         let mut events = Vec::new();
         observe_waits(&view, &mut events);
-        crate::autopilot::evaluator::unregister(agent_id);
+        crate::circuit::evaluator::unregister(agent_id);
 
         match wait_event(&events) {
             CircuitEvent::WaitObserved { observed, explicit_budget, reason, timeout_ms, .. } => {
@@ -6832,7 +6818,7 @@ mod tests {
 
         let mut events = Vec::new();
         observe_waits(&view, &mut events);
-        crate::autopilot::evaluator::unregister(agent_id);
+        crate::circuit::evaluator::unregister(agent_id);
 
         match wait_event(&events) {
             CircuitEvent::WaitObserved { observed, reason, .. } => {
@@ -6854,7 +6840,7 @@ mod tests {
 
         let mut events = Vec::new();
         observe_waits(&view, &mut events);
-        crate::autopilot::evaluator::unregister(agent_id);
+        crate::circuit::evaluator::unregister(agent_id);
 
         match wait_event(&events) {
             CircuitEvent::WaitObserved { explicit_budget, timeout_ms, .. } => {
@@ -6880,7 +6866,7 @@ mod tests {
 
         let mut events = Vec::new();
         observe_waits(&view, &mut events);
-        crate::autopilot::evaluator::unregister(agent_id);
+        crate::circuit::evaluator::unregister(agent_id);
 
         match wait_event(&events) {
             CircuitEvent::WaitObserved { observed, reason, .. } => {
@@ -6892,5 +6878,44 @@ mod tests {
             }
             other => panic!("expected WaitObserved, got {other:?}"),
         }
+    }
+}
+
+/// A Circuit agent needs human input.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitAgentBlockedPayload.ts")]
+pub struct CircuitAgentBlockedPayload {
+    #[ts(as = "i32")]
+    pub node_id: i64,
+    #[ts(as = "i32")]
+    pub issue: i64,
+}
+
+fn classifier_provider(preferences: &crate::preferences::AppPreferences) -> &str {
+    preferences.circuit_classifier_provider.as_deref()
+        .filter(|value| !value.trim().is_empty()).unwrap_or("claude")
+}
+
+#[cfg(test)]
+mod classifier_selection_tests {
+    use super::classifier_provider;
+
+    #[test]
+    fn circuit_classifier_is_independent_of_codex_spawn_and_naming_defaults() {
+        let mut preferences = crate::preferences::AppPreferences {
+            default_provider: Some("codex".into()), naming_provider: Some("claude:minimax".into()),
+            ..Default::default()
+        };
+        assert_eq!(classifier_provider(&preferences), "claude");
+        let directory = tempfile::tempdir().unwrap();
+        crate::preferences::storage::init_for_tests(directory.path().to_path_buf());
+        crate::preferences::save(preferences.clone()).unwrap();
+        let backend = crate::session_naming::naming_backend_env(classifier_provider(&preferences));
+        assert!(backend.is_ok(), "Codex spawn defaults must not disable the Circuit classifier");
+
+        preferences.circuit_classifier_provider = Some("claude:minimax".into());
+        assert_eq!(classifier_provider(&preferences), "claude:minimax");
+        preferences.default_provider = Some("opencode".into());
+        assert_eq!(classifier_provider(&preferences), "claude:minimax");
     }
 }

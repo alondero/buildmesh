@@ -3,7 +3,7 @@
 
 pub mod agent;
 mod attention_autoclear;
-pub mod autopilot;
+pub mod circuit;
 mod blocking;
 mod commands;
 mod coordinator;
@@ -285,7 +285,7 @@ pub fn run() {
             }
 
             // Commit legacy cancellation before crash recovery can offer auto-resume.
-            services::autopilot::retire_legacy_automation()?;
+            services::legacy_retirement::retire_legacy_automation()?;
 
             // Crash recovery: any sessions still marked 'running' from a previous
             // crash have no live process. Mark them suspended for auto-resume.
@@ -363,12 +363,8 @@ pub fn run() {
             // can emit `pool-count-changed` from its inner drain/fill calls.
             services::pool_worker::start_background_worker(app.handle().clone());
 
-            // Autopilot polling daemon (issue #482, PRD #480). Walks every
-            // autopilot-enabled mesh on a 2-minute cadence and auto-spawns
-            // branched-worktree Agent Nodes for newly-labelled GitHub
-            // issues, capacity-gated per mesh. No-op while no mesh has
-            // Autopilot enabled.
-            services::autopilot::start_autopilot_worker(app.handle().clone());
+            // Retry one-way retirement of historical legacy runs; never launch new agents.
+            services::legacy_retirement::start_retirement_worker();
 
             // Autopilot Circuits worker (spec #1205 / walking skeleton
             // #1206). Dedicated OS thread with a fast tick + condvar
@@ -468,7 +464,8 @@ pub fn run() {
             commands::preferences::set_app_default_provider,
             commands::preferences::set_app_reviewer_provider,
             commands::preferences::set_app_naming_provider,
-            commands::preferences::set_app_autopilot_pool_size,
+            commands::preferences::set_app_circuit_agent_pool_size,
+            commands::preferences::set_circuit_classifier_provider,
             commands::preferences::set_app_confirm_before_quit,
             commands::preferences::get_probe_spawn_prompt_defaults,
             commands::preferences::set_app_issue_spawn_prompt,
@@ -567,7 +564,6 @@ pub fn run() {
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
-            commands::agent::list_autopilot_runs,
             // Autopilot Circuits (spec #1205 / walking skeleton #1206).
             commands::circuit::list_circuits,
             commands::circuit::list_circuit_agent_ownerships,
@@ -612,30 +608,11 @@ pub fn run() {
             commands::mesh_properties::remove_worktree_base_ref,
             commands::mesh_properties::update_mesh_use_worktree,
             commands::mesh_properties::update_mesh_sandbox,
-            commands::mesh_properties::update_mesh_autopilot,
-            // Looping Autopilot config (wayfinder #990 / ticket #991).
-            // The dedicated Autopilot Probe UI tab (#994) flips the mode
-            // and edits the prompt / cap inputs through this command; the
-            // command validates the typed inputs and writes the six
-            // `loop_*` columns atomically.
-            commands::mesh_properties::update_mesh_loop_config,
-            // Looping Autopilot Start/Stop + status (ticket #994). The
-            // Start/Stop buttons flip only `autopilot_enabled` (the poller's
-            // on-switch for a Looping mesh); `get_loop_status` projects the
-            // enabled flag + loop-iteration ledger into the tab's status badge.
-            commands::mesh_properties::set_mesh_autopilot_enabled,
-            commands::mesh_properties::get_loop_status,
-            // Autopilot compatibility gate (issue #1152) — pure verdict for
-            // the Probe UI. `update_mesh_autopilot` and
-            // `set_mesh_autopilot_enabled` enforce the same verdict on the
-            // write side.
-            commands::mesh_properties::get_autopilot_compatibility,
             commands::mesh_properties::update_mesh_pool_size,
             commands::mesh_properties::get_mesh_pool_count,
             // Circuit-run capacity (issue #1467) — narrow single-column
             // write for the new `meshes.circuit_run_capacity` column.
-            // Sibling to `set_mesh_autopilot_enabled` so adjusting the run
-            // cap can't clobber the legacy autopilot policy atomic write.
+
             commands::mesh_properties::update_mesh_circuit_run_capacity,
             // Configurable Worktree Node directories (issue #1519): per-Mesh
             // override with same-environment validation for absolute paths.
@@ -695,7 +672,7 @@ pub fn run() {
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
             // Issue label toggle (issue #979) — backs the Issues Probe's
-            // click-to-add/remove affordance on the autopilot trigger label.
+            // general label management surface.
             commands::pr::set_issue_label,
             commands::pr::get_open_pr_for_node,
             commands::pr::get_repo_pulls,

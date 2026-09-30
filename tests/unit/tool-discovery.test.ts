@@ -28,7 +28,7 @@ describe('tool discovery grid traversal', () => {
   ];
 
   it('matches the rendered per-group two-column rows', () => {
-    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 2, 2, 1]);
+    expect(TOOL_DISCOVERY_ROW_LAYOUT).toEqual([2, 2, 2, 1, 2, 1]);
   });
 
   it.each(cases)('%s %s -> %s (%s)', (from, direction, to) => {

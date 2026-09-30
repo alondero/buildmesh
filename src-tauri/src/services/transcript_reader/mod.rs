@@ -126,7 +126,7 @@ mod native_completion_tests {
         fs::write(&path,&completed).unwrap();
         let snapshot = native_turn_snapshot_from_file(&path,TranscriptFormat::Codex).unwrap();
         assert!(snapshot.is_current());
-        let guard = crate::autopilot::circuit::stepper::ObservationInputFence {
+        let guard = crate::circuit::stepper::ObservationInputFence {
             transcript_guard: Some(snapshot), report_guard: None, agent_node_id: 9, input_stamp: "input".into(),
             observed_at_ms: 1, session_id: "session".into(), session_incarnation: "incarnation".into(),
         };

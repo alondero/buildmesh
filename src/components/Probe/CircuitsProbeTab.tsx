@@ -58,6 +58,7 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { formatError } from '../../lib/errorUtils';
+import { CircuitRunCapacity } from './CircuitRunCapacity';
 import {
   approveCircuitStep,
   cancelCircuitRun,
@@ -721,6 +722,7 @@ export function CircuitsProbeTab() {
         <p className="text-xs text-text-secondary mb-2" role="status" data-testid="circuits-status">
           {statusText}
         </p>
+        {meshRow && <CircuitRunCapacity key={activeMeshId} meshId={activeMeshId} capacity={meshRunCapacity} />}
         <div
           className="grid grid-cols-2 gap-1"
           role="tablist"

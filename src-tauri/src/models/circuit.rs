@@ -9,7 +9,7 @@ use ts_rs::TS;
 // Wire shapes for the three circuit ledger tables. The Graph Blueprint
 // AST itself is NOT re-declared here — it serialises to the
 // `graph_json` TEXT column and travels over IPC as that string; the
-// canonical Rust type lives in `autopilot::circuit::model::CircuitGraph`.
+// canonical Rust type lives in `circuit::model::CircuitGraph`.
 // ---------------------------------------------------------------------------
 
 /// One Autopilot Circuit — the persisted blueprint row.
@@ -54,7 +54,7 @@ pub struct AutopilotCircuitRun {
     /// same source independently.
     pub trigger_identity: String,
     /// RunState wire token (`pending` | `running` | `paused` | `completed` |
-    /// `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
+    /// `failed` | `cancelled`). See `circuit::vocabulary`.
     pub state: String,
     /// The run's resolved template context (`circuit.*`, `node.*`), JSON.
     pub context_json: String,
@@ -76,7 +76,7 @@ pub struct AutopilotCircuitRunStep {
     #[ts(as = "Option<i32>")]
     pub agent_node_id: Option<i64>,
     /// StepStatus wire token (`pending_slot` | `running` | `blocked` |
-    /// `completed` | `failed` | `cancelled`). See `autopilot::circuit::vocabulary`.
+    /// `completed` | `failed` | `cancelled`). See `circuit::vocabulary`.
     pub status: String,
     #[ts(as = "i32")]
     pub attempt: i32,

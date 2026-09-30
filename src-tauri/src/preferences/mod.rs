@@ -47,7 +47,7 @@ pub use model::{
 // ----- Re-exports: storage ----------------------------------------------
 
 pub use storage::{
-    app_data_dir, autopilot_pool_size, default_provider, generation, init, issue_spawn_prompt, load,
+    app_data_dir, circuit_agent_pool_size, default_provider, generation, init, issue_spawn_prompt, load,
     naming_provider, pr_spawn_prompt, reviewer_provider, save, update, worktree_directory,
 };
 #[cfg(test)]

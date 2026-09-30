@@ -26,9 +26,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
-use crate::autopilot::{gate_trigger, AutopilotTrigger, GateDecision};
-use crate::autopilot::circuit::context::CircuitContext;
-use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
+use crate::circuit::security::{gate_trigger, AutopilotTrigger, GateDecision};
+use crate::circuit::context::CircuitContext;
+use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
 use crate::db;
 use crate::models::AutopilotCircuit;
 use crate::services::github::GitHubClient;
@@ -193,15 +193,6 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
     let Some((owner, repo, client)) = repo_client_for(circuit) else {
         return;
     };
-    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
-    if review_blueprint && action == "none" {
-        tracing::warn!(
-            "circuits: review blueprint {} is paused because mesh {} has autopilot_action_on_success=none",
-            circuit.id,
-            circuit.mesh_id
-        );
-        return;
-    }
     let mut issues = match client.list_open_issues_with_label(&owner, &repo, label) {
         Ok(i) => i,
         Err(e) => {
@@ -239,14 +230,14 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
         };
         let open_issue_numbers: HashSet<i64> = issues.iter().map(|issue| issue.number).collect();
         issues.retain(|issue| {
-            match crate::services::autopilot::unresolved_blockers(
+            match crate::circuit::issue_dependencies::unresolved_blockers(
                 issue,
                 &open_issue_numbers,
                 &known_issue_numbers,
             ) {
                 None => true,
                 Some(blockers) => {
-                    if crate::services::autopilot::mark_blocked_logged(circuit.id, issue.number) {
+                    {
                         tracing::info!(
                             "circuits: issue #{} on circuit {} blocked by {:?} — parked, retry next pass",
                             issue.number,
@@ -309,7 +300,7 @@ fn ingest_issues(circuit: &AutopilotCircuit, label: &str, review_blueprint: bool
                 if let Some(decision) = gate_decisions.get(&i.number) {
                     ctx.with_collaborator_gate(matches!(decision, GateDecision::AutoRun));
                 }
-                ctx.with_autopilot_finish_prompt(Some(i.number), Some(action.as_str()));
+                ctx.with_autopilot_finish_prompt(Some(i.number), Some("draft_pr"));
                 ctx
             })
     });
@@ -398,7 +389,7 @@ fn base_context(circuit: &AutopilotCircuit) -> CircuitContext {
     let mut ctx = CircuitContext::new();
     ctx.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
     ctx.with_app_reviewer_provider();
-    let action = crate::services::autopilot::configured_action_on_success(circuit.mesh_id);
+    let action = "draft_pr".to_string();
     ctx.with_autopilot_finish_prompt(None, Some(action.as_str()));
     ctx
 }

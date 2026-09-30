@@ -18,8 +18,8 @@ import { useSubmenu, focusWithoutScroll } from '../../hooks/useSubmenu';
 import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
-import { getAutopilotNodePresentation, hasActiveAutopilotOwnership } from '../../lib/autopilotNodePresentation';
-import { AutopilotNodeIndicatorCell } from '../shared/AutopilotNodeIndicator';
+import { getCircuitNodePresentation, hasActiveCircuitOwnership } from '../../lib/circuitNodePresentation';
+import { CircuitNodeIndicatorCell } from '../shared/CircuitNodeIndicator';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -85,10 +85,9 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
   // re-renders only the rows whose bit actually changed; every other row's
   // selector result is identical and zustand skips the render.
   const isActive = useAgentNodeStore((s) => s.activeNodeId === node.id);
-  const autopilotState = useAgentNodeStore((s) => s.autopilotStates[node.id]);
   const circuitOwnership = useAgentNodeStore((s) => s.circuitOwnerships[node.id]);
-  const autopilotPresentation = getAutopilotNodePresentation(node, autopilotState, circuitOwnership);
-  const isAutopilot = hasActiveAutopilotOwnership(autopilotState, circuitOwnership);
+  const autopilotPresentation = getCircuitNodePresentation(node, circuitOwnership);
+  const isAutopilot = hasActiveCircuitOwnership(circuitOwnership);
   const lostConversation = hasLostConversation(node, isAutopilot);
   const renameAgentNode = useAgentNodeStore((s) => s.renameAgentNode);
   const spawnAgent = useAgentNodeStore((s) => s.spawnAgent);
@@ -425,7 +424,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
       >
         {config.dot}
       </span>
-      <AutopilotNodeIndicatorCell presentation={autopilotPresentation} />
+      <CircuitNodeIndicatorCell presentation={autopilotPresentation} />
       {/* Issue #1364 §3 — node-level status-reporting fault (see GridNodeHeader). */}
       {isSignalHealthProblem(node.signal_health) && <SignalHealthBadge compact health={node.signal_health} />}
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />

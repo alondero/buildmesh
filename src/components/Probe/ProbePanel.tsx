@@ -71,7 +71,6 @@ const ProjectFilesTab = lazy(() => import('./ProjectFilesTab').then((m) => ({ de
 const AgentChangesTab = lazy(() => import('./AgentChangesTab').then((m) => ({ default: m.AgentChangesTab })));
 const MeshPropertiesTab = lazy(() => import('./MeshPropertiesTab').then((m) => ({ default: m.MeshPropertiesTab })));
 const WorktreeManagerTab = lazy(() => import('./WorktreeManagerTab').then((m) => ({ default: m.WorktreeManagerTab })));
-const AutopilotProbeTab = lazy(() => import('./AutopilotProbeTab').then((m) => ({ default: m.AutopilotProbeTab })));
 const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
 const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
 const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
@@ -409,7 +408,6 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'files') return <ProjectFilesTab />;
   if (tab === 'review') return <AgentChangesTab />;
   if (tab === 'properties') return <MeshPropertiesTab />;
-  if (tab === 'autopilot') return <AutopilotProbeTab />;
   if (tab === 'circuits') return <CircuitsProbeTab />;
   if (tab === 'worktrees') return <WorktreeManagerTab />;
   if (tab === 'issues') return <GitIssuesTab />;

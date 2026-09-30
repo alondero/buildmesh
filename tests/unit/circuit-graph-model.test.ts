@@ -285,7 +285,7 @@ describe('parseGraph', () => {
   });
 
   // #1219 / review feedback: `CIRCUIT_GRAPH_VERSION` exists in two
-  // places (TS here, Rust in `src-tauri/src/autopilot/circuit/model.rs`)
+  // places (TS here, Rust in `src-tauri/src/circuit/model.rs`)
   // and the drift gate does NOT cover it because the constant is hand-
   // maintained. Pin the current value as a single source of truth on
   // the TS side; if a future bump forgets the TS mirror, this test

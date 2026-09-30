@@ -135,7 +135,7 @@ function seed() {
     selectedMeshId: null,
   });
   seedAgentNodes([A1(), A2(), AX(), B1(), B2()]);
-  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, closingNodeIds: new Set(), error: null, activeNodeId: null });
+  useAgentNodeStore.setState({ circuitOwnerships: {}, closingNodeIds: new Set(), error: null, activeNodeId: null });
 }
 
 function clearCounts() {

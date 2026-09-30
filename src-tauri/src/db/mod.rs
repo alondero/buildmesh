@@ -58,12 +58,10 @@ pub(crate) use auth::{COORDINATOR_DRIVE_TOKEN_KEY, COORDINATOR_READ_TOKEN_KEY};
 #[allow(unused_imports)]
 pub(crate) use mesh::{
     get_mesh_by_id_inner,
-    count_active_autopilot_nodes_total_inner,
     get_mesh_scratchpad_inner,
     set_mesh_scratchpad_inner,
     set_mesh_sandbox_inner,
     set_mesh_worktree_directory_inner,
-    COUNT_ACTIVE_AUTOPILOT_SQL
 };
 
 #[allow(unused_imports)]
@@ -717,7 +715,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
         -- table. Canonical indexes are installed after schema evolution:
         --   * autopilot_circuits — the blueprint rows. `graph_json` holds
         --     the serialised Graph Blueprint AST (see
-        --     autopilot::circuit::model); no per-node-kind migration — the
+        --     circuit::model); no per-node-kind migration — the
         --     AST evolves inside the JSON. `enabled` defaults to 0
         --     (draft-first, issue #1356) so a freshly created circuit
         --     cannot fire GitHub/interval pollers until the user opts in.

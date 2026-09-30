@@ -112,7 +112,7 @@ function seed(meshes: Mesh[] = MESHES, nodes: AgentNode[] = baselineNodes()) {
     selectedMeshId: null,
   });
   seedAgentNodes(nodes);
-  useAgentNodeStore.setState({ autopilotStates: {}, circuitOwnerships: {}, closingNodeIds: new Set(), error: null, activeNodeId: null });
+  useAgentNodeStore.setState({ circuitOwnerships: {}, closingNodeIds: new Set(), error: null, activeNodeId: null });
 }
 
 /** Mesh names in rendered sidebar order (band label excluded — it is not a mesh row). */

@@ -1,7 +1,7 @@
 //! Explicit report decisions, consumed only after the normal evidence preflight.
 
 use super::*;
-use crate::autopilot::evaluator::Classification;
+use crate::circuit::evaluator::Classification;
 
 const REVIEW: &str = "BUILDMESH_REVIEW_V1: ";
 const HANDOFF: &str = "BUILDMESH_HANDOFF_V1: ";

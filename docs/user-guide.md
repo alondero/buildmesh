@@ -69,6 +69,28 @@ The first successful loop is: **install → configure → spawn → inspect → 
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
 
+## Configure Autopilot Circuits
+
+Open **Circuits** to configure automated flows and their triggers. **Max concurrent
+circuit runs** controls how many runs the selected mesh can admit at once.
+Settings > General > **Circuit agent pool size** adds an optional cap on agents
+across all meshes; leave it empty for no global cap, or use 0 to pause new launches.
+
+Agent steps use their explicit launch configuration, then the mesh default, then
+the application default. Review agents use their configured reviewer selection.
+Settings > Providers > **Circuit classifier provider** selects the background
+Claude Code launch configuration used to classify reports. It defaults to Claude
+Code and is independent of agent and reviewer defaults; select a host-native
+Claude Code configuration, including a compatible provider route if needed.
+
+Issue-driven review flows prepare a draft pull request. Customize prompts and
+publication steps in the Circuit editor. The shared wrap-up template is stored in
+`circuits/finish.md` under the application data directory.
+
+Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
+retained, and the previous global agent cap and custom wrap-up template are carried
+forward. Old mesh-level Autopilot settings have no effect on Circuit launches.
+
 ## Understand a circuit checkpoint
 
 An **Unverified Checkpoint** means Buildmesh cannot currently establish the
@@ -293,7 +315,7 @@ the app-wide value when both exist.
 
 | Settings area | Use it for |
 |---|---|
-| General | Appearance, quit confirmation, global Autopilot capacity, the default worktree directory, and the Probe spawn prompts |
+| General | Appearance, quit confirmation, global Circuit agent capacity, the default worktree directory, and the Probe spawn prompts |
 | Providers | Credentials, provider routing, accounts, and custom compatible endpoints |
 | Launch Configurations | Named recipes, harness ordering, fallback defaults, and advanced provider routes |
 | Remote Access | LAN/VPN exposure, the Coordinator Read API, certificate management, and paired-device revocation |

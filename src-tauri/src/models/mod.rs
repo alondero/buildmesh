@@ -50,6 +50,16 @@ mod tests {
     }
 
     #[test]
+    fn mesh_wire_contract_excludes_retired_automation_settings() {
+        let mesh = sample_mesh();
+        for object in [serde_json::to_value(&mesh).unwrap(), serde_json::to_value(MeshRow::from(&mesh)).unwrap()] {
+            let object = object.as_object().unwrap();
+            assert!(object.contains_key("circuit_run_capacity"));
+            assert!(!object.keys().any(|key| key.starts_with("autopilot_") || key.starts_with("loop_")));
+        }
+    }
+
+    #[test]
     fn mesh_row_from_mesh_maps_all_fields() {
         let cfg = MeshRow::from(&sample_mesh());
         assert_eq!(cfg.name.as_deref(), Some("demo"));
@@ -69,12 +79,7 @@ mod tests {
         assert_eq!(cfg.root_run_command, None);
         // Wayfinder #990 / ticket #991 — looping autopilot config mirrors
         // through MeshRow::from exactly like the other Mesh fields.
-        assert_eq!(cfg.autopilot_mode, AutopilotMode::IssueDriven);
-        assert_eq!(cfg.loop_initial_prompt, None);
-        assert_eq!(cfg.loop_suffix_prompt, None);
-        assert_eq!(cfg.loop_max_iterations, None);
-        assert_eq!(cfg.loop_interval_seconds, 0);
-        assert_eq!(cfg.loop_consecutive_failures, 0);
+
     }
 
     /// #802 — a mesh that DID configure per-context commands must round-trip
@@ -96,25 +101,7 @@ mod tests {
         assert_eq!(MeshRow::from(&mesh).name, None);
     }
 
-    /// Wayfinder #990 / ticket #991 — a mesh that DID configure looping
-    /// autopilot must round-trip ALL six columns through `MeshRow::from`.
-    #[test]
-    fn mesh_row_from_mesh_maps_loop_config() {
-        let mut mesh = sample_mesh();
-        mesh.autopilot_mode = AutopilotMode::Looping;
-        mesh.loop_initial_prompt = Some("iterate the planner".to_string());
-        mesh.loop_suffix_prompt = Some("now write tests".to_string());
-        mesh.loop_max_iterations = Some(7);
-        mesh.loop_interval_seconds = 60;
-        mesh.loop_consecutive_failures = 2;
-        let cfg = MeshRow::from(&mesh);
-        assert_eq!(cfg.autopilot_mode, AutopilotMode::Looping);
-        assert_eq!(cfg.loop_initial_prompt.as_deref(), Some("iterate the planner"));
-        assert_eq!(cfg.loop_suffix_prompt.as_deref(), Some("now write tests"));
-        assert_eq!(cfg.loop_max_iterations, Some(7));
-        assert_eq!(cfg.loop_interval_seconds, 60);
-        assert_eq!(cfg.loop_consecutive_failures, 2);
-    }
+
 
     /// Regression test for issue #457: `AgentNode::default()` exists so future
     /// optional columns only need to be added to the struct, not to 8 test
@@ -206,12 +193,7 @@ mod tests {
         // Wayfinder #990 / ticket #991 — looping autopilot config: zero /
         // default per Option A (issue #518), with the `#[default]` enum
         // variant on the autopilot_mode carrying its pre-v30 behaviour.
-        assert_eq!(m.autopilot_mode, AutopilotMode::IssueDriven);
-        assert_eq!(m.loop_initial_prompt, None);
-        assert_eq!(m.loop_suffix_prompt, None);
-        assert_eq!(m.loop_max_iterations, None);
-        assert_eq!(m.loop_interval_seconds, 0);
-        assert_eq!(m.loop_consecutive_failures, 0);
+
     }
 
     /// Companion to the above: a partially-overridden literal must compile
@@ -288,58 +270,6 @@ mod tests {
         assert_eq!(SessionStatus::from_db_str("garbage"), SessionStatus::Idle);
         assert_eq!(SessionStatus::from_db_str(""), SessionStatus::Idle);
         assert_eq!(SessionStatus::from_db_str("RUNNING"), SessionStatus::Idle);
-    }
-
-    // Wayfinder #990 / ticket #991 — AutopilotMode is a wire-shape mirror of
-    // SessionStatus: same snake_case rename, same "DB string == wire value"
-    // contract, same fail-open unknown-strings-degrade-to-default semantics.
-    // The defensive tests below pin all three.
-
-    #[test]
-    fn autopilot_mode_round_trip_all_variants() {
-        for &mode in [AutopilotMode::IssueDriven, AutopilotMode::Looping].iter() {
-            let db_str = match mode {
-                AutopilotMode::IssueDriven => "issue_driven",
-                AutopilotMode::Looping => "looping",
-            };
-            assert_eq!(
-                AutopilotMode::from_db_str(db_str),
-                mode,
-                "round-trip failed for {mode:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn autopilot_mode_serializes_to_wire_as_its_snake_case_string() {
-        // Wire shape MUST equal the DB string the column stores, the same
-        // way SessionStatus does (issue #359). The `rename_all = "snake_case"`
-        // serde attribute is the bridge; without it, `Looping` would land
-        // on the wire as `"Looping"` and the frontend enum-compare would
-        // silently miss every Looping-mode mesh.
-        for mode in [AutopilotMode::IssueDriven, AutopilotMode::Looping] {
-            let wire = serde_json::to_value(mode).unwrap();
-            let expected = match mode {
-                AutopilotMode::IssueDriven => "issue_driven",
-                AutopilotMode::Looping => "looping",
-            };
-            assert_eq!(
-                wire,
-                serde_json::Value::String(expected.to_string()),
-                "wire serialization of {mode:?} must match its snake_case DB string"
-            );
-        }
-    }
-
-    #[test]
-    fn autopilot_mode_unknown_string_defaults_to_issue_driven() {
-        // Fail-open: a row written by a future build with an unknown mode
-        // string degrades to IssueDriven (the pre-v30 behaviour), so the
-        // poller keeps working — the alternative (degrading to Looping)
-        // would silently spin up a configured-but-failed Looping mesh.
-        assert_eq!(AutopilotMode::from_db_str("garbage"), AutopilotMode::IssueDriven);
-        assert_eq!(AutopilotMode::from_db_str(""), AutopilotMode::IssueDriven);
-        assert_eq!(AutopilotMode::from_db_str("Looping"), AutopilotMode::IssueDriven);
     }
 
     #[test]

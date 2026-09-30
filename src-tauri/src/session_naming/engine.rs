@@ -41,7 +41,7 @@ pub(super) fn naming() -> std::sync::MutexGuard<'static, HashMap<i64, NodeNaming
 
 pub(super) const MAX_RENAME_ATTEMPTS: u8 = 3;
 
-// `pub(crate)` so Autopilot's state evaluator (`autopilot::evaluator`,
+// `pub(crate)` so Autopilot's state evaluator (`circuit::evaluator`,
 // issue #483) shares the exact same terminal-cleaning rule instead of
 // growing a second, subtly-different ANSI regex.
 pub(crate) static ANSI_ESCAPE: once_cell::sync::Lazy<regex::Regex> =

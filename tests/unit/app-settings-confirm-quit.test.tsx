@@ -35,7 +35,7 @@ beforeEach(() => {
   tauriMocks.getAppPreferences.mockReset().mockResolvedValue({
     default_provider: null,
     naming_provider: null,
-    autopilot_pool_size: null,
+    circuit_agent_pool_size: null,
     worktree_directory: null,
     harness_defaults: {},
     provider_pairings: [],

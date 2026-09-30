@@ -10,7 +10,7 @@
 //! it needs a network and credentials, and the decision logic it delegates to is
 //! what these assertions pin.
 
-use buildmesh_lib::autopilot::{
+use buildmesh_lib::circuit::security::{
     evaluate, AutopilotTrigger, CollaboratorPermission, GateDecision, TriggerKind,
 };
 use buildmesh_lib::models::SessionStatus;

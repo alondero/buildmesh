@@ -324,7 +324,6 @@ describe('useProbeContext (issue #1456)', () => {
 
   it('declares an ownership lens and baseline for every Probe destination', () => {
     expect(Object.keys(PROBE_TAB_DEFINITIONS).sort()).toEqual([
-      'autopilot',
       'circuits',
       'files',
       'issues',

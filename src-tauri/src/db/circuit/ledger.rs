@@ -3,7 +3,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::autopilot::circuit::vocabulary::{RunState, StepStatus};
+use crate::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
@@ -16,13 +16,13 @@ use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunSt
 /// `harness:provider_id`. A blank value collapses to `None` (inherit the
 /// app-wide Reviewer provider, then the source agent).
 ///
-/// The gate itself lives in `autopilot::compatibility`
-/// ([`validate_reviewer_provider_id`](crate::autopilot::compatibility::validate_reviewer_provider_id)):
+/// The gate itself lives in `circuit::compatibility`
+/// ([`validate_reviewer_provider_id`](crate::circuit::compatibility::validate_reviewer_provider_id)):
 /// a reviewer must be able to **yield a turn**, or the `verdict` gate parks
 /// forever — the reviewer's status has to reach `awaiting_input` / `ready` /
 /// `completed` before `classify_step_turn` will do anything at all
 /// (`if !yielded { return None; }`). This is the harness half of
-/// `autopilot::compatibility::evaluate`, minus its fail-closed unknown arm
+/// `circuit::compatibility::evaluate`, minus its fail-closed unknown arm
 /// (see `reviewer_harness_reason`) — not a Terminal-only denylist.
 #[cfg(test)]
 fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, String> {
@@ -38,8 +38,8 @@ fn validate_prepared_reviewer(value: &str, preferences: &crate::preferences::App
         None => value,
     };
     let id = crate::agent::provider::SpawnOptionId::from(option);
-    match crate::autopilot::compatibility::reviewer_harness_reason(id.harness_id()) {
-        Some(reason) => Err(crate::autopilot::compatibility::reviewer_refusal_message(&reason)),
+    match crate::circuit::compatibility::reviewer_harness_reason(id.harness_id()) {
+        Some(reason) => Err(crate::circuit::compatibility::reviewer_refusal_message(&reason)),
         None => Ok(()),
     }
 }
@@ -253,14 +253,12 @@ fn create_node_circuit_run_with_recovery_locked(
         &format!(
             "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
              JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-             WHERE s.agent_node_id = ?1 AND r.state IN ({})) \
-             OR EXISTS(SELECT 1 FROM autopilot_runs WHERE node_id = ?1 \
-             AND state IN ('implementing','finishing','suffix_pending'))",
+             WHERE s.agent_node_id = ?1 AND r.state IN ({}))",
             RunState::SQL_IN_LIVE
         ),
         params![node_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if owned { return Err("This agent is already controlled by an active Autopilot run.".into()); }
+    if owned { return Err("This agent is already controlled by an active Circuit run.".into()); }
     if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
         return Err("Resume the agent before starting a review.".into());
     }
@@ -278,16 +276,16 @@ fn create_node_circuit_run_with_recovery_locked(
     } else if let Some(id) = selected_circuit_id {
         let circuit = get_autopilot_circuit_inner(&tx, id).map_err(|e| e.to_string())?
             .ok_or("Circuit no longer exists")?;
-        let graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
+        let graph = crate::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
         graph.validate()?;
         if circuit.mesh_id != node.mesh_id || graph.roots().is_empty()
-            || graph.roots().iter().any(|n| !matches!(n.kind, crate::autopilot::circuit::model::CircuitNodeKind::Manual)) {
+            || graph.roots().iter().any(|n| !matches!(n.kind, crate::circuit::model::CircuitNodeKind::Manual)) {
             return Err("Select a manual Circuit from this agent's Mesh.".into());
         }
         (id, circuit.name)
     } else {
         let (review_model, review_effort) = review_config.clone().unwrap_or_default();
-        let graph = crate::autopilot::circuit::model::CircuitGraph::agent_review(
+        let graph = crate::circuit::model::CircuitGraph::agent_review(
             review_model.clone(),
             review_effort.clone(),
             max_rounds,
@@ -314,7 +312,7 @@ fn create_node_circuit_run_with_recovery_locked(
             (tx.last_insert_rowid(), name)
         }
     };
-    let mut context = crate::autopilot::circuit::context::CircuitContext::new();
+    let mut context = crate::circuit::context::CircuitContext::new();
     context.with_circuit(circuit_id, &name, node.mesh_id);
     context.set("review.provider", app_reviewer.as_deref().unwrap_or(""));
     context.set("source.agent_id", node_id.to_string());
@@ -388,9 +386,9 @@ fn pin_review_launches(
     source_provider: &str,
     source_configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
     preferences: &crate::preferences::AppPreferences,
-    context: &mut crate::autopilot::circuit::context::CircuitContext,
+    context: &mut crate::circuit::context::CircuitContext,
 ) -> Result<(), String> {
-    use crate::autopilot::circuit::model::{CircuitGraph, CircuitNodeKind};
+    use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
     use crate::preferences::launch_configurations::{capture, snapshot, LaunchOverrides};
     let inherited_configuration = source_configuration.filter(|source| !preferences.spawn_configurations.iter().any(|c| c.id == source.id));
     let mut preferences = preferences.clone();
@@ -448,10 +446,10 @@ pub(crate) fn copy_review_blueprint_locked(db: &mut Connection, circuit_id: i64,
     let tx = db.transaction().map_err(|error| error.to_string())?;
     let original = get_autopilot_circuit_inner(&tx,circuit_id).map_err(|error| error.to_string())?
         .filter(|circuit| circuit.is_preset).ok_or("Select a built-in Review Blueprint to copy.")?;
-    let mut graph = crate::autopilot::circuit::model::CircuitGraph::from_json(&original.graph_json)?;
+    let mut graph = crate::circuit::model::CircuitGraph::from_json(&original.graph_json)?;
     let roots: Vec<String> = graph.roots().iter().map(|node| node.id.clone()).collect();
     for node in &mut graph.nodes {
-        if roots.contains(&node.id) { node.kind = crate::autopilot::circuit::model::CircuitNodeKind::Manual; }
+        if roots.contains(&node.id) { node.kind = crate::circuit::model::CircuitNodeKind::Manual; }
     }
     graph.validate()?;
     let copied = create_autopilot_circuit_inner(&tx,original.mesh_id,name.trim(),"Independent copy of the Review Blueprint",original.concurrency_limit,&graph.to_json()?)
@@ -616,7 +614,7 @@ pub(super) fn ensure_review_blueprint(mesh_id: i64) -> SqlResult<()> {
 }
 
 pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> SqlResult<()> {
-    let graph = crate::autopilot::circuit::model::CircuitGraph::agent_review(None, None, 3)
+    let graph = crate::circuit::model::CircuitGraph::agent_review(None, None, 3)
         .to_json().map_err(rusqlite::Error::InvalidParameterName)?;
     db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,concurrency_limit,graph_json,is_preset)
         SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,2,?2,1
@@ -929,11 +927,11 @@ pub(crate) fn create_circuit_run_prepared_locked(
     let tx = db.transaction()?;
     if let Some(id) = tx.query_row("SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1 AND trigger_identity=?2",
         params![circuit_id, trigger_identity], |row| row.get::<_, i64>(0)).optional()? { return Ok(id); }
-    let mut context = crate::autopilot::circuit::context::CircuitContext::from_json(context_json).map_err(rusqlite::Error::InvalidParameterName)?;
+    let mut context = crate::circuit::context::CircuitContext::from_json(context_json).map_err(rusqlite::Error::InvalidParameterName)?;
     if let Some(source) = context.source_agent_id() {
         if crate::db::legacy_retirement::pending_inner(&tx, source)? { return Err(rusqlite::Error::InvalidQuery); }
     }
-    let default_provider: Option<String> = tx.query_row("SELECT COALESCE(NULLIF(TRIM(autopilot_provider), ''), default_provider) FROM meshes WHERE id=?1", [mesh_id], |row| row.get(0))?;
+    let default_provider: Option<String> = tx.query_row("SELECT default_provider FROM meshes WHERE id=?1", [mesh_id], |row| row.get(0))?;
     let source_provider = crate::preferences::resolve_default_provider(None, default_provider, preferences.default_provider.clone());
     if context.get("review.provider").is_none() {
         if let Some(provider) = preferences.reviewer_provider.as_deref() { context.set("review.provider", provider); }
@@ -1271,7 +1269,7 @@ pub(crate) fn transition_circuit_run_state_inner(
 /// NOT terminal: paused runs retain their slot (the user-chosen
 /// semantics in #1467 planning).
 pub fn is_terminal_run_state(state: &str) -> bool {
-    crate::autopilot::circuit::stepper::RunState::from_db_str(state).is_terminal()
+    crate::circuit::stepper::RunState::from_db_str(state).is_terminal()
 }
 
 /// One run row by id, or `None` when the id is unknown.
@@ -1550,7 +1548,7 @@ pub(crate) fn commit_circuit_advance_inner(
         let error_changed = op.error.is_some();
         let terminal = outcome_val
             .as_deref()
-            .map(crate::autopilot::circuit::model::StepOutcome::is_terminal_db_str)
+            .map(crate::circuit::model::StepOutcome::is_terminal_db_str)
             .unwrap_or(false);
         tx.execute(
             "INSERT INTO autopilot_circuit_run_steps \
@@ -1768,13 +1766,13 @@ pub(crate) fn count_active_circuit_runs_inner(db: &Connection, mesh_id: i64) -> 
 mod reviewer_tests {
     use super::*;
     use crate::agent::capabilities::capabilities_for;
-    use crate::autopilot::compatibility::harness_has_turn_signal;
+    use crate::circuit::compatibility::harness_has_turn_signal;
     use crate::models::Provider;
 
     #[test]
     fn circuit_review_inherits_source_snapshot_without_a_saved_configuration() {
         use crate::preferences::launch_configurations::{capture, snapshot};
-        use crate::autopilot::circuit::context::CircuitContext;
+        use crate::circuit::context::CircuitContext;
         for harness in ["codex", "retained-codex"] {
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -1802,8 +1800,8 @@ mod reviewer_tests {
     }
 
     #[test]
-    fn circuit_issue_review_pins_parent_selection_with_autopilot_precedence() {
-        use crate::autopilot::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind}};
+    fn circuit_issue_review_ignores_retired_provider_when_pinning_parent_selection() {
+        use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind}};
         for explicit in [None, Some("kimi")] {
             let mut db = Connection::open_in_memory().unwrap();
             crate::db::init_schema(&db).unwrap();
@@ -1816,13 +1814,13 @@ mod reviewer_tests {
             let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
             let context = CircuitContext::from_json(&stored.context_json).unwrap();
             let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
-            assert_eq!(configuration.spawn_option_id, explicit.unwrap_or("codex"));
+            assert_eq!(configuration.spawn_option_id, explicit.unwrap_or("claude"));
         }
     }
 
     #[test]
     fn circuit_trigger_snapshot_is_atomic_and_duplicate_trigger_keeps_original_settings() {
-        use crate::autopilot::circuit::{context::CircuitContext, model::CircuitGraph};
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
         use crate::preferences::spawn_configurations::SpawnConfiguration;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -1847,7 +1845,7 @@ mod reviewer_tests {
 
     #[test]
     fn circuit_review_pins_effective_configuration_and_continuation_keeps_it() {
-        use crate::autopilot::circuit::context::CircuitContext;
+        use crate::circuit::context::CircuitContext;
         use crate::preferences::spawn_configurations::SpawnConfiguration;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -1900,7 +1898,7 @@ mod reviewer_tests {
     /// the reopened successor's recorded lineage still agrees with its context.
     #[test]
     fn circuit_recovery_history_survives_reopen_and_matches_successor_context() {
-        use crate::autopilot::circuit::context::CircuitContext;
+        use crate::circuit::context::CircuitContext;
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut db = Connection::open(file.path()).unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -1943,8 +1941,8 @@ mod reviewer_tests {
         let graph = super::super::evidence::run_graph(&db, successor).unwrap();
         assert!(graph.node("implementer").is_none(), "review continuation never replays implementation");
         assert!(!graph.nodes.iter().any(|node| matches!(node.kind,
-            crate::autopilot::circuit::model::CircuitNodeKind::GithubAction {
-                action: crate::autopilot::circuit::model::GithubActionKind::OpenPr, ..
+            crate::circuit::model::CircuitNodeKind::GithubAction {
+                action: crate::circuit::model::GithubActionKind::OpenPr, ..
             })), "review continuation never replays PR publication");
         assert_eq!(db.query_row("SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1", [successor], |row| row.get::<_, i64>(0)).unwrap(), 0,
             "an unopened successor has not dispatched any external effect");

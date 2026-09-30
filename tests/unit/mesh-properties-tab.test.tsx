@@ -60,11 +60,7 @@ const MESH_CONFIG = {
   sandbox: true,
   // Autopilot Policy (issue #481) — disabled by default in the fixture;
   // the dedicated tests below flip it on via a per-test override.
-  autopilot_enabled: false,
-  autopilot_trigger_label: null,
-  autopilot_concurrency_limit: 2,
-  autopilot_provider: null,
-  autopilot_action_on_success: null,
+
 };
 
 /** Capability descriptor for the test fixtures — every native row in

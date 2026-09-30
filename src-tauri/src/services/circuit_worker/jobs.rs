@@ -292,7 +292,7 @@ mod tests {
             run_id, state: RunState::Running, context,
             graph: super::super::CircuitGraph {
                 version: 3, blueprint: None, edges: vec![],
-                nodes: vec![crate::autopilot::circuit::model::CircuitNode {
+                nodes: vec![crate::circuit::model::CircuitNode {
                     id: "gate".into(), kind: CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) },
                 }],
             },

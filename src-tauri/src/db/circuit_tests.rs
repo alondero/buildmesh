@@ -26,8 +26,8 @@
 //!   before any condvar signal / IO.
 
 use super::*;
-use crate::autopilot::circuit::model::CircuitGraph;
-use crate::autopilot::circuit::vocabulary::StepStatus;
+use crate::circuit::model::CircuitGraph;
+use crate::circuit::vocabulary::StepStatus;
 use crate::models::{EnvType, SessionStatus};
 use rusqlite::{params, Connection};
 
@@ -92,7 +92,7 @@ fn review_blueprint_copy_is_manual_disabled_independent_and_has_no_transferred_r
     assert!(!copy.is_preset);
     assert!(!copy.enabled);
     let graph=CircuitGraph::from_json(&copy.graph_json).unwrap();
-    assert!(graph.roots().iter().all(|node|matches!(node.kind,crate::autopilot::circuit::model::CircuitNodeKind::Manual)));
+    assert!(graph.roots().iter().all(|node|matches!(node.kind,crate::circuit::model::CircuitNodeKind::Manual)));
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id=?1",[copy.id],|row|row.get::<_,i64>(0)).unwrap(),0);
     let changed=CircuitGraph::walking_skeleton("Independent changes").to_json().unwrap();
     update_autopilot_circuit_graph_inner(&conn,copy.id,&changed).unwrap();
@@ -103,7 +103,7 @@ fn review_blueprint_copy_is_manual_disabled_independent_and_has_no_transferred_r
 #[test]
 fn copied_review_continuation_requires_the_frozen_review_contract() {
     use super::circuit::{ledger::copy_review_blueprint_locked, recovery::review_recovery_inner};
-    use crate::autopilot::circuit::model::{CircuitNodeKind, EdgeCondition};
+    use crate::circuit::model::{CircuitNodeKind, EdgeCondition};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "copy continuation", "/tmp/copy-continuation").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
@@ -134,8 +134,8 @@ fn copied_review_continuation_requires_the_frozen_review_contract() {
 #[test]
 fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_source_disable() {
     use super::circuit::{ledger::copy_review_blueprint_locked, recovery::review_recovery_inner};
-    use crate::autopilot::circuit::context::CircuitContext;
-    use crate::autopilot::circuit::model::CircuitNodeKind;
+    use crate::circuit::context::CircuitContext;
+    use crate::circuit::model::CircuitNodeKind;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "blueprint-audit", "/tmp/blueprint-audit").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Implementation", &mesh.path, "work", EnvType::Windows,
@@ -224,7 +224,7 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
 fn continued_review_dispatches_only_review_work_and_records_the_run_it_continues() {
     use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
-    use crate::autopilot::circuit::model::{CircuitNodeKind, GithubActionKind};
+    use crate::circuit::model::{CircuitNodeKind, GithubActionKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-only", "/tmp/review-only").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
@@ -413,7 +413,7 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
     let legacy = include_str!("../../tests/fixtures/legacy-issue-review-circuit.json");
     let mut graph = CircuitGraph::from_json(legacy).unwrap();
     let reviewer = graph.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap();
-    if let crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. } = &mut reviewer.kind {
+    if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. } = &mut reviewer.kind {
         *model = Some("saved-model".into());
         *prompt = "custom reviewer instructions".into();
     } else { panic!("fixture must contain a reviewer spawn"); }
@@ -425,9 +425,9 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
     let upgraded_graph = CircuitGraph::from_json(&upgraded).unwrap();
     upgraded_graph.validate().unwrap();
     assert!(matches!(upgraded_graph.node("review_classifier").map(|n| &n.kind),
-        Some(crate::autopilot::circuit::model::CircuitNodeKind::ReviewVerdict { .. })));
+        Some(crate::circuit::model::CircuitNodeKind::ReviewVerdict { .. })));
     assert!(matches!(upgraded_graph.node("reviewer").map(|n| &n.kind),
-        Some(crate::autopilot::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. })
+        Some(crate::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. })
             if model.as_deref() == Some("saved-model") && prompt == "custom reviewer instructions"));
     super::init_schema(&conn).unwrap();
     assert_eq!(conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(), upgraded);
@@ -476,7 +476,7 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     assert_eq!(preset_count, 1);
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.source_agent_node_id, Some(source.id));
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
+    let ctx = crate::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
     assert_eq!(ctx.get("review.provider"), Some("codex"), "the first picked reviewer provider survives the dedup re-creates");
@@ -503,7 +503,7 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
 fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
     use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
-    use crate::autopilot::circuit::{context::CircuitContext, model::CircuitNodeKind};
+    use crate::circuit::{context::CircuitContext, model::CircuitNodeKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "recovery", "/tmp/recovery").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
@@ -548,7 +548,7 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
 #[test]
 fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     use super::circuit::recovery::extend_failed_review_locked;
-    use crate::autopilot::circuit::context::CircuitContext;
+    use crate::circuit::context::CircuitContext;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "same review", "/tmp/same-review").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "work", EnvType::Windows,
@@ -580,22 +580,22 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
     assert_eq!(steps.iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 4);
     assert!(steps.iter().all(|s| s.node_id != "implementer" && s.node_id != "open_pr"));
-    let mut view = crate::autopilot::circuit::stepper::RunView {
+    let mut view = crate::circuit::stepper::RunView {
         run_id,
         graph: CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
             [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap(),
-        state: crate::autopilot::circuit::stepper::RunState::Pending,
+        state: crate::circuit::stepper::RunState::Pending,
         context: CircuitContext::from_json(&after.context_json).unwrap(),
-        steps: steps.into_iter().map(|step| crate::autopilot::circuit::stepper::StepView {
+        steps: steps.into_iter().map(|step| crate::circuit::stepper::StepView {
             node_id: step.node_id,
-            status: crate::autopilot::circuit::stepper::StepStatus::from_db_str(&step.status),
-            outcome: step.outcome.as_deref().and_then(crate::autopilot::circuit::model::StepOutcome::from_db_str),
+            status: crate::circuit::stepper::StepStatus::from_db_str(&step.status),
+            outcome: step.outcome.as_deref().and_then(crate::circuit::model::StepOutcome::from_db_str),
             error: step.error_message,
             agent_node_id: step.agent_node_id,
             attempt: step.attempt,
         }).collect(),
     };
-    use crate::autopilot::circuit::stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus};
+    use crate::circuit::stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus};
     advance(&mut view, &CircuitEvent::Triggered);
     let tick = advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 2 }));
     assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running);
@@ -620,7 +620,7 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
 #[test]
 fn extending_issue_review_replays_neither_implementation_nor_publication() {
     use super::circuit::recovery::extend_failed_review_locked;
-    use crate::autopilot::circuit::model::{CircuitNodeKind, GithubActionKind};
+    use crate::circuit::model::{CircuitNodeKind, GithubActionKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "issue extension", "/tmp/issue-extension").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "work", EnvType::Windows,
@@ -658,7 +658,7 @@ fn extending_issue_review_replays_neither_implementation_nor_publication() {
 fn review_continuation_follows_failed_generations_and_reuses_success() {
     use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
-    use crate::autopilot::circuit::context::CircuitContext;
+    use crate::circuit::context::CircuitContext;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-lineage", "/tmp/review-lineage").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "Implementation", &mesh.path, "work", EnvType::Windows,
@@ -688,7 +688,7 @@ fn review_continuation_follows_failed_generations_and_reuses_success() {
 fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
     use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
-    use crate::autopilot::circuit::{context::CircuitContext, model::CircuitNodeKind};
+    use crate::circuit::{context::CircuitContext, model::CircuitNodeKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "pr-recovery", "/tmp/pr-recovery").unwrap();
     let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
@@ -732,7 +732,7 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let foreign = create_autopilot_circuit_inner(&conn, other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
     assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None).unwrap_err().contains("manual Circuit"));
-    let interval = CircuitGraph::triggered_skeleton("task", crate::autopilot::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
+    let interval = CircuitGraph::triggered_skeleton("task", crate::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
     let timed = create_autopilot_circuit_inner(&conn, mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
     assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(timed.id), 3, None).is_err());
     let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
@@ -745,11 +745,11 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     // must equal the same no-override run's context, so "ignored" is
     // distinguishable from "clobbered with an empty string".
     let expected_reviewer = crate::preferences::reviewer_provider().unwrap_or_default();
-    let run_context = crate::autopilot::circuit::context::CircuitContext::from_json(
+    let run_context = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
     let rerun = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("codex".into())).unwrap();
-    let rerun_context = crate::autopilot::circuit::context::CircuitContext::from_json(
+    let rerun_context = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, rerun).unwrap().unwrap().context_json,
     ).unwrap();
     assert!(rerun != run, "the cancelled run was replaced");
@@ -792,7 +792,7 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.
     let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("   ".into())).unwrap();
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+    let ctx = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
     assert_eq!(
@@ -816,7 +816,7 @@ fn node_review_ignores_ineligible_override_for_authored_circuit() {
     // Would be refused on the built-in preset path; the authored path
     // ignores the value entirely, so the run mints.
     let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("freebuff".into())).unwrap();
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+    let ctx = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
     assert_eq!(
@@ -865,7 +865,7 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
         ..Default::default()
     }).expect("store eligible app-wide reviewer");
     let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap();
-    let ctx = crate::autopilot::circuit::context::CircuitContext::from_json(
+    let ctx = crate::circuit::context::CircuitContext::from_json(
         &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
     ).unwrap();
     assert_eq!(ctx.get("review.provider"), Some("codex"));
@@ -958,22 +958,22 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
         version: 1,
         blueprint: None,
         nodes: vec![
-            crate::autopilot::circuit::model::CircuitNode {
+            crate::circuit::model::CircuitNode {
                 id: "trigger".into(),
-                kind: crate::autopilot::circuit::model::CircuitNodeKind::Manual,
+                kind: crate::circuit::model::CircuitNodeKind::Manual,
             },
-            crate::autopilot::circuit::model::CircuitNode {
+            crate::circuit::model::CircuitNode {
                 id: "verify".into(),
-                kind: crate::autopilot::circuit::model::CircuitNodeKind::DeterministicVerification {
+                kind: crate::circuit::model::CircuitNodeKind::DeterministicVerification {
                     command: "cargo test".into(),
                 },
             },
         ],
-        edges: vec![crate::autopilot::circuit::model::CircuitEdge {
+        edges: vec![crate::circuit::model::CircuitEdge {
             from: "trigger".into(),
             to: "verify".into(),
-            condition: crate::autopilot::circuit::model::EdgeCondition::OnOutcome(
-                crate::autopilot::circuit::model::StepOutcome::Green,
+            condition: crate::circuit::model::EdgeCondition::OnOutcome(
+                crate::circuit::model::StepOutcome::Green,
             ),
         }],
     };

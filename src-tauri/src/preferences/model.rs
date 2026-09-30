@@ -437,18 +437,13 @@ pub struct AppPreferences {
     /// haiku tier instead of the user's main subscription default.
     #[serde(default)]
     pub naming_provider: Option<String>,
-    /// Buildmesh-wide cap on **concurrently active autopilot nodes across all
-    /// meshes** — the global "pool" the per-mesh `autopilot_concurrency_limit`
-    /// slots draw from. Per-mesh limits alone can't protect the machine: ten
-    /// meshes × 2 nodes each is still twenty concurrent agents. `None` (the
-    /// default) means no global cap — per-mesh limits alone apply, exactly the
-    /// pre-existing behaviour. `Some(0)` pauses all new autopilot spawns
-    /// without touching any mesh's enabled flag. Enforced by the poller
-    /// (`services::autopilot::run_poll_pass`), never by killing running nodes
-    /// — lowering the cap below the current active count just stops new
-    /// spawns until enough slots free up.
+    /// Host-wide limit on Circuit agents, including retained agents from terminal runs.
+    /// None is uncapped; zero pauses new admission and launches without stopping live agents.
     #[serde(default)]
-    pub autopilot_pool_size: Option<u32>,
+    pub circuit_agent_pool_size: Option<u32>,
+    /// Claude Code launch configuration used for Circuit classification, independent of agent defaults.
+    #[serde(default)]
+    pub circuit_classifier_provider: Option<String>,
     /// **Application-level harness defaults** (issue #1148 / #1150) — a
     /// sparse map keyed by stable harness profile id (the id the Spawn Menu
     /// uses, e.g. `"claude"`, `"codex"`, `"agy"`, plus any user-defined

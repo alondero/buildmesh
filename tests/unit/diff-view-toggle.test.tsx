@@ -152,7 +152,7 @@ describe('Diff view toggle (issue #1374)', () => {
       nodeIds: [],
       activeNodeId: null,
       closingNodeIds: new Set(),
-      autopilotStates: {},
+      circuitOwnerships: {},
       semanticTurns: {},
       schedules: {},
     });

@@ -163,7 +163,7 @@ fn record_time(format: TranscriptFormat, value: &serde_json::Value) -> Option<i6
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::autopilot::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNode, CircuitNodeKind, CircuitEdge},
+    use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNode, CircuitNodeKind, CircuitEdge},
         observation::{ObservationIdentity, WorkEvidence}, stepper::*};
 
     #[test]
@@ -212,7 +212,7 @@ mod tests {
                 outcome: None, error: Some("Missing ownership adapter".into()), agent_node_id: None }],
         };
         let event = CircuitEvent::TurnClassified { node_id: "await_source".into(),
-            classification: Some(crate::autopilot::evaluator::Classification::Completed), output: Some(snapshot.text.clone()),
+            classification: Some(crate::circuit::evaluator::Classification::Completed), output: Some(snapshot.text.clone()),
             binding: Some(ClassificationBinding {
                 owner: ObservationIdentity { run_id: 42, step_id: "await_source".into(), attempt: 1, agent_node_id: 900,
                     session_incarnation: Some("100".into()), session_id: Some("session".into()), turn_id: None,
@@ -231,7 +231,7 @@ mod tests {
         use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};
         use crate::agent::process::InputUnavailable;
-        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        use crate::circuit::observation::CircuitObservationBlocker as B;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("messages.jsonl");
         let lines = format!("{}\n{}\n", serde_json::json!({
@@ -255,7 +255,7 @@ mod tests {
             assert_eq!(candidate.status, SessionStatus::Ready);
             let mut routed = run.clone();
             let transition = advance(&mut routed, &CircuitEvent::TurnClassified {
-                node_id:"await_source".into(), classification:Some(crate::autopilot::evaluator::Classification::Completed),
+                node_id:"await_source".into(), classification:Some(crate::circuit::evaluator::Classification::Completed),
                 output:Some(candidate.output), binding:Some(candidate.binding) });
             assert_eq!(routed.state, RunState::Completed);
             assert!(!transition.classifications[0].lifecycle_verified);
@@ -293,7 +293,7 @@ mod tests {
         use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};
         use crate::agent::process::InputUnavailable;
-        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        use crate::circuit::observation::CircuitObservationBlocker as B;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rollout.jsonl");
         // Minimal replay of run 239's native final-answer/task_complete pair.
@@ -313,7 +313,7 @@ mod tests {
             assert_eq!(candidate.status, SessionStatus::Ready);
             let mut recovered = run.clone();
             let transition = advance(&mut recovered, &CircuitEvent::TurnClassified {
-                node_id: "await_source".into(), classification: Some(crate::autopilot::evaluator::Classification::Completed),
+                node_id: "await_source".into(), classification: Some(crate::circuit::evaluator::Classification::Completed),
                 output: Some(candidate.output), binding: Some(candidate.binding),
             });
             assert_eq!(recovered.state, RunState::Completed);
@@ -328,7 +328,7 @@ mod tests {
 
         // A resumed process replaces a status-only identity without weakening
         // the report/session/input fences used by the production handoff.
-        use crate::autopilot::circuit::observation::{CircuitObservation, ObservedWorkFact};
+        use crate::circuit::observation::{CircuitObservation, ObservedWorkFact};
         let owner = ObservationIdentity { run_id: 42, step_id: "await_source".into(), attempt: 1,
             agent_node_id: 900, session_incarnation: Some("50".into()), session_id: Some("session".into()),
             turn_id: None, report_revision: None };
@@ -343,7 +343,7 @@ mod tests {
             Ok("1:0".into()), Ok(report.clone())).unwrap().unwrap();
         let mut resumed = run.clone();
         advance(&mut resumed, &CircuitEvent::TurnClassified { node_id: "await_source".into(),
-            classification: Some(crate::autopilot::evaluator::Classification::Completed),
+            classification: Some(crate::circuit::evaluator::Classification::Completed),
             output: Some(candidate.output), binding: Some(candidate.binding) });
         assert_eq!(resumed.state, RunState::Completed);
         run.context.set("agent.900.previous_report_revision", &report.revision);
@@ -771,7 +771,7 @@ mod tests {
     fn superseded_and_stale_reports_cannot_bind_for_any_harness() {
         use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};
-        use crate::autopilot::circuit::observation::CircuitObservationBlocker as B;
+        use crate::circuit::observation::CircuitObservationBlocker as B;
         for (harness, _dir, snapshot) in wired_report_snapshots() {
             let agent = AgentNode { id: 900, provider: harness.into(), cli_session_id: Some("session".into()),
                 status: SessionStatus::Ready, ..Default::default() };
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn a_report_handoff_never_claims_native_lifecycle_or_owned_work_for_any_harness() {
-        use crate::autopilot::circuit::observation::ReportCompleteness;
+        use crate::circuit::observation::ReportCompleteness;
         for (harness, _dir, snapshot) in wired_report_snapshots() {
             let (mut run, event) = classified_run(snapshot);
             let transition = advance(&mut run, &event);

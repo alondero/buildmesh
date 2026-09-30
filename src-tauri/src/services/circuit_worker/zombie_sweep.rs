@@ -247,7 +247,7 @@ mod tests {
         let node = conn.last_insert_rowid();
         if piloted {
             let circuit =
-                db::create_autopilot_circuit_inner(conn, mesh.id, "c", "", 2, &crate::autopilot::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
+                db::create_autopilot_circuit_inner(conn, mesh.id, "c", "", 2, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
             let run = db::create_circuit_run_locked(
                 conn,
                 circuit.id,

@@ -3,8 +3,8 @@
 use tauri::{AppHandle, Emitter};
 
 use crate::agent::spawn::ExplicitSpawnOverrides;
-use crate::autopilot::circuit::model::CircuitNodeKind;
-use crate::autopilot::circuit::stepper::RunView;
+use crate::circuit::model::CircuitNodeKind;
+use crate::circuit::stepper::RunView;
 use crate::db;
 use crate::models::SessionStatus;
 
@@ -270,7 +270,7 @@ pub(super) fn deliver_circuit_initial_prompt(
     let result = match delivery {
         InitialPromptDelivery::Prefill => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
-            crate::autopilot::pipeline::write_prompt_to_pty_guarded(
+            crate::circuit::delivery::write_prompt_to_pty_guarded(
                 &crate::agent::process::PROCESS_REGISTRY, node_id, prompt, app, expected_input,
             ).and_then(|submitted| {
                 submitted.then_some(()).ok_or_else(|| "Input ownership changed before initial prompt submission completed".into())
@@ -299,7 +299,7 @@ pub(super) fn schedule_circuit_initial_prompt(
     delivery: crate::agent::launch::InitialPromptDelivery,
 ) {
     if delivery == crate::agent::launch::InitialPromptDelivery::Prefill {
-        crate::autopilot::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
+        crate::circuit::launch::watch_and_submit_for_circuit(app.clone(), node_id, prompt);
     }
 }
 
@@ -330,7 +330,7 @@ async fn wait_for_initial_prompt(run_id: i64, node_id: i64) -> Result<Option<Str
         if crate::agent::process::PROCESS_REGISTRY.input_stamp(node_id).as_ref() != Some(&input) {
             return Err("Terminal input changed during startup; initial prompt was not sent".into());
         }
-        if provider.adapter().ready_for_initial_prompt(&crate::autopilot::evaluator::cleaned_tail(node_id)) {
+        if provider.adapter().ready_for_initial_prompt(&crate::circuit::evaluator::cleaned_tail(node_id)) {
             return Ok(Some(input));
         }
         if std::time::Instant::now() >= deadline {
@@ -557,7 +557,7 @@ pub(super) fn spawn_step_agent(
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::services::autopilot::configured_autopilot_provider(&mesh));
+        .unwrap_or_else(|| crate::preferences::resolve_default_provider(None, mesh.default_provider.clone(), crate::preferences::default_provider()));
     let inherited_configuration = frozen_review_configuration(view, node_id).or_else(|| parent_agent_node_id.and_then(|id| db::get_agent_node_by_id(id).ok())
         .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)
         .or_else(|| view.step(node_id).and_then(|s| s.agent_node_id)
@@ -578,17 +578,17 @@ pub(super) fn spawn_step_agent(
         WorktreePolicy::RespectMesh => None,
     };
 
-    // Issue-triggered circuit runs share the legacy Autopilot trust boundary:
+    // Issue-triggered Circuit runs enforce their provider and worktree contract:
     // resolve the same harness/provider chain and reject an incompatible mesh
     // before a pending Agent Node row is created. Manual circuits remain a
     // general-purpose graph feature and are intentionally not subject to the
-    // Autopilot compatibility gate.
+    // Circuit compatibility gate.
     if source_issue.is_some() {
-        let verdict = crate::autopilot::compatibility::compute_for_mesh(
+        let verdict = crate::circuit::compatibility::compute_for_mesh(
             Some(launch_harness),
             mesh.default_provider.as_deref(),
             crate::preferences::default_provider().as_deref(),
-            mesh.use_worktree,
+            use_worktree_override.unwrap_or(mesh.use_worktree),
         );
         if !verdict.allowed {
             return Err(format!(
@@ -608,8 +608,8 @@ pub(super) fn spawn_step_agent(
                 run_id
             );
             let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
-            crate::autopilot::evaluator::note_turn_start(existing_agent_id);
-            crate::autopilot::pipeline::write_prompt_to_pty(
+            crate::circuit::evaluator::note_turn_start(existing_agent_id);
+            crate::circuit::delivery::write_prompt_to_pty(
                 existing_agent_id,
                 &resolved_prompt,
                 app,
@@ -665,8 +665,8 @@ pub(super) fn spawn_step_agent(
                 abort_circuit_spawn(run_id, new_node.id);
                 return Ok(());
             }
-            crate::autopilot::evaluator::register_circuit(new_node.id);
-            crate::autopilot::evaluator::note_turn_start(new_node.id);
+            crate::circuit::evaluator::register_circuit(new_node.id);
+            crate::circuit::evaluator::note_turn_start(new_node.id);
             let _ = app.emit(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
@@ -728,8 +728,8 @@ pub(super) fn spawn_step_agent(
 
     // Track output times for this piloted node (the PTY submit watcher
     // and future classifiers read them).
-    crate::autopilot::evaluator::register_circuit(node.id);
-    crate::autopilot::evaluator::note_turn_start(node.id);
+    crate::circuit::evaluator::register_circuit(node.id);
+    crate::circuit::evaluator::note_turn_start(node.id);
 
     let _ = app.emit(
         "node-created",

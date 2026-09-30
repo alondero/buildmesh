@@ -4,11 +4,7 @@ import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayloa
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
 import type { WorktreeCleanupFailedPayload } from './types/generated/WorktreeCleanupFailedPayload';
 import type { MeshSyncWarningPayload } from './types/generated/MeshSyncWarningPayload';
-import type { AutopilotBlockedPayload } from './types/generated/AutopilotBlockedPayload';
-import type { AutopilotPrCreatedPayload } from './types/generated/AutopilotPrCreatedPayload';
-import type { AutopilotFinishFailedPayload } from './types/generated/AutopilotFinishFailedPayload';
-import type { AutopilotSubmittedPayload } from './types/generated/AutopilotSubmittedPayload';
-import type { AutopilotNodeClosedPayload } from './types/generated/AutopilotNodeClosedPayload';
+import type { CircuitAgentBlockedPayload } from './types/generated/CircuitAgentBlockedPayload';
 import { useGlobalShortcuts } from './hooks/useGlobalShortcuts';
 import { Sidebar } from './components/Sidebar/Sidebar';
 import { TitleBar } from './components/TitleBar/TitleBar';
@@ -573,8 +569,8 @@ function App() {
   // node list refetch keeps status badges (Completed / Error) in step with
   // the backend's direct DB writes, which emit no dedicated status event.
   useEffect(() => {
-    const unlistenBlocked = listen<AutopilotBlockedPayload>(
-      'autopilot-blocked',
+    const unlistenBlocked = listen<CircuitAgentBlockedPayload>(
+      'circuit-agent-blocked',
       (event) => {
         addToast(
           'Autopilot',
@@ -583,62 +579,8 @@ function App() {
         );
       },
     );
-    const unlistenPr = listen<AutopilotPrCreatedPayload>(
-      'autopilot-pr-created',
-      (event) => {
-        addToast(
-          'Autopilot',
-          event.payload.pr_url
-            ? `Wrap-up complete — PR opened: ${event.payload.pr_url}`
-            : `Wrap-up complete for node ${event.payload.node_id}.`,
-          'warning',
-        );
-        void useAgentNodeStore.getState().fetchAgentNodes();
-      },
-    );
-    const unlistenFailed = listen<AutopilotFinishFailedPayload>(
-      'autopilot-finish-failed',
-      (event) => {
-        addToast(
-          'Autopilot',
-          `Node ${event.payload.node_id} failed its wrap-up after 3 attempts: ${event.payload.reasons.join('; ')}`,
-          'error',
-        );
-        void useAgentNodeStore.getState().fetchAgentNodes();
-      },
-    );
-    // Launch watcher pressed Enter — the agent has actually started the
-    // task (the prefill alone only stages it). No refetch needed: nothing
-    // about the node row changed.
-    const unlistenSubmitted = listen<AutopilotSubmittedPayload>(
-      'autopilot-submitted',
-      (event) => {
-        addToast(
-          'Autopilot',
-          `Started work on issue #${event.payload.issue} (node ${event.payload.node_id}).`,
-          'warning',
-        );
-      },
-    );
-    // Merged-PR sweep archived a finished node (the store refetches the
-    // node list on this same event; here we just tell the user why a card
-    // vanished from the grid).
-    const unlistenClosed = listen<AutopilotNodeClosedPayload>(
-      'autopilot-node-closed',
-      (event) => {
-        addToast(
-          'Autopilot',
-          `PR #${event.payload.pr_number} merged — node ${event.payload.node_id} closed.`,
-          'warning',
-        );
-      },
-    );
     return () => {
       unlistenBlocked.then((fn) => fn());
-      unlistenPr.then((fn) => fn());
-      unlistenFailed.then((fn) => fn());
-      unlistenSubmitted.then((fn) => fn());
-      unlistenClosed.then((fn) => fn());
     };
   }, []);
 

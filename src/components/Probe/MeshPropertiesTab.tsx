@@ -19,13 +19,6 @@
  *   • Project preset (auto-fill build / run)
  *   • Build / run commands
  *
- * Autopilot Policy (trigger label / concurrency / provider override /
- * on-success action) was removed in ticket #1013 — it lives on the
- * dedicated `AutopilotProbeTab` (wayfinder map #990 decision #5) and
- * persists atomically through `update_mesh_autopilot`, the same typed
- * IPC the legacy Mesh Properties used. The behaviour is identical;
- * only the render surface and the save call site moved.
- *
  * Reactivity model matches the legacy panel: text fields save on blur,
  * selects and the preset picker save on change. The probe's
  * `useProbeContext()` hook drives which mesh is being edited — switching
@@ -509,13 +502,6 @@ export function MeshPropertiesTab() {
             </p>
           </div>
 
-          {/* Autopilot Mode (issue #481, PRD #480) moved to the
-              dedicated `AutopilotProbeTab` (ticket #1013). Master toggle,
-              trigger label, concurrency limit, provider override, and
-              on-success action now live there alongside the Looping
-              section. The 5 fields persist atomically through
-              `update_mesh_autopilot` — the IPC's behaviour is unchanged,
-              only its call site moved. */}
 
           <Field label="Project preset" htmlFor="mesh-prop-preset">
             <select

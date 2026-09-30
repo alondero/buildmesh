@@ -111,7 +111,6 @@ pub fn publish_background(
 /// The attention-independent consumers, shared by both publish flavours.
 fn publish_passive(node_id: i64, app: &AppHandle) {
     crate::session_naming::on_turn(node_id, app.clone());
-    crate::autopilot::pipeline::on_turn(node_id, app);
 }
 
 #[cfg(test)]
