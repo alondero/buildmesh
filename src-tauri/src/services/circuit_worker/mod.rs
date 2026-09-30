@@ -1777,6 +1777,14 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
             events.push(CircuitEvent::GithubActionRetry {
                 node_id: step.node_id.clone(),
             });
+        } else if step.status == StepStatus::Unverified
+            && matches!(view.graph.node(&step.node_id).map(|node| &node.kind),
+                Some(CircuitNodeKind::GithubAction { action: crate::autopilot::circuit::model::GithubActionKind::OpenPr, .. }))
+            && db::circuit::evidence::latest_effect_target(view.run_id, &step.node_id, step.attempt)
+                .ok().flatten().is_some()
+        {
+            events.push(CircuitEvent::GithubRecheckDue { node_id:step.node_id.clone(), attempt:step.attempt,
+                now_ms:chrono::Utc::now().timestamp_millis() });
         }
     }
 
