@@ -105,12 +105,12 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |
 | Meta Muse | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Native on Windows since Muse 1.3.0; workspace trust pre-provisioned (#1706) |
-| Cline | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch) |
+| Cline | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Native Provider; hook delivers turn completion only (no clean-exit dispatch); reader over `<id>.messages.json` (#1776) |
 | Terminal | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | Plain shell; the only `PlainShell` launch mode |
 
-Nine harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
-Codex, Cursor, Antigravity, OpenCode, Grok Code, MiniMax Code, Command Code, and
-Meta Muse. Kimi Code, Freebuff, and Cline support process resume
+Ten harnesses are archive-resumable (Resume **and** Transcript): Claude Code,
+Codex, Cursor, Antigravity, OpenCode, Grok Code, MiniMax Code, Command Code, Meta
+Muse, and Cline. Kimi Code and Freebuff support process resume
 but are **not** resumable from the archive picker because they have no
 transcript reader. DeepSeek Harness and Terminal do not resume at all.
 

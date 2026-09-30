@@ -32,9 +32,10 @@ Provider**: Cline owns its own credentials (`cline auth`) and Buildmesh never
 writes Cline's configuration. Buildmesh spawns `cline -i`, resumes with
 `cline -i --id <id>`, and can forward a model, a reasoning effort, and a
 prefill prompt. Attention is wired through Cline's `TaskComplete` file hook,
-which reports a **completed turn** as `turn_completed` (node → Ready);
-transcript reading is **not** wired yet (issue #1776). Cline's file hooks expose
-no clean-exit or failure signal, so those are not claimed.
+which reports a **completed turn** as `turn_completed` (node → Ready), and the
+transcript reader is wired (issue #1776), so the Node Digest carries real turn
+content and an archived Cline node can be resumed from the picker. Cline's file
+hooks expose no clean-exit or failure signal, so those are not claimed.
 
 ## What Buildmesh wants from a harness
 
@@ -50,7 +51,7 @@ no clean-exit or failure signal, so those are not claimed.
 | `supports_prefill` | Seed the first turn from issue / handover text | Yes (`-i "<prompt>"`) |
 | `supports_extra_args` | Verbatim circuit-author CLI flags | Yes |
 | `requires_attention_hook` | Autopilot attention gate | Yes (file hooks; issue #1775) |
-| `produces_readable_transcript` | Coordinator Node Digest / archive resume | No (reader not shipped) |
+| `produces_readable_transcript` | Coordinator Node Digest / archive resume | Yes (reader wired; issue #1776) |
 | `available_on` | Spawn Menu filtering | Windows, macOS, Linux |
 
 ## Cline's actual CLI
@@ -277,14 +278,126 @@ shape the Codex and AGY adapters use for cross-env capture.
 
 ### Limitations
 
-- `~/.cline/data/db/sessions.db` is the **only** capture source today.
-  The on-disk `~/.cline/data/sessions/<id>/` tree is a documented
-  fallback for future work; the capture poller does not consult it.
+- `~/.cline/data/db/sessions.db` is the only **capture** source today. The
+  on-disk `~/.cline/data/sessions/<id>/` tree is the **transcript** source
+  (next section); the capture poller does not consult it.
 - `--data-dir <path>` is honoured by the resolver, but Buildmesh never
   sets it — concurrent Buildmesh-spawned Cline processes share one
   store, and the row matchers use `cwd` to disambiguate. The
   `interactive = 1` filter excludes one-shot prompt runs that would
   otherwise pollute that shared view.
+
+## Transcript reader (issue #1776)
+
+`produces_readable_transcript` is `true`, which turns on two products: the
+Coordinator **Node Digest** rich layer and the **archived-node resume picker**
+(`resumable = supports_resume() && produces_readable_transcript()`). The reader
+lives in `services::transcript_reader::adapters::cline` and resolves
+`TranscriptFormat::Cline`.
+
+### Where the data comes from
+
+Cline keeps a per-session directory under
+`<cline data dir>/sessions/<session-id>/` with two JSON documents:
+
+| File | Carries | Read by Buildmesh |
+|---|---|---|
+| `<id>.json` | Session manifest — `status`, `ended_at`, `exit_code`, `prompt`, `metadata.title`, `metadata.git.branch`, `cwd`, `provider`, `model` | Not by the reader (every field is already on the node row) |
+| `<id>.messages.json` | `{version: 1, messages: [...], system_prompt}` — the turns | **Yes**, the only turn source |
+
+The data dir is `$CLINE_DATA_DIR` when set, otherwise `~/.cline/data` — the
+same override the capture poller resolves, so the reader and the poller can
+never disagree about which store Buildmesh is reading. The session id is
+validated with `services::cline_session::is_cline_session_id` before it reaches
+the path join; that validator's charset (`[0-9a-z_]`) is also what keeps a
+corrupt `cli_session_id` from traversing out of the sessions root.
+
+**Sources deliberately not used**, all settled by the #1776 research:
+
+- `sessions.db` — stores **no message content** (only a `messages_path`
+  pointer), and its `transcript_path` column is reserved and empty in every row.
+- `cline history --json` — usable, but its `metadata` embeds the full
+  `systemPrompt`; the file is a better source.
+- `cline history export <id>` — emits **HTML**, not structured data.
+- `session-search.db` — a derived FTS5 index, best-effort and possibly
+  stale/unavailable. `tasks.db` is kanban, unrelated.
+  `workspaces/<hash>/workspaceState.json` is near-empty in practice.
+
+### Parsing rules
+
+- **One JSON object, not JSONL — and rewritten wholesale.** Cline re-serialises
+  the whole document with a non-atomic `writeFileSync` at each
+  `iteration_end` (no append, no temp+rename), so the file is **not
+  tail-able**: every read parses the whole document, and a read racing a write
+  can catch it empty or truncated. The reader never assumes a complete
+  document on a single read.
+- **Gate on `version === 1`.** Cline's own Zod schema uses `$strip`, so the
+  reader tolerates unknown *keys* for forward compatibility — but a different
+  `version` is a different, unverified message shape.
+- **The embedded `system_prompt` is skipped.** It duplicates the manifest's
+  and dominates the file size; it must never surface as dialogue.
+- **Turns are user-delimited.** Cline writes no turn index, and role transitions
+  alone are not enough — a `role: "user"` message may be a harness notice. A
+  user turn opens at each non-notice user message; the assistant messages up to
+  the next one are that turn's work, coalesced into one turn (an assistant run
+  is usually split across several messages: text, then a tool call, then the
+  closing text).
+- **Notices are filtered** by `metadata.kind` (`compaction`,
+  `compaction_summary`, `auto_compaction`, `compaction_budget_emergency`,
+  `completion_reminder`, `loop_detection_notice`, `mistake_stop_notice`,
+  `recovery_notice`, `manual_compaction`), by `metadata.displayRole`
+  (`system` / `status` / `error`), and by the presence of
+  `metadata.userRunSpan`. This is also how a **compacted** session is accounted
+  for: Cline re-materialises the collapsed prefix into `messages`, so without
+  the filter a compaction summary would open a spurious "user turn" and swallow
+  the real turns after it.
+- **Prompts arrive wrapped** in `<user_input mode="act">…</user_input>`; the
+  tag is stripped and the mode captured. A wrapper that is malformed or
+  unexpected passes through unchanged rather than emptying the turn.
+- **Blocks**: `text` becomes turn text; `tool_use` becomes a `ToolCall`;
+  `thinking`, `redacted_thinking`, and `tool_result` are transport details and
+  contribute neither.
+
+### Degradation ladder
+
+Never a crash, never a silent omission — the digest reports a typed reason:
+
+| State | Result |
+|---|---|
+| No captured `cli_session_id` | `NoSession` |
+| Session directory or `<id>.messages.json` absent | `NoTranscript` |
+| Document truncated, not an object, `version ≠ 1`, or no `messages` array | `ShapeChanged` (loud — a busy node must never look quietly finished) |
+| Well-formed but no dialogue yet (notices only) | `Empty` |
+
+### Deliberate non-goals
+
+- **Session telemetry is not surfaced.** `metadata.usage` /
+  `metadata.aggregateUsage` (`inputTokens`, `outputTokens`, `cacheReadTokens`,
+  `cacheWriteTokens`, `totalCost`, plus `aggregatedAgentsCost` for spawned
+  agents) are **observed-session** totals, not account quota, and this reader
+  does not present them anywhere. Every locally observed session during the
+  research was failed or trivial with all-zero usage, so the non-zero shape is
+  asserted from the type contract rather than observed — treat those numbers as
+  unverified until someone runs a real multi-turn session. Keep them distinct
+  from any account-level usage surface.
+- **No circuit report adapter — a deliberate non-goal.** The Circuit report
+  reader (`report_snapshot.rs`) is **line-oriented**: it requires a trailing
+  newline, parses each line as a standalone JSON record, and reads the
+  publication time from a per-record `timestamp`. A Cline transcript is a single
+  JSON object, so `report_snapshot::read` refuses the format up front with
+  `ReportReadError::Unsupported`. This is load-bearing, not cosmetic:
+  `readiness::prepare` admits hook-native evidence for exactly
+  `Unsupported | NoTranscript | Unreadable`, so a Cline circuit keeps running on
+  its `agent_end` receipt. Had the document fallen through to the line reader it
+  would report `PartialPublication` ("still publishing a transcript record") or
+  `NoReport` ("has not published an assistant report") — both false for a
+  complete document, and both in the set that *discards* the receipt, stalling
+  the circuit behind a blocker it can never clear. So Cline's turn evidence is
+  the hook receipt, and its digest is rich; it has no *report* read. For the
+  same reason there is no native circuit turn boundary: `line_has_assistant_text`
+  is a per-JSONL-line predicate with no meaning for a document, and the 256 KiB
+  tail window that feeds `completed_turn` would truncate a document that has to
+  be parsed whole.
 
 ## Troubleshooting
 
@@ -344,6 +457,8 @@ shape the Codex and AGY adapters use for cross-env capture.
   `sdk/packages/shared/src/storage/paths.ts` (`resolveHooksConfigSearchPaths`,
   `resolveClineDir`)
 - Buildmesh `agent::provider::adapters::cline` adapter and its unit tests
-- Buildmesh `services::transcript_reader::adapters::cline` hook classifier
+- Buildmesh `services::transcript_reader::adapters::cline` — hook classifier
+  and transcript reader
+- Buildmesh `services::cline_session` (session store layout, id shape)
 - Buildmesh `agent::detection` (install resolver order) and
   `preferences::compatibility` (`resolve_pairing` surface fallback)

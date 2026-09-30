@@ -290,7 +290,7 @@ mod tests {
     #[test]
     fn unwired_harness_report_is_explicitly_unsupported_not_another_parser() {
         use crate::services::transcript_reader::report_snapshot::ReportReadError;
-        for provider in [Provider::Kimi, Provider::Dsh, Provider::Freebuff, Provider::Cline, Provider::Terminal] {
+        for provider in [Provider::Kimi, Provider::Dsh, Provider::Freebuff, Provider::Terminal] {
             let label = format!("{provider:?}");
             assert_eq!(
                 circuit_report_snapshot(&node(provider, Some("sid"), true)).err(),
@@ -298,6 +298,54 @@ mod tests {
                 "{label} has no wired report adapter"
             );
         }
+    }
+
+    /// Issue #1776 — the asymmetric case, and the reason Cline must not be
+    /// folded into the list above. Cline *does* have a transcript reader (the
+    /// Node Digest is rich), but it reads a single JSON **document**, not a
+    /// line-oriented record stream, so it has no report adapter. The circuit
+    /// report must still answer `Unsupported` rather than misreporting a
+    /// complete document as a partial publication or a missing report.
+    #[test]
+    fn cline_has_a_digest_reader_but_no_report_adapter() {
+        use crate::services::transcript_reader::report_snapshot::ReportReadError;
+        let digest_node = node(Provider::Cline, None, true);
+        // The digest reader is live: an uncaptured session is `NoSession`, not
+        // `Unsupported` (which would mean "no reader wired" and flag a gap).
+        assert_eq!(
+            digest_enrichment(&digest_node),
+            Some(TranscriptTail::Unavailable { reason: UnavailableReason::NoSession })
+        );
+        // The report read stays `Unsupported` even with a session id in hand —
+        // the circuit then continues on Cline's `agent_end` hook receipt
+        // instead of being handed a bogus document read.
+        assert_eq!(
+            circuit_report_snapshot(&node(Provider::Cline, Some("sid"), true)).err(),
+            Some(ReportReadError::Unsupported),
+            "a Cline document must never be reported as a line-oriented report"
+        );
+    }
+
+    /// Issue #1776: Cline produces a readable transcript, so the digest gate
+    /// must let a cline node through to the reader rather than degrading to
+    /// `Unsupported`. With no captured session the typed reason is `NoSession`
+    /// — proof the gate passed and the reader actually ran (and that it did not
+    /// silently fall back to another harness's parser). The second case
+    /// carries a session id but no on-disk store: the `NoTranscript` rung.
+    #[test]
+    fn cline_provider_passes_the_capability_gate() {
+        assert_eq!(
+            transcript_tail(&node(Provider::Cline, None, true), 10),
+            TranscriptTail::Unavailable { reason: UnavailableReason::NoSession }
+        );
+        // A session id with no matching Cline store degrades as a *missing
+        // transcript*, never as an unsupported harness. Deterministic: `sid` is
+        // not a Cline session id, so the locator rejects it whatever the
+        // machine's `~/.cline` happens to hold.
+        assert_eq!(
+            transcript_tail(&node(Provider::Cline, Some("sid"), true), 10),
+            TranscriptTail::Unavailable { reason: UnavailableReason::NoTranscript }
+        );
     }
 
     /// Secrets the agent echoed in its transcript must be masked before the tail

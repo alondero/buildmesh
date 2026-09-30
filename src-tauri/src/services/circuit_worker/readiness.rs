@@ -35,7 +35,14 @@ pub(crate) fn prepare(
             && match &report {
                 Ok(report) => report.revision == native_report.revision && report.text == native_report.text,
                 // Unavailable storage can fall back to a current native receipt;
-                // positive evidence of unfinished/newer work cannot.
+                // positive evidence of unfinished/newer work cannot. The set is
+                // load-bearing for hook-native harnesses whose report read can
+                // only ever answer one of these three — Cline (#1776) is the
+                // live case: it has a whole-document digest reader but no report
+                // adapter, so `report_snapshot::read` returns `Unsupported` and
+                // its `agent_end` receipt is admitted here. Returning `NoReport`
+                // or `PartialPublication` for Cline instead would discard that
+                // receipt and stall the circuit permanently.
                 Err(ReportReadError::Unsupported | ReportReadError::NoTranscript | ReportReadError::Unreadable) => true,
                 Err(_) => false,
             }

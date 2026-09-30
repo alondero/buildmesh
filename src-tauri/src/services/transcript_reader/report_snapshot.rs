@@ -64,6 +64,21 @@ pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) 
         let (path, session_id) = opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
         return read_opencode_file(&path, session_id);
     }
+    if format == TranscriptFormat::Cline {
+        // Issue #1776: Cline *has* a transcript reader (the Node Digest reads
+        // `<id>.messages.json`), but that reader is a whole-document parser and
+        // this one is line-oriented: it requires a trailing newline, parses
+        // each line as a standalone JSON record, and derives the publication
+        // time from a per-record `timestamp`. A Cline document is a single JSON
+        // object, so routing it here would not merely fail — it would fail
+        // *misleadingly*, reporting `PartialPublication` ("still publishing a
+        // transcript record") or `NoReport` ("has not published an assistant
+        // report") for a node whose document is complete. `Unsupported` is both
+        // the truth and the useful answer: `readiness::prepare` admits
+        // hook-native evidence for exactly this variant, so a Cline circuit
+        // continues on its `agent_end` receipt instead of being walled off.
+        return Err(E::Unsupported);
+    }
     read_file(&locate_transcript(format, session_id, node_path).ok_or(E::NoTranscript)?, format)
 }
 
@@ -197,6 +212,81 @@ mod tests {
             read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode)
         else { panic!("expected a display preview"); };
         assert!(preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8());
+    }
+
+    /// Issue #1776: wiring the Cline transcript reader must **not** silently
+    /// hand a Cline document to the line-oriented report reader. Two halves:
+    ///
+    /// 1. The hazard, pinned on a real, valid Cline fixture — the document
+    ///    parses as JSON (it is one object) but every line-oriented
+    ///    precondition fails or misfires, so `read_file` reports a *wrong*
+    ///    reason rather than "this format has no report adapter".
+    /// 2. The guard — `read` refuses the format up front, with the honest
+    ///    `Unsupported`, and never resolves a path.
+    #[test]
+    fn cline_document_is_never_read_as_a_line_oriented_report() {
+        let path = crate::services::transcript_reader::tests::fixture("cline_messages.json");
+        // The fixture is a genuinely valid Cline document (a single JSON
+        // object), not a malformed stand-in.
+        let document = fs::read_to_string(&path).expect("checked-in Cline fixture");
+        assert!(serde_json::from_str::<serde_json::Value>(&document).is_ok(),
+            "the fixture must be a valid Cline document for this test to mean anything");
+        assert!(parse_transcript(TranscriptFormat::Cline, document.split('\n').map(str::to_string), 4)
+            .turns.iter().any(|turn| turn.role == "assistant"),
+            "the digest reader must find real turns in it");
+
+        // (1) What the line-oriented reader would claim, and why each reason is
+        // a lie for a complete Cline document. Both trailing-newline shapes
+        // matter: Cline's non-atomic `writeFileSync(JSON.stringify(...))` emits
+        // none, but a document can be read after a newline-terminated write.
+        let no_newline = crate::services::transcript_reader::tests::write_fixture(
+            "cline_no_trailing_newline",
+            document.trim_end(),
+        );
+        assert_eq!(
+            read_file(&no_newline, TranscriptFormat::Cline).err(),
+            Some(ReportReadError::PartialPublication),
+            "a missing trailing newline in a whole-document transcript is not a partial publication"
+        );
+        assert_eq!(
+            read_file(&path, TranscriptFormat::Cline).err(),
+            Some(ReportReadError::NoReport),
+            "a document has no assistant *line*; 'has not published an assistant report' is wrong"
+        );
+        std::fs::remove_file(&no_newline).ok();
+
+        // (2) The guard, at the seam the circuit actually calls.
+        assert_eq!(
+            read(TranscriptFormat::Cline, "session_1790003303940_9ouga", ".").err(),
+            Some(ReportReadError::Unsupported),
+            "Cline has no report adapter; the circuit must be told so, not sent through the JSONL reader"
+        );
+    }
+
+    /// Why the guard's *exact* reason matters. `readiness::prepare` keeps
+    /// hook-native evidence only when the report error is
+    /// `Unsupported | NoTranscript | Unreadable`; every other reason
+    /// (`NoReport`, `PartialPublication`, …) discards it. Cline's only turn
+    /// evidence is the `agent_end` receipt, so a document falling through to the
+    /// line-oriented reader would not merely report a misleading string — it
+    /// would discard the receipt and stall the circuit behind a blocker it can
+    /// never clear. See the `readiness` match arm for the other half of this
+    /// coupling.
+    #[test]
+    fn cline_report_reason_stays_in_the_hook_native_admitted_set() {
+        let reason = read(TranscriptFormat::Cline, "session_1790003303940_9ouga", ".").unwrap_err();
+        assert_eq!(reason, ReportReadError::Unsupported);
+        assert!(matches!(
+            reason,
+            ReportReadError::Unsupported | ReportReadError::NoTranscript | ReportReadError::Unreadable
+        ), "reason {reason:?} must stay in the set that admits hook-native evidence");
+        // The reasons the guard exists to avoid are all *outside* that set.
+        for outside in [ReportReadError::NoReport, ReportReadError::PartialPublication] {
+            assert!(!matches!(
+                outside,
+                ReportReadError::Unsupported | ReportReadError::NoTranscript | ReportReadError::Unreadable
+            ), "{outside:?} must not be the reason a Cline circuit sees");
+        }
     }
 
     fn classified_run(snapshot: ReportSnapshot) -> (RunView, CircuitEvent) {
