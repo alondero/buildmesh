@@ -157,6 +157,9 @@ mod agent_node_tests;
 mod circuit_tests;
 
 #[cfg(test)]
+mod circuit_review_start_tests;
+
+#[cfg(test)]
 mod circuit_prune_tests;
 
 #[cfg(test)]
