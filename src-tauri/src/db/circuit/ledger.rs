@@ -103,41 +103,36 @@ fn resolve_preset_reviewer(
 /// **First writer wins.** If the source agent already owns a live run, the
 /// early-return below hands back that run's id and `max_rounds` /
 /// `reviewer_provider` are not applied — the dialog hides the form in this
-/// state, so the only way here is a retry or IPC race. The dedupe check
-/// runs BEFORE the readiness gate (#1792) so a retry on an unobserved
-/// source still returns the existing run id (issue #1660 dedupe wins
-/// over the gate, otherwise the gate would silently strip the live
-/// borrower's run id on every retry).
+/// state, so the only way here is a retry or IPC race.
 ///
-/// `allow_unobserved` (issue #1792) is the explicit override for the
-/// source-agent readiness gate enforced by [`assert_source_observed`].
-/// The built-in review preset refuses to mint a run on a never-observed
-/// source (no `cli_session_id`, no readable `assistant_report`); recovery
-/// and explicit user-selected circuits stay permissive because both paths
-/// have already proven the source is observed in another context. The
-/// override is recorded on the run's `context_json`
-/// (`source.review_allow_unobserved = "1"`) for audit.
+/// There is no source-observation precondition: a source whose worker has not
+/// yet captured a `cli_session_id` or a readable report still mints. The run's
+/// first step waits for the source to yield a turn, and the #1791 watchdog
+/// bounds that wait when the source never becomes observable.
 ///
-/// The readiness gate runs **before** the writer mutex is acquired —
-/// `assistant_report` does filesystem I/O and the writer mutex cannot be
-/// released mid-call (issue #1228). The locked helper trusts the caller
-/// and does not re-check.
+/// The source-side refusals live where they are enforced: the ledger's mint
+/// path requires the source to be
+/// `Running | AwaitingInput | Completed | Ready` (else "Resume the agent before
+/// starting a review."), and the IPC layer above
+/// (`commands::circuit::trigger_circuit_from_node`) requires a live process.
+/// The harness rule is reviewer-only at this layer — only the *reviewer* harness
+/// is validated, by [`resolve_preset_reviewer`]; a non-turn-yielding *source*
+/// harness is refused by the title-bar control, not here.
+///
+/// The dedupe read runs lock-free on the process-global reader; the mint
+/// acquires the writer mutex.
 pub fn create_node_circuit_run(
     node_id: i64,
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
-    allow_unobserved: bool,
 ) -> Result<i64, String> {
-    // Pre-gate decisions: dedupe-before-gate then gate. Done under the
-    // process-global reader so the writer mutex is not held during the
-    // `assistant_report` filesystem I/O (issue #1228). The composition
-    // is testable on a per-test private in-memory DB via
-    // `create_node_circuit_run_pre_gate` (see below).
+    // First-writer-wins dedupe (#1660) on the process-global reader so the
+    // writer mutex is not held for a pure read.
     {
         let db = crate::db::read_conn();
         if let Some(existing) =
-            create_node_circuit_run_pre_gate(&db, node_id, selected_circuit_id, allow_unobserved)?
+            find_live_run_for_source_inner(&db, node_id).map_err(|e| e.to_string())?
         {
             return Ok(existing);
         }
@@ -146,7 +141,7 @@ pub fn create_node_circuit_run(
     // Mint (acquires the writer mutex).
     let mut db = crate::db::write_conn();
     create_node_circuit_run_with_recovery_locked(
-        &mut db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None, allow_unobserved,
+        &mut db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None,
     )
 }
 
@@ -159,13 +154,10 @@ pub fn create_node_circuit_run(
 /// cleanup) — an ineligible effective reviewer is rejected before any DB
 /// work happens, on the built-in preset path only.
 ///
-/// The helper trusts the caller: it assumes the readiness gate has
-/// already been enforced by [`assert_source_observed`] (the public
-/// wrapper runs that before `write_conn()`) or that the override /
-/// recovery / explicit-circuit carve-out applies. Tests that call the
-/// locked helper directly model the "caller has already verified"
-/// state — they do not need to stamp `cli_session_id` to satisfy a
-/// gate that is no longer in this function.
+/// Like the public wrapper it applies no source-observation precondition. A
+/// future author must not add one here either: the `assistant_report` read is
+/// filesystem I/O and the writer mutex cannot be released mid-call (issue
+/// #1228).
 #[cfg(test)]
 pub(crate) fn create_node_circuit_run_locked(
     db: &mut Connection,
@@ -173,22 +165,15 @@ pub(crate) fn create_node_circuit_run_locked(
     selected_circuit_id: Option<i64>,
     max_rounds: i32,
     reviewer_provider: Option<String>,
-    allow_unobserved: bool,
 ) -> Result<i64, String> {
     let preferences = crate::preferences::load().unwrap_or_default();
     create_node_circuit_run_with_recovery_locked(
-        db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None, allow_unobserved,
+        db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None,
     )
 }
 
-/// Recovery path: the source is already known to be observed (it has a
-/// previous run whose evidence the recovery plan reads), so the readiness
-/// check is irrelevant. The locked helper records `allow_unobserved = true`
-/// purely so the audit field is *not* emitted on this path — the
-/// `if selected_circuit_id.is_none() && recovery.is_none()` guard below
-/// already drops the audit on recovery, but the helper still uses
-/// `allow_unobserved = true` so any future "always audit" tweak lands on
-/// the right side of the carve-out.
+/// Recovery path: re-mint or extend a review run from a recovery plan whose
+/// source is already claimed by the failed run the plan reads.
 pub(crate) fn create_node_circuit_run_recovery_locked(
     db: &mut Connection,
     recovery: super::recovery::ReviewRecovery,
@@ -204,24 +189,14 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
         _ => recovery,
     };
     create_node_circuit_run_with_recovery_locked(
-        db, recovery.source_id, None, max_rounds, (None, None), Some(recovery), true,
+        db, recovery.source_id, None, max_rounds, (None, None), Some(recovery),
     )
 }
 
-/// Exact reason returned when the built-in review preset is asked to mint
-/// a run on a source agent that has produced no observable evidence yet
-/// (no captured `cli_session_id`, no readable `assistant_report` revision).
-/// Pinned by `node_review_refuses_unstarted_source_with_exact_message`
-/// (issue #1792).
-pub(crate) const SOURCE_NOT_YET_OBSERVED_MESSAGE: &str =
-    "Source agent has not started yet — wait for its first turn before starting a review.";
-
 /// First-writer-wins dedupe (issue #1660). Returns the id of the source's
-/// currently-live run if any. Driven from
-/// [`create_node_circuit_run_pre_gate`] before the readiness gate so a
-/// retry on an unobserved source still hands back the live borrower's
-/// run id. The locked helper re-checks this under the writer transaction
-/// as defense in depth for concurrent inserts.
+/// currently-live run if any. Read by [`create_node_circuit_run`] before it
+/// acquires the writer mutex, and re-checked by the locked helper under the
+/// writer transaction as defense in depth for concurrent inserts.
 pub(crate) fn find_live_run_for_source_inner(
     conn: &Connection,
     node_id: i64,
@@ -238,89 +213,6 @@ pub(crate) fn find_live_run_for_source_inner(
     .optional()
 }
 
-/// Source-agent readiness gate (issue #1792). Lock-free: callers MUST run
-/// this before acquiring the writer mutex because `assistant_report` does
-/// filesystem I/O. Refuses to mint a run on a source agent that has
-/// produced no observable evidence yet — neither a non-empty
-/// `cli_session_id` nor a readable `assistant_report` revision.
-///
-/// Carve-outs (the gate is permissive):
-/// - `allow_unobserved` — the user explicitly opted in to the override
-///   on the Start Review dialog.
-/// - `has_selected_circuit` — the user is asking for a specific
-///   authored blueprint, not the built-in review preset.
-///
-/// Note: today's `assistant_report` reader returns `None` whenever
-/// `cli_session_id` is `None` (every harness stores the session id
-/// alongside the report, so the report branch never produces
-/// independent evidence). The check is kept for the spec's
-/// `cli_session_id OR assistant_report` contract and to defend against
-/// future harness adapters that may diverge.
-pub(crate) fn assert_source_observed(
-    node: &crate::models::AgentNode,
-    allow_unobserved: bool,
-    has_selected_circuit: bool,
-) -> Result<(), String> {
-    if allow_unobserved || has_selected_circuit {
-        return Ok(());
-    }
-    if node.cli_session_id.as_deref().is_some_and(|s| !s.is_empty()) {
-        return Ok(());
-    }
-    // `assistant_report` is filesystem I/O. The caller must run this
-    // helper before acquiring any DB writer mutex (issue #1228).
-    if crate::coordinator::enrichment::assistant_report(node).is_some() {
-        return Ok(());
-    }
-    Err(SOURCE_NOT_YET_OBSERVED_MESSAGE.into())
-}
-
-/// Pre-gate composition for the public wrapper (#1792). Returns:
-/// - `Ok(Some(existing_run_id))` when first-writer-wins dedupe (#1660)
-///   wins — a retry on an unobserved source returns the live borrower's
-///   run id instead of re-firing the refusal.
-/// - `Ok(None)` when the gate passes (or is permissive), and the caller
-///   should proceed to the locked helper.
-/// - `Err(msg)` when the gate refuses the source agent.
-///
-/// This is the single decision point the wrapper relies on. The
-/// recovery path bypasses it entirely via `create_node_circuit_run_recovery_locked`
-/// (the recovery source is already observed via its previous run),
-/// so the helper has no `is_recovery` carve-out — keeping the helper's
-/// parameters honest about the only flags the public wrapper passes.
-///
-/// Lock-free: takes `&Connection` so the caller controls transaction /
-/// mutex scope. Tests drive this on a per-test private in-memory DB
-/// (issue #1691) so the dedupe-before-gate ordering is covered
-/// end-to-end without touching the process-global writer.
-pub(crate) fn create_node_circuit_run_pre_gate(
-    conn: &Connection,
-    node_id: i64,
-    selected_circuit_id: Option<i64>,
-    allow_unobserved: bool,
-) -> Result<Option<i64>, String> {
-    // First-writer-wins dedupe (#1660). Runs BEFORE the readiness
-    // gate (#1792) so a retry on an unobserved source hands back the
-    // live borrower's run id without re-firing the refusal.
-    if let Some(existing) = find_live_run_for_source_inner(conn, node_id)
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(Some(existing));
-    }
-    // Load the source node (cheap DB read on the same connection).
-    let node = crate::db::agent_node::get_agent_node_by_id_inner(conn, node_id)
-        .map_err(|e| e.to_string())?;
-    // Source-agent readiness gate (#1792). The wrapper always calls
-    // this with the real flags — no conditional call at the call site
-    // (which would be the same lie the round-3 review flagged).
-    assert_source_observed(
-        &node,
-        allow_unobserved,
-        selected_circuit_id.is_some(),
-    )?;
-    Ok(None)
-}
-
 fn create_node_circuit_run_with_recovery_locked(
     db: &mut Connection,
     node_id: i64,
@@ -328,7 +220,6 @@ fn create_node_circuit_run_with_recovery_locked(
     max_rounds: i32,
     reviewer: (Option<String>, Option<&crate::preferences::AppPreferences>),
     recovery: Option<super::recovery::ReviewRecovery>,
-    allow_unobserved: bool,
 ) -> Result<i64, String> {
     let continued_from = recovery.as_ref().map(|recovery| recovery.run_id);
     let (reviewer_provider, preferences) = reviewer;
@@ -433,14 +324,6 @@ fn create_node_circuit_run_with_recovery_locked(
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() && recovery.is_none() {
-        if allow_unobserved {
-            // Audit field for the readiness-gate override (issue #1792):
-            // a user who knowingly reviewed an unobserved source leaves a
-            // permanent breadcrumb on the run. Absent means the source
-            // either had a captured `cli_session_id` or a readable
-            // `assistant_report` at create time.
-            context.set("source.review_allow_unobserved", "1");
-        }
         if let Some(provider) = reviewer_override.as_deref() {
             context.set("review.provider", provider);
         }
@@ -1908,7 +1791,7 @@ mod reviewer_tests {
         prefs.harness_profiles.clear();
         assert!(prefs.spawn_configurations.is_empty());
         db.execute("UPDATE agent_nodes SET spawn_configuration=?1 WHERE id=?2", params![serde_json::to_string(&launch).unwrap(), source.id]).unwrap();
-        let run = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&prefs)), None, true).unwrap();
+        let run = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&prefs)), None).unwrap();
         let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
         let context = CircuitContext::from_json(&stored.context_json).unwrap();
         let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
@@ -1975,7 +1858,7 @@ mod reviewer_tests {
         let mut preferences = crate::preferences::AppPreferences::default();
         preferences.reviewer_provider = Some("codex".into());
         preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
-        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
+        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
         let read_snapshot = |db: &Connection, id| {
             let run = get_circuit_run_inner(db, id).unwrap().unwrap();
             let context = CircuitContext::from_json(&run.context_json).unwrap();
@@ -2009,7 +1892,7 @@ mod reviewer_tests {
         assert_eq!(serde_json::to_value(read_snapshot(&db, successor)).unwrap(), serde_json::to_value(&frozen).unwrap());
         assert_eq!(serde_json::to_value(read_snapshot(&db, first)).unwrap(), serde_json::to_value(&frozen).unwrap());
         cancel_circuit_run_locked(&mut db, successor).unwrap();
-        let fresh = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
+        let fresh = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
         assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
     }
 
@@ -2028,7 +1911,7 @@ mod reviewer_tests {
         let mut preferences = crate::preferences::AppPreferences::default();
         preferences.reviewer_provider = Some("codex".into());
         preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
-        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None, true).unwrap();
+        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
         commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
             node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
         }]).unwrap();
