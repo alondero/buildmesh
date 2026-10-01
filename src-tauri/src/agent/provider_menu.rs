@@ -237,6 +237,36 @@ pub(super) fn compose_provider_menu(
     order_proxied_children(order_providers(rows, order), proxied_order)
 }
 
+/// Discover the native and foreign-runtime Codex installs concurrently.
+///
+/// The two are independent chains - separate `CODEX_INSTALL_CACHE` slots,
+/// separate process spawns - combined only further down, so serializing them
+/// made the tab pay their sum rather than their max (issue #1934). The caller's
+/// `foreign_runtime` is never `Windows` (it is `WindowsInterop` or `Wsl`), so
+/// the two never contend for one cache entry.
+///
+/// Both results are `Option`s because `available_providers` drops a failed
+/// discovery rather than reporting it, so there is no error ordering to
+/// preserve here and no need to distinguish the two slots by type - unlike the
+/// probes inside one runtime's chain, where the order decides which message a
+/// broken install surfaces.
+fn discover_codex_runtimes_concurrently(
+    native: impl FnOnce() -> Option<crate::agent::provider::adapters::codex::CodexInstall> + Send,
+    foreign: impl FnOnce() -> Option<crate::agent::provider::adapters::codex::CodexInstall> + Send,
+) -> (
+    Option<crate::agent::provider::adapters::codex::CodexInstall>,
+    Option<crate::agent::provider::adapters::codex::CodexInstall>,
+) {
+    std::thread::scope(|scope| {
+        let native = scope.spawn(native);
+        let foreign = scope.spawn(foreign);
+        (
+            crate::agent::provider::adapters::codex::join_probe(native),
+            crate::agent::provider::adapters::codex::join_probe(foreign),
+        )
+    })
+}
+
 /// Returns the list of agent providers available on this host platform.
 /// Each provider declares which platforms it runs on via `AgentProvider::available_on()`.
 ///
@@ -247,13 +277,18 @@ pub(super) fn compose_provider_menu(
 pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     // Issue #1937: this derivation dominates the Settings -> Providers load,
     // so each derivation emits one `info` line (lands in `logs\buildmesh.log`
-    // on a default install) with the total wall-clock and the per-runtime
-    // Codex probe cost. Only the runtime identity and CLI version travel in
-    // the fields - never credentials, keys, or endpoint URLs.
+    // on a default install) with the total wall-clock and the Codex probe cost.
+    // Only the runtime identity and CLI version travel in the fields - never
+    // credentials, keys, or endpoint URLs.
     // Issue #1948: the same line now separates Codex discovery from the rest
     // of the derivation (`menu_compose_duration_ms`) and reports per-runtime
     // cache reuse (`*_codex_cached`), so a slow save-refresh can be
     // attributed to cold discovery, warm discovery, or menu composition.
+    // Issue #1934: the two runtimes now discover concurrently, so the probe
+    // cost is one overlapped `codex_probe_duration_ms` window rather than two
+    // per-runtime durations that summed to the same wall clock. The per-runtime
+    // `*_codex_cached` bits still discriminate cold from warm, which is what
+    // the attribution needed them for.
     let derivation_started = std::time::Instant::now();
     let accounts = crate::preferences::provider_accounts();
     let configured_pairings = crate::preferences::provider_pairings();
@@ -263,31 +298,31 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
     // Snapshot cache state before probing (issue #1948): `false` covers both
     // a cold cache and "no probe ran" when `needs_codex` is false (the probe
-    // durations are 0 then, so the line still reads unambiguously).
+    // duration is 0 then, so the line still reads unambiguously).
     let native_codex_cached = needs_codex
         && crate::agent::provider::adapters::codex::codex_install_cached(
             crate::models::EnvType::Windows,
         );
     let foreign_codex_cached = needs_codex
         && crate::agent::provider::adapters::codex::codex_install_cached(foreign_runtime);
-    let native_probe_started = std::time::Instant::now();
-    let native_codex = needs_codex
-        .then(|| {
-            crate::agent::provider::adapters::codex::discover_supported_install(
-                crate::models::EnvType::Windows,
-            )
-        })
-        .and_then(Result::ok);
-    let native_probe_duration_ms = native_probe_started.elapsed().as_millis();
-    let foreign_probe_started = std::time::Instant::now();
-    let wsl_codex = needs_codex
-        .then(|| {
-            crate::agent::provider::adapters::codex::discover_supported_install(
-                foreign_runtime,
-            )
-        })
-        .and_then(Result::ok);
-    let foreign_probe_duration_ms = foreign_probe_started.elapsed().as_millis();
+    let probe_started = std::time::Instant::now();
+    let (native_codex, wsl_codex) = if needs_codex {
+        discover_codex_runtimes_concurrently(
+            || {
+                crate::agent::provider::adapters::codex::discover_supported_install(
+                    crate::models::EnvType::Windows,
+                )
+                .ok()
+            },
+            || {
+                crate::agent::provider::adapters::codex::discover_supported_install(foreign_runtime)
+                    .ok()
+            },
+        )
+    } else {
+        (None, None)
+    };
+    let codex_probe_duration_ms = probe_started.elapsed().as_millis();
     // Everything after the probes is menu composition (issue #1948): pairing
     // filters, harness detection, row ordering, and Launch Configuration
     // attachment. Timed separately so cold Codex discovery is never blamed on
@@ -335,7 +370,7 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     };
     tracing::info!(
         needs_codex,
-        native_probe_duration_ms,
+        codex_probe_duration_ms,
         native_codex_cached,
         native_runtime_identity = native_codex
             .as_ref()
@@ -346,7 +381,6 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
             .map(|install| install.version.as_str())
             .unwrap_or("none"),
         foreign_env = %foreign_runtime,
-        foreign_probe_duration_ms,
         foreign_codex_cached,
         foreign_runtime_identity = wsl_codex
             .as_ref()
@@ -520,6 +554,99 @@ pub async fn list_providers() -> Vec<ProviderInfo> {
 mod tests {
     use super::*;
     use crate::preferences::ProxiedProviderOrder;
+
+    /// Issue #1934: `available_providers` must discover the two runtimes
+    /// concurrently. The runtime chains are independent, so serializing them
+    /// made a cold Settings -> Providers open pay their sum.
+    ///
+    /// Each closure blocks until the other has entered, so both can only
+    /// return if they really were in flight together - a sleep-based margin
+    /// would pass on a slow machine. A serial regression strands the first
+    /// closure until the bound fires, so this fails rather than hangs.
+    ///
+    /// Limit worth stating: this pins the overlap mechanism, not the wiring.
+    /// The bare test env configures no OpenAI-surface pairing, so
+    /// `needs_codex` is false and `available_providers` never reaches this
+    /// helper here; proving that call site routes through it would need a
+    /// paired OpenAI account on disk plus real `codex`/`wsl.exe` spawns. The
+    /// separate-runtime cache test in `codex` covers the other half of the
+    /// claim (the two never contend for one cache entry).
+    #[test]
+    fn both_codex_runtime_discoveries_are_issued_concurrently() {
+        use std::sync::{Condvar, Mutex};
+        use crate::agent::provider::adapters::codex::CodexInstall;
+
+        /// Blocks until the sibling runtime has also entered, so both can only
+        /// return if they really were in flight together.
+        struct BothInside {
+            arrived: Mutex<usize>,
+            released: Condvar,
+        }
+
+        impl BothInside {
+            fn wait(&self, entered: &str) {
+                let bound = std::time::Duration::from_secs(2);
+                let mut count = self.arrived.lock().unwrap_or_else(|p| p.into_inner());
+                *count += 1;
+                // Predicate first, then wait - the same shape as the codex
+                // rendezvous. Checking before waiting is what lets the last
+                // arriver return at once instead of blocking out the bound
+                // nobody will notify it out of, and looping is what stops a
+                // spurious wakeup from passing as "overlapped" before the
+                // sibling arrived.
+                loop {
+                    if *count >= 2 {
+                        self.released.notify_all();
+                        return;
+                    }
+                    let (guard, timeout) = self
+                        .released
+                        .wait_timeout(count, bound)
+                        .unwrap_or_else(|p| p.into_inner());
+                    count = guard;
+                    if timeout.timed_out() && *count < 2 {
+                        panic!(
+                            "{entered} runtime never overlapped its sibling within {bound:?} - the derivations ran serially"
+                        );
+                    }
+                }
+            }
+        }
+
+        let both_inside = BothInside {
+            arrived: Mutex::new(0),
+            released: Condvar::new(),
+        };
+        let install = |runtime: &str| {
+            Some(CodexInstall {
+                executable: format!("/usr/bin/{runtime}"),
+                version: "0.158.0".to_string(),
+                runtime_identity: runtime.to_string(),
+                codex_home: format!("/home/dev/.{runtime}"),
+                wsl_distro: None,
+            })
+        };
+
+        let (native, foreign) = discover_codex_runtimes_concurrently(
+            || {
+                both_inside.wait("native");
+                install("codex-native")
+            },
+            || {
+                both_inside.wait("foreign");
+                install("codex-foreign")
+            },
+        );
+
+        assert_eq!(
+            native.map(|i| i.runtime_identity).as_deref(),
+            Some("codex-native")
+        );
+        assert_eq!(
+            foreign.map(|i| i.runtime_identity).as_deref(),
+            Some("codex-foreign")
+        );
+    }
 
     #[test]
     fn available_providers_lists_only_harness_profiles_with_no_legacy_rows() {
@@ -1668,16 +1795,15 @@ mod tests {
         assert_eq!(
             names,
             [
+                "codex_probe_duration_ms",
                 "foreign_codex_cached",
                 "foreign_codex_version",
                 "foreign_env",
-                "foreign_probe_duration_ms",
                 "foreign_runtime_identity",
                 "menu_compose_duration_ms",
                 "menu_rows",
                 "native_codex_cached",
                 "native_codex_version",
-                "native_probe_duration_ms",
                 "native_runtime_identity",
                 "needs_codex",
                 "total_duration_ms",
@@ -1697,26 +1823,24 @@ mod tests {
         value("total_duration_ms")
             .parse::<u128>()
             .expect("total_duration_ms must be a millisecond count");
-        value("native_probe_duration_ms")
+        value("codex_probe_duration_ms")
             .parse::<u128>()
-            .expect("native_probe_duration_ms must be a millisecond count");
-        value("foreign_probe_duration_ms")
-            .parse::<u128>()
-            .expect("foreign_probe_duration_ms must be a millisecond count");
-        // The phases must partition the derivation (issue #1948): the three
+            .expect("codex_probe_duration_ms must be a millisecond count");
+        // The phases must partition the derivation (issue #1948): the two
         // fields must always sum within the total, so a future phase cannot
         // be added without updating this budget. Limit of this guard: the bare
         // test env skips both probes (needs_codex is false), so a `compose_started`
         // misplaced above zero-length probes still passes here - clock placement
         // is pinned by inspection; real cold/warm splits come from the log line.
+        // Issue #1934: the two runtimes are discovered concurrently, so their
+        // costs share one `codex_probe_duration_ms` window. Summing a
+        // per-runtime duration each would double-count that overlap and break
+        // this partition, which is why the field is gone rather than renamed.
         // Millis truncation only rounds each phase down, so the sum of floors
         // still cannot exceed the total.
-        let phase_total = value("native_probe_duration_ms")
+        let phase_total = value("codex_probe_duration_ms")
             .parse::<u128>()
-            .expect("native_probe_duration_ms must be a millisecond count")
-            + value("foreign_probe_duration_ms")
-            .parse::<u128>()
-            .expect("foreign_probe_duration_ms must be a millisecond count")
+            .expect("codex_probe_duration_ms must be a millisecond count")
             + value("menu_compose_duration_ms")
             .parse::<u128>()
             .expect("menu_compose_duration_ms must be a millisecond count");

@@ -30,6 +30,14 @@ runtime, so it is normally well under a second. It takes noticeably longer when:
   (this can take several seconds);
 - `codex` or `wsl` is slow to start because the disk or the WSL service is busy.
 
+The Codex probes do not all run at once. Within one runtime, the three
+identity lookups - version, executable location, and `CODEX_HOME` - overlap each
+other, and the two capability `--help` probes then overlap each other; the help
+pair has to wait for the version, because it is keyed on the resolved install.
+The Windows and WSL runtimes overlap each other throughout. So the wait per
+runtime is roughly the slowest identity lookup plus the slowest help probe, and
+a stopped WSL distribution usually costs one VM start rather than one per probe.
+
 The wait is bounded: a probe that does not answer is abandoned and reported as a
 load failure with a **Retry** button rather than leaving the tab stuck. The
 provider pickers stay disabled while the check runs and are enabled once it
