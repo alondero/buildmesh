@@ -94,6 +94,32 @@ fn attention_capture_cannot_claim_another_nodes_session() {
 }
 
 #[test]
+fn attention_capture_can_reuse_an_identity_owned_only_by_archived_node() {
+    let conn = suspended_recovery_schema();
+    conn.execute("UPDATE agent_nodes SET cli_session_id = 'archived-session' WHERE id = 45", []).unwrap();
+    assert!(super::agent_node::set_cli_session_id_if_missing_inner(&conn, 43, "archived-session").unwrap());
+    conn.execute(
+        "UPDATE agent_nodes SET cli_session_id = NULL, status = 'running', session_started_at = 200 WHERE id = 43",
+        [],
+    ).unwrap();
+    let live = super::agent_node::get_agent_node_by_id_inner(&conn, 43).unwrap();
+    assert!(
+        super::recover_live_cli_session_id_inner(&conn, &live, "archived-session", 200).unwrap()
+    );
+    conn.execute("UPDATE agent_nodes SET cli_session_id = NULL WHERE id = 43", []).unwrap();
+    let suspended = super::agent_node::get_agent_node_by_id_inner(&conn, 42).unwrap();
+    assert!(
+        super::recover_suspended_cli_session_id_inner(&conn, &suspended, "archived-session", None)
+            .unwrap()
+    );
+    let owner_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM agent_nodes WHERE cli_session_id = 'archived-session' AND status != 'archived'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(owner_count, 1);
+}
+
+#[test]
 fn v39_migrates_legacy_session_generation_keys_into_agent_nodes() {
     let conn = suspended_recovery_schema();
     conn.execute(
@@ -127,7 +153,8 @@ fn hook_session_capture_only_fills_a_missing_cli_session_id() {
     conn.execute_batch(
         "CREATE TABLE agent_nodes (
             id INTEGER PRIMARY KEY,
-            cli_session_id TEXT
+            cli_session_id TEXT,
+            status TEXT NOT NULL DEFAULT 'running'
          );
          INSERT INTO agent_nodes (id, cli_session_id) VALUES
             (1, NULL),

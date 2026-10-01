@@ -8,9 +8,10 @@
 //!
 //! **Session resumption** uses `--session [<id>]` or `-c` / `--continue`.
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
-//! verified for the TUI, so PTY capture stays off. Native SessionStart/Stop
-//! callbacks carry both the workspace and `mvs_<hex>` conversation identity;
-//! the shared plugin uses a node-independent URL. Consequently
+//! verified for the TUI, so PTY capture stays off. SessionStart is provisioned
+//! to capture the workspace and `mvs_<hex>` identity, but delivery is not
+//! validated against the installed TUI. Stop was validated on 0.4.12. The shared
+//! plugin uses a node-independent URL. Consequently
 //! `http::request::parse_mcode_session_id` must accept that shape or the id is
 //! silently discarded. `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
@@ -87,7 +88,7 @@ pub static MCODE: McodeAdapter = McodeAdapter;
 
 /// Minimum mcode release the Buildmesh attention hook has been validated
 /// against (issue #1797). Validated on a live `0.4.12` TUI: `Stop` fires at
-/// turn end and POSTs the mcode envelope to `/api/attention/<node-id>`. The
+/// turn end and POSTs the mcode envelope to `/api/attention/mcode`. The
 /// pin is descriptor-shape only — we do not gate the spawn on a runtime
 /// version probe because mcode does not expose a semver-ish header through
 /// the hook surface. Like `CURSOR_MIN_HOOK_VERSION` / `GROK_MIN_HOOK_VERSION`.
@@ -772,9 +773,9 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
-    /// Issue #1797 — the structured attention contract. mcode's `Stop` hook is
-    /// the validated signal: a completed turn POSTs the mcode envelope to
-    /// `/api/attention/<node-id>`. Buildmesh launches mcode in Full Access
+    /// Issue #1797: `Stop` is the validated signal: a completed turn POSTs the mcode
+    /// envelope to
+    /// `/api/attention/mcode`. Buildmesh launches mcode in Full Access
     /// (`permissionMode: bypassPermissions`, pinned by
     /// [`pin_permission_mode`]), so no approval prompt is raised and
     /// `PermissionRequested` is not advertised — exactly like Cursor under
@@ -789,10 +790,10 @@ impl AgentProvider for McodeAdapter {
         }
     }
 
-    /// Provision mcode's Agent-Plugin attention hook (issue #1796, wired and
+    /// Provision mcode's Agent-Plugin attention hook (issue #1796; Stop delivery
     /// validated in #1797). Writes
     /// `<mcode-data-dir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
-    /// with the `Stop` + `PermissionRequest` handlers inlined on the manifest
+    /// with the `SessionStart`, `Stop`, and `PermissionRequest` handlers inlined on the manifest
     /// in mcode's 0.4.0+ (Claude-compatible) shape.
     ///
     /// The same data dir also gets its `config.yaml` permission mode pinned to
@@ -1047,8 +1048,9 @@ mod tests {
         );
     }
 
-    /// Issue #1797 — pin the structured attention contract. `Stop` is the only
-    /// validated event; Buildmesh launches mcode with its default
+    /// Issue #1797: `Stop` is the only validated lifecycle event. SessionStart is
+    /// provisioned for identity capture but remains unvalidated on the TUI.
+    /// Buildmesh launches mcode with its default
     /// (auto-approving) permission policy, so no permission prompt is raised
     /// and `PermissionRequested` must NOT be advertised. The `min_version` pin
     /// fails a refactor that drops it.
@@ -1170,7 +1172,7 @@ mod tests {
     //   5. Atomic write leaves no `.tmp` residue.
     //   6. Unresolvable data dir returns `Ok(())` with no side effects.
     //   7. The hook invocation POSTs stdin JSON to
-    //      `/api/attention/<node-id>` through a real localhost listener,
+    //      `/api/attention/mcode` through a real localhost listener,
     //      with NO reliance on inherited environment (mcode env_clears
     //      `BUILDMESH_*`, so the URL is baked).
     // -----------------------------------------------------------------
@@ -2029,7 +2031,7 @@ defaultModelThinking:
         assert_eq!(
             MCODE_PROVISIONED_EVENTS,
             &["SessionStart", "Stop", "PermissionRequest"],
-            "SessionStart captures identity without publishing Ready; Stop completes a turn"
+            "SessionStart is provisioned for capture without publishing Ready, but remains unvalidated; Stop completes a turn"
         );
         assert!(
             MCODE_HOOK_TIMEOUT_SECONDS > 0,
@@ -2111,7 +2113,7 @@ defaultModelThinking:
     }
 
     /// Issue #1797 acceptance: the hook invocation must reach
-    /// `/api/attention/<node-id>` with the event's stdin JSON as the body — and
+    /// `/api/attention/mcode` with the event's stdin JSON as the body — and
     /// must do so **without** any inherited `BUILDMESH_*` environment, because
     /// mcode's hook runner env_clears them (a live 0.4.12 run observed
     /// `%BUILDMESH_PORT%` arriving verbatim). This mirrors the Cursor / Kimi

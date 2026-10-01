@@ -588,14 +588,11 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         });
         let _ = output_tx.send(result);
     });
-    let errors_oversized = output_oversized.clone();
+    let errors_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let errors_oversized_reader = errors_oversized.clone();
     let (errors_tx, errors_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = errors.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
-            if bytes.len() > MAX_OUTPUT { errors_oversized.store(true, std::sync::atomic::Ordering::Release); }
-            bytes
-        });
+        let result = drain_classifier_stderr(errors, MAX_OUTPUT, errors_oversized_reader);
         let _ = errors_tx.send(result);
     });
     let job = crate::process_util::JobHandle::contain(child.id());
@@ -659,12 +656,35 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         }
     };
     drop(job);
+    let errors_were_truncated = errors_oversized.load(std::sync::atomic::Ordering::Acquire);
+    let stderr_diagnostic = if errors_were_truncated {
+        format!("{} [stderr truncated after 64 KiB]", classifier_diagnostic(&errors))
+    } else {
+        classifier_diagnostic(&errors)
+    };
     if let Some(error) = status_error {
-        return Err(format!("{error}: {} {}", classifier_diagnostic(&bytes), classifier_diagnostic(&errors)).trim().into());
+        return Err(format!("{error}: {} {stderr_diagnostic}", classifier_diagnostic(&bytes)).trim().into());
     }
     if timed_out { return Err("classifier exceeded its time budget".into()); }
-    if over_budget || bytes.len() > MAX_OUTPUT || errors.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
+    if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier stdout exceeded 64 KiB".into()); }
     String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
+}
+
+fn drain_classifier_stderr(
+    mut reader: impl std::io::Read,
+    max_bytes: usize,
+    oversized: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut chunk)?;
+        if read == 0 { break; }
+        let retain = read.min(max_bytes.saturating_add(1).saturating_sub(retained.len()));
+        retained.extend_from_slice(&chunk[..retain]);
+        if retained.len() > max_bytes { oversized.store(true, std::sync::atomic::Ordering::Release); }
+    }
+    Ok(retained)
 }
 
 fn terminate_classifier_tree(pid: u32, job: Option<&crate::process_util::JobHandle>) {
@@ -710,6 +730,37 @@ mod tests {
         let output = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_secs(10)).unwrap();
         assert!(output.len() > 32_000);
         assert_eq!(parse_classification(&output), Some(Classification::Completed));
+    }
+
+    #[test]
+    fn circuit_classifier_stderr_over_limit_is_truncated_without_killing_success() {
+        let mut cmd = if cfg!(windows) {
+            crate::process_util::command_no_window("powershell.exe")
+        } else {
+            crate::process_util::command_no_window("sh")
+        };
+        if cfg!(windows) {
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 70000; [Console]::OpenStandardError().Write($b,0,$b.Length); [Console]::Out.WriteLine('COMPLETED')"]);
+        } else {
+            cmd.args(["-c", "head -c 70000 /dev/zero | tr '\\0' x >&2; printf 'COMPLETED\\n'"]);
+        }
+        let output = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(parse_classification(&output), Some(Classification::Completed));
+
+        let mut cmd = if cfg!(windows) {
+            crate::process_util::command_no_window("powershell.exe")
+        } else {
+            crate::process_util::command_no_window("sh")
+        };
+        if cfg!(windows) {
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 70000; [Console]::OpenStandardError().Write($b,0,$b.Length); [Console]::Error.WriteLine('classification failed'); exit 1"]);
+        } else {
+            cmd.args(["-c", "head -c 70000 /dev/zero | tr '\\0' x >&2; printf 'classification failed\\n' >&2; exit 1"]);
+        }
+        let error = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("stderr truncated after 64 KiB"), "{error}");
+        assert!(error.contains("classifier exited"), "{error}");
+        assert!(error.len() < 2200, "stderr diagnostics must remain bounded");
     }
 
     #[test]

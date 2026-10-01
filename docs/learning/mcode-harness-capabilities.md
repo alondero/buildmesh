@@ -6,8 +6,9 @@ metadata:
   harness: mcode
   mcode_version: 0.4.12 (@minimax-ai/code)
   date: 2026-09-20
-  attention_validation: validated 2026-09-20 against installed 0.4.12 —
-    Stop delivered from a live TUI; requires_attention_hook flipped to true
+  attention_validation: Stop validated 2026-09-20 against installed 0.4.12;
+    SessionStart provisioned for identity capture but delivery unvalidated
+    against the installed TUI as of 2026-10-01
 ---
 
 # MiniMax Code harness capabilities vs Buildmesh
@@ -46,7 +47,7 @@ interactive TUI over PTY, no harness-owned worktree flag.
 |---|---|---|
 | `supports_resume` | `true` | `resume_args` → `--session <id>` |
 | `auto_resume_on_startup` | `true` | |
-| `self_assigns_session_id` | `true` | Native callbacks bind session id plus workspace; never PTY or time-only manifest scans |
+| `self_assigns_session_id` | `true` | A delivered callback binds session id plus workspace. `Stop` delivery was observed live; `SessionStart` is provisioned but unvalidated, so identity is not established at startup. |
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
 | `supports_model_override` | `false` | Issue #1179: `--model` exists only on `mcode exec`, never the launched TUI |
 | `effort_control` | `None` | Same reason — the TUI rejects effort flags |
@@ -155,6 +156,9 @@ Against the installed `@minimax-ai/code` **0.4.12** on Windows, 2026-09-20:
   `/api/attention/<node-id>`, confirmed from **both** `mcode exec` and the
   **interactive TUI driven through a ConPTY** (a genuine model turn completed):
   `{"stop_hook_active":false,"last_assistant_message":"OK","hook_event_name":"Stop","session_id":"mvs_…","prompt_id":"turn_…","transcript_path":"…","permission_mode":"auto","effort":{"level":"medium"}}`.
+- The node-id URL above records that 0.4.12 validation setup. The corrected
+  adapter now provisions `/api/attention/mcode`; SessionStart delivery from the
+  TUI has not yet been observed.
 - Each run produced exactly one `Stop` POST — no duplicate turns.
 - The attention route's parser already accepts this envelope (`hook_event_name`,
   `session_id`, `transcript_path`, `last_assistant_message`), so no route change
@@ -257,10 +261,17 @@ and sessions too and breaks the transcript reader.
 ## Session identity — native callbacks
 
 mcode assigns `mvs_<hex>` ids. Buildmesh provisions `SessionStart`, `Stop`, and
-`PermissionRequest` handlers. The installed 0.5.8 hook serializer supplies
-`session_id`, `cwd`, and `transcript_path`; SessionStart captures identity without
-publishing Ready. Session/workspace routing and the conditional database write
-prevent simultaneous spawns and standalone callbacks from claiming another node.
+`PermissionRequest` handlers. Static inspection of the installed 0.4.12 bundle
+shows a SessionStart payload schema with `session_id`, `cwd`, and
+`transcript_path`; delivery from the installed TUI remains unvalidated. The
+handler is provisioned to capture identity without publishing Ready. Live
+validation established that `Stop` also delivers the session id, so identity
+can be captured when the first turn completes; startup-time `SessionStart`
+delivery is still unproven. The removed timestamp poller has no verified
+replacement. Until a callback carrying identity is delivered, a new node has
+no `cli_session_id`, which startup resume and transcript lookup require.
+Session/workspace routing and the conditional database write reject ambiguous
+or duplicate owners, but do not establish process identity.
 
 PTY capture remains off. The former time-window manifest poller is removed:
 one observed manifest can be the first of two simultaneous spawns and is not

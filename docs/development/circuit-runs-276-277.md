@@ -41,8 +41,9 @@ cause.
 
 ## Corrective changes
 
-- All MiniMax spawns provision `/api/attention/mcode`. SessionStart captures
-  identity; Stop and PermissionRequest retain their existing lifecycle behavior.
+- All MiniMax spawns provision `/api/attention/mcode`. SessionStart is provisioned
+  for identity capture, but its delivery is unvalidated on the installed TUI.
+  Stop and PermissionRequest retain their existing behavior.
   Native conversation id and workspace select one live node. Older numeric
   callbacks use the same resolution. Unknown standalone workspaces, duplicate
   ownership and ambiguous fresh workspaces are rejected.
@@ -58,7 +59,8 @@ cause.
   configurations independently of implementers, reviewers and auto-naming.
   Codex honors saved model/effort and uses ephemeral read-only execution in a
   temporary directory with shell and multi-agent tools disabled. Arbitrary extra
-  Codex arguments and proxy routes are rejected for this background task.
+  CLI arguments are rejected for both classifier backends; saved model and
+  effort settings are applied to both.
 
 The user selected configurable Codex classification, using `gpt-6-luna` for now.
 A live isolated CLI replay using that model, `low` effort and the existing Codex
@@ -108,6 +110,38 @@ Final verification on Windows:
   after reload and retained its model/effort. The after-only screenshot for this
   new option was inspected. Existing dev fixtures logged unrelated missing
   repositories; no new panic log was created. The dev runtime was stopped.
-- Separate standards and specification reviews found no remaining blocking
-  defect in these correction paths. The ownership limitation above and stable
-  rollout/recovery remain explicit acceptance limits.
+- A subsequent PR review identified defects at the classifier I/O, Claude plan,
+  session identity validation and ownership seams. The follow-up changes address
+  those findings. SessionStart remains provisioned but unvalidated against the
+  installed TUI; stable rollout/recovery remain outstanding.
+
+## Review follow-up verification
+
+The review correction separates stdout and stderr limits: oversized stderr is
+drained and truncated in failure diagnostics, while valid classifier stdout is
+still accepted. Claude and Codex now use one resolved launch plan and reject
+extra CLI arguments consistently. Archived nodes release their session ids for
+reuse. Classifier errors are keyed by attempt, and the failure-count message
+uses the same constant as the budget. Hook parsing is reused once per request;
+MiniMax target selection checks process generation only for its unique owner.
+The mcode SessionStart wait has named bounds and fake-clock deadline coverage.
+
+Final follow-up checks:
+
+- `cargo test --locked --lib circuit_classifier_ -- --test-threads=1`: 13 passed,
+  including successful classification with oversized stderr and bounded failure
+  diagnostics.
+- `cargo test --locked --lib claude_classifier_uses_saved_model_and_effort_and_rejects_extra_args -- --test-threads=1`: 1 passed.
+- `cargo test --locked --lib mcode_ -- --test-threads=1`: 21 passed, including
+  retry deadline, archived identity reuse, and callback routing.
+- `cargo test --locked --lib attention_capture_ -- --test-threads=1`: 2 passed,
+  including archived-owner reuse through normal capture, live recovery, and
+  suspended recovery. `cargo test --locked --lib recovery_ -- --test-threads=1`:
+  37 passed, preserving active-owner and generation fences.
+- `npm run check:docs` and `NODE_ENV=test npm run test:docs`: passed (131 docs,
+  33 documentation tests); `npm run build`: passed.
+- `rustfmt --edition 2021 --check src/services/mcode_session.rs` and
+  `git diff --check`: passed. `cargo clippy --locked --all-targets` passed with
+  3 library and 35 test warnings, matching the recorded base with no new
+  warnings. The final Windows dev-profile build passed; the stable hub was not
+  replaced.

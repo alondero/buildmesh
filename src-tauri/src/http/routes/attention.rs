@@ -375,9 +375,14 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
 /// (the issue #1237 UUID validator shared with `import_and_resume`). A harness
 /// missing from that dispatcher has its id silently discarded, so its
 /// `cli_session_id` capture no-ops.
+#[cfg(test)]
 fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
-    let id = HookPayload::parse(body)?.session_id?;
-    request::parse_session_id_for_provider(provider, &id)
+    hook_session_id_from_payload(&HookPayload::parse(body)?, provider)
+}
+
+fn hook_session_id_from_payload(payload: &HookPayload, provider: &str) -> Option<String> {
+    let id = payload.session_id.as_deref()?;
+    request::parse_session_id_for_provider(provider, id)
 }
 
 /// What to do with an incoming attention webhook (issue #1364).
@@ -1058,13 +1063,13 @@ fn verify_attention_token(
 }
 
 fn resolve_attention_node(
-    addressed: Option<crate::models::AgentNode>, body: &[u8], generic_mcode: bool,
+    addressed: Option<crate::models::AgentNode>, payload: Option<&HookPayload>, generic_mcode: bool,
     resolve_mcode: impl FnOnce(&str, &str) -> Option<crate::models::AgentNode>,
 ) -> Option<crate::models::AgentNode> {
-    if generic_mcode || hook_session_id(body, "mcode").is_some() || addressed.as_ref().is_some_and(|node|
+    let mcode_session_id = payload.and_then(|payload| hook_session_id_from_payload(payload, "mcode"));
+    if generic_mcode || mcode_session_id.is_some() || addressed.as_ref().is_some_and(|node|
         crate::preferences::resolve_harness_provider(&node.provider) == crate::models::Provider::Mcode) {
-        let payload = HookPayload::parse(body)?;
-        resolve_mcode(&hook_session_id(body, "mcode")?, payload.cwd.as_deref()?)
+        resolve_mcode(&mcode_session_id?, payload?.cwd.as_deref()?)
     } else { addressed }
 }
 
@@ -1103,12 +1108,15 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // pair is captured here and passed into the run_blocking closure
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
-    let (node, provider_owned, hook_generation): (Option<crate::models::AgentNode>, String, Option<i64>) =
+    let (node, provider_owned, hook_generation, payload_parsed): (
+        Option<crate::models::AgentNode>, String, Option<i64>, Option<HookPayload>,
+    ) =
         tokio::task::spawn_blocking(move || {
             let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
+            let payload = HookPayload::parse(&hook_body);
             // Old shared manifests may still name the last-spawned node.
             // Their numeric address cannot establish MiniMax ownership either.
-            let node = resolve_attention_node(addressed, &hook_body, session_id.is_none(),
+            let node = resolve_attention_node(addressed, payload.as_ref(), session_id.is_none(),
                 crate::services::mcode_session::hook_target);
             let provider = node
                 .as_ref()
@@ -1120,7 +1128,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                 })
                 .unwrap_or_default();
             let generation = node.as_ref().and_then(|node| crate::db::session_started_at_ms(node.id).ok().flatten());
-            (node, provider, generation)
+            (node, provider, generation, payload)
         })
         .await
         .ok()
@@ -1172,7 +1180,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // (the existing UUID validator would silently drop it). Provider
     // is read from the row already fetched for the token gate above —
     // no extra DB hop.
-    let hook_uuid = hook_session_id(body, provider);
+    let hook_uuid = payload_parsed.as_ref().and_then(|payload| hook_session_id_from_payload(payload, provider));
     let native_hook = crate::services::circuit_worker::native_hooks::NativeHook::parse(provider, body);
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
@@ -1180,9 +1188,8 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // distinguish "the model finished its turn" from "the harness
     // aborted the turn" — log at debug so it's there when needed without
     // polluting the happy path (issue #1285, #1367).
-    let payload_parsed = HookPayload::parse(body);
-    match payload_parsed {
-        Some(ref payload) => {
+    match payload_parsed.as_ref() {
+        Some(payload) => {
             if let Some(ref reason) = payload
                 .termination_reason
                 .as_deref()
@@ -3517,9 +3524,10 @@ mod tests {
         }).to_string().into_bytes();
         let id = "mvs_22222222222222222222222222222222";
         let start = body("SessionStart", id, "f:\\repo\\implementation");
+        let start_payload = HookPayload::parse(&start);
         let resolve = |id: &str, cwd: &str| crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| true);
-        let legacy = resolve_attention_node(Some(nodes[1].clone()), &start, false, resolve).unwrap();
-        let shared = resolve_attention_node(None, &start, true, resolve).unwrap();
+        let legacy = resolve_attention_node(Some(nodes[1].clone()), start_payload.as_ref(), false, resolve).unwrap();
+        let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve).unwrap();
         assert_eq!(legacy.id, 4724, "last-writer numeric URL cannot select node4725");
         assert_eq!(shared.id, legacy.id);
         assert_eq!(classify(&start, "mcode", |_| Some(0)).decision, Decision::Ignore);
@@ -3534,10 +3542,13 @@ mod tests {
         let stop = body("Stop", id, "F:/repo/implementation");
         assert_eq!(classify(&stop, "mcode", |_| Some(0)).decision, Decision::Ready);
         let unrelated = body("Stop", "mvs_11111111111111111111111111111111", "F:/repo/implementation");
-        assert!(resolve_attention_node(Some(nodes[0].clone()), &unrelated, false, resolve).is_none());
-        assert!(resolve_attention_node(None, &body("Stop", id, "F:/standalone"), true, resolve).is_none());
-        assert!(resolve_attention_node(None, &body("Stop", id, ""), true, resolve).is_none());
-        assert!(resolve_attention_node(None, &start, true, |id,cwd|
+        let unrelated_payload = HookPayload::parse(&unrelated);
+        let standalone_payload = HookPayload::parse(&body("Stop", id, "F:/standalone"));
+        let missing_cwd_payload = HookPayload::parse(&body("Stop", id, ""));
+        assert!(resolve_attention_node(Some(nodes[0].clone()), unrelated_payload.as_ref(), false, resolve).is_none());
+        assert!(resolve_attention_node(None, standalone_payload.as_ref(), true, resolve).is_none());
+        assert!(resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve).is_none());
+        assert!(resolve_attention_node(None, start_payload.as_ref(), true, |id,cwd|
             crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| false)).is_none());
     }
 

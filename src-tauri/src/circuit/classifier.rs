@@ -10,15 +10,23 @@ pub(crate) enum ClassifierLaunch {
 pub(crate) fn resolve(selection: &str) -> Result<ClassifierLaunch, String> {
     let prefs = crate::preferences::load()?;
     let plan = crate::preferences::launch_configurations::resolve(&prefs, selection, &Default::default())?;
+    resolve_plan(selection, plan, &prefs)
+}
+
+fn resolve_plan(
+    selection: &str,
+    plan: crate::preferences::launch_configurations::ResolvedLaunchPlan,
+    prefs: &crate::preferences::AppPreferences,
+) -> Result<ClassifierLaunch, String> {
     if matches!(plan.harness.runtime, Some(EnvType::Wsl | EnvType::WindowsInterop)) {
         return Err("Circuit classification requires a host-native Launch Configuration".into());
     }
+    if plan.extra_args.as_deref().is_some_and(|args| !args.trim().is_empty()) {
+        return Err("Circuit classifiers use the saved model and effort settings; remove extra CLI arguments".into());
+    }
     match Provider::from_db_str(&plan.harness.harness) {
-        Provider::Anthropic => crate::session_naming::naming_backend_env(selection).map(ClassifierLaunch::Claude),
+        Provider::Anthropic => crate::session_naming::naming_backend_env_from_plan(selection, plan, prefs).map(ClassifierLaunch::Claude),
         Provider::Codex if plan.route.is_none() => {
-            if plan.extra_args.as_deref().is_some_and(|args| !args.trim().is_empty()) {
-                return Err("Codex classifiers support model and effort settings; remove extra CLI arguments".into());
-            }
             Ok(ClassifierLaunch::Codex(Box::new(plan)))
         }
         _ => Err("Circuit classification requires Claude Code or native Codex".into()),
@@ -76,6 +84,46 @@ impl ClassifierLaunch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_classifier_uses_saved_model_and_effort_and_rejects_extra_args() {
+        use crate::preferences::launch_configurations::{self, LaunchOverrides};
+
+        let prefs = crate::preferences::AppPreferences::default();
+        let model = "claude-sonnet-4-20250514";
+        let effort = "low";
+        let plan = launch_configurations::capture(
+            &prefs,
+            "claude",
+            &LaunchOverrides {
+                model: Some(model.into()),
+                effort: Some(effort.into()),
+                extra_args: None,
+            },
+        )
+        .unwrap();
+        let ClassifierLaunch::Claude(launch) = resolve_plan("claude", plan, &prefs).unwrap() else {
+            panic!("Claude configuration must resolve to the Claude classifier")
+        };
+        let adapter = Provider::Anthropic.adapter();
+        let mut expected = adapter.model_args(model);
+        expected.extend(adapter.effort_args(effort));
+        assert_eq!(launch.args, expected);
+
+        let plan = launch_configurations::capture(
+            &prefs,
+            "claude",
+            &LaunchOverrides {
+                extra_args: Some("--dangerously-skip-permissions".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_plan("claude", plan, &prefs),
+            Err(error) if error.contains("remove extra CLI arguments")
+        ));
+    }
 
     #[test]
     fn circuit_classifier_codex_uses_saved_model_and_final_message() {

@@ -559,6 +559,14 @@ pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String>
     let prefs = crate::preferences::load()?;
     let plan = crate::preferences::launch_configurations::resolve(
         &prefs, provider, &Default::default())?;
+    naming_backend_env_from_plan(provider, plan, &prefs)
+}
+
+pub(crate) fn naming_backend_env_from_plan(
+    provider: &str,
+    plan: crate::preferences::launch_configurations::ResolvedLaunchPlan,
+    prefs: &crate::preferences::AppPreferences,
+) -> Result<NamingLaunch, String> {
     if crate::models::Provider::from_db_str(&plan.harness.harness) != crate::models::Provider::Anthropic {
         return Err("This background task requires a Claude Code Launch Configuration".into());
     }

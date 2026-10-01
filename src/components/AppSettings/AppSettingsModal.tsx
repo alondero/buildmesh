@@ -2141,7 +2141,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           <SettingsRow label="Circuit classifier provider" htmlFor="circuit-classifier-provider"
             summary="Background model used to classify Circuit agent reports."
-            details={<>Independent of agent spawn defaults. Choose a host-native Claude Code or native Codex launch configuration; its model and effort settings apply.</>}>
+            details={<>Independent of agent spawn defaults. Choose a host-native Claude Code or native Codex launch configuration; its model and effort settings apply. Extra CLI arguments are not used for classification.</>}>
             <SpawnOptionPicker id="circuit-classifier-provider" size="md" ariaLabel="Circuit classifier provider" unsetValue={null}
               providers={providers} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
               disabled={!prefsLoaded || !providersLoaded || classifierSaving}

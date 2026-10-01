@@ -1136,7 +1136,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
         CircuitEvent::ClassifierErrorObserved { node_id, attempt, error } => {
             if run.state == RunState::Running && run.step(node_id).is_some_and(|step|
                 step.attempt == *attempt && matches!(step.status, StepStatus::Running | StepStatus::Unverified)) {
-                run.context.set(&format!("node.{node_id}.classifier_error"), error);
+                run.context.set(&format!("node.{node_id}.classifier_error.{attempt}"), error);
                 t.context_changed = true;
             }
         }
@@ -1255,7 +1255,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         });
                     }
                     run.context.set(&format!("node.{node_id}.classifier_failures.{attempt}"), "0");
-                    run.context.set(&format!("node.{node_id}.classifier_error"), "");
+                    run.context.set(&format!("node.{node_id}.classifier_error.{attempt}"), "");
                     let outcome = match classification {
                         Classification::Completed => StepOutcome::Completed,
                         Classification::Blocked => StepOutcome::Blocked,
@@ -1490,14 +1490,14 @@ fn record_classifier_failure(run: &mut RunView, t: &mut Transition, node_id: &st
     let key = format!("node.{node_id}.classifier_failures.{attempt}");
     let previous = run.context.get(&key).and_then(|value| value.parse::<u32>().ok()).unwrap_or(0);
     if previous >= MAX_CLASSIFIER_FAILURES { return; }
-    if let Some(error) = error { run.context.set(&format!("node.{node_id}.classifier_error"), error); }
+    if let Some(error) = error { run.context.set(&format!("node.{node_id}.classifier_error.{attempt}"), error); }
     let failures = previous + 1;
     run.context.set(&key, failures.to_string());
     t.context_changed = true;
-    let diagnostic = run.context.get(&format!("node.{node_id}.classifier_error"))
+    let diagnostic = run.context.get(&format!("node.{node_id}.classifier_error.{attempt}"))
         .filter(|error| !error.is_empty()).map(|error| format!(" Last failure: {error}")).unwrap_or_default();
     if failures >= MAX_CLASSIFIER_FAILURES {
-        unverify_step(run, t, node_id, format!("Classifier unavailable after 5 attempts. Restore the configured classifier and recheck evidence.{diagnostic}"));
+        unverify_step(run, t, node_id, format!("Classifier unavailable after {MAX_CLASSIFIER_FAILURES} attempts. Restore the configured classifier and recheck evidence.{diagnostic}"));
     } else {
         let error = format!("Classifier unavailable; retrying after 60 seconds. Check the Circuit classifier provider in app settings if this persists.{diagnostic}");
         if let Some(step) = run.step_mut(node_id) { step.error = Some(error.clone()); }
@@ -3903,7 +3903,9 @@ mod tests {
             assert_eq!(run.state, RunState::Running);
             assert_eq!(status_of(&run, "classify"), if attempt < 5 { StepStatus::Running } else { StepStatus::Unverified });
         }
-        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("5 attempts"));
+        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains(
+            &format!("{MAX_CLASSIFIER_FAILURES} attempts")
+        ));
         let t = advance(&mut run, &classified("classify", None));
         assert!(!t.context_changed);
         assert_eq!(run.context.get("node.classify.classifier_failures.1"), Some("5"));
@@ -3915,13 +3917,27 @@ mod tests {
         fire_to_gate(&mut run, "classify");
         advance(&mut run, &CircuitEvent::ClassifierErrorObserved { node_id: "classify".into(), attempt: 2,
             error: "stale error".into() });
-        assert!(run.context.get("node.classify.classifier_error").is_none());
+        assert_eq!(run.context.get("node.classify.classifier_error.2"), None);
         advance(&mut run, &CircuitEvent::ClassifierErrorObserved { node_id: "classify".into(), attempt: 1,
             error: "claude: Failed to authenticate: OAuth session expired".into() });
+        assert_eq!(run.context.get("node.classify.classifier_error.1"), Some("claude: Failed to authenticate: OAuth session expired"));
         for _ in 0..5 { advance(&mut run, &classified("classify", None)); }
         run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
         assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
         assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("OAuth session expired"));
+
+        let step = run.step_mut("classify").unwrap();
+        step.attempt = 2;
+        step.status = StepStatus::Running;
+        advance(&mut run, &CircuitEvent::ClassifierUnavailable {
+            node_id: "classify".into(),
+            attempt: 2,
+            error: "codex: new attempt failed".into(),
+        });
+        assert_eq!(run.context.get("node.classify.classifier_error.1"), Some("claude: Failed to authenticate: OAuth session expired"));
+        assert_eq!(run.context.get("node.classify.classifier_error.2"), Some("codex: new attempt failed"));
+        assert!(run.step("classify").unwrap().error.as_ref().unwrap().contains("codex: new attempt failed"));
+        assert!(!run.step("classify").unwrap().error.as_ref().unwrap().contains("OAuth session expired"));
     }
 
     #[test]
