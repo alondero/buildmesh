@@ -161,7 +161,11 @@ struct HookPayload {
 
 impl HookPayload {
     fn parse(body: &[u8]) -> Option<Self> {
-        let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        Self::parse_value(value)
+    }
+
+    fn parse_value(mut value: serde_json::Value) -> Option<Self> {
         let fields = value.as_object_mut()?;
         // Grok sends both spellings in the same envelope. Serde aliases alone
         // reject this as a duplicate field; prefer the canonical snake case.
@@ -757,7 +761,18 @@ fn classify(
     provider: &str,
     count_pending: impl FnOnce(&Path) -> Option<usize>,
 ) -> Classified {
-    let Some(payload) = HookPayload::parse(body) else {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let payload = value.clone().and_then(HookPayload::parse_value);
+    classify_payload(payload.as_ref(), value.as_ref(), provider, count_pending)
+}
+
+fn classify_payload(
+    payload: Option<&HookPayload>,
+    raw_payload: Option<&serde_json::Value>,
+    provider: &str,
+    count_pending: impl FnOnce(&Path) -> Option<usize>,
+) -> Classified {
+    let Some(payload) = payload else {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
             ..Default::default()
@@ -768,7 +783,7 @@ fn classify(
     // needed". Mark for attention with a degraded health so the UI can
     // render the uncertainty (issue #1364 §1). Comparing against the
     // derived `Default` keeps this total over future `HookPayload` fields.
-    if payload == HookPayload::default() {
+    if *payload == HookPayload::default() {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
             ..Default::default()
@@ -973,8 +988,8 @@ fn classify(
     // names are OpenCode-specific — a sibling harness borrowing the
     // same names must not false-positive). Grok + Claude Code ignore
     // `provider` (their classifiers key on body content alone).
-    if let Some(classified) =
-        crate::services::transcript_reader::adapter::classify_hook(body, provider)
+    if let Some(classified) = raw_payload
+        .and_then(|payload| crate::services::transcript_reader::adapter::classify_hook_value(payload, provider))
     {
         return match classified.decision {
             HookDecision::MarkInput => {
@@ -1024,13 +1039,17 @@ fn classify(
     // A Stop with fullyIdle: true or absent falls through to the
     // transcript-scan path so any future transcript reader hooks in
     // normally.
-    let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
+    let Some(transcript_path) = payload
+        .transcript_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    else {
         return Classified::ready(detail);
     };
     // A WSL-side agent reports a Linux transcript path; convert before the
     // Windows-side read (the module rule: never hand a Linux path to a
     // Windows API).
-    let host_path = crate::env::to_host_path(&transcript_path);
+    let host_path = crate::env::to_host_path(transcript_path);
     match count_pending(Path::new(&host_path)) {
         Some(n) if n > 0 => Classified::suppress(detail),
         Some(_) => Classified::ready(detail),
@@ -1108,12 +1127,18 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // pair is captured here and passed into the run_blocking closure
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
-    let (node, provider_owned, hook_generation, payload_parsed): (
-        Option<crate::models::AgentNode>, String, Option<i64>, Option<HookPayload>,
+    let (node, provider_owned, hook_generation, payload_parsed, native_hook_parsed, raw_payload): (
+        Option<crate::models::AgentNode>,
+        String,
+        Option<i64>,
+        Option<HookPayload>,
+        Option<crate::services::circuit_worker::native_hooks::NativeHook>,
+        Option<serde_json::Value>,
     ) =
         tokio::task::spawn_blocking(move || {
             let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
-            let payload = HookPayload::parse(&hook_body);
+            let value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
+            let payload = value.clone().and_then(HookPayload::parse_value);
             // Old shared manifests may still name the last-spawned node.
             // Their numeric address cannot establish MiniMax ownership either.
             let node = resolve_attention_node(addressed, payload.as_ref(), session_id.is_none(),
@@ -1127,8 +1152,14 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         .to_owned()
                 })
                 .unwrap_or_default();
+            let native_hook = value.as_ref().and_then(|value| {
+                crate::services::circuit_worker::native_hooks::NativeHook::parse_value(
+                    &provider,
+                    value,
+                )
+            });
             let generation = node.as_ref().and_then(|node| crate::db::session_started_at_ms(node.id).ok().flatten());
-            (node, provider, generation, payload)
+            (node, provider, generation, payload, native_hook, value)
         })
         .await
         .ok()
@@ -1152,8 +1183,6 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         return Response::empty("404 Not Found");
     };
 
-    let body = &req.body;
-
     // The path id is untrusted input. Do not create a process-lifetime
     // HookState entry or attempt a lifecycle publish for a node that has
     // already been deleted (or never existed); both would turn a typo/flood
@@ -1166,9 +1195,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         return Response::empty("404 Not Found");
     }
 
-    // Cheap, CPU-only classification happens on the async worker: parse,
-    // debug-log, extract the semantic turn, and classify (the transcript
-    // scan is file I/O, not SQLite). Everything that touches SQLite — the
+    // The bounded JSON body is parsed once on the blocking hop. Cheap,
+    // CPU-only work then logs diagnostics, extracts the semantic turn,
+    // and classifies; the transcript scan is file I/O, not SQLite. Everything
+    // that touches SQLite — the
     // fill-only session capture, the stale-callback check, the signal-
     // health confirmation, the semantic-turn persist, and the status write
     // — then runs in ONE `run_blocking` dispatch below, so a single webhook
@@ -1181,7 +1211,7 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // is read from the row already fetched for the token gate above —
     // no extra DB hop.
     let hook_uuid = payload_parsed.as_ref().and_then(|payload| hook_session_id_from_payload(payload, provider));
-    let native_hook = crate::services::circuit_worker::native_hooks::NativeHook::parse(provider, body);
+    let native_hook = native_hook_parsed;
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
@@ -1219,8 +1249,9 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
 
     let semantic = payload_parsed.as_ref().and_then(semantic_turn);
 
-    let classified = classify(
-        body,
+    let classified = classify_payload(
+        payload_parsed.as_ref(),
+        raw_payload.as_ref(),
         provider,
         crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks,
     );

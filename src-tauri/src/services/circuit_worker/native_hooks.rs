@@ -57,16 +57,20 @@ pub(crate) fn submission_digest(text: &str) -> String {
 
 impl NativeHook {
     pub(crate) fn parse(provider: &str, body: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        Self::parse_value(provider, &value)
+    }
+
+    pub(crate) fn parse_value(provider: &str, value: &serde_json::Value) -> Option<Self> {
         if provider == "agy" {
-            return parse_agy(body);
+            return parse_agy(value);
         }
         if !matches!(provider, "claude" | "claude_code" | "anthropic" | "codex") {
             return None;
         }
         let claude_family = matches!(provider, "claude" | "claude_code" | "anthropic");
-        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
         let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
-        let human_fact = human_fact(&value);
+        let human_fact = human_fact(value);
         // Codex's PermissionRequest contract has no stable request id. Keep
         // the event as an uncorrelated permission wait instead of dropping
         // it or inventing a correlation token.
@@ -165,8 +169,7 @@ impl NativeHook {
 ///
 /// Only `Stop` is accepted; under `--dangerously-skip-permissions` AGY
 /// installs no `PreToolUse` gate, so no other event is validated.
-fn parse_agy(body: &[u8]) -> Option<NativeHook> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+fn parse_agy(value: &serde_json::Value) -> Option<NativeHook> {
     let named = value
         .get("hook_event_name")
         .or_else(|| value.get("hookEventName"))

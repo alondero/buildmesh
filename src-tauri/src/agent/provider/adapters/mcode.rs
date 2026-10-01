@@ -10,8 +10,10 @@
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
 //! verified for the TUI, so PTY capture stays off. SessionStart is provisioned
 //! to capture the workspace and `mvs_<hex>` identity, but delivery is not
-//! validated against the installed TUI. Stop was validated on 0.4.12. The shared
-//! plugin uses a node-independent URL. Consequently
+//! validated against the installed TUI. Stop delivery was validated on 0.4.12
+//! using the then-provisioned `/api/attention/<node-id>` callback. The current
+//! node-independent `/api/attention/mcode` route is provisioned but its native
+//! delivery has not been validated. Consequently
 //! `http::request::parse_mcode_session_id` must accept that shape or the id is
 //! silently discarded. `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
@@ -37,11 +39,12 @@
 //! Linux it is an executable on PATH so `WindowsShell::Direct` is used.
 //!
 //! **Attention** (issue #1797, validating #1796): a Buildmesh Agent-Plugin is
-//! provisioned into `<dataDir>/plugins/io.buildmesh.attention/`, and `Stop`
-//! delivery is validated end-to-end against a live `mcode` 0.4.12 TUI — a
-//! completed turn POSTs the mcode envelope (`hook_event_name`, `session_id`,
-//! `cwd`, `transcript_path`) to `/api/attention/mcode`. Three mcode-0.4.x
-//! constraints shape the write:
+//! provisioned into `<dataDir>/plugins/io.buildmesh.attention/`. A live
+//! `mcode` 0.4.12 TUI validated `Stop` delivery of the
+//! (`hook_event_name`, `session_id`, `transcript_path`) envelope to the then-
+//! configured `/api/attention/<node-id>` callback. Current delivery to
+//! `/api/attention/mcode` and SessionStart delivery remain unvalidated. Three
+//! mcode-0.4.x constraints shape the write:
 //!
 //! 1. The manifest lives at `.claude-plugin/plugin.json` and `hooks` is
 //!    **inlined on the manifest**. A separate `io.minimax.mcode/hooks/hooks.json`
@@ -88,8 +91,10 @@ pub static MCODE: McodeAdapter = McodeAdapter;
 
 /// Minimum mcode release the Buildmesh attention hook has been validated
 /// against (issue #1797). Validated on a live `0.4.12` TUI: `Stop` fires at
-/// turn end and POSTs the mcode envelope to `/api/attention/mcode`. The
-/// pin is descriptor-shape only — we do not gate the spawn on a runtime
+/// turn end and POSTs the mcode envelope to the then-provisioned
+/// `/api/attention/<node-id>` callback. Current provisioning uses
+/// `/api/attention/mcode`, but delivery to that route remains unvalidated.
+/// The pin is descriptor-shape only — we do not gate the spawn on a runtime
 /// version probe because mcode does not expose a semver-ish header through
 /// the hook surface. Like `CURSOR_MIN_HOOK_VERSION` / `GROK_MIN_HOOK_VERSION`.
 pub const MCODE_MIN_HOOK_VERSION: &str = "0.4.12";
@@ -765,17 +770,19 @@ impl AgentProvider for McodeAdapter {
 
     /// `true` — the Buildmesh Agent-Plugin is provisioned into
     /// `<dataDir>/plugins/io.buildmesh.attention/.claude-plugin/plugin.json`
-    /// and `Stop` delivery was validated against a live 0.4.12 TUI (issue
-    /// #1797). This flag opens the spawn-time gate at `provision.rs:557-569`
-    /// and, downstream, the Autopilot compatibility gate; see
-    /// `attention_capability()` for the structured contract.
+    /// and `Stop` delivery was validated against a live 0.4.12 TUI using the
+    /// historical per-node callback (issue #1797). The current shared callback
+    /// and SessionStart delivery remain unvalidated. This flag opens the
+    /// spawn-time gate at `provision.rs:557-569` and, downstream, the Autopilot
+    /// compatibility gate; see `attention_capability()` for the contract.
     fn requires_attention_hook(&self) -> bool {
         true
     }
 
-    /// Issue #1797: `Stop` is the validated signal: a completed turn POSTs the mcode
-    /// envelope to
-    /// `/api/attention/mcode`. Buildmesh launches mcode in Full Access
+    /// Issue #1797: `Stop` is the only live-validated lifecycle signal. That
+    /// 0.4.12 validation used the historical `/api/attention/<node-id>` URL;
+    /// current `/api/attention/mcode` and SessionStart delivery remain
+    /// unvalidated. Buildmesh launches mcode in Full Access
     /// (`permissionMode: bypassPermissions`, pinned by
     /// [`pin_permission_mode`]), so no approval prompt is raised and
     /// `PermissionRequested` is not advertised — exactly like Cursor under
@@ -2039,15 +2046,15 @@ defaultModelThinking:
         );
     }
 
-    /// Issue #1797: `requires_attention_hook` is `true` — the plugin is
-    /// provisioned and `Stop` delivery was validated end-to-end against a live
-    /// mcode 0.4.12 TUI. Reverting this without new evidence would re-close the
-    /// Autopilot gate.
+    /// Issue #1797: `requires_attention_hook` is `true` — live mcode 0.4.12
+    /// testing validated the Stop event shape on the historical per-node URL.
+    /// The current shared URL and SessionStart remain unvalidated. Reverting
+    /// this without new evidence would re-close the Autopilot gate.
     #[test]
     fn requires_attention_hook_is_enabled_after_tui_validation() {
         assert!(
             MCODE.requires_attention_hook(),
-            "issue #1797 validated Stop delivery against a live 0.4.12 TUI; \
+            "issue #1797 validated historical Stop delivery against a live 0.4.12 TUI; \
              reverting to false would close the Autopilot gate without cause"
         );
     }
@@ -2112,12 +2119,11 @@ defaultModelThinking:
         }
     }
 
-    /// Issue #1797 acceptance: the hook invocation must reach
-    /// `/api/attention/mcode` with the event's stdin JSON as the body — and
-    /// must do so **without** any inherited `BUILDMESH_*` environment, because
-    /// mcode's hook runner env_clears them (a live 0.4.12 run observed
-    /// `%BUILDMESH_PORT%` arriving verbatim). This mirrors the Cursor / Kimi
-    /// stdin-delivery tests.
+    /// Provisioning contract: the hook invocation targets the currently
+    /// configured `/api/attention/mcode` URL with stdin JSON as the body and
+    /// does not rely on inherited `BUILDMESH_*` environment. This local test
+    /// verifies the generated command against a listener; it does not validate
+    /// native delivery from the installed mcode TUI.
     #[test]
     fn attention_invocation_delivers_stdin_to_attention_route_without_env() {
         use std::io::{Read, Seek, Write};

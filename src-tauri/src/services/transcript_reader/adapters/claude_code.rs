@@ -66,9 +66,9 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
                 .is_empty()
     }
 
-    fn classify_hook(
+    fn classify_hook_value(
         &self,
-        body: &[u8],
+        payload: &serde_json::Value,
         _provider: &str,
     ) -> Option<HookClassification> {
         // Claude Code's documented Notification envelope is "… needs
@@ -77,7 +77,6 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
         // already granted for Bash" cannot false-positive. Cursor's
         // envelope shape matches Claude Code's, so Cursor delegates
         // here.
-        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
         // The HookPayload struct in routes/attention.rs applies the
         // `hookEventName` alias; we read raw `serde_json::Value` here.
         let event = payload
