@@ -80,10 +80,11 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
         None
     }
 
-    /// Per-harness hook classification. The attention route calls this
-    /// first; `Some(classified)` short-circuits to that decision, `None`
-    /// falls through to the shared post-processing gates (transcript
-    /// scan, AGY's `fullyIdle == false` shape gate). Most adapters return
+    /// Test-only byte-based adapter for provider hook classifiers. The
+    /// attention route calls `classify_hook_value` with the shared envelope.
+    /// `Some(classified)` short-circuits to that decision, while `None`
+    /// falls through to the shared post-processing gates (transcript scan,
+    /// AGY's `fullyIdle == false` shape gate). Most adapters return
     /// `None` for every payload; OpenCode (session.idle / session.created),
     /// Grok (notification_type), and Claude Code (the "needs your
     /// permission" prose substring) carry their own logic here.
@@ -95,9 +96,21 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// OpenCode-specific, so OpenCodeAdapter gates on `provider` to
     /// avoid false-positives if a sibling harness ever borrowed the
     /// same event names.
+    #[cfg(test)]
     fn classify_hook(
         &self,
-        _body: &[u8],
+        body: &[u8],
+        provider: &str,
+    ) -> Option<HookClassification> {
+        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
+        self.classify_hook_value(&payload, provider)
+    }
+
+    /// Classify an already parsed hook envelope. The attention route shares
+    /// one parsed JSON value across all provider adapters.
+    fn classify_hook_value(
+        &self,
+        _payload: &serde_json::Value,
         _provider: &str,
     ) -> Option<HookClassification> {
         None
@@ -115,7 +128,7 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     }
 }
 
-/// What an adapter's [`TranscriptAdapter::classify_hook`] returns. `Some(_)`
+/// What an adapter's [`TranscriptAdapter::classify_hook_value`] returns. `Some(_)`
 /// short-circuits the attention route's shared post-processing; `None`
 /// falls through to the transcript-scan fallback and the AGY `fullyIdle`
 /// shape gate.
@@ -178,20 +191,20 @@ pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapte
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
 }
 
-/// Iterate every registered adapter's [`TranscriptAdapter::classify_hook`]
-/// in registration order, returning the first non-`None` decision. The
-/// attention route calls this once per hook POST; most adapters return
-/// `None` (default impl) for every payload, so the cost is one
-/// function call per harness id. Used because the route cannot rely on
-/// the `provider` field alone (the legacy hooks send empty strings) and
-/// per-harness classifiers inspect the body itself (OpenCode's
-/// `session.idle`, Grok's `notificationType`, Claude Code's
-/// "needs your permission" prose substring).
-pub(crate) fn classify_hook(body: &[u8], provider: &str) -> Option<HookClassification> {
+/// Iterate every registered adapter's parsed-envelope classifier in
+/// registration order, returning the first non-`None` decision. Most adapters
+/// return `None` for every payload, so this costs one function call per
+/// harness id. Used because the route cannot rely on the `provider` field
+/// alone (legacy hooks may send an empty string) and per-harness classifiers
+/// inspect provider-specific fields.
+pub(crate) fn classify_hook_value(
+    payload: &serde_json::Value,
+    provider: &str,
+) -> Option<HookClassification> {
     ADAPTERS
         .iter()
         .copied()
-        .find_map(|adapter| adapter.classify_hook(body, provider))
+        .find_map(|adapter| adapter.classify_hook_value(payload, provider))
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an

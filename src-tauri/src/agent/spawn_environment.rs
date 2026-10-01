@@ -51,6 +51,26 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
     format!("& {}", parts.join(" "))
 }
 
+/// Pipe-based background tasks still need the adapter's Windows shell for npm shims.
+pub(crate) fn background_command(recipe: &SpawnRecipe, executable: Option<&std::path::Path>) -> std::process::Command {
+    let executable = executable.map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| recipe.binary.into());
+    let args: Vec<String> = recipe.argv().map(str::to_owned).collect();
+    if cfg!(windows) && recipe.windows_shell == WindowsShell::PowerShell {
+        let script = format!("{}; exit $LASTEXITCODE", format_powershell_command(&executable, &args));
+        let mut cmd = crate::process_util::command_no_window("powershell.exe");
+        cmd.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encode_for_powershell(&script)]);
+        cmd
+    } else {
+        let mut cmd = if cfg!(windows) && recipe.windows_shell == WindowsShell::Cmd {
+            let mut cmd = crate::process_util::command_no_window("cmd.exe");
+            cmd.args(["/d", "/c", &executable]);
+            cmd
+        } else { crate::process_util::command_no_window(executable) };
+        cmd.args(args);
+        cmd
+    }
+}
+
 pub fn wrap(
     mut recipe: SpawnRecipe,
     env_type: EnvType,

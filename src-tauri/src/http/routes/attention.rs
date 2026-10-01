@@ -66,6 +66,7 @@ pub(crate) const MAX_HOOK_BODY: usize = 64 * 1024;
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
     agent_id: Option<String>,
+    cwd: Option<String>,
     #[serde(
         alias = "sessionId",
         alias = "sessionID",
@@ -159,11 +160,20 @@ struct HookPayload {
 }
 
 impl HookPayload {
+    #[cfg(test)]
     fn parse(body: &[u8]) -> Option<Self> {
         let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        Self::parse_value(&mut value)
+    }
+
+    fn parse_value(value: &mut serde_json::Value) -> Option<Self> {
         let fields = value.as_object_mut()?;
         // Grok sends both spellings in the same envelope. Serde aliases alone
         // reject this as a duplicate field; prefer the canonical snake case.
+        // Temporarily move aliases to canonical keys for deserialization, then
+        // restore them so the other classifiers see the original envelope.
+        let mut moved_aliases = Vec::new();
+        let mut inserted_canonical = Vec::new();
         for (canonical, aliases) in [
             (
                 "session_id",
@@ -206,13 +216,33 @@ impl HookPayload {
                 ][..],
             ),
         ] {
+            let mut has_canonical = fields.contains_key(canonical);
             for alias in aliases {
+                if *alias == canonical {
+                    continue;
+                }
                 if let Some(value) = fields.remove(*alias) {
-                    fields.entry(canonical).or_insert(value);
+                    if has_canonical {
+                        moved_aliases.push(((*alias).to_owned(), value));
+                    } else {
+                        fields.insert(canonical.to_owned(), value);
+                        inserted_canonical.push((canonical.to_owned(), (*alias).to_owned()));
+                        has_canonical = true;
+                    }
                 }
             }
         }
-        serde_json::from_value(value).ok()
+        let payload = <Self as serde::Deserialize>::deserialize(&*value).ok();
+        let fields = value.as_object_mut()?;
+        for (canonical, alias) in inserted_canonical {
+            if let Some(value) = fields.remove(&canonical) {
+                fields.insert(alias, value);
+            }
+        }
+        for (alias, value) in moved_aliases {
+            fields.insert(alias, value);
+        }
+        payload
     }
 }
 
@@ -374,9 +404,14 @@ fn semantic_turn(payload: &HookPayload) -> Option<SemanticTurn> {
 /// (the issue #1237 UUID validator shared with `import_and_resume`). A harness
 /// missing from that dispatcher has its id silently discarded, so its
 /// `cli_session_id` capture no-ops.
+#[cfg(test)]
 fn hook_session_id(body: &[u8], provider: &str) -> Option<String> {
-    let id = HookPayload::parse(body)?.session_id?;
-    request::parse_session_id_for_provider(provider, &id)
+    hook_session_id_from_payload(&HookPayload::parse(body)?, provider)
+}
+
+fn hook_session_id_from_payload(payload: &HookPayload, provider: &str) -> Option<String> {
+    let id = payload.session_id.as_deref()?;
+    request::parse_session_id_for_provider(provider, id)
 }
 
 /// What to do with an incoming attention webhook (issue #1364).
@@ -746,12 +781,24 @@ impl Classified {
 /// 6. No transcript path, unreadable transcript, or no pending tasks →
 ///    `Ready` (issue #1364): a clean turn completion is NOT a user-input
 ///    request. The node lands in `Ready`, never in `AwaitingInput`.
+#[cfg(test)]
 fn classify(
     body: &[u8],
     provider: &str,
     count_pending: impl FnOnce(&Path) -> Option<usize>,
 ) -> Classified {
-    let Some(payload) = HookPayload::parse(body) else {
+    let mut value = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let payload = value.as_mut().and_then(HookPayload::parse_value);
+    classify_payload(payload.as_ref(), value.as_ref(), provider, count_pending)
+}
+
+fn classify_payload(
+    payload: Option<&HookPayload>,
+    raw_payload: Option<&serde_json::Value>,
+    provider: &str,
+    count_pending: impl FnOnce(&Path) -> Option<usize>,
+) -> Classified {
+    let Some(payload) = payload else {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
             ..Default::default()
@@ -762,7 +809,7 @@ fn classify(
     // needed". Mark for attention with a degraded health so the UI can
     // render the uncertainty (issue #1364 §1). Comparing against the
     // derived `Default` keeps this total over future `HookPayload` fields.
-    if payload == HookPayload::default() {
+    if *payload == HookPayload::default() {
         return Classified::mark_input(crate::agent::session_lifecycle::HookSignalDetail {
             signal_health: crate::agent::session_lifecycle::SignalHealth::Degraded,
             ..Default::default()
@@ -916,7 +963,7 @@ fn classify(
             // harness enumerated one, and nothing at all when it did not.
             // Clients render choices only for a real list; an open question
             // stays open-to-answer instead of borrowing permission semantics.
-            request: question_choices(&payload),
+            request: question_choices(payload),
             message: payload.message.clone().or_else(|| {
                 let questions = payload.tool_input.as_ref()?.get("questions")?.as_array()?;
                 clean_description(&questions.iter().filter_map(|question| question.get("question")?.as_str())
@@ -967,8 +1014,8 @@ fn classify(
     // names are OpenCode-specific — a sibling harness borrowing the
     // same names must not false-positive). Grok + Claude Code ignore
     // `provider` (their classifiers key on body content alone).
-    if let Some(classified) =
-        crate::services::transcript_reader::adapter::classify_hook(body, provider)
+    if let Some(classified) = raw_payload
+        .and_then(|payload| crate::services::transcript_reader::adapter::classify_hook_value(payload, provider))
     {
         return match classified.decision {
             HookDecision::MarkInput => {
@@ -1018,13 +1065,17 @@ fn classify(
     // A Stop with fullyIdle: true or absent falls through to the
     // transcript-scan path so any future transcript reader hooks in
     // normally.
-    let Some(transcript_path) = payload.transcript_path.filter(|p| !p.is_empty()) else {
+    let Some(transcript_path) = payload
+        .transcript_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+    else {
         return Classified::ready(detail);
     };
     // A WSL-side agent reports a Linux transcript path; convert before the
     // Windows-side read (the module rule: never hand a Linux path to a
     // Windows API).
-    let host_path = crate::env::to_host_path(&transcript_path);
+    let host_path = crate::env::to_host_path(transcript_path);
     match count_pending(Path::new(&host_path)) {
         Some(n) if n > 0 => Classified::suppress(detail),
         Some(_) => Classified::ready(detail),
@@ -1056,6 +1107,17 @@ fn verify_attention_token(
     adapter.verify_attention_token(query_string, minted)
 }
 
+fn resolve_attention_node(
+    addressed: Option<crate::models::AgentNode>, payload: Option<&HookPayload>, generic_mcode: bool,
+    resolve_mcode: impl FnOnce(&str, &str) -> Option<crate::models::AgentNode>,
+) -> Option<crate::models::AgentNode> {
+    let mcode_session_id = payload.and_then(|payload| hook_session_id_from_payload(payload, "mcode"));
+    if generic_mcode || mcode_session_id.is_some() || addressed.as_ref().is_some_and(|node|
+        crate::preferences::resolve_harness_provider(&node.provider) == crate::models::Provider::Mcode) {
+        resolve_mcode(&mcode_session_id?, payload?.cwd.as_deref()?)
+    } else { addressed }
+}
+
 pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Loopback-only: the Claude Code hook always posts from 127.0.0.1/::1. A
     // non-loopback peer is an external spoof attempt — refuse before doing work.
@@ -1070,9 +1132,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         .path
         .strip_prefix("/api/attention/")
         .and_then(|s| s.parse().ok());
-    let Some(session_id) = session_id else {
+    if session_id.is_none() && req.path != "/api/attention/mcode" {
         return Response::empty("400 Bad Request");
-    };
+    }
+    let hook_body = req.body.clone();
 
     // Runtime-scoped token gate (issue #1366, round-2 + round-3 +
     // N1 fixes). The decision is **per-provider**, not per-`?token=`
@@ -1090,9 +1153,22 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // pair is captured here and passed into the run_blocking closure
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
-    let (node, provider_owned): (Option<crate::models::AgentNode>, String) =
+    let (node, provider_owned, hook_generation, payload_parsed, native_hook_parsed, raw_payload): (
+        Option<crate::models::AgentNode>,
+        String,
+        Option<i64>,
+        Option<HookPayload>,
+        Option<crate::services::circuit_worker::native_hooks::NativeHook>,
+        Option<serde_json::Value>,
+    ) =
         tokio::task::spawn_blocking(move || {
-            let node = crate::db::get_agent_node_by_id(session_id).ok();
+            let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
+            let mut value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
+            let payload = value.as_mut().and_then(HookPayload::parse_value);
+            // Old shared manifests may still name the last-spawned node.
+            // Their numeric address cannot establish MiniMax ownership either.
+            let node = resolve_attention_node(addressed, payload.as_ref(), session_id.is_none(),
+                crate::services::mcode_session::hook_target);
             let provider = node
                 .as_ref()
                 .map(|node| {
@@ -1102,7 +1178,14 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         .to_owned()
                 })
                 .unwrap_or_default();
-            (node, provider)
+            let native_hook = value.as_ref().and_then(|value| {
+                crate::services::circuit_worker::native_hooks::NativeHook::parse_value(
+                    &provider,
+                    value,
+                )
+            });
+            let generation = node.as_ref().and_then(|node| crate::db::session_started_at_ms(node.id).ok().flatten());
+            (node, provider, generation, payload, native_hook, value)
         })
         .await
         .ok()
@@ -1119,12 +1202,13 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     ) {
         return Response::empty("403 Forbidden");
     }
-
-    let body = &req.body;
-
     let Some(app) = state::app_handle() else {
         return Response::empty("503 Service Unavailable");
     };
+    let Some(session_id) = node.as_ref().map(|node| node.id) else {
+        return Response::empty("404 Not Found");
+    };
+
     // The path id is untrusted input. Do not create a process-lifetime
     // HookState entry or attempt a lifecycle publish for a node that has
     // already been deleted (or never existed); both would turn a typo/flood
@@ -1137,9 +1221,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         return Response::empty("404 Not Found");
     }
 
-    // Cheap, CPU-only classification happens on the async worker: parse,
-    // debug-log, extract the semantic turn, and classify (the transcript
-    // scan is file I/O, not SQLite). Everything that touches SQLite — the
+    // The bounded JSON body is parsed once on the blocking hop. Cheap,
+    // CPU-only work then logs diagnostics, extracts the semantic turn,
+    // and classifies; the transcript scan is file I/O, not SQLite. Everything
+    // that touches SQLite — the
     // fill-only session capture, the stale-callback check, the signal-
     // health confirmation, the semantic-turn persist, and the status write
     // — then runs in ONE `run_blocking` dispatch below, so a single webhook
@@ -1151,17 +1236,16 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // (the existing UUID validator would silently drop it). Provider
     // is read from the row already fetched for the token gate above —
     // no extra DB hop.
-    let hook_uuid = hook_session_id(body, provider);
-    let native_hook = crate::services::circuit_worker::native_hooks::NativeHook::parse(provider, body);
+    let hook_uuid = payload_parsed.as_ref().and_then(|payload| hook_session_id_from_payload(payload, provider));
+    let native_hook = native_hook_parsed;
 
     // AGY surfaces its `terminationReason` (e.g. `"model_stop"`,
     // `"tool_execution_limit_reached"`) so a future debugging session can
     // distinguish "the model finished its turn" from "the harness
     // aborted the turn" — log at debug so it's there when needed without
     // polluting the happy path (issue #1285, #1367).
-    let payload_parsed = HookPayload::parse(body);
-    match payload_parsed {
-        Some(ref payload) => {
+    match payload_parsed.as_ref() {
+        Some(payload) => {
             if let Some(ref reason) = payload
                 .termination_reason
                 .as_deref()
@@ -1191,8 +1275,9 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
 
     let semantic = payload_parsed.as_ref().and_then(semantic_turn);
 
-    let classified = classify(
-        body,
+    let classified = classify_payload(
+        payload_parsed.as_ref(),
+        raw_payload.as_ref(),
         provider,
         crate::services::transcript_reader::adapters::claude_code::count_pending_background_tasks,
     );
@@ -1230,12 +1315,21 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // new prompt cannot overtake a Stop that passed its turn fence.
             let state_owner = crate::agent::hook_state::for_node(session_id);
             let mut state = state_owner.lock();
+            if provider_owned == "mcode"
+                && (hook_generation.is_none()
+                    || hook_generation != crate::db::session_started_at_ms(session_id).ok().flatten()) {
+                return Ok(Applied::StaleDropped);
+            }
             // Codex self-assigns its thread id. PTY capture remains the
             // earliest source; SessionStart is the structured capture at
             // boot, and Stop/PermissionRequest remain the later fallback
             // (issue #1089).
             if let Some(cli_session_id) = hook_uuid.clone() {
-                match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
+                let captured = if provider_owned == "mcode" {
+                    crate::db::recover_live_cli_session_id(node.as_ref().expect("resolved hook node"), &cli_session_id,
+                        hook_generation.expect("fenced hook generation"))
+                } else { crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) };
+                match captured {
                     Ok(true) => tracing::info!(
                         "attention webhook captured session ID {} for node {}",
                         cli_session_id,
@@ -1248,6 +1342,12 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         error
                     ),
                 }
+            }
+            // Re-read after conditional capture. A callback racing another
+            // identity write must not publish lifecycle for the losing session.
+            if provider_owned == "mcode" && crate::db::get_agent_node_by_id(session_id).ok()
+                .and_then(|node| node.cli_session_id) != hook_uuid {
+                return Ok(Applied::StaleDropped);
             }
 
             // Issue #1364 §1 — ordering token: a hook whose provider session
@@ -3468,6 +3568,48 @@ mod tests {
     }
 
     #[test]
+    fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
+        use crate::models::{AgentNode, SessionStatus};
+        let nodes = vec![
+            AgentNode { id: 4724, provider: "mcode".into(), path: "F:/repo/implementation".into(), status: SessionStatus::Running, ..Default::default() },
+            AgentNode { id: 4725, provider: "mcode".into(), path: "F:/repo/other".into(), status: SessionStatus::Running, ..Default::default() },
+            AgentNode { id: 4715, provider: "mcode".into(), path: "F:/unrelated".into(), cli_session_id: Some("mvs_11111111111111111111111111111111".into()), status: SessionStatus::Running, ..Default::default() },
+        ];
+        let body = |event: &str, id: &str, cwd: &str| serde_json::json!({
+            "hook_event_name": event, "session_id": id, "cwd": cwd,
+            "transcript_path": "F:/native/messages.jsonl", "permission_mode": "bypassPermissions"
+        }).to_string().into_bytes();
+        let id = "mvs_22222222222222222222222222222222";
+        let start = body("SessionStart", id, "f:\\repo\\implementation");
+        let start_payload = HookPayload::parse(&start);
+        let resolve = |id: &str, cwd: &str| crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| true);
+        let legacy = resolve_attention_node(Some(nodes[1].clone()), start_payload.as_ref(), false, resolve).unwrap();
+        let shared = resolve_attention_node(None, start_payload.as_ref(), true, resolve).unwrap();
+        assert_eq!(legacy.id, 4724, "last-writer numeric URL cannot select node4725");
+        assert_eq!(shared.id, legacy.id);
+        assert_eq!(classify(&start, "mcode", |_| Some(0)).decision, Decision::Ignore);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE agent_nodes(id INTEGER PRIMARY KEY, provider TEXT, path TEXT, env TEXT,
+            worktree_name TEXT, worktree_path TEXT, use_worktree INTEGER, status TEXT, session_started_at INTEGER, cli_session_id TEXT);
+            INSERT INTO agent_nodes VALUES(4724,'mcode','F:/repo/implementation','windows',NULL,NULL,0,'running',100,NULL);
+            INSERT INTO agent_nodes VALUES(4725,'mcode','F:/repo/other','windows',NULL,NULL,0,'running',101,NULL);").unwrap();
+        assert!(!crate::db::agent_node::recover_live_cli_session_id_inner(&conn, &legacy, id, 99).unwrap(), "stale generation cannot capture");
+        assert!(crate::db::agent_node::recover_live_cli_session_id_inner(&conn, &legacy, id, 100).unwrap());
+        assert!(!crate::db::set_cli_session_id_if_missing_inner(&conn, 4725, id).unwrap(), "another node cannot claim the conversation");
+        let stop = body("Stop", id, "F:/repo/implementation");
+        assert_eq!(classify(&stop, "mcode", |_| Some(0)).decision, Decision::Ready);
+        let unrelated = body("Stop", "mvs_11111111111111111111111111111111", "F:/repo/implementation");
+        let unrelated_payload = HookPayload::parse(&unrelated);
+        let standalone_payload = HookPayload::parse(&body("Stop", id, "F:/standalone"));
+        let missing_cwd_payload = HookPayload::parse(&body("Stop", id, ""));
+        assert!(resolve_attention_node(Some(nodes[0].clone()), unrelated_payload.as_ref(), false, resolve).is_none());
+        assert!(resolve_attention_node(None, standalone_payload.as_ref(), true, resolve).is_none());
+        assert!(resolve_attention_node(None, missing_cwd_payload.as_ref(), true, resolve).is_none());
+        assert!(resolve_attention_node(None, start_payload.as_ref(), true, |id,cwd|
+            crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| false)).is_none());
+    }
+
+    #[test]
     fn hook_session_id_reads_agy_conversation_id() {
         let body = serde_json::json!({
             "conversationId": "C1234567-89AB-CDEF-0123-456789ABCDEF",
@@ -3500,6 +3642,24 @@ mod tests {
             hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
+    }
+
+    #[test]
+    fn hook_payload_parsing_preserves_the_shared_envelope() {
+        let mut raw = serde_json::json!({
+            "session_id": "canonical-session",
+            "sessionId": "alias-session",
+            "hook_event_name": "Stop",
+            "hookEventName": "Notification",
+            "toolInput": {"nested": [1, 2, 3]},
+        });
+        let original = raw.clone();
+
+        let payload = HookPayload::parse_value(&mut raw).unwrap();
+
+        assert_eq!(payload.session_id.as_deref(), Some("canonical-session"));
+        assert_eq!(payload.hook_event_name.as_deref(), Some("Stop"));
+        assert_eq!(raw, original, "other classifiers must see the original envelope");
     }
 
     /// Issue #1367: Fixture for a complete AGY Stop payload emitted by current releases (1.0.0-1.1.22+).

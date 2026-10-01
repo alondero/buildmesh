@@ -145,11 +145,14 @@ impl TranscriptAdapter for ClineAdapter {
     ///   when the user interrupts a *live* session, so it is explicitly not a
     ///   session-exit signal (claiming it here also stops a stale hook file
     ///   from a previous build falling through to the route's degraded arm).
-    fn classify_hook(&self, body: &[u8], provider: &str) -> Option<HookClassification> {
+    fn classify_hook_value(
+        &self,
+        payload: &serde_json::Value,
+        provider: &str,
+    ) -> Option<HookClassification> {
         if provider != "cline" {
             return None;
         }
-        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
         let event = payload
             .get("hookName")
             .or_else(|| payload.get("hook_name"))

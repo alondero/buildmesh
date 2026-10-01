@@ -30,6 +30,14 @@ runtime, so it is normally well under a second. It takes noticeably longer when:
   (this can take several seconds);
 - `codex` or `wsl` is slow to start because the disk or the WSL service is busy.
 
+The Codex probes do not all run at once. Within one runtime, the three
+identity lookups - version, executable location, and `CODEX_HOME` - overlap each
+other, and the two capability `--help` probes then overlap each other; the help
+pair has to wait for the version, because it is keyed on the resolved install.
+The Windows and WSL runtimes overlap each other throughout. So the wait per
+runtime is roughly the slowest identity lookup plus the slowest help probe, and
+a stopped WSL distribution usually costs one VM start rather than one per probe.
+
 The wait is bounded: a probe that does not answer is abandoned and reported as a
 load failure with a **Retry** button rather than leaving the tab stuck. The
 provider pickers stay disabled while the check runs and are enabled once it
@@ -154,6 +162,30 @@ only helps for sessions started outside Buildmesh. Buildmesh rewrites only
 that one line — your comments, ordering, API key and model catalog are left
 as they were. See
 [the MiniMax Code capability notes](learning/mcode-harness-capabilities.md).
+
+## Circuit classification keeps failing or reports an expired login
+
+The classifier has its own selection in Settings > Providers > **Circuit
+classifier provider**. Changing an implementer or reviewer does not change it.
+Select a working host-native Claude Code or native Codex configuration. A Codex
+configuration can use `gpt-6-luna` with `low` effort and the existing Codex login.
+
+The step displays the classifier's last error and stops automatic inference
+after five failures. Once authentication or configuration is restored, choose
+**Recheck evidence**. A restart or new report does not reset the exhausted budget.
+
+## MiniMax Code attaches the wrong conversation or never captures one
+
+Buildmesh routes MiniMax callbacks using the native conversation id and workspace,
+including callbacks from older shared plugins with a numeric URL. It no longer
+guesses session ownership from manifest creation times. Standalone conversations,
+duplicate conversation ownership, and ambiguous workspaces are rejected.
+
+Use separate worktrees for simultaneous fresh MiniMax agents. If an older run
+already has a wrong conversation id, preserve its worktree and history and recover
+the verified original conversation before rechecking the run. Rechecking alone
+cannot establish which conversation belongs to the implementer. See
+[the runs 276/277 investigation](development/circuit-runs-276-277.md).
 
 ## Muse fails to start with `os error 267` or `Not a directory`
 

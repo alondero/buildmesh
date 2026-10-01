@@ -135,9 +135,9 @@ impl TranscriptAdapter for OpenCodeAdapter {
         false
     }
 
-    fn classify_hook(
+    fn classify_hook_value(
         &self,
-        body: &[u8],
+        payload: &serde_json::Value,
         provider: &str,
     ) -> Option<HookClassification> {
         // OpenCode's plugin events are harness-specific — the
@@ -158,7 +158,6 @@ impl TranscriptAdapter for OpenCodeAdapter {
         // carrying the freshly minted `ses_…` id; it's lifecycle-neutral
         // (the id-capture path persists the session id, the attention
         // route must not flip a fresh spawn into `AwaitingInput`).
-        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
         let event = payload
             .get("hook_event_name")
             .or_else(|| payload.get("hookEventName"))
