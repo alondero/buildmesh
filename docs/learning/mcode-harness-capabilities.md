@@ -46,7 +46,7 @@ interactive TUI over PTY, no harness-owned worktree flag.
 |---|---|---|
 | `supports_resume` | `true` | `resume_args` → `--session <id>` |
 | `auto_resume_on_startup` | `true` | |
-| `self_assigns_session_id` | `true` | mcode mints its own ids; capture is the post-spawn manifest poller, never PTY |
+| `self_assigns_session_id` | `true` | Native callbacks bind session id plus workspace; never PTY or time-only manifest scans |
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
 | `supports_model_override` | `false` | Issue #1179: `--model` exists only on `mcode exec`, never the launched TUI |
 | `effort_control` | `None` | Same reason — the TUI rejects effort flags |
@@ -230,20 +230,12 @@ and sessions too and breaks the transcript reader.
 
 ### Known limits
 
-- **One machine-global manifest.** The plugin path is the user's home
-  (`<dataDir>/plugins/…`), not the worktree — unlike Codex, whose hooks file is
-  project-scoped — so provisioning is last-writer-wins: each `Stop` reports to
-  the id baked by the most recent mcode spawn. That is safe for a *running*
-  session, because mcode resolves a plugin's hooks once at process start and
-  keeps them for the session's life. Verified on 0.4.12: a session launched
-  bound to node 7, whose manifest was then overwritten mid-session with node 99,
-  kept posting to `/api/attention/7` — not to 99. The residual hazard is a
-  narrow **startup** window: a node whose process scans the plugin directory
-  *after* another node's spawn overwrote it adopts the other node's URL. Closing
-  it needs either serialised mcode spawns or a node-agnostic callback the route
-  resolves from the payload; neither is implemented, because the payload's `cwd`
-  is ambiguous for two nodes sharing one worktree and mcode's self-assigned
-  session id is not known at provision time.
+- **One machine-global manifest.** The plugin path is the user's home,
+  not the worktree. All nodes now provision the same `/api/attention/mcode`
+  URL. The route requires a native session id, matching workspace, live process,
+  and current process generation. Known sessions cannot claim another node;
+  simultaneous fresh nodes sharing one workspace are rejected as ambiguous.
+  Older numeric callbacks use the same resolution, ignoring their baked node id.
 - **WSL-guest mcode now fails provisioning loudly when it cannot deliver.**
   Reaching the Windows-side Buildmesh from the guest needs mirrored networking,
   so `provision_attention_hooks` preflights `wslinfo --networking-mode`
@@ -262,24 +254,17 @@ and sessions too and breaks the transcript reader.
   (the Muse / Command Code pattern) remains the fallback if the plugin path
   proves unreliable.
 
-## Session identity — manifest-scan capture (issue #1798)
+## Session identity — native callbacks
 
-mcode auto-assigns session ids; PTY-output capture is off
-(`captures_session_id_from_pty = false` — no banner shape is verified, and
-leaving it on would risk binding a stray UUID from tool output). Capture is
-driven by the post-spawn manifest poller (`services::mcode_session`, the
-Command Code pattern): `after_fresh_spawn` binds the fresh `sessionId`
-through the shared live recovery, and `recover_suspended_session_id`
-rebinds archived nodes after restart. Matching is time-window only with
-single-candidate binding — the manifest carries no verified workspace
-anchor, so two fresh manifests bind nothing rather than risk cross-wiring
-sessions.
+mcode assigns `mvs_<hex>` ids. Buildmesh provisions `SessionStart`, `Stop`, and
+`PermissionRequest` handlers. The installed 0.5.8 hook serializer supplies
+`session_id`, `cwd`, and `transcript_path`; SessionStart captures identity without
+publishing Ready. Session/workspace routing and the conditional database write
+prevent simultaneous spawns and standalone callbacks from claiming another node.
 
-A second path opens once the attention hook is live: the route's fill-only
-capture. mcode reports `mvs_<hex>` in the hook payload, which is not a UUID, so
-`http::request::parse_session_id_for_provider` needs an explicit `mcode` arm
-(`parse_mcode_session_id`) or the route discards the id outright. Before that
-arm existed the route silently dropped it — caught in issue #1797's review. The
-manifest poller above is what binds the column today; the hook capture is
-redundant confirmation and keeps the lifecycle telemetry's
-`provider_session_id` populated.
+PTY capture remains off. The former time-window manifest poller is removed:
+one observed manifest can be the first of two simultaneous spawns and is not
+proof of ownership. Resuming a known id remains supported; a suspended node
+without an id cannot safely infer one from timestamps. Historical duplicate
+ownership is rejected rather than silently rewritten. See
+[runs 276/277](../development/circuit-runs-276-277.md) for the observed failure.

@@ -8,10 +8,9 @@
 //!
 //! **Session resumption** uses `--session [<id>]` or `-c` / `--continue`.
 //! MiniMax Code auto-assigns its own session ids. No PTY banner shape is
-//! verified for the TUI, so PTY capture stays off and ids are captured via
-//! the post-spawn manifest poller (`services::mcode_session`, issue #1798).
-//! Once the attention hook is live, the route's fill-only capture is a second
-//! path: mcode reports `mvs_<hex>` in the hook payload, so
+//! verified for the TUI, so PTY capture stays off. Native SessionStart/Stop
+//! callbacks carry both the workspace and `mvs_<hex>` conversation identity;
+//! the shared plugin uses a node-independent URL. Consequently
 //! `http::request::parse_mcode_session_id` must accept that shape or the id is
 //! silently discarded. `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
@@ -40,7 +39,7 @@
 //! provisioned into `<dataDir>/plugins/io.buildmesh.attention/`, and `Stop`
 //! delivery is validated end-to-end against a live `mcode` 0.4.12 TUI — a
 //! completed turn POSTs the mcode envelope (`hook_event_name`, `session_id`,
-//! `transcript_path`) to `/api/attention/<node-id>`. Three mcode-0.4.x
+//! `cwd`, `transcript_path`) to `/api/attention/mcode`. Three mcode-0.4.x
 //! constraints shape the write:
 //!
 //! 1. The manifest lives at `.claude-plugin/plugin.json` and `hooks` is
@@ -50,8 +49,7 @@
 //! 2. `command` + `args` are executed **without shell interpretation**, so the
 //!    invocation names a shell (`cmd.exe` / `sh`) and hands it one command line.
 //! 3. mcode `env_clear()`s `BUILDMESH_*` before running a hook — exactly like
-//!    Codex — so the callback URL **bakes** the loopback port and node id rather
-//!    than expanding them at run time.
+//!    Codex, so the shared callback URL bakes the loopback port.
 //!
 //! The merge is idempotent and additive: sibling events and user-authored
 //! handlers round-trip untouched, a malformed user file fails closed rather
@@ -147,7 +145,7 @@ const MCODE_HOOK_TIMEOUT_SECONDS: u64 = 5;
 /// Access (`permissionMode: bypassPermissions`, pinned by
 /// [`pin_permission_mode`] on every spawn), so no approval prompt is ever
 /// raised and the event is never observed.
-const MCODE_PROVISIONED_EVENTS: &[&str] = &["Stop", "PermissionRequest"];
+const MCODE_PROVISIONED_EVENTS: &[&str] = &["SessionStart", "Stop", "PermissionRequest"];
 
 /// Marker substring identifying the Buildmesh-owned handler inside the
 /// manifest's inline `hooks` map. Used to detect a stale Buildmesh entry on
@@ -228,9 +226,9 @@ fn attention_invocation(env_type: EnvType, url: &str) -> (String, Vec<String>) {
 /// One inline handler entry for an event in the manifest's `hooks` map. The
 /// mcode 0.4.0+ shape nests the executable entry under a `hooks` array beside
 /// a `matcher` (a `"*"` matcher matches every occurrence).
-fn attention_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
+fn attention_handler(_node_id: i64, env_type: EnvType) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
-    let url = format!("http://localhost:{port}/api/attention/{node_id}");
+    let url = format!("http://localhost:{port}/api/attention/mcode");
     let (command, args) = attention_invocation(env_type, &url);
     serde_json::json!({
         "matcher": "*",
@@ -803,8 +801,7 @@ impl AgentProvider for McodeAdapter {
     /// propagated, so an unpinnable config cannot abort a launch (the node
     /// simply starts in mcode's own default mode). Note it is a
     /// **machine-global** setting, shared with the user's standalone `mcode`
-    /// sessions, unlike the node-scoped `node_id` baked into the manifest
-    /// below.
+    /// sessions. Callback provisioning also uses one shared manifest.
     ///
     /// The merge is additive (sibling events and user handlers round-trip) and
     /// idempotent (issue #886); a malformed existing file returns `Err` rather
@@ -814,26 +811,9 @@ impl AgentProvider for McodeAdapter {
     /// proceeds (only the attention callback is lost — the agent remains
     /// usable).
     ///
-    /// `node_id` is baked into the callback URL: mcode `env_clear()`s the
-    /// `BUILDMESH_*` variables before running a hook, so `BUILDMESH_SESSION_ID`
-    /// is not available at run time (the same constraint Codex has). The URL is
-    /// re-baked on every spawn, which also re-points a node at the current
-    /// Buildmesh HTTP port.
-    ///
-    /// **One machine-global manifest, one node per file.** The path is shared
-    /// by every mcode node on the machine — `<dataDir>` is the user's home, not
-    /// the worktree (unlike Codex, whose hooks file is project-scoped) — so a
-    /// later spawn rewrites the baked `node_id` and the file is
-    /// last-writer-wins. That is safe for a *running* session, because mcode
-    /// resolves a plugin's hooks once at process start and keeps them for the
-    /// life of the session: verified against 0.4.12 by rewriting the manifest
-    /// mid-session and observing the session keep posting to its original URL
-    /// (pinned by `provision_is_last_writer_wins_across_nodes_sharing_one_data_dir`).
-    /// The residual hazard is a narrow **startup** window — a node whose
-    /// process scans the plugin directory after another node's spawn overwrote
-    /// it adopts the other node's URL. Serialising those two spawns, or a
-    /// node-agnostic callback the route resolves from the payload, would close
-    /// it; neither is implemented here.
+    /// The manifest is machine-global and mcode clears `BUILDMESH_*` before
+    /// invoking handlers. A stable URL lets the route bind the native session
+    /// and workspace instead of trusting another spawn's baked node address.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
@@ -889,8 +869,7 @@ impl AgentProvider for McodeAdapter {
         &[Platform::Windows, Platform::Linux, Platform::Macos]
     }
 
-    /// MiniMax Code auto-assigns session ids — captured via the manifest
-    /// poller, not PTY output (issue #1798).
+    /// MiniMax Code assigns ids captured by native session/workspace callbacks.
     fn self_assigns_session_id(&self) -> bool {
         true
     }
@@ -898,41 +877,13 @@ impl AgentProvider for McodeAdapter {
     /// The TUI has no verified session banner, so the labeled-UUID PTY regex
     /// can never reliably match an mcode id — and leaving it on would risk
     /// binding a stray UUID from tool output (same reason AGY opts out).
-    /// Capture runs from [`Self::after_fresh_spawn`] via the manifest scan.
+    /// Capture uses native hooks; timestamps cannot prove session ownership.
     fn captures_session_id_from_pty(&self) -> bool {
         false
     }
 
-    /// Start the manifest-scan capture poller so `cli_session_id` is
-    /// populated shortly after spawn. Without this, every mcode node keeps
-    /// `cli_session_id = NULL` and is permanently skipped by
-    /// `auto_resume_agent_nodes` (issue #1798).
-    fn after_fresh_spawn(
-        &self,
-        node_id: i64,
-        spawn_path: &str,
-        env_type: EnvType,
-        _app: &tauri::AppHandle,
-    ) {
-        crate::services::mcode_session::start_capture_poller(
-            node_id,
-            spawn_path.to_string(),
-            env_type,
-        );
-    }
-
-    fn recover_suspended_session_id(
-        &self,
-        spawn_path: &str,
-        env_type: EnvType,
-        anchor_ms: i64,
-        recorded_start: bool,
-    ) -> Option<String> {
-        crate::services::mcode_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
-        )
-    }
-
+    // Identity is captured by workspace-scoped native callbacks. The global
+    // manifest has no workspace anchor, so time-only recovery is unsafe.
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["--session".into(), id.into()]
     }
@@ -1011,11 +962,7 @@ mod tests {
         assert!(MCODE.self_assigns_session_id());
     }
 
-    /// Issue #1798: mcode self-assigns ids but the TUI prints no verified
-    /// banner, so the PTY UUID regex can never reliably capture one. Capture
-    /// runs from `after_fresh_spawn` (manifest-scan poller, same shape as
-    /// CommandCode) — the PTY path must stay off so a stray UUID from tool
-    /// output can't bind the wrong session.
+    /// Native callbacks capture identity; PTY must not bind UUIDs from tool output.
     #[test]
     fn self_assigns_but_does_not_capture_from_pty() {
         assert!(
@@ -1325,8 +1272,8 @@ mod tests {
                 "{event} handler must POST to the attention route: {joined}"
             );
             assert!(
-                joined.contains("/api/attention/7"),
-                "{event} must bake the node id into the callback URL: {joined}"
+                joined.contains("/api/attention/mcode"),
+                "{event} must use the shared callback URL: {joined}"
             );
             assert!(
                 !joined.contains("BUILDMESH_PORT") && !joined.contains("BUILDMESH_SESSION_ID"),
@@ -1390,11 +1337,12 @@ mod tests {
             "Stop must carry both the user and Buildmesh entries (additive merge); got {stop:?}"
         );
 
-        // The unmanaged `SessionStart` event must be preserved verbatim.
+        // SessionStart must retain the user handler alongside Buildmesh capture.
         let session_start = value["hooks"]["SessionStart"]
             .as_array()
             .expect("SessionStart array");
-        assert_eq!(session_start.len(), 1);
+        assert_eq!(session_start.len(), 2);
+        assert!(session_start.iter().any(is_buildmesh_handler));
         assert_eq!(
             session_start[0]["hooks"][0]["args"][0].as_str(),
             Some("startup.mjs")
@@ -1454,22 +1402,15 @@ mod tests {
             "stale URL must be replaced, not preserved: {joined}"
         );
         assert!(
-            joined.contains("/api/attention/7"),
-            "replacement must carry the fresh node id: {joined}"
+            joined.contains("/api/attention/mcode"),
+            "replacement must carry the shared callback URL: {joined}"
         );
     }
 
-    /// Issue #1797 review (finding 1): the plugin path is machine-global
-    /// (`<dataDir>/plugins/…` — the user's home, not per-worktree like Codex),
-    /// so provisioning is last-writer-wins: a second node's spawn overwrites
-    /// the first node's baked URL on disk. Pin that on-disk semantics, and pin
-    /// that a re-spawn restores a node's own URL, so the shared-path behaviour
-    /// is a tested property rather than a surprise. *Running* sessions are
-    /// unaffected because mcode resolves a plugin's hooks once at process start
-    /// — see the trait method's docs and the mid-session rewrite experiment
-    /// recorded in `docs/learning/mcode-harness-capabilities.md`.
+    /// A shared plugin must retain the same URL across launches and resumes,
+    /// including standalone processes that load the manifest.
     #[test]
-    fn provision_is_last_writer_wins_across_nodes_sharing_one_data_dir() {
+    fn provision_is_stable_across_nodes_sharing_one_data_dir() {
         let home = tempfile::tempdir().unwrap();
         let manifest = plugin_manifest_path(home.path());
 
@@ -1496,26 +1437,10 @@ mod tests {
         };
 
         let first = provision(101);
-        assert!(
-            first.contains("/api/attention/101"),
-            "node 101's URL must be baked: {first}"
-        );
-
+        assert!(first.contains("/api/attention/mcode"), "{first}");
         let second = provision(202);
-        assert!(
-            second.contains("/api/attention/202"),
-            "a second node sharing the data dir overwrites the manifest: {second}"
-        );
-        assert!(
-            !second.contains("/api/attention/101"),
-            "no stale node id may survive the overwrite: {second}"
-        );
-
-        let restored = provision(101);
-        assert!(
-            restored.contains("/api/attention/101"),
-            "re-spawning a node restores its own URL: {restored}"
-        );
+        assert_eq!(first, second, "another spawn cannot redirect an existing process");
+        assert_eq!(provision(101), first);
 
         // The merge never accumulates handlers across nodes.
         let value: serde_json::Value =
@@ -2103,8 +2028,8 @@ defaultModelThinking:
         );
         assert_eq!(
             MCODE_PROVISIONED_EVENTS,
-            &["Stop", "PermissionRequest"],
-            "issue #1796 calls out Stop + PermissionRequest specifically; drift trips here"
+            &["SessionStart", "Stop", "PermissionRequest"],
+            "SessionStart captures identity without publishing Ready; Stop completes a turn"
         );
         assert!(
             MCODE_HOOK_TIMEOUT_SECONDS > 0,

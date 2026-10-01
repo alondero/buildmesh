@@ -163,6 +163,30 @@ that one line — your comments, ordering, API key and model catalog are left
 as they were. See
 [the MiniMax Code capability notes](learning/mcode-harness-capabilities.md).
 
+## Circuit classification keeps failing or reports an expired login
+
+The classifier has its own selection in Settings > Providers > **Circuit
+classifier provider**. Changing an implementer or reviewer does not change it.
+Select a working host-native Claude Code or native Codex configuration. A Codex
+configuration can use `gpt-6-luna` with `low` effort and the existing Codex login.
+
+The step displays the classifier's last error and stops automatic inference
+after five failures. Once authentication or configuration is restored, choose
+**Recheck evidence**. A restart or new report does not reset the exhausted budget.
+
+## MiniMax Code attaches the wrong conversation or never captures one
+
+Buildmesh routes MiniMax callbacks using the native conversation id and workspace,
+including callbacks from older shared plugins with a numeric URL. It no longer
+guesses session ownership from manifest creation times. Standalone conversations,
+duplicate conversation ownership, and ambiguous workspaces are rejected.
+
+Use separate worktrees for simultaneous fresh MiniMax agents. If an older run
+already has a wrong conversation id, preserve its worktree and history and recover
+the verified original conversation before rechecking the run. Rechecking alone
+cannot establish which conversation belongs to the implementer. See
+[the runs 276/277 investigation](development/circuit-runs-276-277.md).
+
 ## Muse fails to start with `os error 267` or `Not a directory`
 
 `AGENTS.md` and `.agents/skills` are Git symlinks. On Windows checkouts

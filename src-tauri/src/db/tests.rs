@@ -85,6 +85,15 @@ fn live_identity_recovery_rejects_regeneration_relocation_and_duplicate_claims()
 }
 
 #[test]
+fn attention_capture_cannot_claim_another_nodes_session() {
+    let conn = suspended_recovery_schema();
+    assert!(!super::agent_node::set_cli_session_id_if_missing_inner(&conn, 43, "known").unwrap());
+    let stored: String = conn.query_row("SELECT cli_session_id FROM agent_nodes WHERE id=43", [], |r| r.get(0)).unwrap();
+    assert_eq!(stored, "");
+    assert!(super::agent_node::set_cli_session_id_if_missing_inner(&conn, 43, "own-session").unwrap());
+}
+
+#[test]
 fn v39_migrates_legacy_session_generation_keys_into_agent_nodes() {
     let conn = suspended_recovery_schema();
     conn.execute(

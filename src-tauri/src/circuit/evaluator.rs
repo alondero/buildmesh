@@ -524,24 +524,19 @@ pub(crate) fn review_prompt(output: &str) -> String {
     )
 }
 
-pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &crate::session_naming::NamingLaunch, prompt: &str) -> Option<Classification> {
-
-    let mut cmd = crate::process_util::command_no_window(backend_env.executable.as_deref().unwrap_or(std::path::Path::new("claude")));
-    cmd.arg("--print");
-    cmd.args(&backend_env.args);
-    for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
-        cmd.env_remove(k);
-    }
-    for (k, v) in &backend_env.env {
-        cmd.env(k, v);
-    }
+pub(crate) fn classify_with_prompt(node_id: i64, launch: &super::classifier::ClassifierLaunch, prompt: &str) -> Result<Classification, String> {
+    // No repository rules, tools, or hooks belong in a report classification task.
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let result = directory.path().join("verdict.txt");
+    let cmd = launch.command(directory.path(), &result)?;
     let output = match run_classifier_command(cmd, prompt, std::time::Duration::from_secs(30)) {
         Ok(output) => output,
         Err(error) => {
             tracing::warn!("circuit evaluator({node_id}): {error}");
-            return None;
+            return Err(error);
         }
     };
+    let output = launch.final_output(output, &result)?;
     let parsed = parse_classification(&output);
     tracing::info!(
         "circuit evaluator({}): classified turn as {:?} (raw: {:?})",
@@ -549,7 +544,12 @@ pub(crate) fn classify_with_prompt(node_id: i64, backend_env: &crate::session_na
         parsed,
         output.trim().chars().take(80).collect::<String>()
     );
-    parsed
+    parsed.ok_or_else(|| format!("Classifier returned no recognised verdict: {}", classifier_diagnostic(output.as_bytes())))
+}
+
+fn classifier_diagnostic(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    crate::secret_scrubber::SecretScrubber::scrub(&text).chars().take(2000).collect()
 }
 
 fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout: std::time::Duration) -> Result<String, String> {
@@ -569,10 +569,11 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     }
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
+        .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().map_err(io_error)?;
     let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
     let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
+    let errors = child.stderr.take().ok_or_else(|| "classifier stderr was not piped".to_string())?;
     let prompt_bytes = prompt.as_bytes().to_vec();
     let (input_tx, input_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || { let _ = input_tx.send(input.write_all(&prompt_bytes)); });
@@ -582,10 +583,20 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     std::thread::spawn(move || {
         let mut bytes = Vec::with_capacity(MAX_OUTPUT.min(8 * 1024));
         let result = output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
-            output_oversized_reader.store(bytes.len() > MAX_OUTPUT, std::sync::atomic::Ordering::Release);
+            if bytes.len() > MAX_OUTPUT { output_oversized_reader.store(true, std::sync::atomic::Ordering::Release); }
             bytes
         });
         let _ = output_tx.send(result);
+    });
+    let errors_oversized = output_oversized.clone();
+    let (errors_tx, errors_rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = errors.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
+            if bytes.len() > MAX_OUTPUT { errors_oversized.store(true, std::sync::atomic::Ordering::Release); }
+            bytes
+        });
+        let _ = errors_tx.send(result);
     });
     let job = crate::process_util::JobHandle::contain(child.id());
     let deadline = std::time::Instant::now() + timeout;
@@ -637,10 +648,22 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
                 .map_err(io_error)?
         }
     };
+    let errors = match errors_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+        Ok(result) => result.map_err(io_error)?,
+        Err(_) => {
+            terminate_classifier_tree(child.id(), job.as_ref());
+            let _ = child.kill();
+            let _ = child.wait();
+            errors_rx.recv_timeout(std::time::Duration::from_secs(1))
+                .map_err(|_| "classifier error reader did not finish".to_string())?.map_err(io_error)?
+        }
+    };
     drop(job);
-    if let Some(error) = status_error { return Err(error); }
+    if let Some(error) = status_error {
+        return Err(format!("{error}: {} {}", classifier_diagnostic(&bytes), classifier_diagnostic(&errors)).trim().into());
+    }
     if timed_out { return Err("classifier exceeded its time budget".into()); }
-    if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
+    if over_budget || bytes.len() > MAX_OUTPUT || errors.len() > MAX_OUTPUT { return Err("classifier output exceeded 64 KiB".into()); }
     String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
 }
 
@@ -661,6 +684,20 @@ fn terminate_classifier_tree(pid: u32, job: Option<&crate::process_util::JobHand
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn circuit_classifier_failure_retains_authentication_diagnostics() {
+        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") }
+            else { crate::process_util::command_no_window("sh") };
+        if cfg!(windows) {
+            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('Failed to authenticate: OAuth session expired'); [Console]::Error.WriteLine('Refresh rejected'); exit 1"]);
+        } else {
+            cmd.args(["-c", "printf 'Failed to authenticate: OAuth session expired\\n'; printf 'Refresh rejected\\n' >&2; exit 1"]);
+        }
+        let error = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap_err();
+        assert!(error.contains("OAuth session expired"), "{error}");
+        assert!(error.contains("Refresh rejected"), "{error}");
+    }
 
     #[test]
     fn circuit_classifier_drains_output_larger_than_a_pipe_buffer() {

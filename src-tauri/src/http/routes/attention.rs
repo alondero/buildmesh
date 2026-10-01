@@ -66,6 +66,7 @@ pub(crate) const MAX_HOOK_BODY: usize = 64 * 1024;
 #[derive(serde::Deserialize, Default, Debug, Clone, PartialEq, Eq)]
 struct HookPayload {
     agent_id: Option<String>,
+    cwd: Option<String>,
     #[serde(
         alias = "sessionId",
         alias = "sessionID",
@@ -1056,6 +1057,17 @@ fn verify_attention_token(
     adapter.verify_attention_token(query_string, minted)
 }
 
+fn resolve_attention_node(
+    addressed: Option<crate::models::AgentNode>, body: &[u8], generic_mcode: bool,
+    resolve_mcode: impl FnOnce(&str, &str) -> Option<crate::models::AgentNode>,
+) -> Option<crate::models::AgentNode> {
+    if generic_mcode || hook_session_id(body, "mcode").is_some() || addressed.as_ref().is_some_and(|node|
+        crate::preferences::resolve_harness_provider(&node.provider) == crate::models::Provider::Mcode) {
+        let payload = HookPayload::parse(body)?;
+        resolve_mcode(&hook_session_id(body, "mcode")?, payload.cwd.as_deref()?)
+    } else { addressed }
+}
+
 pub async fn handle_post(req: &ParsedRequest) -> Response {
     // Loopback-only: the Claude Code hook always posts from 127.0.0.1/::1. A
     // non-loopback peer is an external spoof attempt — refuse before doing work.
@@ -1070,9 +1082,10 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
         .path
         .strip_prefix("/api/attention/")
         .and_then(|s| s.parse().ok());
-    let Some(session_id) = session_id else {
+    if session_id.is_none() && req.path != "/api/attention/mcode" {
         return Response::empty("400 Bad Request");
-    };
+    }
+    let hook_body = req.body.clone();
 
     // Runtime-scoped token gate (issue #1366, round-2 + round-3 +
     // N1 fixes). The decision is **per-provider**, not per-`?token=`
@@ -1090,9 +1103,13 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     // pair is captured here and passed into the run_blocking closure
     // below — see the N1 review point about hitting SQLite twice
     // for the same row.
-    let (node, provider_owned): (Option<crate::models::AgentNode>, String) =
+    let (node, provider_owned, hook_generation): (Option<crate::models::AgentNode>, String, Option<i64>) =
         tokio::task::spawn_blocking(move || {
-            let node = crate::db::get_agent_node_by_id(session_id).ok();
+            let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
+            // Old shared manifests may still name the last-spawned node.
+            // Their numeric address cannot establish MiniMax ownership either.
+            let node = resolve_attention_node(addressed, &hook_body, session_id.is_none(),
+                crate::services::mcode_session::hook_target);
             let provider = node
                 .as_ref()
                 .map(|node| {
@@ -1102,7 +1119,8 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         .to_owned()
                 })
                 .unwrap_or_default();
-            (node, provider)
+            let generation = node.as_ref().and_then(|node| crate::db::session_started_at_ms(node.id).ok().flatten());
+            (node, provider, generation)
         })
         .await
         .ok()
@@ -1119,12 +1137,15 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     ) {
         return Response::empty("403 Forbidden");
     }
-
-    let body = &req.body;
-
     let Some(app) = state::app_handle() else {
         return Response::empty("503 Service Unavailable");
     };
+    let Some(session_id) = node.as_ref().map(|node| node.id) else {
+        return Response::empty("404 Not Found");
+    };
+
+    let body = &req.body;
+
     // The path id is untrusted input. Do not create a process-lifetime
     // HookState entry or attempt a lifecycle publish for a node that has
     // already been deleted (or never existed); both would turn a typo/flood
@@ -1230,12 +1251,21 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
             // new prompt cannot overtake a Stop that passed its turn fence.
             let state_owner = crate::agent::hook_state::for_node(session_id);
             let mut state = state_owner.lock();
+            if provider_owned == "mcode"
+                && (hook_generation.is_none()
+                    || hook_generation != crate::db::session_started_at_ms(session_id).ok().flatten()) {
+                return Ok(Applied::StaleDropped);
+            }
             // Codex self-assigns its thread id. PTY capture remains the
             // earliest source; SessionStart is the structured capture at
             // boot, and Stop/PermissionRequest remain the later fallback
             // (issue #1089).
             if let Some(cli_session_id) = hook_uuid.clone() {
-                match crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) {
+                let captured = if provider_owned == "mcode" {
+                    crate::db::recover_live_cli_session_id(node.as_ref().expect("resolved hook node"), &cli_session_id,
+                        hook_generation.expect("fenced hook generation"))
+                } else { crate::db::set_cli_session_id_if_missing(session_id, &cli_session_id) };
+                match captured {
                     Ok(true) => tracing::info!(
                         "attention webhook captured session ID {} for node {}",
                         cli_session_id,
@@ -1248,6 +1278,12 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
                         error
                     ),
                 }
+            }
+            // Re-read after conditional capture. A callback racing another
+            // identity write must not publish lifecycle for the losing session.
+            if provider_owned == "mcode" && crate::db::get_agent_node_by_id(session_id).ok()
+                .and_then(|node| node.cli_session_id) != hook_uuid {
+                return Ok(Applied::StaleDropped);
             }
 
             // Issue #1364 §1 — ordering token: a hook whose provider session
@@ -3465,6 +3501,44 @@ mod tests {
             None,
             "another provider must not adopt the mvs_ shape"
         );
+    }
+
+    #[test]
+    fn mcode_native_attention_routes_legacy_and_shared_callbacks_before_capture() {
+        use crate::models::{AgentNode, SessionStatus};
+        let nodes = vec![
+            AgentNode { id: 4724, provider: "mcode".into(), path: "F:/repo/implementation".into(), status: SessionStatus::Running, ..Default::default() },
+            AgentNode { id: 4725, provider: "mcode".into(), path: "F:/repo/other".into(), status: SessionStatus::Running, ..Default::default() },
+            AgentNode { id: 4715, provider: "mcode".into(), path: "F:/unrelated".into(), cli_session_id: Some("mvs_11111111111111111111111111111111".into()), status: SessionStatus::Running, ..Default::default() },
+        ];
+        let body = |event: &str, id: &str, cwd: &str| serde_json::json!({
+            "hook_event_name": event, "session_id": id, "cwd": cwd,
+            "transcript_path": "F:/native/messages.jsonl", "permission_mode": "bypassPermissions"
+        }).to_string().into_bytes();
+        let id = "mvs_22222222222222222222222222222222";
+        let start = body("SessionStart", id, "f:\\repo\\implementation");
+        let resolve = |id: &str, cwd: &str| crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| true);
+        let legacy = resolve_attention_node(Some(nodes[1].clone()), &start, false, resolve).unwrap();
+        let shared = resolve_attention_node(None, &start, true, resolve).unwrap();
+        assert_eq!(legacy.id, 4724, "last-writer numeric URL cannot select node4725");
+        assert_eq!(shared.id, legacy.id);
+        assert_eq!(classify(&start, "mcode", |_| Some(0)).decision, Decision::Ignore);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE agent_nodes(id INTEGER PRIMARY KEY, provider TEXT, path TEXT, env TEXT,
+            worktree_name TEXT, worktree_path TEXT, use_worktree INTEGER, status TEXT, session_started_at INTEGER, cli_session_id TEXT);
+            INSERT INTO agent_nodes VALUES(4724,'mcode','F:/repo/implementation','windows',NULL,NULL,0,'running',100,NULL);
+            INSERT INTO agent_nodes VALUES(4725,'mcode','F:/repo/other','windows',NULL,NULL,0,'running',101,NULL);").unwrap();
+        assert!(!crate::db::agent_node::recover_live_cli_session_id_inner(&conn, &legacy, id, 99).unwrap(), "stale generation cannot capture");
+        assert!(crate::db::agent_node::recover_live_cli_session_id_inner(&conn, &legacy, id, 100).unwrap());
+        assert!(!crate::db::set_cli_session_id_if_missing_inner(&conn, 4725, id).unwrap(), "another node cannot claim the conversation");
+        let stop = body("Stop", id, "F:/repo/implementation");
+        assert_eq!(classify(&stop, "mcode", |_| Some(0)).decision, Decision::Ready);
+        let unrelated = body("Stop", "mvs_11111111111111111111111111111111", "F:/repo/implementation");
+        assert!(resolve_attention_node(Some(nodes[0].clone()), &unrelated, false, resolve).is_none());
+        assert!(resolve_attention_node(None, &body("Stop", id, "F:/standalone"), true, resolve).is_none());
+        assert!(resolve_attention_node(None, &body("Stop", id, ""), true, resolve).is_none());
+        assert!(resolve_attention_node(None, &start, true, |id,cwd|
+            crate::services::mcode_session::select_hook_target(&nodes, id, cwd, |_| false)).is_none());
     }
 
     #[test]

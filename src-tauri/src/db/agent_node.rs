@@ -1157,7 +1157,8 @@ pub(crate) fn set_cli_session_id_if_missing_inner(
 ) -> SqlResult<bool> {
     let changed = conn.execute(
         "UPDATE agent_nodes SET cli_session_id = ?1 \
-         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')",
+         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')
+         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
         params![cli_id, id],
     )?;
     Ok(changed > 0)
