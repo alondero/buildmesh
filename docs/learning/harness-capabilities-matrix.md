@@ -126,8 +126,8 @@ the adapter's `background_recipe`, which must fulfill all of these requirements:
 - Honor the selected native login or an explicitly supported provider route.
 
 The caller supplies an isolated temporary directory and a 30-second deadline;
-naming retains cancellation cleanup, and classifiers retain bounded pipe readers
-and process-tree cleanup. Interactive prefill and attention hooks alone do not
+naming and classifiers share descendant cleanup through `BackgroundProcessGuard`,
+and classifiers retain bounded pipe readers. Interactive prefill and attention hooks alone do not
 establish background support. This capability concerns the inference backend;
 the node being named still needs a turn signal to trigger naming.
 

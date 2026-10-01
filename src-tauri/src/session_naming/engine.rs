@@ -180,6 +180,24 @@ pub(super) struct RenameTrigger {
     pub(super) buffer: String,
 }
 
+pub(super) fn prepare_rename_with(
+    repo: &dyn SessionNamingRepository,
+    node_id: i64,
+    resolve_launch: impl FnOnce() -> Result<NamingLaunch, String>,
+) -> Result<Option<(RenameTrigger, NamingLaunch)>, String> {
+    let Some(trigger) = should_trigger_rename(repo, node_id) else { return Ok(None); };
+    let launch = match resolve_launch() {
+        Ok(launch) => launch,
+        Err(error) => {
+            // No inference attempt has started; preserve the buffer for a
+            // later turn after the user repairs the selected configuration.
+            set_renaming(node_id, false);
+            return Err(error);
+        }
+    };
+    Ok(Some((trigger, launch)))
+}
+
 /// Record a completed turn for a node. Triggers async LLM rename if buffer is sufficient.
 pub fn on_turn(node_id: i64, app: AppHandle) {
     on_turn_with(Arc::new(DbSessionNamingRepository), node_id, app);
@@ -197,8 +215,10 @@ pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64,
         return;
     };
 
-    let Some(trigger) = should_trigger_rename(&*repo, node_id) else {
-        return;
+    let (trigger, backend_env) = match prepare_rename_with(&*repo, node_id, || naming_backend_env(&user_naming_provider)) {
+        Ok(Some(prepared)) => prepared,
+        Ok(None) => return,
+        Err(error) => { tracing::warn!("session_naming: {error}"); return; }
     };
     let RenameTrigger { buffer } = trigger;
 
@@ -207,16 +227,6 @@ pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64,
         node_id,
         buffer.len()
     );
-
-    // Resolve the LLM-call env once at trigger time so a node's configured
-    // backend (or the built-in Anthropic default) is honoured by
-    // `summarize_and_rename_with`. The provider comes from
-    // `AppPreferences.naming_provider` — NOT `node.provider`. The
-    // default is "disabled"; the user explicitly opts in.
-    let backend_env = match naming_backend_env(&user_naming_provider) {
-        Ok(launch) => launch,
-        Err(error) => { tracing::warn!("session_naming: {error}"); return; }
-    };
 
     let app_for_task = app.clone();
     // Clone the Arc so the spawned future owns its own handle; the
@@ -578,7 +588,7 @@ pub(super) async fn summarize_and_rename_with(
 
     maybe_dump_rename_buffer(node_id, buffer, &clean_buffer);
 
-    let prompt = "The text on stdin is a terminal log from an AI coding-assistant session. \
+    let prompt = "The supplied text is a terminal log from an AI coding-assistant session. \
                   Generate a short slug that describes the task the user is working on in this session. \
                   Output EXACTLY one line: 3 to 5 lowercase words joined by hyphens, nothing else \
                   (no explanation, no punctuation, no quotes, no example labels).";

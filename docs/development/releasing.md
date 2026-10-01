@@ -108,7 +108,7 @@ same ground:
 | `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, and the vitest unit + integration suites. The fast frontend gate — it no longer compiles Rust. |
 | `Verification / Rust tests + TS bindings` | yes | The Rust export, doctest, and integration targets, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It also refuses to run unless the compile job and every test shard below passed. |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
-| `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering holds. |
+| `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. |
 | `Verification / Platform smoke (macos-latest)` | yes | The Tauri app compiles and links on macOS. |
 
 The jobs fan out rather than chain. `Quality (Linux)` (frontend) and the

@@ -49,10 +49,8 @@ impl BackgroundProcessGuard {
     pub(crate) fn new(pid: u32) -> Self {
         Self { pid, job: crate::process_util::JobHandle::contain(pid) }
     }
-}
 
-impl Drop for BackgroundProcessGuard {
-    fn drop(&mut self) {
+    pub(crate) fn terminate(&self) {
         if let Some(job) = &self.job { job.terminate(); }
         #[cfg(windows)]
         if self.job.is_none() { crate::process_util::kill_process_tree(self.pid); }
@@ -64,11 +62,19 @@ impl Drop for BackgroundProcessGuard {
     }
 }
 
+impl Drop for BackgroundProcessGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
 pub(crate) fn resolve_plan(plan: ResolvedLaunchPlan, prefs: &AppPreferences) -> Result<BackgroundLaunch, String> {
     if matches!(plan.harness.runtime, Some(EnvType::Wsl | EnvType::WindowsInterop)) {
         return Err("Background inference requires a host-native Launch Configuration".into());
     }
-    let adapter = Provider::from_db_str(&plan.harness.harness).adapter();
+    let adapter = Provider::try_from_db_str(&plan.harness.harness)
+        .ok_or_else(|| format!("Unknown background inference harness: {:?}", plan.harness.harness))?
+        .adapter();
     let recipe = adapter.background_recipe(Platform::current()).ok_or_else(|| {
         format!("{} does not support one-shot background inference (prompt input, final answer, and non-interactive exit)", plan.harness.name)
     })?;
@@ -112,7 +118,7 @@ impl BackgroundLaunch {
         }
         let executable = match &self.executable {
             Some(path) => path.clone(),
-            None if recipe.binary == "claude" => crate::session_naming::resolve_claude_binary()?,
+            None if matches!(recipe.binary, "claude" | "claude.exe") => crate::session_naming::resolve_claude_binary()?,
             None => which::which(recipe.binary).map_err(|_| format!("{} binary not found; install the selected harness or set its executable in Settings", recipe.binary))?,
         };
         let mut cmd = super::spawn_environment::background_command(&recipe, Some(&executable));
@@ -182,6 +188,94 @@ mod tests {
 
     fn plan(harness: &str) -> ResolvedLaunchPlan {
         capture(&AppPreferences::default(), harness, &LaunchOverrides::default()).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn with_stale_path(test: impl FnOnce(&Path, &Path)) {
+        let _env_guard = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let directory = tempfile::Builder::new().prefix("background inference ").tempdir().unwrap();
+        let empty_path = directory.path().join("empty PATH");
+        let appdata = directory.path().join("AppData");
+        std::fs::create_dir_all(&empty_path).unwrap();
+        std::fs::create_dir_all(&appdata).unwrap();
+        crate::env::with_env_vars(&[
+            ("PATH", Some(empty_path.as_os_str())),
+            ("USERPROFILE", Some(directory.path().as_os_str())),
+            ("APPDATA", Some(appdata.as_os_str())),
+        ], || test(directory.path(), &appdata));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_claude_launch_resolves_windows_native_install_with_stale_path() {
+        with_stale_path(|directory, _| {
+            let install = directory.join(".local/bin/claude.exe");
+            std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+            std::fs::write(&install, b"resolution fixture").unwrap();
+            let plan = plan("claude");
+            assert!(plan.harness.executable.is_none());
+            let launch = resolve_plan(plan, &AppPreferences::default()).unwrap();
+            let command = launch.command(directory, &directory.join("result.txt"), "prompt").unwrap();
+            assert_eq!(Path::new(command.get_program()), install);
+            assert!(command.get_args().any(|arg| arg == "--print"));
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_claude_launch_executes_windows_npm_shim_with_stale_path() {
+        with_stale_path(|directory, appdata| {
+            let install = appdata.join("npm/claude.cmd");
+            std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+            std::fs::write(&install, "@echo off\r\necho fix-background-naming\r\n").unwrap();
+            let plan = plan("claude");
+            assert!(plan.harness.executable.is_none());
+            let launch = resolve_plan(plan, &AppPreferences::default()).unwrap();
+            let mut command = launch.command(directory, &directory.join("result.txt"), "prompt").unwrap();
+            assert_eq!(Path::new(command.get_program()), install);
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "fix-background-naming");
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_claude_executable_takes_precedence_over_windows_install_fallback() {
+        with_stale_path(|directory, appdata| {
+            let install = appdata.join("npm/claude.cmd");
+            std::fs::create_dir_all(install.parent().unwrap()).unwrap();
+            std::fs::write(&install, "@echo off\r\necho wrong-fallback\r\n").unwrap();
+            let executable = directory.join("custom claude.cmd");
+            std::fs::write(&executable, "@echo off\r\necho explicit-executable\r\n").unwrap();
+            let mut plan = plan("claude");
+            plan.harness.executable = Some(executable.clone());
+            let launch = resolve_plan(plan, &AppPreferences::default()).unwrap();
+            let mut command = launch.command(directory, &directory.join("result.txt"), "prompt").unwrap();
+            assert_eq!(command.get_program(), executable.as_os_str());
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "explicit-executable");
+        });
+    }
+
+    #[test]
+    fn unknown_background_harness_is_rejected_instead_of_using_claude() {
+        for harness in ["codxe", "", "unknown-harness"] {
+            let mut plan = plan("codex");
+            plan.harness.harness = harness.into();
+            let error = resolve_plan(plan, &AppPreferences::default()).err().expect("unknown harness must fail resolution");
+            assert!(error.contains("Unknown background inference harness"), "{error}");
+        }
+    }
+
+    #[test]
+    fn background_resolution_preserves_known_harness_aliases() {
+        for harness in [" Anthropic ", "Claude", "miniMax-code", "command-code", "cmdc", "cmd"] {
+            let mut plan = plan("codex");
+            plan.harness.harness = harness.into();
+            assert!(resolve_plan(plan, &AppPreferences::default()).is_ok(), "{harness}");
+        }
     }
 
     #[test]

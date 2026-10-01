@@ -354,6 +354,10 @@ with extra CLI arguments cannot run background inference. Unsupported choices
 show the missing requirement in the settings picker and are rejected by the
 backend. Usage remains attached to the account, not each recipe.
 
+If the selected configuration cannot be resolved, auto-naming retries on a later
+turn after you repair it. On Windows, Claude Code background work also checks
+the standard native and npm install locations when the app's PATH is stale.
+
 ## Settings that matter
 
 Open **Settings** for app-wide defaults. A Mesh's **Project Settings** override

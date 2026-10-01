@@ -577,10 +577,16 @@ generated catalog and settings pickers derive eligibility from that recipe.
 `agent::background` owns launch validation, prompt transport (stdin, argument,
 or file), authentication environment, and final-answer extraction (stdout,
 result file, or structured events). Naming and Circuit classifiers share it.
-The callers own isolated temporary directories, bounded execution, and child
-cleanup. Extra CLI arguments are rejected because they can change this protocol;
+Unknown harness identifiers are rejected instead of using the legacy database
+parser's Claude fallback. Both consumers own descendant cleanup through
+`BackgroundProcessGuard`; callers supply isolated directories and execution bounds.
+Claude command resolution preserves PATH lookup and Windows native/npm install
+fallbacks for both binary spellings, unless an executable override is supplied.
+Extra CLI arguments are rejected because they can change this protocol;
 provider routes require explicit support from the background recipe. Adding a
-runner belongs in its adapter, without an orchestration allow-list.
+runner belongs in its adapter, without an orchestration allow-list. Naming
+preflight failures release in-flight ownership without consuming an inference
+attempt or discarding the buffer, so repaired settings can retry on a later turn.
 `session_naming.rs` captures PTY output and auto-names agent nodes via LLM summarisation (slug-based, e.g. `fix-auth-flow`). Buffering is gated: `on_output` only starts collecting after the first `on_turn` (first idle-prompt webhook) fires, so the Claude Code startup chrome — banner, "Bypass Permissions" warning, plugin/skill listing — is discarded before it can reach the LLM. The rename runs async one turn later, against clean post-startup content.
 
 **Name uniqueness is load-bearing for Worktree Nodes.** A Worktree Node's `name` is also its `worktree_name`, its worktree directory, and (branched mode) its local branch — see `services/agent_node.rs` (`worktree_db_name = session_name`). Issue/PR spawns derive that name deterministically (`issue_node_name` / `pr_node_name` → `gh{N}-{slug}` / `pr{N}-{slug}`), so a second spawn for the same issue or PR derives the same worktree path as the first. `git::worktree::provision_for_spawn` cannot recover from that: its warm path refuses the adoption because the branch is already checked out there, and its cold path's path-exists short-circuit hands the same directory to both nodes. (The warm-failure cleanup used to read "path exists" as "our move created it" and delete the other node's live worktree; it now only removes a target it created itself.) Any new spawn source that derives a name deterministically must therefore make it unique per Mesh — `session_naming::disambiguate_node_name` is the helper, and the PR pill's reviewer spawn (`create_pr_node` with `reviewer`) is the worked example.
