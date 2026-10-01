@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // PreToolUse guard: blocks edits that introduce catastrophic anti-patterns.
-// See CLAUDE.md "Hard rules". Per-line escape hatches: `// allow-dispose`, `// allow-wsl-path`.
+// See CLAUDE.md "Hard rules". Per-line escape hatches: `// allow-dispose`,
+// `// allow-wsl-path`, `// allow-bare-rounded`, `# allow-native-condition`.
 // Reads the Claude Code hook payload from stdin. Exit 2 + stderr = block the tool call.
 // Fails open (exit 0) on any parse error so it can never wedge all edits.
 //
@@ -90,6 +91,35 @@ const RULES = [
       "`rounded-r-md` (etc.) or `rounded-r-[6px]` (arbitrary value) so the " +
       "radius is explicit. Add `{/* allow-bare-rounded */}` if this is " +
       "intentionally smallest-radius.",
+  },
+  {
+    // Issue #1982 — PowerShell evaluates a command's OUTPUT, not its exit code,
+    // so a silent native command used as a bare condition is always false.
+    // `git merge-base --is-ancestor` prints nothing on success, which makes the
+    // condition the empty string and sends every call down the `else` branch:
+    // the check can never report success whatever the real state, and it fails
+    // silently. Same trap for `git diff --quiet`, `gh`, `cargo`.
+    //
+    // Narrow on purpose. The condition must BE the command call: the pattern
+    // requires the command's closing paren to be followed by `)` or `{`. So
+    // cmdlets that return a value (`Test-Path`) and explicit output comparisons
+    // (`if ((git status --porcelain).Length -gt 0)`, where `.Length` follows
+    // the call) do not match, while `if (git …)` and `if (!(git …))` do.
+    // Scoped to `.ps1` so the wrong form quoted in docs/agents/engineering.md to
+    // teach this rule is not itself flagged.
+    id: "powershell-if-native-command",
+    appliesTo: (path) => /\.ps1$/i.test(path),
+    pattern:
+      /\b(?:if|while|until)\s*\(\s*!?\s*\(?\s*(?:git|gh|cargo|rustc|npm|npx|pnpm|yarn|node|dotnet|python3?)\s+[^()]*\)\s*[){]/i,
+    allow: "allow-native-condition",
+    message:
+      "PowerShell tests a command's OUTPUT, not its exit code, so a silent " +
+      "native command (`git merge-base --is-ancestor`, `git diff --quiet`, " +
+      "`gh`, `cargo`) as a bare condition is always false and fails silently. " +
+      "Run the command, then branch on `$LASTEXITCODE -eq 0`, or compare its " +
+      "output explicitly. See docs/agents/engineering.md, " +
+      "'Verifying a push or merge'. If the command really does emit the value " +
+      "being tested, add `# allow-native-condition` on that line.",
   },
 ];
 

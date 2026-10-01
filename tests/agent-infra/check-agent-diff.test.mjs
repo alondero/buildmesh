@@ -87,6 +87,32 @@ test('a rename into a guarded path is checked even without content changes', t =
   assert.match(failures[0], /Renamed Terminal.ts.*terminal-dispose/);
 });
 
+test('flags a PowerShell condition on a native command in scripts/*.ps1 (#1982)', t => {
+  const { cwd, git, put } = repo(t);
+  mkdirSync(join(cwd, 'scripts'), { recursive: true });
+  put('scripts/check-merge.ps1', 'Write-Output "probe"\n');
+  git('add', '.');
+  git('-c', 'commit.gpgsign=false', 'commit', '-qm', 'scripts baseline');
+  assert.deepEqual(checkDiff(cwd), []);
+
+  // The silent, always-false form must be reported by the CI-facing gate too,
+  // not only by the Claude PreToolUse hook.
+  put(
+    'scripts/check-merge.ps1',
+    'Write-Output "probe"\nif (git diff --quiet) { Write-Output "unchanged" }\n',
+  );
+  const failures = checkDiff(cwd);
+  assert.equal(failures.length, 1, failures.join('\n'));
+  assert.match(failures[0], /scripts\/check-merge\.ps1.*powershell-if-native-command/);
+
+  // And the $LASTEXITCODE form is not flagged.
+  put(
+    'scripts/check-merge.ps1',
+    'Write-Output "probe"\ngit diff --quiet\nif ($LASTEXITCODE -eq 0) { Write-Output "unchanged" }\n',
+  );
+  assert.deepEqual(checkDiff(cwd), []);
+});
+
 test('configured hooks exist and shared skill entrypoints are readable', () => {
   const settings = JSON.parse(readFileSync(join(root, '.claude/settings.json'), 'utf8'));
   for (const entries of Object.values(settings.hooks)) {

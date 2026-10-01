@@ -194,6 +194,90 @@ describe("checkContentViolations — bare-rounded rules (#733)", () => {
   });
 });
 
+// Issue #1982 — PowerShell evaluates a command's OUTPUT, not its exit code, so a
+// silent native command used as a bare condition is always false. `if (git
+// merge-base --is-ancestor …)` printed the empty string on success and took the
+// else branch on every call: the check could never report "YES".
+describe("checkContentViolations — PowerShell native-command conditions (#1982)", () => {
+  it("blocks `if (git merge-base --is-ancestor ...)` in a PowerShell script", () => {
+    const v = checkContentViolations(
+      "scripts/check-merge.ps1",
+      'if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  it("blocks other silent native commands used as a bare condition", () => {
+    const cases = [
+      'if (git diff --quiet) { "unchanged" }',
+      'if (!(gh pr checks 1977)) { "none" }',
+      'while (cargo fmt --check) { Start-Sleep 1 }',
+      'if (npm run lint) { "clean" }',
+    ];
+    for (const line of cases) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("allows the $LASTEXITCODE form", () => {
+    const v = checkContentViolations(
+      "scripts/check-merge.ps1",
+      "git merge-base --is-ancestor $sha origin/main 2>$dev\nif ($LASTEXITCODE -eq 0) { \"YES\" } else { \"NO\" }",
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows a cmdlet that returns a value (`Test-Path`)", () => {
+    const v = checkContentViolations(
+      "scripts/run.ps1",
+      "if (Test-Path $logPath) { Get-Content $logPath -Tail 40 }",
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows an explicit comparison of a native command's output", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      "if ((git status --porcelain).Length -gt 0) { Write-Output 'dirty' }",
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows the `# allow-native-condition` escape hatch", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git branch --show-current) { "on a branch" } # allow-native-condition',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("does NOT police markdown, where the wrong form is quoted on purpose", () => {
+    const v = checkContentViolations(
+      "docs/agents/engineering.md",
+      'if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("does NOT police TypeScript or Rust", () => {
+    expect(
+      checkContentViolations(
+        "src/components/Terminal.tsx",
+        "if (git status --porcelain) {}",
+      ),
+    ).toHaveLength(0);
+    expect(
+      checkContentViolations(
+        "src-tauri/src/agent/spawn.rs",
+        "if git status --porcelain {}",
+      ),
+    ).toHaveLength(0);
+  });
+});
+
 describe("collectNewText", () => {
   it("reads Write content, Edit new_string, and MultiEdit edits", () => {
     expect(collectNewText({ content: "a" })).toBe("a");
