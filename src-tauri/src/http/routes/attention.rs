@@ -160,15 +160,20 @@ struct HookPayload {
 }
 
 impl HookPayload {
+    #[cfg(test)]
     fn parse(body: &[u8]) -> Option<Self> {
-        let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-        Self::parse_value(value)
+        let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
+        Self::parse_value(&mut value)
     }
 
-    fn parse_value(mut value: serde_json::Value) -> Option<Self> {
+    fn parse_value(value: &mut serde_json::Value) -> Option<Self> {
         let fields = value.as_object_mut()?;
         // Grok sends both spellings in the same envelope. Serde aliases alone
         // reject this as a duplicate field; prefer the canonical snake case.
+        // Temporarily move aliases to canonical keys for deserialization, then
+        // restore them so the other classifiers see the original envelope.
+        let mut moved_aliases = Vec::new();
+        let mut inserted_canonical = Vec::new();
         for (canonical, aliases) in [
             (
                 "session_id",
@@ -211,13 +216,33 @@ impl HookPayload {
                 ][..],
             ),
         ] {
+            let mut has_canonical = fields.contains_key(canonical);
             for alias in aliases {
+                if *alias == canonical {
+                    continue;
+                }
                 if let Some(value) = fields.remove(*alias) {
-                    fields.entry(canonical).or_insert(value);
+                    if has_canonical {
+                        moved_aliases.push(((*alias).to_owned(), value));
+                    } else {
+                        fields.insert(canonical.to_owned(), value);
+                        inserted_canonical.push((canonical.to_owned(), (*alias).to_owned()));
+                        has_canonical = true;
+                    }
                 }
             }
         }
-        serde_json::from_value(value).ok()
+        let payload = <Self as serde::Deserialize>::deserialize(&*value).ok();
+        let fields = value.as_object_mut()?;
+        for (canonical, alias) in inserted_canonical {
+            if let Some(value) = fields.remove(&canonical) {
+                fields.insert(alias, value);
+            }
+        }
+        for (alias, value) in moved_aliases {
+            fields.insert(alias, value);
+        }
+        payload
     }
 }
 
@@ -756,13 +781,14 @@ impl Classified {
 /// 6. No transcript path, unreadable transcript, or no pending tasks →
 ///    `Ready` (issue #1364): a clean turn completion is NOT a user-input
 ///    request. The node lands in `Ready`, never in `AwaitingInput`.
+#[cfg(test)]
 fn classify(
     body: &[u8],
     provider: &str,
     count_pending: impl FnOnce(&Path) -> Option<usize>,
 ) -> Classified {
-    let value = serde_json::from_slice::<serde_json::Value>(body).ok();
-    let payload = value.clone().and_then(HookPayload::parse_value);
+    let mut value = serde_json::from_slice::<serde_json::Value>(body).ok();
+    let payload = value.as_mut().and_then(HookPayload::parse_value);
     classify_payload(payload.as_ref(), value.as_ref(), provider, count_pending)
 }
 
@@ -937,7 +963,7 @@ fn classify_payload(
             // harness enumerated one, and nothing at all when it did not.
             // Clients render choices only for a real list; an open question
             // stays open-to-answer instead of borrowing permission semantics.
-            request: question_choices(&payload),
+            request: question_choices(payload),
             message: payload.message.clone().or_else(|| {
                 let questions = payload.tool_input.as_ref()?.get("questions")?.as_array()?;
                 clean_description(&questions.iter().filter_map(|question| question.get("question")?.as_str())
@@ -1137,8 +1163,8 @@ pub async fn handle_post(req: &ParsedRequest) -> Response {
     ) =
         tokio::task::spawn_blocking(move || {
             let addressed = session_id.and_then(|id| crate::db::get_agent_node_by_id(id).ok());
-            let value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
-            let payload = value.clone().and_then(HookPayload::parse_value);
+            let mut value = serde_json::from_slice::<serde_json::Value>(&hook_body).ok();
+            let payload = value.as_mut().and_then(HookPayload::parse_value);
             // Old shared manifests may still name the last-spawned node.
             // Their numeric address cannot establish MiniMax ownership either.
             let node = resolve_attention_node(addressed, payload.as_ref(), session_id.is_none(),
@@ -3616,6 +3642,24 @@ mod tests {
             hook_session_id(body.as_bytes(), "agy").as_deref(),
             Some("c1234567-89ab-cdef-0123-456789abcdef")
         );
+    }
+
+    #[test]
+    fn hook_payload_parsing_preserves_the_shared_envelope() {
+        let mut raw = serde_json::json!({
+            "session_id": "canonical-session",
+            "sessionId": "alias-session",
+            "hook_event_name": "Stop",
+            "hookEventName": "Notification",
+            "toolInput": {"nested": [1, 2, 3]},
+        });
+        let original = raw.clone();
+
+        let payload = HookPayload::parse_value(&mut raw).unwrap();
+
+        assert_eq!(payload.session_id.as_deref(), Some("canonical-session"));
+        assert_eq!(payload.hook_event_name.as_deref(), Some("Stop"));
+        assert_eq!(raw, original, "other classifiers must see the original envelope");
     }
 
     /// Issue #1367: Fixture for a complete AGY Stop payload emitted by current releases (1.0.0-1.1.22+).

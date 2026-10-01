@@ -138,10 +138,17 @@ Final follow-up checks:
   including archived-owner reuse through normal capture, live recovery, and
   suspended recovery. `cargo test --locked --lib recovery_ -- --test-threads=1`:
   37 passed, preserving active-owner and generation fences.
+- `cargo test --locked --lib attention::tests -- --test-threads=1`: 100 passed,
+  including the regression that borrowed payload parsing preserves the shared
+  hook envelope. `cargo test --locked --lib native_hooks::tests -- --test-threads=1`:
+  21 passed; `cargo test --locked --lib transcript_reader::adapters:: -- --test-threads=1`:
+  48 passed.
 - `npm run check:docs` and `NODE_ENV=test npm run test:docs`: passed (131 docs,
   33 documentation tests); `npm run build`: passed.
 - `rustfmt --edition 2021 --check src/services/mcode_session.rs` and
-  `git diff --check`: passed. `cargo clippy --locked --all-targets` passed with
-  3 library and 35 test warnings, matching the recorded base with no new
-  warnings. The final Windows dev-profile build passed; the stable hub was not
-  replaced.
+  `git diff --check`: passed. `cargo clippy --locked --all-targets` passed on
+  Windows with 4 library and 36 lib-test warnings (2 duplicate diagnostics).
+  The four test-only byte wrappers and the attention-route needless borrow
+  reported in review are gone; remaining warning sites are existing code per
+  the base comparison.
+  The final Windows dev-profile build passed; the stable hub was not replaced.

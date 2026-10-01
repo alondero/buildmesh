@@ -56,6 +56,7 @@ pub(crate) fn submission_digest(text: &str) -> String {
 }
 
 impl NativeHook {
+    #[cfg(test)]
     pub(crate) fn parse(provider: &str, body: &[u8]) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_slice(body).ok()?;
         Self::parse_value(provider, &value)

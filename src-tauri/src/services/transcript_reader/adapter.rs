@@ -80,12 +80,11 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
         None
     }
 
-    /// Per-harness hook classification. The attention route calls
-    /// `classify_hook_value` with the shared parsed envelope; this byte-based
-    /// wrapper remains available to adapter tests and direct callers.
-    /// first; `Some(classified)` short-circuits to that decision, `None`
-    /// falls through to the shared post-processing gates (transcript
-    /// scan, AGY's `fullyIdle == false` shape gate). Most adapters return
+    /// Test-only byte-based adapter for provider hook classifiers. The
+    /// attention route calls `classify_hook_value` with the shared envelope.
+    /// `Some(classified)` short-circuits to that decision, while `None`
+    /// falls through to the shared post-processing gates (transcript scan,
+    /// AGY's `fullyIdle == false` shape gate). Most adapters return
     /// `None` for every payload; OpenCode (session.idle / session.created),
     /// Grok (notification_type), and Claude Code (the "needs your
     /// permission" prose substring) carry their own logic here.
@@ -97,6 +96,7 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// OpenCode-specific, so OpenCodeAdapter gates on `provider` to
     /// avoid false-positives if a sibling harness ever borrowed the
     /// same event names.
+    #[cfg(test)]
     fn classify_hook(
         &self,
         body: &[u8],
@@ -106,8 +106,7 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
         self.classify_hook_value(&payload, provider)
     }
 
-    /// Classify an already parsed hook envelope. The byte-based method above
-    /// remains the test/convenience entry point; the attention route shares
+    /// Classify an already parsed hook envelope. The attention route shares
     /// one parsed JSON value across all provider adapters.
     fn classify_hook_value(
         &self,
