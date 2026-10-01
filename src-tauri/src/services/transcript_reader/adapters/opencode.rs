@@ -182,8 +182,8 @@ impl TranscriptAdapter for OpenCodeAdapter {
 }
 
 /// Read the row tail of an OpenCode session's `message` table. Returns the
-/// up-to-`row_budget` newest rows in chronological order (oldest →
-/// newest), matching how `opencode export <id>` orders them. Returns
+/// up-to-`row_budget` newest messages with their parts in chronological order
+/// (oldest → newest), matching how `opencode export <id>` orders them. Returns
 /// `None` on any I/O or query failure so callers can degrade to
 /// `Unreadable`.
 ///
@@ -222,26 +222,37 @@ pub(crate) fn read_opencode_message_rows(
     }
     let mut stmt = conn
         .prepare(
-            "SELECT id, data FROM message \
-             WHERE session_id = ?1 \
-             ORDER BY time_created DESC \
-             LIMIT ?2",
+            // LIMIT applies to messages, not joined parts. One statement keeps
+            // metadata and content on the same SQLite read snapshot.
+            // Unary + disqualifies the session predicate as an index lookup:
+            // use the message-id index instead of rescanning the whole session
+            // for every message, while still checking part session ownership.
+            "WITH recent AS (SELECT id, session_id, time_created, data FROM message \
+                WHERE session_id = ?1 ORDER BY time_created DESC, id DESC LIMIT ?2) \
+             SELECT m.id, m.data, p.data FROM recent m \
+             LEFT JOIN part p ON p.message_id = m.id AND +p.session_id = m.session_id \
+             ORDER BY m.time_created DESC, m.id DESC, p.id ASC",
         )
         .ok()?;
-    let mut latest = Vec::new();
+    let mut latest: Vec<(String, serde_json::Value)> = Vec::new();
     let mut rows = stmt
         .query(rusqlite::params![session_id, row_budget as i64])
         .ok()?;
     while let Some(row) = rows.next().ok()? {
         let id: String = row.get(0).ok()?;
         let data: String = row.get(1).ok()?;
-        // Each row's `data` is one message record. We accept any JSON
-        // shape here — structural validation lives in the parser so an
-        // unknown shape degrades as `ShapeChanged`, not a panic. Rows
-        // that aren't valid JSON are silently dropped (graceful failure
-        // on bad rows).
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
-            latest.push((id, value));
+        if latest.last().is_none_or(|(previous, _)| previous != &id) {
+            let info = serde_json::from_str::<serde_json::Value>(&data).unwrap_or(serde_json::Value::Null);
+            latest.push((id, serde_json::json!({"info": info, "parts": []})));
+        }
+        if let Some(data) = row.get::<_, Option<String>>(2).ok()? {
+            let (_, message) = latest.last_mut()?;
+            match serde_json::from_str::<serde_json::Value>(&data) {
+                Ok(part) if part.is_object() => message["parts"].as_array_mut()?.push(part),
+                // Preserve corruption as malformed evidence. Dropping it could
+                // expose an older answer while hiding newer input/tool work.
+                _ => message["info"] = serde_json::Value::Null,
+            }
         }
     }
     // The query returned DESC; the parser consumes ASC (matches the
@@ -548,4 +559,29 @@ fn extract_opencode_tool_calls(parts: &[serde_json::Value]) -> Vec<ToolCall> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    pub(crate) fn create_store(conn: &Connection) {
+        conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);").unwrap();
+    }
+
+    /// Store export fixtures in the native two-table schema, not as envelopes.
+    pub(crate) fn insert_message(conn: &Connection, id: &str, session: &str, created: i64, data: &str) {
+        let value = serde_json::from_str::<serde_json::Value>(data).ok();
+        let info = value.as_ref().and_then(|value| value.get("info"));
+        let raw_info = info.map(|info| info.to_string()).unwrap_or_else(|| data.into());
+        conn.execute("INSERT INTO message VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![id, session, created, raw_info]).unwrap();
+        if let Some(parts) = value.as_ref().and_then(|value| value.get("parts")).and_then(|parts| parts.as_array()) {
+            for (index, part) in parts.iter().enumerate() {
+                conn.execute("INSERT INTO part VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![format!("{id}-part-{index:04}"), id, session, created, part.to_string()]).unwrap();
+            }
+        }
+    }
 }
