@@ -1030,16 +1030,73 @@ pub fn codex_install_cached(env_type: EnvType) -> bool {
     CODEX_INSTALL_CACHE.is_fresh(env_type)
 }
 
-fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall, String> {
-    let wsl_distro = if env_type == EnvType::Wsl {
-        Some(
-            crate::env::detect_default_wsl_distro()
-                .ok_or_else(|| "default WSL distribution is unavailable".to_string())?,
-        )
-    } else {
-        None
-    };
-    let output = codex_output(env_type, wsl_distro.as_deref(), &["--version"])?;
+/// Distinct wrappers for probe results.
+///
+/// Left as bare `String`s, all three identity probes (and both help probes)
+/// share one signature, so passing them to a joiner out of order type-checks
+/// while silently changing which error a broken install surfaces. With these
+/// wrappers any permutation is a type error, so the precedence the tests pin
+/// cannot regress at a call site (issue #1934).
+#[derive(Debug)]
+struct CodexVersion(String);
+#[derive(Debug)]
+struct CodexExecutable(String);
+#[derive(Debug)]
+struct CodexHome(String);
+#[derive(Debug)]
+struct FreshHelp(String);
+#[derive(Debug)]
+struct ResumeHelp(String);
+
+/// Join a probe thread, re-raising a panic with its original payload.
+///
+/// `join().unwrap()` replaces the payload with `called 'Result::unwrap()' on an
+/// 'Err' value: Any { .. }`, which would reach `run_blocking` without the
+/// message naming the probe that failed. `resume_unwind` propagates the
+/// original payload, which is what the serial chain did.
+pub(crate) fn join_probe<T>(probe: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    match probe.join() {
+        Ok(value) => value,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+/// Issue the three independent Codex identity probes for one runtime
+/// concurrently and collect them in discovery order.
+///
+/// They read the same CLI but do not depend on each other: the executable
+/// location and `CODEX_HOME` each have their own process spawn, and only the
+/// capability key further down needs the version. Chaining them made one WSL
+/// discovery pay three `wsl.exe` starts in sequence, so the wall clock was
+/// their sum rather than their max.
+///
+/// **Error precedence stays the serial order.** A missing `codex` fails all
+/// three probes at once, and the user must still see `Codex version check
+/// failed` — the root cause — rather than the location/home failures that only
+/// follow from it. Every result is joined before any is surfaced, then they are
+/// reported earliest-step-first. The distinct result types above make that order
+/// a compile-time property of this signature, not a convention.
+fn probe_codex_identity_concurrently(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+    version: impl FnOnce(EnvType, Option<&str>) -> Result<CodexVersion, String> + Send,
+    executable: impl FnOnce(EnvType, Option<&str>) -> Result<CodexExecutable, String> + Send,
+    home: impl FnOnce(EnvType, Option<&str>) -> Result<CodexHome, String> + Send,
+) -> Result<(CodexVersion, CodexExecutable, CodexHome), String> {
+    std::thread::scope(|scope| {
+        let version = scope.spawn(|| version(env_type, wsl_distro));
+        let executable = scope.spawn(|| executable(env_type, wsl_distro));
+        let home = scope.spawn(|| home(env_type, wsl_distro));
+        let version = join_probe(version);
+        let executable = join_probe(executable);
+        let home = join_probe(home);
+        Ok((version?, executable?, home?))
+    })
+}
+
+/// `codex --version`, parsed and range-checked against the proxied-CLI floor.
+fn probe_codex_version(env_type: EnvType, wsl_distro: Option<&str>) -> Result<CodexVersion, String> {
+    let output = codex_output(env_type, wsl_distro, &["--version"])?;
     if !output.status.success() {
         return Err("Codex version check failed".into());
     }
@@ -1051,6 +1108,14 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
             "proxied Codex requires codex-cli >= 0.144.0; found {version}"
         ));
     }
+    Ok(CodexVersion(version))
+}
+
+/// Step 2: resolve the absolute path of this runtime's Codex executable.
+fn probe_codex_executable(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+) -> Result<CodexExecutable, String> {
     let executable = if env_type == EnvType::WindowsInterop {
         let command = crate::env::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -ErrorAction Stop).Source");
         let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", CODEX_LOOKUP_TIMEOUT)?;
@@ -1059,7 +1124,7 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
         let mut locate = crate::process_util::command_no_window("wsl.exe");
         locate.args([
             "-d",
-            wsl_distro.as_deref().expect("WSL distribution was resolved"),
+            wsl_distro.expect("WSL distribution was resolved"),
             "--exec",
             "sh",
             "-lc",
@@ -1107,10 +1172,16 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
     if executable.is_empty() {
         return Err("Codex executable identity is unavailable".into());
     }
-    let codex_home = if env_type == EnvType::WindowsInterop {
+    Ok(CodexExecutable(executable))
+}
+
+/// Step 3: resolve this runtime's `CODEX_HOME`.
+fn probe_codex_home(env_type: EnvType, wsl_distro: Option<&str>) -> Result<CodexHome, String> {
+    if env_type == EnvType::WindowsInterop {
         let home = crate::env::codex_dir_for_env(env_type, "").ok_or_else(|| "Windows Codex home unavailable".to_string())?;
-        crate::env::windows_path_from_wsl(&home.to_string_lossy())
-    } else if let Some(distro) = wsl_distro.as_deref() {
+        return Ok(CodexHome(crate::env::windows_path_from_wsl(&home.to_string_lossy())));
+    }
+    if let Some(distro) = wsl_distro {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
             "-d",
@@ -1131,10 +1202,51 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
         if !output.status.success() {
             return Err("WSL Codex home identity is unavailable".into());
         }
-        home.to_string_lossy().into_owned()
+        return Ok(CodexHome(home.to_string_lossy().into_owned()));
+    }
+    Ok(CodexHome(native_codex_home()?.to_string_lossy().into_owned()))
+}
+
+/// Run the two proxy-capability `--help` probes concurrently.
+///
+/// `fresh` and `resume` are independent reads of the same CLI, and each one is
+/// a separate process spawn, so the pair was paying double for one answer. They
+/// run after the identity trio because the capability key needs the parsed
+/// version, so they overlap each other but not the trio. Error precedence stays
+/// in probe order, which is also the order [`validate_proxy_cli_help`] names a
+/// missing flag in.
+fn probe_proxy_cli_help_concurrently(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+    fresh: impl FnOnce(EnvType, Option<&str>) -> Result<FreshHelp, String> + Send,
+    resume: impl FnOnce(EnvType, Option<&str>) -> Result<ResumeHelp, String> + Send,
+) -> Result<(FreshHelp, ResumeHelp), String> {
+    std::thread::scope(|scope| {
+        let fresh = scope.spawn(|| fresh(env_type, wsl_distro));
+        let resume = scope.spawn(|| resume(env_type, wsl_distro));
+        let fresh = join_probe(fresh);
+        let resume = join_probe(resume);
+        Ok((fresh?, resume?))
+    })
+}
+
+fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall, String> {
+    let wsl_distro = if env_type == EnvType::Wsl {
+        Some(
+            crate::env::detect_default_wsl_distro()
+                .ok_or_else(|| "default WSL distribution is unavailable".to_string())?,
+        )
     } else {
-        native_codex_home()?.to_string_lossy().into_owned()
+        None
     };
+    let (CodexVersion(version), CodexExecutable(executable), CodexHome(codex_home)) =
+        probe_codex_identity_concurrently(
+            env_type,
+            wsl_distro.as_deref(),
+            probe_codex_version,
+            probe_codex_executable,
+            probe_codex_home,
+        )?;
     let runtime = if let Some(distro) = wsl_distro.as_deref() {
         wsl_runtime_identity(distro, &codex_home)
     } else {
@@ -1149,14 +1261,23 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
         .unwrap_or_else(|p| p.into_inner())
         .contains(&capability_key);
     if !capabilities_are_cached {
-        let fresh_help = successful_help(env_type, wsl_distro.as_deref(), &["--help"], "fresh")?;
-        let resume_help = successful_help(
-            env_type,
-            wsl_distro.as_deref(),
-            &["resume", "--help"],
-            "resume",
-        )?;
+        let (FreshHelp(fresh_help), ResumeHelp(resume_help)) =
+            probe_proxy_cli_help_concurrently(
+                env_type,
+                wsl_distro.as_deref(),
+                |env_type, wsl_distro| {
+                    successful_help(env_type, wsl_distro, &["--help"], "fresh").map(FreshHelp)
+                },
+                |env_type, wsl_distro| {
+                    successful_help(env_type, wsl_distro, &["resume", "--help"], "resume")
+                        .map(ResumeHelp)
+                },
+            )?;
         validate_proxy_cli_help(&fresh_help, &resume_help)?;
+        // The cache-miss path stays idempotent: two runtimes discovering the
+        // same `runtime\0executable\0version` concurrently may both probe and
+        // both insert, which is harmless. No single-flight assumption is built
+        // on top of it.
         CLI_CAPABILITY_CACHE
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1890,6 +2011,198 @@ mod tests {
         // Lookups are plain host/guest reads, so they stay tighter than the
         // CLI capability probes (which may go through PowerShell).
         assert!(CODEX_LOOKUP_TIMEOUT < CODEX_PROBE_TIMEOUT);
+    }
+
+    /// How long a probe may wait for its siblings before the concurrency
+    /// assertions call the chain serial.
+    const PROBE_RENDEZVOUS: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// An all-participants rendezvous, so the concurrency assertions are
+    /// deterministic rather than a sleep-and-hope margin: every probe blocks
+    /// until all of its siblings have arrived, so they can only all return if
+    /// they were genuinely in flight together. A regression to the serial chain
+    /// strands the first probe until the bound fires, which turns into a failing
+    /// test instead of a hung one.
+    struct Rendezvous {
+        arrived: Mutex<usize>,
+        released: std::sync::Condvar,
+        participants: usize,
+    }
+
+    impl Rendezvous {
+        fn new(participants: usize) -> Self {
+            Self {
+                arrived: Mutex::new(0),
+                released: std::sync::Condvar::new(),
+                participants,
+            }
+        }
+
+        fn wait(&self) -> Result<(), String> {
+            let mut arrived = self.arrived.lock().unwrap_or_else(|p| p.into_inner());
+            *arrived += 1;
+            // Loop on the predicate, not on a single wait: a condvar may wake
+            // spuriously, and passing on that wakeup would let a probe return
+            // "overlapped" before its siblings had arrived - exactly the false
+            // pass this rendezvous exists to prevent.
+            loop {
+                if *arrived >= self.participants {
+                    self.released.notify_all();
+                    return Ok(());
+                }
+                let (guard, timeout) = self
+                    .released
+                    .wait_timeout(arrived, PROBE_RENDEZVOUS)
+                    .unwrap_or_else(|p| p.into_inner());
+                arrived = guard;
+                if timeout.timed_out() && *arrived < self.participants {
+                    return Err(format!(
+                        "probe never overlapped its {} siblings within {PROBE_RENDEZVOUS:?} - the chain ran serially",
+                        self.participants - 1
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Issue #1934: the three identity probes are independent, so they must be
+    /// issued concurrently. Serially they cost their sum — three `wsl.exe`
+    /// starts, ~340ms each warm and seconds on a cold distro — where the user
+    /// only ever waits for the slowest one.
+    ///
+    /// This proves the joiner overlaps its probes. That
+    /// `discover_supported_install_uncached` routes through it is enforced by
+    /// the compiler, not here: the call site passes bare `probe_codex_*` items,
+    /// so dropping or reordering one is a type error.
+    #[test]
+    fn codex_identity_probes_are_issued_concurrently() {
+        let rendezvous = Rendezvous::new(3);
+        let (version, executable, home) = probe_codex_identity_concurrently(
+            EnvType::Windows,
+            None,
+            |_, _| rendezvous.wait().map(|_| CodexVersion("0.158.0".to_string())),
+            |_, _| rendezvous.wait().map(|_| CodexExecutable("/usr/bin/codex".to_string())),
+            |_, _| rendezvous.wait().map(|_| CodexHome("/home/dev/.codex".to_string())),
+        )
+        .expect("all three probes must rendezvous and succeed");
+        assert_eq!(version.0, "0.158.0");
+        assert_eq!(executable.0, "/usr/bin/codex");
+        assert_eq!(home.0, "/home/dev/.codex");
+    }
+
+    /// The concurrent chain must not change which message a broken install
+    /// produces. A missing `codex` fails all three probes at once, and the
+    /// user has to keep seeing the version failure — the root cause — rather
+    /// than the location/home failures that only follow from it.
+    #[test]
+    fn codex_identity_error_precedence_keeps_the_serial_order() {
+        assert_eq!(
+            probe_codex_identity_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| Err("Codex version check failed".to_string()),
+                |_, _| Err("Codex executable identity is unavailable".to_string()),
+                |_, _| Err("WSL Codex home identity is unavailable".to_string()),
+            )
+            .expect_err("every probe failed"),
+            "Codex version check failed",
+            "a broken install must report the version failure, not a downstream symptom"
+        );
+        assert_eq!(
+            probe_codex_identity_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| Ok(CodexVersion("0.158.0".to_string())),
+                |_, _| Err("Codex executable identity is unavailable".to_string()),
+                |_, _| Err("WSL Codex home identity is unavailable".to_string()),
+            )
+            .expect_err("location and home failed"),
+            "Codex executable identity is unavailable",
+            "the version probe passing must expose the location failure next"
+        );
+        assert_eq!(
+            probe_codex_identity_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| Ok(CodexVersion("0.158.0".to_string())),
+                |_, _| Ok(CodexExecutable("/usr/bin/codex".to_string())),
+                |_, _| Err("WSL Codex home identity is unavailable".to_string()),
+            )
+            .expect_err("only the home probe failed"),
+            "WSL Codex home identity is unavailable"
+        );
+    }
+
+    /// Issue #1934: the two `--help` capability probes are independent reads of
+    /// the same CLI, so they overlap too.
+    #[test]
+    fn proxy_cli_help_probes_are_issued_concurrently() {
+        let rendezvous = Rendezvous::new(2);
+        let (fresh, resume) = probe_proxy_cli_help_concurrently(
+            EnvType::Windows,
+            None,
+            |_, _| rendezvous.wait().map(|_| FreshHelp("fresh help".to_string())),
+            |_, _| rendezvous.wait().map(|_| ResumeHelp("resume help".to_string())),
+        )
+        .expect("both help probes must rendezvous and succeed");
+        assert_eq!(fresh.0, "fresh help");
+        assert_eq!(resume.0, "resume help");
+    }
+
+    /// The help pair keeps probe-order precedence, matching both the serial
+    /// chain and the `("fresh", ..)` order [`validate_proxy_cli_help`] reports
+    /// a missing flag in.
+    #[test]
+    fn proxy_cli_help_error_precedence_reports_fresh_first() {
+        assert_eq!(
+            probe_proxy_cli_help_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| Err("Codex fresh capability check failed".to_string()),
+                |_, _| Err("Codex resume capability check failed".to_string()),
+            )
+            .expect_err("both help probes failed"),
+            "Codex fresh capability check failed"
+        );
+        assert_eq!(
+            probe_proxy_cli_help_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| Ok(FreshHelp("fresh help".to_string())),
+                |_, _| Err("Codex resume capability check failed".to_string()),
+            )
+            .expect_err("only the resume probe failed"),
+            "Codex resume capability check failed"
+        );
+    }
+
+    /// Finding #1: a probe panic must reach the boundary above carrying the
+    /// message that named the probe. `join().unwrap()` replaces the payload
+    /// with `Any { .. }`, so the joiners re-raise with `resume_unwind` instead;
+    /// this pins that the payload survives.
+    #[test]
+    fn a_panicking_probe_keeps_its_message_at_the_join_boundary() {
+        let boundary = std::panic::catch_unwind(|| {
+            let _ = probe_codex_identity_concurrently(
+                EnvType::Windows,
+                None,
+                |_, _| -> Result<CodexVersion, String> {
+                    panic!("WSL Codex location probe blew up")
+                },
+                |_, _| Ok(CodexExecutable("/usr/bin/codex".to_string())),
+                |_, _| Ok(CodexHome("/home/dev/.codex".to_string())),
+            );
+        });
+        let payload = boundary.expect_err("the panicking probe must re-raise on the joining thread");
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|m| m.to_string()))
+            .expect("panic payload must still be a string");
+        assert_eq!(
+            message, "WSL Codex location probe blew up",
+            "the probe's own message must survive the join, not degrade to `Any {{ .. }}`"
+        );
     }
 
     #[test]
