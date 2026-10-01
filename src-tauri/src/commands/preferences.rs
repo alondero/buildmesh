@@ -15,6 +15,7 @@ use crate::preferences::resolver::cascade::{
     apply_capability_mask, field_inputs, harness_config_str,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
@@ -432,6 +433,17 @@ pub fn compatible_providers_for_harness(
     harness_id: String,
 ) -> Result<Vec<ProviderAccount>, String> {
     Ok(preferences::compatible_providers_for_harness(&harness_id))
+}
+
+/// The whole attach-picker map — `harness_id` → compatible accounts — in one
+/// call (issue #1935). The Settings Harnesses pane used to issue one
+/// `compatible_providers_for_harness` per harness, which also made its pairings
+/// load wait on the Spawn Menu load it took the harness ids from. This is the
+/// same per-harness computation over every harness the pane can render; see
+/// [`preferences::compatible_providers_by_harness`].
+#[command]
+pub fn compatible_providers_by_harness() -> Result<BTreeMap<String, Vec<ProviderAccount>>, String> {
+    Ok(preferences::compatible_providers_by_harness())
 }
 
 /// Attach a **Model Provider** to a harness over the harness's surface — the

@@ -58,9 +58,10 @@ pub use accounts::{
 
 #[allow(unused_imports)]
 pub use pairings::{
-    compatible_providers_for_harness, effective_provider_pairings, pairing_for, provider_pairings,
-    proxied_order_for, proxied_provider_order, remove_provider_pairing, resolve_stored_pairing_and_account,
-    set_proxied_provider_order, upsert_provider_pairing,
+    compatible_providers_by_harness, compatible_providers_for_harness, effective_provider_pairings,
+    pairing_for, provider_pairings, proxied_order_for, proxied_provider_order,
+    remove_provider_pairing, resolve_stored_pairing_and_account, set_proxied_provider_order,
+    upsert_provider_pairing,
 };
 #[allow(unused_imports)]
 pub(crate) use pairings::effective_pairings;
