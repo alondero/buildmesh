@@ -323,7 +323,11 @@ live-over-cache rules both probes must use if a snapshot store is added;
 live list methods fetch every time today. `services::github` re-exports the
 command-facing types, so handlers keep calling `services::github::...`.
 Issue-only parsing stays in `issues`; pull-request merge logic stays in
-`prs`.
+`prs`. Repository lookup in `commands::pr` uses the shared host-path opener.
+Unreadable repositories propagate errors to both feeds; only readable repos
+without a GitHub origin produce an empty list. WSL ownership trust is an exact
+`safe.directory` entry in Windows Git configuration, independent of GitHub
+authentication (see [troubleshooting](troubleshooting.md#github-feeds-fail-for-a-wsl-mesh)).
 
 ### Probe Panel shell (scroll ownership + narrow width)
 `ProbePanel.tsx` wraps every tab in `flex-1 overflow-y-auto` (`:359`) around an `h-full flex flex-col` keyed div (`:360-365`). A tab root must therefore be **layout-only** (`flex flex-col h-full min-h-0`) with **one** inner `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` body — the shared `<ProbeTabBody>` primitive exists to provide exactly that. Because the root is `h-full`, the panel's outer scroller has content precisely its own height and stays inert, so the inner body is the single *effective* scroll owner; adding `overflow-y-auto` to the root as well stacks two scrollers (the #1468 defect in `CircuitsProbeTab`). Two further traps: `overflow-y-auto` **alone computes `overflow-x: auto`** (CSS forbids one axis being `visible` while the other scrolls), so wide content can scroll the tab sideways unless you state `overflow-x-hidden`; and the dock's **240px minimum** (`PROBE_PANEL_BOUNDS`) means unbounded text (errors, identifiers, node ids) must wrap — `truncate` there hides the tail that carries the diagnosis, and `truncate` combined with `flex-wrap` on one row is self-contradictory. Note `ProbePanel.tsx` also declares a *local* `function ProbeTabBody` that is only the tab router — same name as the shared primitive, different component. Full checklist: `docs/development/probe-ui-checklist.md` (umbrella issue #1464).

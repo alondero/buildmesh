@@ -215,10 +215,9 @@ pub struct PrFileEntry {
 }
 
 /// Get open GitHub issues for a mesh.
-/// Returns an empty list if the mesh has no GitHub remote (or any error
-/// resolving one), with a `warn!` capturing the reason. The modal degrades
-/// gracefully — see [`resolve_github_owner_repo`] for the error wording the
-/// sibling spawn endpoint surfaces directly.
+/// Returns an empty list when a readable mesh has no GitHub remote.
+/// Repository failures propagate so an inaccessible mesh cannot masquerade
+/// as a repository with no issues.
 #[command]
 pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
     crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
@@ -231,12 +230,8 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
-    let (owner, repo) = match resolve_github_owner_repo(&mesh) {
-        Ok(pair) => pair,
-        Err(reason) => {
-            tracing::warn!("get_repo_issues: {} — returning empty issue list", reason);
-            return Ok(Vec::new());
-        }
+    let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
+        return Ok(Vec::new());
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
@@ -268,9 +263,8 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
 }
 
 /// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
-/// Mirrors [`get_repo_issues`]: degrades to an empty list (with a `warn!`) when
-/// the mesh has no GitHub origin, so the panel renders an empty state rather
-/// than an error.
+/// Mirrors [`get_repo_issues`]: a readable mesh without a GitHub origin has
+/// an empty feed; repository failures propagate to the panel.
 ///
 /// Issue #1529: one cohesive summary query — list fields plus mergeability
 /// ride inline via the GraphQL PR-summaries connection (O(pages), not O(PRs)).
@@ -290,12 +284,8 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
 
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
-    let (owner, repo) = match resolve_github_owner_repo(&mesh) {
-        Ok(pair) => pair,
-        Err(reason) => {
-            tracing::warn!("get_repo_pulls: {} — returning empty PR list", reason);
-            return Ok(Vec::new());
-        }
+    let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
+        return Ok(Vec::new());
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
@@ -859,9 +849,30 @@ fn resolve_open_pr(
 }
 
 
+fn safe_directory_command(host_path: &str, windows: bool) -> String {
+    let quoted = if windows {
+        host_path.replace('\\', "/").replace('\'', "''")
+    } else {
+        host_path.replace('\'', "'\\''")
+    };
+    format!("git config --global --add safe.directory '{quoted}'")
+}
+
+fn open_github_repo(path: &str) -> Result<Repository, String> {
+    crate::git::primitives::open_from_host_path(path).map_err(|error| {
+        if error.code() == git2::ErrorCode::Owner {
+            let command = safe_directory_command(&env::to_host_path(path), cfg!(windows));
+            let runtime = if cfg!(windows) { "Windows" } else { "host" };
+            format!("git error: {error}. If you trust this repository, add its exact path to {runtime} Git configuration: {command}")
+        } else {
+            format!("git error: {error}")
+        }
+    })
+}
+
 /// Open the repo once and extract both the current branch and origin URL.
 fn repo_info(path: &str) -> Result<RepoInfo, String> {
-    let repo = Repository::open(path).map_err(|e| format!("git error: {}", e))?;
+    let repo = open_github_repo(path)?;
 
     let branch = match repo.head() {
         Ok(head) => {
@@ -884,36 +895,24 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
     Ok(RepoInfo { branch, remote_url, owner_repo })
 }
 
-/// Resolve a Mesh's `origin` remote to (owner, repo) for GitHub operations,
-/// with a diagnostic that disambiguates "no origin at all" from "origin exists
-/// but isn't a GitHub URL". Used by both `get_repo_issues` (which degrades
-/// gracefully to an empty list + warn) and `spawn_issue_agent` (which
-/// propagates the error to the user, since they actively clicked Spawn).
+/// Resolve a Mesh's GitHub origin for actions that require one.
+/// Unlike feed queries, a missing or non-GitHub origin is an error here.
 pub(crate) fn resolve_github_owner_repo(
     mesh: &crate::models::Mesh,
 ) -> Result<(String, String), String> {
-    match resolve_owner_repo(&mesh.path)? {
-        Some(pair) => Ok(pair),
-        None => {
-            let has_origin = git2::Repository::open(&mesh.path)
-                .ok()
-                .and_then(|r| r.find_remote("origin").ok().map(|_| ()))
-                .is_some();
-            if has_origin {
-                Err(format!(
-                    "Mesh at {} has an `origin` remote, but it isn't a GitHub URL",
-                    mesh.path
-                ))
-            } else {
-                Err(format!("Mesh at {} has no `origin` remote", mesh.path))
-            }
+    let info = repo_info(&mesh.path)?;
+    info.owner_repo.clone().ok_or_else(|| {
+        if info.remote_url.is_some() {
+            format!("Mesh at {} has an `origin` remote, but it isn't a GitHub URL", mesh.path)
+        } else {
+            format!("Mesh at {} has no `origin` remote", mesh.path)
         }
-    }
+    })
 }
 
 /// Resolve owner/repo from a path, returning None if no origin remote.
 pub(crate) fn resolve_owner_repo(path: &str) -> Result<Option<(String, String)>, String> {
-    let repo = Repository::open(path).map_err(|e| format!("git error: {}", e))?;
+    let repo = open_github_repo(path)?;
     let url = match repo.find_remote("origin") {
         Ok(remote) => remote.url().map(|u| u.to_string()),
         Err(_) => return Ok(None),
@@ -1003,6 +1002,85 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn safe_directory_commands_preserve_shell_paths() {
+        assert_eq!(
+            safe_directory_command(r"C:\alice's repo", true),
+            "git config --global --add safe.directory 'C:/alice''s repo'",
+        );
+        assert_eq!(
+            safe_directory_command(r"/tmp/alice's\repo", false),
+            r"git config --global --add safe.directory '/tmp/alice'\''s\repo'",
+        );
+    }
+
+    #[test]
+    fn github_feeds_report_unreadable_repository() {
+        let _guard = CREATE_PR_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_blocking_db();
+        let tmp = TempGitRepo::new();
+        let mesh = db::create_mesh("unreadable-github-feed", tmp.path().to_str().unwrap()).unwrap();
+        let issues = get_repo_issues_blocking(mesh.id);
+        let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string());
+        db::delete_mesh(mesh.id).unwrap();
+        assert!(issues.unwrap_err().contains("git error:"));
+        assert!(pulls.unwrap_err().contains("git error:"));
+    }
+
+    #[test]
+    fn github_feeds_without_github_origin_remain_empty() {
+        let _guard = CREATE_PR_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ensure_pr_blocking_db();
+        for origin in [None, Some("https://gitlab.com/example/repo.git")] {
+            let (tmp, path) = init_repo_with_commit();
+            if let Some(url) = origin {
+                Repository::open(&path).unwrap().remote("origin", url).unwrap();
+            }
+            let mesh = db::create_mesh("non-github-feed", &path).unwrap();
+            assert!(get_repo_issues_blocking(mesh.id).unwrap().is_empty());
+            assert!(get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap().is_empty());
+            db::delete_mesh(mesh.id).unwrap();
+            drop(tmp);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires default WSL; changes process-global libgit2 config search path, run serially"]
+    fn live_wsl_github_repository_trust() {
+        let guest_home = env::wsl_home().expect("WSL home");
+        let fixture = tempfile::Builder::new().prefix("buildmesh-github-")
+            .tempdir_in(env::to_host_path(&guest_home.to_string_lossy())).unwrap();
+        let host_path = fixture.path().to_str().unwrap();
+        let guest_path = env::normalize_unc_to_wsl(host_path).into_owned();
+        let mut command = crate::process_util::command_no_window("wsl.exe");
+        command.args(["-d", &env::get_default_wsl_distro().unwrap(), "--exec", "git", "init", &guest_path]);
+        let output = crate::process_util::run_command_with_timeout(command, "WSL fixture init", std::time::Duration::from_secs(15)).unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        std::fs::write(fixture.path().join(".git/config"), "[core]\nrepositoryformatversion = 0\nbare = false\n[remote \"origin\"]\nurl = https://github.com/example/wsl-fixture.git\n").unwrap();
+
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut config = git2::Config::open(&config_dir.path().join(".gitconfig")).unwrap();
+        struct RestoreConfig(std::ffi::CString);
+        impl Drop for RestoreConfig {
+            fn drop(&mut self) {
+                unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap(); }
+            }
+        }
+        let _restore = RestoreConfig(unsafe { git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap() });
+        unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap(); }
+        assert_eq!(Repository::open(host_path).err().unwrap().code(), git2::ErrorCode::Owner);
+        let error = resolve_owner_repo(host_path).unwrap_err();
+        assert!(error.contains("safe.directory"), "{error}");
+        assert!(error.contains("Windows"), "{error}");
+        config.set_str("safe.directory", &host_path.replace('\\', "/")).unwrap();
+        let expected = Some(("example".to_string(), "wsl-fixture".to_string()));
+        assert_eq!(resolve_owner_repo(host_path).unwrap(), expected);
+        assert_eq!(resolve_owner_repo(&guest_path).unwrap(), expected);
+        assert_eq!(repo_info(&guest_path).unwrap().owner_repo, expected);
+        assert_eq!(github_url_for_path(&guest_path).unwrap(), Some("https://github.com/example/wsl-fixture".to_string()));
+    }
 
     // ----- GitHubIssue wire shape (issue #481 follow-up: blocked_by) -----
 
