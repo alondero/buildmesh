@@ -207,6 +207,76 @@ describe("checkContentViolations — PowerShell native-command conditions (#1982
     expect(v.join()).toContain("powershell-if-native-command");
   });
 
+  // Review on #1988: requiring `)` or `{` immediately after the call missed the
+  // standard PowerShell spellings, so the trap walked straight through a rule
+  // that looked like coverage. Each case below is a real idiom, not a synthetic
+  // shape invented for the regex.
+  it("blocks the Allman brace style (opening brace on the next line)", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git diff --quiet)\n{\n    Write-Output "unchanged"\n}',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  it("blocks a trailing comment after the condition", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git diff --quiet) # is the worktree clean?\n{\n    Write-Output "unchanged"\n}',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  it("blocks `elseif (...)` and the two-word `else if (...)`", () => {
+    for (const line of [
+      'elseif (git diff --quiet) { Write-Output "clean" }',
+      'else if (git diff --quiet) { Write-Output "clean" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("blocks the idiomatic `-not` negation", () => {
+    for (const line of [
+      'if (-not (git diff --quiet)) { Write-Output "dirty" }',
+      'if (-not(git diff --quiet)) { Write-Output "dirty" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("blocks a native command continued into a compound condition", () => {
+    for (const line of [
+      'if (git diff --quiet) -and $dirty { Write-Output "x" }',
+      'if (git diff --quiet) -or $flag { Write-Output "x" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  // Pinned limit, not an oversight: a native call in a *later* clause of a
+  // compound condition is not matched. Matching it means allowing arbitrary
+  // text before the command, which also flags legitimate comparisons such as
+  // `if ($env:PATH -like "*git *")`. Prefer a false negative a reviewer can see
+  // over a false positive that blocks correct code — the limit is documented in
+  // the rule and in docs/agents/engineering.md.
+  it("does NOT reach a native call in a later clause of a compound condition", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if ($dirty -or (git diff --quiet)) { Write-Output "x" }',
+    );
+    expect(v).toHaveLength(0);
+  });
+
   it("blocks other silent native commands used as a bare condition", () => {
     const cases = [
       'if (git diff --quiet) { "unchanged" }',
@@ -238,12 +308,19 @@ describe("checkContentViolations — PowerShell native-command conditions (#1982
     expect(v).toHaveLength(0);
   });
 
-  it("allows an explicit comparison of a native command's output", () => {
-    const v = checkContentViolations(
-      "scripts/probe.ps1",
+  it("allows explicit comparisons of a native command's output", () => {
+    // The widened terminator (end-of-line / comment) must not start matching
+    // these: `.Length`, `.Count` and `-gt` all follow the call, not `)`+brace.
+    for (const line of [
       "if ((git status --porcelain).Length -gt 0) { Write-Output 'dirty' }",
-    );
-    expect(v).toHaveLength(0);
+      "if ((git status --porcelain).Length -gt 0)\n{\n    Write-Output 'dirty'\n}",
+      "if (@(git ls-files).Count -gt 0) { Write-Output 'has files' }",
+      "if ($diff.Length -gt 0) { Write-Output 'has output' }",
+    ]) {
+      expect(checkContentViolations("scripts/probe.ps1", line).join(), line).toBe(
+        "",
+      );
+    }
   });
 
   it("allows the `# allow-native-condition` escape hatch", () => {

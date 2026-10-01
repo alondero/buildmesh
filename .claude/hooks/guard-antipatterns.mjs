@@ -100,17 +100,30 @@ const RULES = [
     // the check can never report success whatever the real state, and it fails
     // silently. Same trap for `git diff --quiet`, `gh`, `cargo`.
     //
-    // Narrow on purpose. The condition must BE the command call: the pattern
-    // requires the command's closing paren to be followed by `)` or `{`. So
-    // cmdlets that return a value (`Test-Path`) and explicit output comparisons
-    // (`if ((git status --porcelain).Length -gt 0)`, where `.Length` follows
-    // the call) do not match, while `if (git …)` and `if (!(git …))` do.
+    // Narrow on purpose. The condition must BE the command call, so an
+    // explicit comparison does not match: in `if ((git status --porcelain)
+    // .Length -gt 0)` the `.Length` follows the call, and `@(git ls-files)
+    // .Count` starts with `@`. Cmdlets that return a value (`Test-Path`) never
+    // match, and neither does the correct `$LASTEXITCODE` form.
+    //
+    // The terminator must accept more than `{` on the same line. PowerShell
+    // conventionally puts the Allman brace on the next line and allows a
+    // trailing comment; `elseif` and the idiomatic `-not` are standard control
+    // flow. Requiring `)` or `{` immediately after the call missed all four and
+    // let the trap through, which is worse than no rule: it reads as coverage.
     // Scoped to `.ps1` so the wrong form quoted in docs/agents/engineering.md to
     // teach this rule is not itself flagged.
+    //
+    // Known limits (documented, not silently absent): a condition split across
+    // several lines is not seen, `$ok = git …` followed by `if ($ok)` loses the
+    // exit code, and a native call in a *later* clause of a compound condition
+    // (`if ($dirty -or (git diff --quiet))`) is not reached — matching it would
+    // need arbitrary text before the command and would flag legitimate
+    // comparisons like `if ($env:PATH -like "*git *")`. All need $LASTEXITCODE.
     id: "powershell-if-native-command",
     appliesTo: (path) => /\.ps1$/i.test(path),
     pattern:
-      /\b(?:if|while|until)\s*\(\s*!?\s*\(?\s*(?:git|gh|cargo|rustc|npm|npx|pnpm|yarn|node|dotnet|python3?)\s+[^()]*\)\s*[){]/i,
+      /\b(?:if|elseif|while|until)\s*\(\s*(?:!|-not\b)?\s*\(?\s*(?:git|gh|cargo|rustc|npm|npx|pnpm|yarn|node|dotnet|python3?)\s+[^()]*\)\s*(?:[){]|#|\r?$|-(?:and|or|xor|not)\b)/i,
     allow: "allow-native-condition",
     message:
       "PowerShell tests a command's OUTPUT, not its exit code, so a silent " +
