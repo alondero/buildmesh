@@ -1,11 +1,11 @@
-﻿//! Transcript reader (ADR-0008) "— the deep module that, given an Agent Node's
+//! Transcript reader (ADR-0008) "— the deep module that, given an Agent Node's
 //! CLI session id and working-directory path, locates and parses the harness's
 //! on-disk JSONL transcript and returns the **raw recent turns** (assistant
 //! text and tool calls) plus the last assistant message "— or a typed
 //! [`Unavailable`] reason when the provider has no readable transcript or the
 //! file fails to parse.
 //!
-//! Nine harness formats are supported, selected by [`TranscriptFormat`]:
+//! Ten harness formats are supported, selected by [`TranscriptFormat`]:
 //! Claude Code's `~/.claude/projects/<encoded-cwd>/<session>.jsonl`, Cursor's
 //! `~/.cursor/projects/<workspace>/agent-transcripts/<session>/<session>.jsonl`,
 //! Codex's `~/.codex/sessions/YYYY/MM/DD/rollout-*-<session>.jsonl` (issue
@@ -16,9 +16,11 @@
 //! #1500), Muse Code's
 //! `~/.local/share/muse/sessions/YYYY/MM/DD/<id>/session.jsonl` (issue
 //! #1708, indexed by `~/.local/share/muse/session-index.db`), and
-//! OpenCode's local `opencode.db` SQLite store (issue #1296), and MiniMax
+//! OpenCode's local `opencode.db` SQLite store (issue #1296), MiniMax
 //! Code's `<dataDir>/v2/sessions/…/messages.jsonl` canonical history
-//! (manifest-indexed, `~/.minimax` by default).
+//! (manifest-indexed, `~/.minimax` by default), and Cline's
+//! `<cline data dir>/sessions/<id>/<id>.messages.json` document (issue
+//! #1776).
 //! All map onto the same [`Turn`]/[`ToolCall`] wire shape, so the Coordinator
 //! never learns which harness wrote the file.
 //!
@@ -283,6 +285,15 @@ pub enum TranscriptFormat {
     /// this variant does not flow through the file-based `locate_transcript`
     /// chain because OpenCode has no per-session transcript file.
     OpenCode,
+    /// Cline (issue #1776) persists per-session history at
+    /// `<cline data dir>/sessions/<session-id>/<session-id>.messages.json` —
+    /// a single JSON **document** (`{version: 1, messages: [...],
+    /// system_prompt}`) rewritten wholesale at each turn, not an append-only
+    /// JSONL stream. The adapter parses the whole document (skipping the
+    /// embedded `system_prompt`, which duplicates the manifest and dominates
+    /// the file) and reconstructs user-delimited turns. `sessions.db` is
+    /// deliberately not consulted: it holds no message content.
+    Cline,
 }
 
 impl TranscriptFormat {
@@ -311,6 +322,7 @@ impl TranscriptFormat {
             "muse" => Some(TranscriptFormat::Muse),
             "mcode" => Some(TranscriptFormat::Mcode),
             "opencode" => Some(TranscriptFormat::OpenCode),
+            "cline" => Some(TranscriptFormat::Cline),
             "anthropic" | "claude" => Some(TranscriptFormat::ClaudeCode),
             // No arm, no transcript directory (issue #1817): an unwired or
             // unknown harness id resolves to `None` so callers degrade to
@@ -491,6 +503,7 @@ fn adapter_id_for_format(format: TranscriptFormat) -> &'static str {
         // short-circuits to `read_opencode_*` before `parse_transcript`
         // runs); routing through the registry still resolves correctly.
         TranscriptFormat::OpenCode => "opencode",
+        TranscriptFormat::Cline => "cline",
     }
 }
 /// Cheap digest reader (issue #341). Returns only the last assistant message
@@ -817,6 +830,7 @@ mod tests {
         count_pending_background_tasks, parse_turns, pending_background_task_ids,
     };
     use crate::services::transcript_reader::adapters::codex::{find_codex_rollout_in, parse_codex_turns};
+    use crate::services::transcript_reader::adapters::cline::find_cline_transcript_in;
     use crate::services::transcript_reader::adapters::commandcode::{
         commandcode_project_slug, commandcode_sessions_dir, commandcode_transcript_path_in,
         parse_commandcode_turns,
@@ -861,7 +875,10 @@ mod tests {
         assert_eq!(actual.text, "Implementation and verification finished; changes are uncommitted.");
         assert!(!actual.revision.is_empty());
     }
-    fn write_fixture(name: &str, body: &str) -> PathBuf {
+    /// Write a throwaway transcript into the temp dir for a test that needs to
+    /// mutate the body (a differently-terminated copy, say) rather than read a
+    /// checked-in fixture. Callers remove the file themselves.
+    pub(crate) fn write_fixture(name: &str, body: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "buildmesh_transcript_{name}_{}.jsonl",
             std::process::id()
@@ -869,7 +886,11 @@ mod tests {
         std::fs::write(&path, body).unwrap();
         path
     }
-    fn fixture(name: &str) -> PathBuf {
+    /// Read a checked-in fixture from `tests/fixtures`. `pub(crate)` so a
+    /// sibling submodule's tests can assert against the same real artifacts
+    /// this module's own contract tests use, rather than re-creating lookalikes
+    /// that could drift from the shipped shapes.
+    pub(crate) fn fixture(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
@@ -1526,12 +1547,187 @@ mod tests {
         std::fs::remove_dir_all(&temp).ok();
     }
 
+    /// ── Cline (issue #1776) ───────────────────────────────────────────
+    ///
+    /// The Cline contract over a checked-in fixture, read through the real
+    /// file path (`read_tail_from_file` → `BufReader` → the adapter's
+    /// whole-document parse). Three properties are load-bearing: a user prompt
+    /// is unwrapped from its `<user_input mode="act">` envelope, the several
+    /// assistant messages of one run coalesce into one turn carrying its tool
+    /// call, and the `completion_reminder` / `userRunSpan` notices plus the
+    /// embedded `system_prompt` never become dialogue.
+    #[test]
+    fn cline_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("cline_messages.json"),
+            10,
+            TranscriptFormat::Cline,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("fixture should parse to an available tail, got {tail:?}");
+        };
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant"],
+            "turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Fix the failing login test");
+        assert_eq!(turns[2].text, "Open the PR");
+        // The `thinking` block and the `tool_result` echo contribute neither
+        // text nor a call; the two text entries of the run concatenate.
+        assert_eq!(
+            turns[1].text,
+            "Reading the auth module.\n`login` returns undefined for an unknown user, so the test's truthy assertion fails. I added the null guard."
+        );
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(turns[1].tool_calls[0].input["path"], "src/auth.ts");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Opened the PR against main.")
+        );
+        // The embedded system prompt is the largest string in the document and
+        // must never surface as a turn.
+        assert!(
+            !turns.iter().any(|turn| turn.text.contains("tool_specification")),
+            "the embedded system prompt must not surface as dialogue"
+        );
+    }
+
+    /// The cheap digest reader must agree with the full reader on a Cline
+    /// document — it still returns no turns (the digest only wants the last
+    /// assistant message) and the same message text.
+    #[test]
+    fn cline_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("cline_messages.json"),
+            TranscriptFormat::Cline,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Opened the PR against main.")
+        );
+    }
+
+    /// A Cline document is a single JSON object, so the 256 KiB byte window the
+    /// digest reader normally uses to avoid a full parse *cannot* produce valid
+    /// JSON — the seek lands mid-document. The reader's existing "window carried
+    /// no assistant text → re-read the whole file" fallback is what keeps a
+    /// real (long) Cline session rich instead of degrading it to
+    /// `ShapeChanged`. This is the production-scale case: the embedded
+    /// `system_prompt` alone pushes a real session past the window.
+    #[test]
+    fn cline_digest_reads_a_document_larger_than_the_bounded_window() {
+        let padding = "x".repeat(300 * 1024);
+        let document = serde_json::json!({
+            "version": 1,
+            "system_prompt": padding,
+            "messages": [
+                {"role": "user", "content": "<user_input mode=\"act\">go</user_input>"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "A long answer that is older than the window."}]},
+                {"role": "user", "content": "<user_input mode=\"act\">still there?</user_input>"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Yes — the final answer survives the window cut."}]},
+            ],
+        });
+        let path = write_fixture("cline_large", &document.to_string());
+        assert!(std::fs::metadata(&path).unwrap().len() > 256 * 1024);
+
+        let digest = read_last_assistant_message_from_file(&path, TranscriptFormat::Cline);
+        let TranscriptTail::Available {
+            last_assistant_message,
+            ..
+        } = digest
+        else {
+            panic!(
+                "a document past the window must fall back to a whole read, got {digest:?}"
+            );
+        };
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Yes — the final answer survives the window cut.")
+        );
+        // The full reader agrees, and keeps every turn.
+        let TranscriptTail::Available { turns, .. } =
+            read_tail_from_file(&path, 10, TranscriptFormat::Cline)
+        else {
+            panic!("the drill-in reader must also parse the whole document");
+        };
+        assert_eq!(turns.len(), 4);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Cline rewrites the document wholesale with a non-atomic
+    /// `writeFileSync`, so a read racing the write lands on a truncated (or
+    /// empty) file. A busy node must degrade *loudly* — the digest reports
+    /// `ShapeChanged` and the caller can surface a broken rich layer — never as
+    /// a quietly-finished session.
+    #[test]
+    fn cline_truncated_document_degrades_to_shape_changed_not_a_quiet_session() {
+        let full = std::fs::read_to_string(fixture("cline_messages.json")).unwrap();
+        for (name, body) in [
+            ("truncated", &full[..full.len() / 2]),
+            ("empty", ""),
+            ("not_json", "the writer has not published a document yet"),
+        ] {
+            let path = write_fixture(&format!("cline_{name}"), body);
+            let tail = read_tail_from_file(&path, 10, TranscriptFormat::Cline);
+            assert_eq!(
+                tail,
+                TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
+                "{name} must degrade loudly, got {tail:?}"
+            );
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    /// Issue #1817/§#1776: the absent-transcript rungs stay *typed* degrades,
+    /// so the digest flags them instead of silently omitting the rich layer.
+    /// A node with no captured id is rejected before any path resolution; a
+    /// session directory Cline has not yet filled is rejected by the locator,
+    /// which is the `None` the reader turns into `NoTranscript`.
+    #[test]
+    fn cline_absent_session_and_document_degrade_to_typed_reasons() {
+        // No captured `cli_session_id` — no path lookup is even attempted.
+        for session_id in [None, Some("")] {
+            assert_eq!(
+                read_tail(TranscriptFormat::Cline, session_id, "F:\\src\\repo", 10),
+                TranscriptTail::unavailable(UnavailableReason::NoSession),
+                "a node with no captured Cline session id must be NoSession"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        let id = "session_1790003303940_9ouga";
+        // Directory without a messages document (Cline creates it before the
+        // first rewrite lands) — the locator rung that yields `NoTranscript`.
+        std::fs::create_dir_all(root.path().join(id)).unwrap();
+        assert_eq!(
+            find_cline_transcript_in(root.path(), id),
+            None,
+            "a session with no messages document must not resolve"
+        );
+    }
+
     /// `for_harness` routes each harness to its native format — codex to
     /// Codex, cursor to Cursor, agy to a dedicated AGY shape (#1283),
     /// grok to its own Grok shape (#1281), muse to Muse (#1708), mcode to
-    /// Mcode (#1799), opencode to OpenCode (#1296).
+    /// Mcode (#1799), opencode to OpenCode (#1296), cline to Cline (#1776).
     /// Only the Claude-backed ids resolve to Claude Code; unwired
-    /// harnesses (`kimi`, `dsh`, `freebuff`, `cline`, `terminal`) resolve
+    /// harnesses (`kimi`, `dsh`, `freebuff`, `terminal`) resolve
     /// to `None` (issue #1817) instead of Claude Code.
     /// A unit test below keeps this consistent with the capability catalog.
     #[test]
@@ -1568,6 +1764,10 @@ mod tests {
             TranscriptFormat::for_harness("opencode"),
             Some(TranscriptFormat::OpenCode)
         );
+        assert_eq!(
+            TranscriptFormat::for_harness("cline"),
+            Some(TranscriptFormat::Cline)
+        );
         for id in ["anthropic", "claude"] {
             assert_eq!(
                 TranscriptFormat::for_harness(id),
@@ -1579,13 +1779,14 @@ mod tests {
 
     /// Unwired harnesses must not silently resolve to Claude Code
     /// (issue #1817): no arm, no transcript directory. Today `kimi`,
-    /// `dsh`, `freebuff`, and `cline` are saved only by
+    /// `dsh`, `freebuff`, and `terminal` are saved only by
     /// `produces_readable_transcript() == false`; the moment one flips
     /// its flag (cf. #945 for Kimi Code) the resolver must report "no
-    /// reader" instead of reading the Claude Code directory.
+    /// reader" instead of reading the Claude Code directory. `cline`
+    /// left this list in #1776, when its reader shipped.
     #[test]
     fn transcript_format_for_harness_rejects_unwired_harnesses() {
-        for id in ["kimi", "dsh", "freebuff", "cline", "terminal", "", "totally-unknown"] {
+        for id in ["kimi", "dsh", "freebuff", "terminal", "", "totally-unknown"] {
             assert_eq!(
                 TranscriptFormat::for_harness(id),
                 None,
@@ -3325,5 +3526,4 @@ mod tests {
         );
     }
 }
-
 
