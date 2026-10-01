@@ -36,3 +36,5 @@ The dev launcher prints pre-launch line counts for `buildmesh.log`, `panic.log`,
 ## Report
 
 State the base/working tree, requested scope, commands actually run, results and executed counts. Separate passed, failed, and not run. Label browser evidence as mock IPC or real backend. Include the observed acceptance outcome and any limitation that matters to the reviewer. Add a durable lesson to the owning documentation only when it changes a future decision; do not accumulate one-off recipes in this skill.
+
+When the verification includes remote state — a pushed branch, a PR awaiting checks, merge readiness — read the `Verifying a push or merge` section of the shared contract before reporting a verdict. Poll one run id rather than the `gh pr checks` rollup, and read a PowerShell condition as an exit code (`$LASTEXITCODE`), never as command output.
