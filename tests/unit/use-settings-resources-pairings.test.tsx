@@ -220,34 +220,51 @@ describe('useSettingsResources — pairings load (#1935)', () => {
     expect(firstResult).toBeNull();
   });
 
-  it('keeps the pairings retry boundary check: no providers list means an explicit failure, not a clean state', async () => {
+  it('retries pairings unconditionally: the retry re-runs the read and recovers', async () => {
+    // The trap this pins shut: `retryResource('pairings')` used to require the
+    // caller to pass a non-empty providers list, and no call site ever did —
+    // so Retry on a failed pairings load silently did nothing and replaced the
+    // real error with "Awaiting providers list". A retry must now be just the
+    // loader, with no precondition and no arguments.
+    let fails = true;
+    let reads = 0;
+    mockPairingsIpc({
+      get_provider_pairings: () => {
+        reads += 1;
+        return fails
+          ? Promise.reject(new Error('pairings endpoint 500'))
+          : Promise.resolve([pairing('minimax')]);
+      },
+    });
+
     const onPairingsLoaded = vi.fn();
-    mockPairingsIpc({});
     const { result } = renderHook(() =>
       useSettingsResources({ getHostPairingVerifications: noVerifications, onPairingsLoaded }),
     );
 
-    // The harness rows the attach pickers hang off are derived from the
-    // provider menu, so retrying pairings behind an empty list would load
-    // data for a pane with no rows — and, if the list is empty because the
-    // read failed, would present that as "no compatible providers".
-    act(() => {
-      result.current.retryResource('pairings');
+    await act(async () => {
+      await result.current.loadPairings();
     });
     expect(result.current.resources.pairings).toEqual({
       status: 'failed',
-      error: 'Awaiting providers list — retry providers first.',
+      error: 'pairings endpoint 500',
     });
-    expect(onPairingsLoaded).not.toHaveBeenCalled();
+    expect(reads).toBe(1);
 
-    // With a providers list in hand the same call runs the load for real.
+    // No providers list exists in this hook at all — the retry must not need one.
+    fails = false;
     act(() => {
-      result.current.retryResource('pairings', {
-        providers: [{ harness_id: 'claude' } as never],
-      });
+      result.current.retryResource('pairings');
     });
-    await waitFor(() => expect(result.current.resources.pairings.status).toBe('loaded'));
-    expect(onPairingsLoaded).toHaveBeenCalledTimes(1);
+
+    await waitFor(() =>
+      expect(result.current.resources.pairings).toEqual({ status: 'loaded', error: null }),
+    );
+    // The read really was re-issued, and the recovered state carries the data.
+    expect(reads).toBe(2);
+    expect(onPairingsLoaded).toHaveBeenCalledWith(
+      expect.objectContaining({ effective: [pairing('minimax')] }),
+    );
   });
 
   it('keeps the preferences read best-effort for pairings: a preferences failure does not fail the resource', async () => {

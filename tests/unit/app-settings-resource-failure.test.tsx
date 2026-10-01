@@ -572,36 +572,74 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     expect(prefsReads).toBe(1);
   });
 
-  it('the pairings Retry reports the Awaiting-providers boundary instead of a clean state (issue #1534 round 4, still reachable)', async () => {
-    // The boundary check survived #1935 as an *affordance* check: the
-    // Harnesses pane renders its harness rows from `providers`, so a pairings
-    // retry issued with no providers list must say so rather than quietly
-    // re-run behind an empty list and present it as "no compatible
-    // providers". The mount load no longer needs the guard; this path does.
-    mockWithFailure('get_provider_pairings', 'pairings endpoint 500');
+  it('the pairings Retry re-reads pairings and recovers (no Awaiting-providers trap)', async () => {
+    // The trap this pins shut: `retryResource('pairings')` required a non-empty
+    // providers list that no call site passes, so Retry never retried anything
+    // and overwrote the real error with an unrecoverable "Awaiting providers
+    // list" — while providers, having succeeded, had no banner to point the
+    // user at. The retry must now re-issue the read and clear the banner.
+    let failsPairings = true;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case 'get_app_preferences':
+          return Promise.resolve({
+            default_provider: null,
+            naming_provider: null,
+            circuit_agent_pool_size: null,
+            worktree_directory: '',
+            confirm_before_quit: true,
+            harness_defaults: {},
+            provider_pairings: [],
+          });
+        case 'list_providers':
+          return Promise.resolve(REAL_PROVIDERS);
+        case 'get_provider_accounts':
+          return Promise.resolve(REAL_ACCOUNTS);
+        case 'get_keyed_first_class_catalog':
+          return Promise.resolve([]);
+        case 'get_provider_pairings':
+          return failsPairings
+            ? Promise.reject(new Error('pairings endpoint 500'))
+            : Promise.resolve([]);
+        case 'get_pairing_verifications':
+          return Promise.resolve([]);
+        case 'compatible_providers_by_harness':
+          return Promise.resolve({ anthropic: REAL_ACCOUNTS });
+        case 'get_coordinator_status':
+          return Promise.resolve({ enabled: false, has_token: false });
+        case 'list_device_sessions':
+          return Promise.resolve([]);
+        case 'get_network_status':
+          return Promise.resolve(REAL_NETWORK);
+        default:
+          return Promise.resolve({});
+      }
+    });
 
     render(<AppSettingsModal onClose={() => {}} />);
     await openSettingsPane('Harnesses');
 
     const banner = await screen.findByTestId('resource-load-pairings');
     expect(banner.textContent).toContain('pairings endpoint 500');
-    // `list_providers` succeeded, so the pane is on the pairings banner and
-    // the retry is reachable.
+    // `list_providers` succeeded, so the pane is on the pairings banner and the
+    // retry is reachable.
     const retry = screen.getByTestId('resource-load-pairings-retry');
     expect(retry).toBeTruthy();
     const pairingReads = () =>
       vi.mocked(invoke).mock.calls.filter((c) => c[0] === 'get_provider_pairings').length;
     const readsBefore = pairingReads();
 
+    failsPairings = false;
     fireEvent.click(retry);
 
-    await waitFor(() => {
-      const same = screen.getByTestId('resource-load-pairings');
-      expect(same.textContent).toContain('Awaiting providers list');
-    });
-    // The guard short-circuits: it never re-issues the read it has no
-    // boundary for.
-    expect(pairingReads()).toBe(readsBefore);
+    // The retry really re-issued the read…
+    await waitFor(() => expect(pairingReads()).toBeGreaterThan(readsBefore));
+    // …and the pane recovered, rather than being trapped behind a new error.
+    await waitFor(() => expect(screen.queryByTestId('resource-load-pairings')).toBeNull());
+    expect(screen.queryByText(/Awaiting providers list/i)).toBeNull();
+    // The successful retry committed data, so the pane rendered its harness
+    // list instead of an error banner.
+    expect(screen.getByTestId('harness-config-list')).toBeTruthy();
   });
 
   it('retrying pairings while providers is empty marks pairings failed (no fabricated clean state)', async () => {
@@ -950,13 +988,19 @@ describe('AppSettingsModal — resource-load failure isolation (#1534)', () => {
     )?.[0] ?? '';
     expect(loadProvidersBody).not.toMatch(/loadPairings\(/);
 
-    // 2. `retryResource`'s pairings branch checks for providers
-    //    and surfaces an "Awaiting providers" message — never
-    //    fabricates success with an empty providers list.
+    // 2. `retryResource` takes no preconditions and the pairings branch is a
+    //    plain `loadPairings()`. The old branch required a providers list no
+    //    call site passes, so Retry never re-read anything and replaced the
+    //    real error with an unrecoverable "Awaiting providers list" (issue
+    //    #1935 review). Both the guard's message and any providers
+    //    precondition must stay gone.
     const retryBody = hookSrc.match(
       /const retryResource = useCallback[\s\S]+?\n {2}\);/,
     )?.[0] ?? '';
-    expect(retryBody).toMatch(/'pairings'/);
-    expect(retryBody).toMatch(/Awaiting providers list/);
+    expect(retryBody).toMatch(/pairings: \(\) => void loadPairings\(\)/);
+    expect(retryBody).not.toMatch(/Awaiting providers list/);
+    expect(retryBody).not.toMatch(/options/);
+    // ...and the public signature no longer advertises the dead parameter.
+    expect(hookSrc).toMatch(/retryResource: \(key: ResourceKey\) => void;/);
   });
 });

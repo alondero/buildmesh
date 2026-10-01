@@ -111,9 +111,9 @@ export interface UseSettingsResources extends SettingsResourceCallbacks {
     tls_active: boolean;
     exposed_interfaces: api.RealizedBind[];
   } | null>;
-  /** Retry a single failed resource. The pairings path still requires the
-   *  modal to hand it the current providers list — see `retryResource`. */
-  retryResource: (key: ResourceKey, options?: { providers?: api.ProviderInfo[] }) => void;
+  /** Retry a single failed resource. Takes no preconditions — every loader
+   *  reads what it needs. */
+  retryResource: (key: ResourceKey) => void;
 }
 
 export function useSettingsResources(
@@ -340,55 +340,37 @@ export function useSettingsResources(
     [withResourceLoad],
   );
 
-  /** Retry a single failed resource. The pairings *retry* path still has a
-   *  boundary check on providers (issue #1534 round 4): the Harnesses pane
-   *  renders its harness rows from `providers`, so reloading pairings behind
-   *  an empty providers list would load compatibility data for a pane with no
-   *  rows — and, when the list is empty because the *read* failed, report it
-   *  as a clean state rather than the failure it is. The user retries
-   *  providers first.
-   *
-   *  This is deliberately separate from the mount load's concurrency. Since
-   *  issue #1935 the loader itself needs nothing from `providers` (the
-   *  attach-picker map is one backend call over every harness), so the mount
-   *  fan-out starts pairings immediately — the guard here is about the retry
-   *  affordance, not about a data dependency.
+  /** Retry a single failed resource. No cross-resource preconditions. The
+   *  pairings boundary check (issue #1534 round 4) is gone: it demanded a
+   *  non-empty providers list, but no call site ever passed one —
+   *  `AppSettingsModal` calls `retryResource('pairings')` — so Retry on a
+   *  failed pairings load never retried anything and instead replaced the real
+   *  error with "Awaiting providers list". That was a dead end: providers has
+   *  usually succeeded, so there is no providers banner to point the user at,
+   *  and the pane recovers only on a modal reopen. Its justification was that
+   *  the loader could not build its picker map without the provider list, which
+   *  issue #1935 removed. When providers genuinely fails, the Harnesses pane
+   *  renders the providers banner ahead of the pairings one — that ordering is
+   *  the affordance the guard stood in for.
    *
    * Issue #1534 (review round 5) — replaced the 7-case switch with
-   * a `Record<ResourceKey, (options?) => void>` lookup so adding a
+   * a `Record<ResourceKey, () => void>` lookup so adding a
    * resource is type-checked at the table's construction site, and
    * removed the redundant `void` cast on each invocation. */
   const retryResource = useCallback(
-    (key: ResourceKey, options?: { providers?: api.ProviderInfo[] }) => {
-      const retryFns: Record<
-        ResourceKey,
-        (opts?: { providers?: api.ProviderInfo[] }) => void
-      > = {
+    (key: ResourceKey) => {
+      const retryFns: Record<ResourceKey, () => void> = {
         preferences: () => void loadPreferences(),
         providers: () => void loadProviders(),
         accounts: () => void loadAccounts(),
-        pairings: () => {
-          if (!options?.providers || options.providers.length === 0) {
-            // Awaiting providers. The boundary check (issue
-            // #1534 round 4) — pairings can't be retried behind an
-            // empty providers list. Mark pairings as failed with a
-            // clear message so the user retries providers first.
-            setResource('pairings', {
-              status: 'failed',
-              error: 'Awaiting providers list — retry providers first.',
-            });
-            return;
-          }
-          void loadPairings();
-        },
+        pairings: () => void loadPairings(),
         coordinator: () => void loadCoordinator(),
         devices: () => void loadDevices(),
         network: () => void loadNetwork(),
       };
-      retryFns[key](options);
+      retryFns[key]();
     },
     [
-      setResource,
       loadPreferences,
       loadProviders,
       loadAccounts,

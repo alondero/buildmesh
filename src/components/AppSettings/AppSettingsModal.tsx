@@ -953,26 +953,26 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // on the read outcome. Other resources are untouched — the user
   // clicking Retry should rehydrate only what they asked for.
   //
-  // Issue #1534 (review round 4) — the pairings retry has a boundary
-  // check on providers: if providers isn't loaded, retrying pairings
-  // would either fabricate a clean state (the bug round 2 caught) or
-  // stay permanently failed (the trap round 4 caught). The boundary
-  // check belongs in the retry path, not in the core loader.
+  // Issue #1534 (review round 4) — the pairings retry used to carry a
+  // boundary check on providers: if providers wasn't loaded, retrying pairings
+  // would either fabricate a clean state (the bug round 2 caught) or stay
+  // permanently failed (the trap round 4 caught). The check belonged in the
+  // retry path, not in the core loader.
   //
   // Issue #1935 — that was a *data* dependency too (the loader took its
-  // harness ids from the provider menu) and it is gone: the mount
-  // fan-out now loads pairings alongside every other resource. The
-  // guard survives as an affordance check — the Harnesses pane renders
-  // its harness rows from `providers`, so reloading pairings behind an
-  // empty list would populate a pane that has no rows. The two are
-  // separate concerns and were changed separately.
+  // harness ids from the provider menu), and removing it removed the check
+  // with it. The check required a providers list no call site ever passed, so
+  // `retryResource('pairings')` never retried anything and instead replaced the
+  // real error with an unrecoverable "Awaiting providers list" — a trap, not a
+  // guard, since providers has usually succeeded and so has no banner of its
+  // own. Retry is now just the loader again. When providers genuinely fails,
+  // the Harnesses pane renders the providers banner ahead of the pairings one
+  // (see the ternary at the pane), which is what the check was standing in for.
   //
   // Issue #1534 (review round 5) — the modal's local `retryResource`
   // was deleted. The hook's `retryResource` (returned from
-  // `useSettingsResources`) handles the pairings guard internally,
-  // accepts the same `(key, options?)` signature the modal's call
-  // sites use, and replaces the 7-case switch with a `Record`-based
-  // dispatch.
+  // `useSettingsResources`) takes just the resource key, and replaces the
+  // 7-case switch with a `Record`-based dispatch.
 
   // Built-in probe-spawn templates for the Settings display. Static per
   // binary with no mesh context, so they load once outside the resource
@@ -1014,10 +1014,10 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     // max(providers, pairings) rather than providers + pairings, and a
     // slow Codex install probe no longer delays the Harnesses pane.
     //
-    // The dependency that *did* matter is preserved where it belongs —
-    // `retryResource`'s pairings boundary check. Pairings is not
-    // auto-chained into `loadProviders` either (issue #1534 round 5):
-    // account-only refreshes must not re-probe WSL harness verifications.
+    // The dependency that *did* matter is gone with the loader's own use of
+    // it. Pairings is also not auto-chained into `loadProviders` (issue #1534
+    // round 5): account-only refreshes must not re-probe WSL harness
+    // verifications.
     void Promise.allSettled([
       loadPreferences(),
       loadProviders(),

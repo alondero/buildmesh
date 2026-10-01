@@ -232,19 +232,31 @@ pub fn effective_provider_pairings() -> Vec<ProviderPairing> {
 /// compatible providers are offered. Empty for a native-only harness (Terminal,
 /// Antigravity, OpenCode) that speaks no proxy surface.
 pub fn compatible_providers_for_harness(harness_id: &str) -> Vec<ProviderAccount> {
+    compatible_providers_for_harness_with(harness_id, &provider_accounts(), &provider_pairings())
+}
+
+/// [`compatible_providers_for_harness`] over already-loaded accounts and stored
+/// pairings, so a caller covering many harnesses reads preferences once instead
+/// of once per harness (issue #1935 review). The compatibility rule is
+/// identical — only the source of the two inputs differs.
+fn compatible_providers_for_harness_with(
+    harness_id: &str,
+    accounts: &[ProviderAccount],
+    stored: &[ProviderPairing],
+) -> Vec<ProviderAccount> {
     let Some(surface) = harness_surface(harness_id) else {
         return Vec::new();
     };
-    let stored = provider_pairings();
-    provider_accounts()
-        .into_iter()
+    accounts
+        .iter()
         .filter(|account| {
             if !provider_surfaces(account).contains(&surface) {
                 return false;
             }
-            attach_pairing_defaults(harness_id, account, &stored, |_| Some(surface))
+            attach_pairing_defaults(harness_id, account, stored, |_| Some(surface))
                 .is_some_and(|pairing| pairing_can_potentially_match(&pairing))
         })
+        .cloned()
         .collect()
 }
 
@@ -281,8 +293,10 @@ pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount
     };
     let mut harness_ids: Vec<String> =
         super::harness::harness_profiles().into_iter().map(|p| p.id).collect();
+    // Empty is not a harness: a corrupt `spawn_option_id` would otherwise add a
+    // `""` key whose empty list is indistinguishable from a real answer.
     let add = |id: String, ids: &mut Vec<String>| {
-        if !ids.contains(&id) {
+        if !id.is_empty() && !ids.contains(&id) {
             ids.push(id);
         }
     };
@@ -297,11 +311,16 @@ pub fn compatible_providers_by_harness() -> BTreeMap<String, Vec<ProviderAccount
             &mut harness_ids,
         );
     }
+    // One preferences read for the whole map: accounts and stored pairings are
+    // read once here and borrowed per harness, rather than re-loaded and
+    // re-cloned inside the loop (issue #1935 review).
+    let accounts = provider_accounts();
+    let stored = &prefs.provider_pairings;
     harness_ids
         .into_iter()
         .map(|harness_id| {
-            let accounts = compatible_providers_for_harness(&harness_id);
-            (harness_id, accounts)
+            let compatible = compatible_providers_for_harness_with(&harness_id, &accounts, stored);
+            (harness_id, compatible)
         })
         .collect()
 }

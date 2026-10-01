@@ -169,3 +169,39 @@ fn compatible_providers_by_harness_covers_every_renderable_harness() {
         );
     });
 }
+
+/// Issue #1935 review — a corrupt or empty `spawn_option_id` must not add an
+/// empty key. `""` is not a harness, and an empty list under it would be
+/// indistinguishable from a real "nothing is compatible here" answer.
+#[test]
+fn compatible_providers_by_harness_skips_empty_harness_ids() {
+    with_temp_dir(|_| {
+        let mut prefs = crate::preferences::load().unwrap();
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "cfg-blank".to_string(),
+                name: "Corrupt recipe".to_string(),
+                spawn_option_id: String::new(),
+                ..Default::default()
+            },
+        );
+        crate::preferences::upsert_provider_pairing(
+            &mut prefs,
+            ProviderPairing {
+                harness_id: String::new(),
+                provider_id: "deepseek".to_string(),
+                surface: ApiSurface::Anthropic,
+                base_url: None,
+                model_tiers: ModelTiers::default(),
+            },
+        );
+        crate::preferences::save(prefs).unwrap();
+
+        let map = crate::preferences::compatible_providers_by_harness();
+        assert!(
+            !map.contains_key(""),
+            "an empty harness id must not become a map key: {:?}",
+            map.keys().collect::<Vec<_>>(),
+        );
+    });
+}
