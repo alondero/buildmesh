@@ -15,8 +15,21 @@ runs:
     - name: Install Linux system dependencies
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        # A flaky mirror must fail the step, not burn the job cap in silence:
+        # attempt 1 of run 36885525121 crawled through `apt-get update` for
+        # seven minutes and then sat on a stalled download until the job was
+        # cancelled. `Acquire::Retries` re-tries transient fetch failures,
+        # the `Timeout` options cap each connection attempt, and `sudo
+        # timeout` puts a hard deadline on apt-get itself (under sudo, not on
+        # sudo) so a wedged download dies with 124 and the automatic re-run
+        # (ci-retry.yml) gets a clean second attempt.
+        APT_OPTS=(
+          -o Acquire::Retries=5
+          -o Acquire::http::Timeout=30
+          -o Acquire::https::Timeout=30
+        )
+        sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" update
+        sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" install -y \
           build-essential \
           curl \
           file \

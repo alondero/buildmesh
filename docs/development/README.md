@@ -67,9 +67,10 @@ without pretending that a code linter can judge prose quality. CI passes
 `--base <commit>` to the same script to require documentation or a reasoned
 `docs: none — <reason>` exemption for behavior-sensitive diffs.
 
-The Quality, Rust tests + TS bindings, Verify-smoke, and Windows/macOS platform
-checks are required status checks on `main`, so a change is not mergeable until
-CI has run them.
+The Quality, Rust tests + TS bindings, and Verify-smoke checks are required
+status checks on `main`, so a change is not mergeable until CI has run them.
+The Windows and macOS platform smoke builds are post-merge signals: they run on
+pushes to `main`, release tags, and manual dispatches, not on pull requests.
 The required names, the release gate, and the emergency bypass are documented
 in [the release procedure](releasing.md#required-checks-and-branch-protection).
 

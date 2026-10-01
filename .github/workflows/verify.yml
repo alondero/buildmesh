@@ -13,19 +13,40 @@ name: Verify
 # ruleset, so renaming one here is a policy change: update the ruleset and
 # docs/development/releasing.md in the same commit.
 #
-# The jobs form a fan-out, not a chain. `quality` (frontend), `rust-build` (the
-# single Rust compile), and both `platform-smoke` jobs start at t=0; the seven
-# `rust-tests` shards start as soon as `rust-build` is ready, and the
-# `rust-bindings` aggregate starts once `quality`, `rust-build`, and every shard
-# have finished. Nothing waits behind one ~10-minute monolith any more: a runner
-# that takes a few minutes to be handed over delays only its own branch of the
-# graph, not every job behind it.
+# The jobs form a fan-out, not a chain. `changes` (change-scope
+# classification) and `quality` (frontend) start at t=0; `changes` reads the
+# pull request's diff and the Rust branch of the graph (`rust-build`, the
+# seven `rust-tests` shards, and the `rust-bindings` aggregate) only starts
+# when it reports that Rust moved, so a frontend-only pull request never
+# compiles and a Rust-only pull request never boots the browser suites.
+# Nothing waits behind one ~10-minute monolith any more: a runner that takes
+# a few minutes to be handed over delays only its own branch of the graph,
+# not every job behind it.
 #
 # Job event guards use the *caller's* event name, which is what keeps the
-# weekly schedule off the browser job: a scheduled run skips `verify-smoke` and
-# `platform-smoke`, both gated to push/pull_request.
+# weekly schedule off the browser job: a scheduled run skips `verify-smoke`.
+# `platform-smoke` is a post-merge signal rather than a merge gate (it is not
+# among the required checks in `docs/development/releasing.md`): it runs on
+# pushes - to main and to a release tag - and on manual dispatches, while
+# pull requests rely on `rust-build` for the Linux compile.
+#
+# The `profile` input narrows push runs further. `full` (pull requests, the
+# weekly schedule, manual dispatches, release tags) runs the whole graph.
+# `light` (pushes to main) skips the Rust branch entirely, leaving `quality`,
+# `verify-smoke`, and `platform-smoke` as the post-merge signal: the merge
+# gate already ran the Rust suite against the same commit through the pull
+# request, and main moves several times a day. Required checks are only ever
+# evaluated on pull-request runs, which are always `full`.
 on:
   workflow_call:
+    inputs:
+      profile:
+        description: >-
+          full runs the merge gate (Rust compile, shards, bindings); light
+          skips the Rust graph and is used for post-merge push runs.
+        type: string
+        required: false
+        default: full
 
 # Least privilege: this workflow only ever checks out code and runs the test,
 # lint, docs, and compile gates. Nothing here needs to write to the repository.
@@ -36,6 +57,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Classify what a pull request touched so each graph can skip itself.
+  # Runs on every event: for anything that is not a pull request
+  # (scripts/ci/changed-scope.mjs gets no --base) the script reports the full
+  # scope, so pushes, schedules, dispatches, and release tags still run
+  # everything. The outputs feed `rust-build`, `quality`'s browser/vitest
+  # steps, and `verify-smoke`.
+  #
+  # If this job fails, its empty outputs are read as "unknown" and unknown
+  # runs everything: `quality` starts anyway (`if: !cancelled()`) and its
+  # browser/vitest steps plus `verify-smoke` treat an empty output as a
+  # frontend change. Only the Rust branch holds back on the compile - the
+  # required `Rust tests + TS bindings` check runs its guard, which fails
+  # closed on a classification that did not succeed.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify the changed paths
+        id: classify
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            node scripts/ci/changed-scope.mjs --base "$PR_BASE"
+          else
+            node scripts/ci/changed-scope.mjs
+          fi
+
   # The fast, frontend-only gate — the first result a PR hears back from. It
   # deliberately no longer compiles Rust: that moved to `rust-build`, so the
   # Rust shards and both platform-smoke jobs no longer wait behind it. The
@@ -44,6 +103,13 @@ jobs:
   # name and its aggregate meaning.
   quality:
     name: Quality (Linux)
+    needs: changes
+    # Runs even when the change-scope job failed: a required check that skips
+    # reports green, and this one must not certify a tree whose classification
+    # never succeeded. `!cancelled()` rather than `always()` so a superseded
+    # run still stops. The steps gated on the classification below treat an
+    # empty output as "unknown, run it" for the same reason.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     # A backstop above the real work (npm ci, the static gates, the frontend
     # build, Chromium, and the vitest suites). It no longer contains the Rust
@@ -149,7 +215,13 @@ jobs:
       # than mocking one, so the suite cannot pass on a runner without the
       # pinned browser build. A GitHub runner has none, and `launchChromium`
       # throws instead of skipping, so the job installs it here (issue #1520).
+      # Skipped when the change-scope job reports frontend=false: a
+      # Rust-only pull request has nothing for a browser suite to run
+      # against, and the skip keeps the required Quality check green. An
+      # empty output (the classification failed) is unknown, and unknown
+      # runs the browser rather than skipping it.
       - name: Install Chromium for the UI screenshot tests
+        if: needs.changes.outputs.frontend != 'false'
         run: npx playwright install --with-deps chromium
 
       # Single invocation runs both unit and integration suites in the
@@ -159,8 +231,12 @@ jobs:
       # times out inside CI's container and reports PASS(0) FAIL(0) exit
       # 0, the same false-green we hit in worktrees. Tests scope is
       # explicit (no `vitest run` default) so a new suite dir can't sneak
-      # in.
+      # in. Skipped for Rust-only pull requests (change-scope job), for
+      # the same reason as the Chromium install above; the static gates,
+      # lint, docs checks, and frontend build in this job still run. An
+      # empty output (failed classification) runs the suites.
       - name: Run vitest test suite (unit + integration)
+        if: needs.changes.outputs.frontend != 'false'
         run: npx vitest run --pool=threads tests/unit tests/integration
 
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
@@ -170,14 +246,22 @@ jobs:
         run: node scripts/check-process-spawn-discipline.mjs
 
   # The single Rust compile, shared by every downstream Rust job so a cold
-  # target directory is paid for once instead of seven times. It starts at t=0
-  # (it needs no frontend output of its own) and publishes both the Cargo cache
-  # (rust-cache) and the built mobile assets the shards and the bindings job
-  # consume. The Rust *tests* do not run here: they live in `rust-tests` and
-  # `rust-bindings`, which give every test a log that survives the runner-loss
-  # failure mode this split was built for (issue #1520).
+  # target directory is paid for once instead of seven times. It starts as
+  # soon as the change-scope job has classified the diff (it needs no frontend
+  # output of its own) and publishes both the Cargo cache (rust-cache) and the
+  # built mobile assets the shards and the bindings job consume. The Rust
+  # *tests* do not run here: they live in `rust-tests` and `rust-bindings`,
+  # which give every test a log that survives the runner-loss failure mode
+  # this split was built for (issue #1520).
   rust-build:
     name: Rust build (compile)
+    needs: changes
+    # Starts only when the merge gate is in play (profile: full) and the
+    # change-scope job reported that Rust moved. Skipping a job GitHub does
+    # not require is harmless: required checks are only the three listed in
+    # docs/development/releasing.md, and the `rust-bindings` job below keeps
+    # the fail-closed guard for every other way this branch can be absent.
+    if: inputs.profile == 'full' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     # A cold, parallel compile and link of every test target, plus the pinned
     # Codex dispatch smoke. A lost runner is caught well before this cap.
@@ -310,7 +394,8 @@ jobs:
   # `--test-threads=1` throughout: CLAUDE.md documents the `db::` tests as
   # sharing one process-global database and reporting phantom failures (and
   # wedging) in parallel, and a gate that cries wolf trains people to re-run
-  # it. The in-shell `timeout` turns a hang into a step failure with a log.
+  # it. The tested guard (scripts/ci/run-guarded.mjs) turns a hang into a step
+  # failure with a log.
   rust-tests:
     name: Rust tests (${{ matrix.shard.label }})
     needs: rust-build
@@ -381,33 +466,25 @@ jobs:
           # outright, so this lands outside the repository.
           TS_RS_EXPORT_DIR: ${{ runner.temp }}/ts-rs-${{ matrix.shard.label }}
         run: |
-          # The log is written by redirection, never through a pipe
-          # (issue #1961). `timeout` signals the process group it starts, but
-          # a test's descendant can leave that group while still holding the
-          # pipe's write end, so `tee` never sees EOF and the step does not
-          # return: the `services` shard ran ~45 minutes that way, past both
-          # this 30-minute guard and the job cap, and a cancelled job flushes
-          # no log, so it produced no evidence either. With a redirect nothing
-          # sits between the test and this shell, the guard ends the step, and
-          # the upload step below still gets the same file.
-          log="cargo-${{ matrix.shard.label }}.log"
-          # GitHub runs a `run:` block under `bash -e`, so a bare `timeout`
-          # that fails ends the step on the spot: the status capture, the
-          # `cat`, and the annotation below would all be skipped, and a hung
-          # shard would fail with an empty step log and no explanation.
-          # Initialising the status and consuming `timeout`'s own failure with
-          # `||` keeps those lines reachable on both paths; the step still
-          # exits with the guarded command's code. Do not "simplify" the `||`.
-          status=0
-          timeout --kill-after=2m 30m \
-            cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }} > "$log" 2>&1 || status=$?
-          # Printing the log keeps the step's own output as readable as the
-          # pipeline was; for a hung shard its tail is the main clue.
-          cat "$log"
-          if [ "$status" = 124 ]; then
-            echo "::error::The ${{ matrix.shard.label }} shard exceeded 30 minutes and was killed ??? a test in it is hanging."
-          fi
-          exit "$status"
+          # scripts/ci/run-guarded.mjs replaces the inline `timeout` shell
+          # guard. It streams the command's output into this step's log
+          # while appending it to the file the upload below preserves,
+          # kills the command's whole process tree at the 30-minute
+          # deadline (SIGTERM, then SIGKILL two minutes later), emits the
+          # annotation itself, and exits with the command's own code or 124
+          # on the deadline. The guard is unit-tested
+          # (tests/agent-infra/run-guarded.test.mjs), and because every
+          # wait on the output pipes after the kill is itself bounded, a
+          # descendant that escapes the process group while holding the
+          # write end - the issue #1961 failure mode - cannot keep this
+          # step alive past the guard, and a job-level cancel still leaves
+          # a log behind.
+          node "$GITHUB_WORKSPACE/scripts/ci/run-guarded.mjs" \
+            --minutes 30 \
+            --kill-grace-seconds 120 \
+            --log "cargo-${{ matrix.shard.label }}.log" \
+            --label "The ${{ matrix.shard.label }} shard" \
+            -- cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }}
         working-directory: src-tauri
 
       - name: Upload the shard log
@@ -422,14 +499,21 @@ jobs:
   # The authoritative Rust pass: every target, in one process, with the real
   # export directory, so ts-rs regenerates the committed bindings and the
   # drift gate has a single writer. Runs only once the compile and every shard
-  # have passed, and `if: always()` with an explicit result check rather than
+  # have passed, with `if: always()` and an explicit result check rather than
   # relying on the implicit skip: a required status check that is *skipped*
   # counts as satisfied by GitHub, so a silently skipped aggregate would be a
   # hole in the merge gate. It fails instead.
+  #
+  # The one legitimate skip is a pull request that touched no Rust on a
+  # successful change-scope classification - there is nothing for this job to
+  # prove, and the check reports success as a skipped job does. Every other
+  # absent input (change-scope failed, outputs missing, profile: light where
+  # this check is not evaluated) keeps the job running so the guard below
+  # fails with a reason instead.
   rust-bindings:
     name: Rust tests + TS bindings
-    needs: [quality, rust-build, rust-tests]
-    if: always()
+    needs: [quality, rust-build, rust-tests, changes]
+    if: always() && inputs.profile == 'full' && !(needs.changes.outputs.rust == 'false' && needs.changes.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -461,12 +545,22 @@ jobs:
           QUALITY_RESULT: ${{ needs.quality.result }}
           RUST_BUILD_RESULT: ${{ needs.rust-build.result }}
           RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
         run: |
-          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_BUILD_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
-            echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT — the Rust suite is not fully green, so the authoritative pass is not running."
+          # A classification that did not succeed leaves empty outputs, which
+          # would otherwise read as "Rust did not change" and silently skip
+          # the compile and the shards. Fail closed: no green Rust gate
+          # without a successful change-scope classification behind it.
+          if [ "$CHANGES_RESULT" != success ] || [ -z "$RUST_CHANGED" ]; then
+            echo "::error::change-scope result=$CHANGES_RESULT rust='$RUST_CHANGED' - refusing to certify the Rust suite without a successful classification."
             exit 1
           fi
-          echo "quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT"
+          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_BUILD_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
+            echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT - the Rust suite is not fully green, so the authoritative pass is not running."
+            exit 1
+          fi
+          echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT"
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -502,29 +596,26 @@ jobs:
       # and the bindings land in src/types/generated/.
       - name: Run Rust export, documentation, and integration tests
         run: |
-          # Redirection rather than a tee pipeline, for the same reason as the
-          # shards (issue #1961): a descendant that leaves `timeout`'s process
-          # group keeps the pipe open, so the step outlives the guard meant to
-          # end it. The inner script keeps its own `pipefail`; only the outer
-          # pipeline plumbing is gone.
-          log=cargo-nonshard-tests.log
-          # Same errexit-safe capture as the shards: under `bash -e` a bare
-          # `timeout` would skip the `cat` and the annotation on failure.
-          status=0
-          timeout --kill-after=2m 45m bash -euo pipefail -c '
-            cargo test --locked --lib export_bindings -- --test-threads=1
-            cargo test --locked --doc -- --test-threads=1
-            for test_file in tests/*.rs; do
-              test_target="${test_file##*/}"
-              test_target="${test_target%.rs}"
-              cargo test --locked --test "$test_target" -- --test-threads=1
-            done
-          ' > "$log" 2>&1 || status=$?
-          cat "$log"
-          if [ "$status" = 124 ]; then
-            echo "::error::Rust export, documentation, and integration tests exceeded 45 minutes."
-          fi
-          exit "$status"
+          # The same tested guard as the shards
+          # (scripts/ci/run-guarded.mjs), at the 45-minute deadline this
+          # pass has always had. The inner shell keeps `errexit` and
+          # `pipefail`, so a failing export or integration target aborts
+          # with that command's code; the guard reports it unchanged, or
+          # 124 with an annotation if the pass hangs.
+          node "$GITHUB_WORKSPACE/scripts/ci/run-guarded.mjs" \
+            --minutes 45 \
+            --kill-grace-seconds 120 \
+            --log cargo-nonshard-tests.log \
+            --label "Rust export, documentation, and integration tests" \
+            -- bash -euo pipefail -c '
+              cargo test --locked --lib export_bindings -- --test-threads=1
+              cargo test --locked --doc -- --test-threads=1
+              for test_file in tests/*.rs; do
+                test_target="${test_file##*/}"
+                test_target="${test_target%.rs}"
+                cargo test --locked --test "$test_target" -- --test-threads=1
+              done
+            '
         working-directory: src-tauri
 
       # The shards have always uploaded their log; this job did not, so a hang
@@ -555,15 +646,23 @@ jobs:
   # class (#149 ??? bytes emitted but never reach xterm.js) had no
   # pre-merge gate. The job installs Chromium, runs only the
   # `verify-smoke` Playwright project, and stays well under 5 minutes.
-  # Intentionally has no `needs` ??? verify-smoke is a lightweight frontend
-  # test with a mock backend; gating it on any upstream job destroys the
-  # fast feedback loop for a nothing-in-common dependency. It also doesn't
+  # Its only `needs` is the change-scope job, which costs a few seconds
+  # and lets a Rust-only pull request skip a browser test with nothing to
+  # test; gating it on any upstream *test* job would destroy the fast
+  # feedback loop for a nothing-in-common dependency. It also doesn't
   # gate `platform-smoke` (the chromium project is far slower, depends on a
   # running buildmesh.exe, and stays a separate local-only contract per
   # CLAUDE.local.md).
   verify-smoke:
     name: Verify-smoke (Linux)
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    needs: changes
+    # Pushes and pull requests, as before (the weekly schedule still skips
+    # it), and on pull requests only when the diff did not rule frontend
+    # changes out: a skipped required check counts as satisfied, so a
+    # Rust-only pull request reports this check green without booting a
+    # browser it has nothing to test. An empty output after a failed
+    # change-scope job is unknown, and unknown runs the browser.
+    if: (github.event_name == 'push' || github.event_name == 'pull_request') && needs.changes.outputs.frontend != 'false'
     runs-on: ubuntu-latest
 
     steps:
@@ -608,17 +707,23 @@ jobs:
 
   # Compiles and links the real Tauri app on the two remaining hosts, including
   # the frontend `beforeBuildCommand`, without spending time or storage on
-  # transient installers. Starts at t=0 alongside `quality` — it consumes
-  # nothing from it — so a queue delay on the frontend gate no longer pushes
-  # these required checks off the end of the run.
+  # transient installers. Not a merge gate: the ruleset's required checks are
+  # Quality, Rust tests + TS bindings, and Verify-smoke (see
+  # docs/development/releasing.md), so paying for two cold cross-OS builds on
+  # every pull request buys no gating power - the Linux compile in `rust-build`
+  # covers the merge. The cross-OS signal still matters where it is cheap to
+  # act on: pushes to main (the post-merge `light` profile still runs these),
+  # the tagged release SHA (release.yml invokes this workflow as a push event),
+  # and manual dispatches. The weekly schedule keeps skipping them in favor of
+  # `Weekly package smoke`, which builds installers on all three platforms.
   platform-smoke:
     name: Platform smoke (${{ matrix.os }})
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     env:
       # No debug symbols in the smoke binary — it proves the app compiles and
       # links, and the ConPTY test reads no symbols. Roughly halves the Windows
-      # link, which is on the per-PR critical path.
+      # link, which is the slow part of this post-merge job.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
     # A failure on one operating system must not hide a regression on the

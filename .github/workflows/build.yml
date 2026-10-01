@@ -34,6 +34,15 @@ jobs:
   verify:
     name: Verification
     uses: ./.github/workflows/verify.yml
+    with:
+      # Push runs to main are the post-merge signal: profile `light` skips the
+      # Rust graph, because the merge gate already ran it against the same
+      # commit through the pull request and main moves several times a day.
+      # `quality`, `verify-smoke`, and both `platform-smoke` jobs still run.
+      # Pull requests, the weekly schedule, manual dispatches, and release
+      # tags get `full`. Required checks are only evaluated on pull-request
+      # runs, which are therefore always full.
+      profile: ${{ github.event_name == 'push' && 'light' || 'full' }}
 
   wsl-profile-smoke:
     name: WSL Codex profile contract (opt-in)
@@ -77,19 +86,7 @@ jobs:
 
       - name: Install Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            curl \
-            file \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libssl-dev \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
-            patchelf \
-            wget
+        uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Node.js
         uses: actions/setup-node@v7

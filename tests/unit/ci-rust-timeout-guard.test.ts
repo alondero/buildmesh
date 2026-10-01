@@ -1,19 +1,23 @@
 /**
- * The Rust test steps bound themselves with an in-shell `timeout`
- * (issue #1961). That bound only ends the *step* if nothing sits between the
- * test and the shell holding the step open. It used to run
- * `cargo test ... 2>&1 | tee log`, and `timeout` signals the child's process
- * group -- which a test's descendant can leave, while still holding the pipe's
- * write end. `tee` then never sees EOF, so the step outlives the guard meant to
- * end it: run 36531715263 lost the `services` shard that way, about 45 minutes
- * with no step conclusion and no log, because a cancelled job flushes no log
- * either.
+ * The Rust test steps bound themselves with a deadline (issue #1961). The
+ * original in-shell `timeout ... cargo test ... 2>&1 | tee log` guard only
+ * ended the *step* if nothing sat between the test and the shell holding the
+ * step open: a test's descendant can leave the process group while still
+ * holding the pipe's write end, so `tee` never sees EOF and the step outlives
+ * the guard -- run 36531715263 lost the `services` shard that way, about 45
+ * minutes with no step conclusion and no log, because a cancelled job flushes
+ * no log either.
  *
- * These assertions read the workflow text and pin the shape that makes the
- * guard real: the guarded command writes its log by redirection, nothing pipes
- * it, the exit status is still propagated, and the log path still matches what
- * an `if: always()` upload step expects, so a killed shard leaves evidence
- * behind rather than a warning.
+ * The guard now lives in scripts/ci/run-guarded.mjs (unit-tested in
+ * tests/agent-infra/run-guarded.test.mjs): it streams output into the step log
+ * while appending to the file the upload preserves, kills the command's whole
+ * process tree at the deadline, and never waits on the output pipes after the
+ * kill. These assertions read the workflow text and pin the contract that
+ * keeps the guard real at the workflow level: the step invokes that tested
+ * guard exactly once with the deadline the release notes document, nothing
+ * pipes or swallows the command, and the log the guard writes is exactly what
+ * the `if: always()` upload collects, so a killed shard leaves evidence behind
+ * rather than a warning.
  */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -89,18 +93,18 @@ function jobBlock(jobId: string): string {
 }
 
 /**
- * The file the guarded command writes into, resolving a `log=` variable so the
- * assertion is about the path rather than the spelling of the redirect.
+ * The file the guard appends to, read from the `--log` flag it passes to
+ * run-guarded.mjs rather than from shell redirection (the guard does the
+ * writing now).
  */
 function logFile(script: string): string {
-  const literal = script.match(/>\s*"?([^\s"'>]+\.log)"?\s*2>&1/);
-  if (literal) return literal[1];
-  const viaVariable = script.match(/>\s*"\$(\w+)"\s*2>&1/);
-  expect(viaVariable, 'the guarded command does not redirect stdout+stderr into a log file').not.toBeNull();
-  const name = viaVariable?.[1] ?? '';
-  const assignment = script.match(new RegExp(`^\\s*${name}=("[^"]+"|\\S+)$`, 'm'));
-  expect(assignment, `the redirect target \`${name}\` is never assigned a path`).not.toBeNull();
-  return (assignment?.[1] ?? '').replace(/^"|"$/g, '');
+  // Quoted when the name embeds a `${{ ... }}` expression (spaces inside),
+  // bare otherwise; either way it must end in `.log`.
+  const flag = script.match(/--log\s+(?:"([^"]+\.log)"|(\S+\.log))/);
+  expect(flag, 'the guarded step passes no `--log <file>.log` to run-guarded.mjs').not.toBeNull();
+  const name = flag?.[1] ?? flag?.[2] ?? '';
+  expect(name, 'the guard log does not end in `.log`').toMatch(/\.log$/);
+  return name;
 }
 
 const shard = runScript('Run the ${{ matrix.shard.label }} tests');
@@ -111,11 +115,12 @@ const guards = [
   { job: 'rust-bindings', script: nonShard, stepMinutes: 45 },
 ];
 
-describe.each(guards)('$job timeout guard', ({ script }) => {
+describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
   it('does not pipe the guarded test command', () => {
     // The pipe is the bug: a descendant holding the write end keeps `tee`
-    // waiting after `timeout` has already killed the test, so the guard ends
-    // nothing.
+    // waiting after the guard has already killed the test, so the guard ends
+    // nothing. run-guarded.mjs streams the output itself; the step shell must
+    // not reintroduce a pipeline around it.
     const shell = shellLines(script);
     expect(shell).not.toMatch(/\|\s*tee\b/);
     expect(shell).not.toContain('PIPESTATUS');
@@ -125,33 +130,26 @@ describe.each(guards)('$job timeout guard', ({ script }) => {
     expect(shell).not.toMatch(/^\s*set -o pipefail$/m);
   });
 
-  it('writes the log by redirection so the guard can end the step', () => {
-    expect(script).toMatch(/timeout --kill-after=/);
-    expect(logFile(script)).toMatch(/\.log$/);
+  it('runs the command as one invocation of the tested guard at the documented deadline', () => {
+    // GitHub runs a `run:` block under `bash -e`, so a single invocation's
+    // exit status is the step's exit status: whatever run-guarded.mjs decides
+    // (child code, 124 on the deadline, 127 on ENOENT) reaches the job result
+    // with nothing in between to swallow it. A second command, a pipe, or a
+    // `|| true` in the step shell would break that chain the same way the old
+    // `set -e` interaction broke the inline `timeout` annotation path.
+    const shell = shellLines(script);
+    expect(
+      shell.match(/run-guarded\.mjs/g),
+      'the step must invoke scripts/ci/run-guarded.mjs exactly once',
+    ).toHaveLength(1);
+    expect(shell).toMatch(new RegExp(`--minutes ${stepMinutes}\\b`));
+    expect(shell).toMatch(/--kill-grace-seconds \d+/);
+    // The guarded command itself, after the `--` separator.
+    expect(shell).toMatch(/-- (cargo|bash)\b/);
+    expect(shell).not.toMatch(/\|\|\s*true/);
   });
 
-  it('captures the status without letting errexit skip the failure path', () => {
-    // GitHub runs a `run:` block under `bash -e`, so a bare `timeout` that
-    // fails ends the step right there. The status capture, the `cat`, and the
-    // 124 annotation after it would never run, and a hung shard would fail
-    // with an empty step log and no explanation. Consuming the guarded
-    // command's own failure with `||` keeps those lines reachable.
-    const guard = script.indexOf('timeout --kill-after=');
-    expect(guard, 'the guarded command is not wrapped in `timeout`').toBeGreaterThan(-1);
-    const initialised = script.indexOf('status=0');
-    expect(
-      initialised,
-      '`status` is never initialised, so a passing run reaches `exit` with an empty argument',
-    ).toBeGreaterThan(-1);
-    expect(initialised, '`status` is initialised after the guarded command runs').toBeLessThan(guard);
-    expect(
-      script.indexOf('|| status=$?'),
-      'the guarded command does not consume its own failure with `|| status=$?`, so `bash -e` ends the step before the status is captured',
-    ).toBeGreaterThan(guard);
-    expect(script).toContain('exit "$status"');
-  });
-
-  it('uploads the log it wrote, including after a kill', () => {
+  it('writes the log that an always() upload collects, including after a kill', () => {
     // `working-directory: src-tauri` is where the log lands; an upload step
     // addresses it from the repository root. If the two names drift, or no
     // upload step exists at all, a hung step leaves no retrievable evidence.
@@ -164,7 +162,8 @@ describe.each(guards)('$job timeout guard', ({ script }) => {
 
 describe.each(guards)('$job bounds', ({ job, script, stepMinutes }) => {
   it('keeps the in-step guard the release notes document', () => {
-    expect(script).toMatch(new RegExp(`timeout --kill-after=\\S+ ${stepMinutes}m\\b`));
+    expect(script).toContain('scripts/ci/run-guarded.mjs');
+    expect(script).toMatch(new RegExp(`--minutes ${stepMinutes}\\b`));
   });
 
   it('keeps a job-level backstop above the in-step guard', () => {

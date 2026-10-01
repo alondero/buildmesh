@@ -52,8 +52,11 @@ cargo test               # Rust unit tests (run inside src-tauri/)
 
 On every pull request, CI runs the required checks: the static agent/docs/lint
 gates, the frontend build and bundle budget, the vitest unit and integration
-suites, the Rust suite, the `verify-smoke` Playwright project, and the Windows
-and macOS platform smoke builds. It does **not** run the full local Playwright
+suites and the `verify-smoke` Playwright project whenever the diff touches
+frontend code, and the Rust suite whenever it touches Rust. The Windows and
+macOS platform smoke builds are not part of this — they are post-merge signals
+that run on pushes to `main`, release tags, and manual dispatches. CI does
+**not** run the full local Playwright
 suite that `npm run test:ci` triggers — that `chromium` project needs a running
 app on :1991 and is a local contract check, not a PR gate. What each required
 check proves is listed in
