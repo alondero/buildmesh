@@ -29,6 +29,16 @@ impl AgentProvider for AnthropicAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--print", "--output-format", "text", "--no-session-persistence", "--tools=", "--disallowedTools=mcp__*"].map(str::to_owned).to_vec();
+        let mut recipe = BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::Stdout);
+        recipe.capability.supports_provider_routing = true;
+        recipe.env_remove = crate::agent::provider::CLAUDE_BACKEND_ENV_VARS.iter().map(|key| (*key).to_owned()).collect();
+        Some(recipe)
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }

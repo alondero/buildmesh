@@ -4,6 +4,81 @@ use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
 use crate::env::{with_env_vars, ENV_LOCK};
 use crate::models::AgentNode;
 
+#[test]
+fn naming_accepts_native_codex_launch_configuration() {
+    let prefs = crate::preferences::AppPreferences::default();
+    let plan = crate::preferences::launch_configurations::capture(
+        &prefs,
+        "codex",
+        &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    ).unwrap();
+    let result = naming_backend_env_from_plan(plan, &prefs);
+    assert!(result.is_ok(), "native Codex supports background inference: {:?}", result.err());
+}
+
+#[tokio::test]
+#[ignore = "requires an installed and authenticated harness; set BUILDMESH_BACKGROUND_HARNESS"]
+async fn live_background_inference() {
+    let harness = std::env::var("BUILDMESH_BACKGROUND_HARNESS").expect("select the live harness explicitly");
+    let prefs = crate::preferences::AppPreferences::default();
+    let plan = crate::preferences::launch_configurations::capture(
+        &prefs, &harness, &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    ).unwrap();
+    let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
+    let slug = summarize_and_rename_with(
+        0, "The user asked to fix background naming. Reply only with fix-background-naming.", launch,
+    ).await.unwrap();
+    assert_eq!(slug, "fix-background-naming");
+}
+
+#[tokio::test]
+async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join(if cfg!(windows) { "naming.ps1" } else { "naming.sh" });
+    let args_file = directory.path().join("args.txt");
+    if cfg!(windows) {
+        std::fs::write(&script, format!(
+            "$promptText = [Console]::In.ReadToEnd()\n\
+             if (-not $promptText.Contains('Terminal log to summarize:')) {{ exit 9 }}\n\
+             if (-not $promptText.Contains('fix background naming')) {{ exit 8 }}\n\
+             if ($env:OPENAI_API_KEY -or $env:OPENAI_BASE_URL -or $env:BUILDMESH_SESSION_ID) {{ exit 7 }}\n\
+             [IO.File]::WriteAllLines({}, [string[]]$args)\n\
+             $index = [Array]::IndexOf([object[]]$args, '--output-last-message')\n\
+             [IO.File]::WriteAllText($args[$index + 1], 'fix-background-naming')\n\
+             [Console]::Out.WriteLine('wrong-stdout-answer')\nexit 0\n",
+            crate::env::powershell_literal(&args_file.to_string_lossy()),
+        )).unwrap();
+    } else {
+        std::fs::write(&script, format!(
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *'Terminal log to summarize:'*'fix background naming'*) ;; *) exit 9;; esac\n\
+             [ -z \"$OPENAI_API_KEY$OPENAI_BASE_URL$BUILDMESH_SESSION_ID\" ] || exit 7\n\
+             printf '%s\\n' \"$@\" > {}\nwhile [ \"$#\" -gt 0 ]; do\n\
+             if [ \"$1\" = '--output-last-message' ]; then shift; printf fix-background-naming > \"$1\"; break; fi\n\
+             shift\ndone\nprintf wrong-stdout-answer\n",
+            shell_words::quote(&args_file.to_string_lossy()),
+        )).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let prefs = crate::preferences::AppPreferences::default();
+    let mut plan = crate::preferences::launch_configurations::capture(
+        &prefs, "codex", &crate::preferences::launch_configurations::LaunchOverrides {
+            model: Some("gpt-6-luna".into()), effort: Some("low".into()), extra_args: None,
+        },
+    ).unwrap();
+    plan.harness.executable = Some(script);
+    let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
+    assert_eq!(summarize_and_rename_with(0, "fix background naming", launch).await.unwrap(), "fix-background-naming");
+    let args = std::fs::read_to_string(args_file).unwrap();
+    let args: Vec<_> = args.lines().collect();
+    assert!(args.windows(2).any(|pair| pair == ["--model", "gpt-6-luna"]));
+    assert!(args.contains(&"model_reasoning_effort=\"low\""));
+    assert!(args.contains(&"--ephemeral"));
+    assert_eq!(args.last(), Some(&"-"));
+}
+
 /// Open the buffering gate for a node so `on_output` writes immediately.
 /// Real code opens the gate via `should_trigger_rename`; tests use this
 /// to simulate "the agent has already had at least one turn".
@@ -1642,11 +1717,11 @@ fn resolve_claude_binary_error_does_not_mislead_to_settings() {
 /// `session_naming.rs:2377`.
 #[test]
 fn summarize_and_rename_uses_resolved_claude_path_not_literal() {
-    let source = include_str!("engine.rs");
+    let source = include_str!("../agent/background.rs");
 
     // Pull out the body of `fn summarize_and_rename_with(..)` by
     // brace-counting so nested closures don't false-match.
-    let sig = "async fn summarize_and_rename_with(";
+    let sig = "fn command(";
     let sig_idx = source
         .find(sig)
         .expect("summarize_and_rename_with must exist");

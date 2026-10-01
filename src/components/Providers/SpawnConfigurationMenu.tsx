@@ -11,11 +11,12 @@ function belongsToHarness(configuration: SpawnConfiguration, harnessId: string):
   return (configuration.harness_id ?? configuration.spawn_option_id.split(':')[0]) === harnessId;
 }
 
-export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, onSelect, onClose, onDismiss, onEditingChange }: {
+export function SpawnConfigurationMenu({ option, anchor, keyboard, configurationRows, decorate, onSelect, onClose, onDismiss, onEditingChange }: {
   option: SpawnOption;
   anchor: HTMLElement;
   keyboard: boolean;
   configurationRows: SpawnOption[];
+  decorate?: (option: SpawnOption) => SpawnOption;
   onSelect: (providerId: string, altKey: boolean, configurationId?: string) => void;
   onClose: () => void;
   onDismiss: () => void;
@@ -132,7 +133,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
       replaceConfiguration(saved, savedRow?.harness_id);
       setUnavailableById((previous) => {
         const next = new Map(previous);
-        if (savedRow) next.set(saved.id, savedRow.unavailable_reason);
+        if (savedRow) next.set(saved.id, (decorate?.(savedRow) ?? savedRow).unavailable_reason);
         else next.delete(saved.id);
         return next;
       });
@@ -170,6 +171,7 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
     { id: 'new', kind: 'new' as const },
   ];
   const menuIndex = new Map(menuEntries.map((entry, index) => [entry.id, index]));
+  const defaultsUnavailable = (decorate?.(option) ?? option).unavailable_reason;
   return createPortal(
     <div
       ref={panel}
@@ -236,11 +238,13 @@ export function SpawnConfigurationMenu({ option, anchor, keyboard, configuration
           if (draftSession.current === session) cancelDraft();
         } : undefined} /> : (
         <div role="menu" aria-label={`${option.label} configurations`}>
-          <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass} onClick={(e) => onSelect(option.id, e.altKey)}>Spawn with defaults</button>
+          <button type="button" role="menuitem" data-menu-index={menuIndex.get('defaults')} tabIndex={activeMenuIndex === menuIndex.get('defaults') ? 0 : -1} className={menuClass}
+            aria-disabled={Boolean(defaultsUnavailable)} title={defaultsUnavailable}
+            onClick={(e) => { if (!defaultsUnavailable) onSelect(option.id, e.altKey); }}>Spawn with defaults</button>
           {!loaded && !error && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">Loading configurations…</p>}
           {loaded && configurations.length === 0 && <p role="presentation" className="px-3 py-1.5 text-xs text-text-muted">No saved configurations</p>}
           {configurations.map((value) => {
-            const unavailable = unavailableById.get(value.id);
+            const unavailable = unavailableById.get(value.id) ?? decorate?.({ ...option, id: value.id, configuration: value }).unavailable_reason;
             return <div key={value.id} role="presentation" className="flex">
               <button type="button" role="menuitem" data-menu-index={menuIndex.get(`configuration:${value.id}`)} tabIndex={activeMenuIndex === menuIndex.get(`configuration:${value.id}`) ? 0 : -1}
                 aria-disabled={Boolean(unavailable)} title={unavailable ?? undefined}

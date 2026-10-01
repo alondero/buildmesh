@@ -17,6 +17,7 @@ export interface GroupedProviderMenuProps {
    *  `resumable: true`). Applied before grouping so the harness header
    *  is hidden when *all* its rows are filtered out. */
   filter?: (provider: SpawnOption) => boolean;
+  decorate?: (provider: SpawnOption) => SpawnOption;
   /** Optional CSS class merged onto the root container. */
   className?: string;
   /**
@@ -32,7 +33,7 @@ export interface GroupedProviderMenuProps {
 /** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
  * opens capability-driven saved configurations. Pointer and keyboard share
  * the same active parent row. */
-export function GroupedProviderMenu({ providers, onSelect, filter, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
+export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
   const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && (
@@ -176,6 +177,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, className, on
         </div>
       ))}
       {submenu && <SpawnConfigurationMenu key={submenu.option.id} {...submenu}
+        decorate={decorate}
         configurationRows={configurationRows}
         onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
     </div>

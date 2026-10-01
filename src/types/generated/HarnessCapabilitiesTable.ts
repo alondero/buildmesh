@@ -80,6 +80,15 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": {
+        "max_prompt_bytes": 16000,
+        "prompt_input": {
+          "flag": "--print",
+          "kind": "argument"
+        },
+        "result_output": "stdout",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "allowed": [
           "low",
@@ -119,6 +128,14 @@ export const HARNESS_CATALOG = {
         "macos",
         "linux"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "stdout",
+        "supports_provider_routing": true
+      },
       "effort_control": {
         "allowed": [
           "low",
@@ -156,6 +173,7 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": null,
       "effort_control": {
         "allowed": [
           "none",
@@ -197,6 +215,14 @@ export const HARNESS_CATALOG = {
         "windows",
         "linux"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "last_message_file",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "allowed": [
           "none",
@@ -229,6 +255,14 @@ export const HARNESS_CATALOG = {
         "macos",
         "linux"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "result_json_lines",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "allowed": [
           "low",
@@ -265,6 +299,7 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": null,
       "effort_control": {
         "kind": "none"
       },
@@ -289,6 +324,7 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": null,
       "effort_control": {
         "kind": "none"
       },
@@ -313,6 +349,7 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": null,
       "effort_control": {
         "kind": "none"
       },
@@ -346,6 +383,15 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "flag": "--prompt-file",
+          "kind": "file"
+        },
+        "result_output": "stdout",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "allowed": [
           "none",
@@ -388,6 +434,15 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": {
+        "max_prompt_bytes": 16000,
+        "prompt_input": {
+          "flag": "--prompt",
+          "kind": "argument"
+        },
+        "result_output": "assistant_json_lines",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "kind": "none"
       },
@@ -418,6 +473,14 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "last_message_file",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "kind": "none"
       },
@@ -442,6 +505,7 @@ export const HARNESS_CATALOG = {
         "macos",
         "windows"
       ],
+      "background_inference": null,
       "effort_control": {
         "kind": "none"
       },
@@ -474,6 +538,14 @@ export const HARNESS_CATALOG = {
         "linux",
         "macos"
       ],
+      "background_inference": {
+        "max_prompt_bytes": null,
+        "prompt_input": {
+          "kind": "stdin"
+        },
+        "result_output": "open_code_json_lines",
+        "supports_provider_routing": false
+      },
       "effort_control": {
         "kind": "none"
       },
@@ -498,6 +570,7 @@ export const HARNESS_CATALOG = {
         "macos",
         "linux"
       ],
+      "background_inference": null,
       "effort_control": {
         "kind": "none"
       },

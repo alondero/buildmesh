@@ -528,8 +528,8 @@ pub(crate) fn classify_with_prompt(node_id: i64, launch: &super::classifier::Cla
     // No repository rules, tools, or hooks belong in a report classification task.
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let result = directory.path().join("verdict.txt");
-    let cmd = launch.command(directory.path(), &result)?;
-    let output = match run_classifier_command(cmd, prompt, std::time::Duration::from_secs(30)) {
+    let cmd = launch.command(directory.path(), &result, prompt)?;
+    let output = match run_classifier_command(cmd, launch.stdin_prompt(prompt), std::time::Duration::from_secs(30)) {
         Ok(output) => output,
         Err(error) => {
             tracing::warn!("circuit evaluator({node_id}): {error}");

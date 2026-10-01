@@ -89,6 +89,13 @@ impl AgentProvider for CommandCodeAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--print", "--output-format", "json", "--max-turns", "1", "--trust"].map(str::to_owned).to_vec();
+        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::ResultJsonLines))
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }

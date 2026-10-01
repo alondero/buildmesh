@@ -67,6 +67,7 @@ fn profile_row(profile: &crate::preferences::HarnessProfile) -> ProviderInfo {
         is_proxied: false,
         group_key: profile.id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
+        runtime: profile.runtime,
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
@@ -123,6 +124,7 @@ pub(super) fn provider_info_for_pairing(
         is_proxied: true,
         group_key: pairing.harness_id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
+        runtime: profiles.iter().find(|profile| profile.id == pairing.harness_id).and_then(|profile| profile.runtime),
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
@@ -685,6 +687,7 @@ mod tests {
             auto_resume_on_startup: false,
             requires_attention_hook: false,
             attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            background_inference: None,
             supports_passive_turn_watcher: false,
             produces_readable_transcript: false,
             supports_model_override: false,
@@ -713,6 +716,7 @@ mod tests {
             is_proxied: false,
             group_key: id.to_string(),
             capabilities: caps_all_false(id),
+            runtime: None,
             configurations: Vec::new(),
             configuration: None,
             unavailable_reason: None,
@@ -1100,6 +1104,7 @@ mod tests {
             is_proxied: true,
             group_key: harness_id.to_string(),
             capabilities: caps_all_false(harness_id),
+            runtime: None,
             configurations: Vec::new(),
             configuration: None,
             unavailable_reason: None,
@@ -1596,6 +1601,23 @@ mod tests {
             "Cursor's workspace JSONL transcript must enable archive resume"
         );
         assert!(info.capabilities.produces_readable_transcript);
+    }
+
+    #[test]
+    fn provider_info_carries_runtime_without_a_resolved_launch_plan() {
+        use crate::models::EnvType;
+        for (runtime, host, wire) in [
+            (EnvType::Wsl, Platform::Windows, "wsl"),
+            (EnvType::WindowsInterop, Platform::Linux, "windowsinterop"),
+            (EnvType::Windows, Platform::Windows, "windows"),
+        ] {
+            let mut profile = profile("custom-codex", "codex");
+            profile.runtime = Some(runtime);
+            let row = provider_info_for(&profile, host).unwrap();
+            assert!(row.configuration.is_none());
+            assert!(row.capabilities.background_inference.is_some());
+            assert_eq!(serde_json::to_value(row).unwrap()["runtime"], wire);
+        }
     }
 
     /// Negative companion to the previous test: the `harness` field must

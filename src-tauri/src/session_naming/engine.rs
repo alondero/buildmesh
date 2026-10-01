@@ -549,47 +549,23 @@ where
 /// `AppPreferences.naming_provider`). See [`naming_backend_env_with`] for
 /// the routing contract; this is the thin caller-friendly version that
 /// resolves via [`crate::preferences::resolve_provider_env`].
-pub(crate) struct NamingLaunch {
-    pub env: Vec<(String, String)>,
-    pub args: Vec<String>,
-    pub executable: Option<std::path::PathBuf>,
-}
+pub(crate) type NamingLaunch = crate::agent::background::BackgroundLaunch;
 
 pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String> {
     let prefs = crate::preferences::load()?;
     let plan = crate::preferences::launch_configurations::resolve(
         &prefs, provider, &Default::default())?;
-    naming_backend_env_from_plan(provider, plan, &prefs)
+    naming_backend_env_from_plan(plan, &prefs)
 }
 
 pub(crate) fn naming_backend_env_from_plan(
-    provider: &str,
     plan: crate::preferences::launch_configurations::ResolvedLaunchPlan,
     prefs: &crate::preferences::AppPreferences,
 ) -> Result<NamingLaunch, String> {
-    if crate::models::Provider::from_db_str(&plan.harness.harness) != crate::models::Provider::Anthropic {
-        return Err("This background task requires a Claude Code Launch Configuration".into());
-    }
-    if plan.harness.runtime == Some(crate::models::EnvType::Wsl)
-        || plan.harness.runtime == Some(crate::models::EnvType::WindowsInterop)
-    {
-        return Err("Background naming requires a host-native Launch Configuration".into());
-    }
-    let env = if let Some(route) = &plan.route {
-        let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
-            .ok_or("Provider account is missing")?;
-        crate::preferences::compatibility::surface_env(route.surface, route.base_url.as_deref(), account.api_key.as_deref(), &route.model_tiers)
-    } else if plan.harness.harness == "anthropic" {
-        naming_backend_env_with("anthropic", |_| Vec::new())
-    } else {
-        naming_backend_env_with(provider, |_| Vec::new())
-    };
-    let adapter = crate::models::Provider::Anthropic.adapter();
-    let mut args = Vec::new();
-    if let Some(model) = &plan.model { args.extend(adapter.model_args(model)); }
-    if let Some(effort) = &plan.effort { args.extend(adapter.effort_args(effort)); }
-    if let Some(extra) = &plan.extra_args { args.extend(adapter.extra_args_args(extra).map_err(|e| e.to_string())?); }
-    Ok(NamingLaunch { env, args, executable: plan.harness.executable })
+    let legacy_haiku = plan.route.is_none() && plan.harness.harness == "anthropic";
+    let mut launch = crate::agent::background::resolve_plan(plan, prefs)?;
+    if legacy_haiku { launch.env.extend(naming_backend_env_with("anthropic", |_| Vec::new())); }
+    Ok(launch)
 }
 
 pub(super) async fn summarize_and_rename_with(
@@ -613,49 +589,20 @@ pub(super) async fn summarize_and_rename_with(
         clean_buffer.len()
     );
 
-    // Compose the full prompt (instructions + terminal log) so Claude Code's
-    // `--print` mode can read it from stdin. `claude --print` reads the user
-    // message from stdin when no positional arg is given — passing both an
-    // arg AND piping stdin is implementation-defined across Claude Code
-    // versions, so we use the stdin-only mode for reliability.
+    // Each adapter owns prompt transport and final-answer extraction.
     let full_input = format!("{}\n\nTerminal log to summarize:\n{}", prompt, clean_buffer);
-
-    // Resolve `claude` to an absolute path before spawning — a direct
-    // `Command::new("claude")` would rely on the buildmesh process's
-    // inherited `PATH` (Windows: captured at process start; stale if
-    // Claude Code was installed after launch).
-    let claude_path = match backend_env.executable.clone() {
-        Some(path) => path,
-        None => resolve_claude_binary()?,
-    };
-    tracing::info!(
-        "session_naming: resolved claude binary to {}",
-        claude_path.display()
-    );
+    let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let result = directory.path().join("name.txt");
     let mut cmd: tokio::process::Command =
-        crate::process_util::command_no_window(&claude_path).into();
+        backend_env.command(directory.path(), &result, &full_input)?.into();
     // Caller (on_turn_with, line 734) is `tauri::async_runtime::spawn` and this
     // future is wrapped in a 30s `tokio::time::timeout` (line below) — both
     // cancel the awaiter, not the child, so without this flag a claude leak
     // accumulates up to MAX_RENAME_ATTEMPTS times per node (gh688).
     cmd.kill_on_drop(true);
-    cmd.args(["--print"]);
-    cmd.args(&backend_env.args);
-
-    // Clear any inherited claude backend env (cwrap `unset` parity) so a value
-    // exported in buildmesh's own environment can't override the resolved
-    // backend below — then inject the env chosen by `naming_backend_env`
-    // (per-node provider account, legacy `MINIMAX_API_KEY`, or built-in
-    // Anthropic subscription when `backend_env` is empty). `naming_backend_env`
-    // replaces the unconditional `minimax_backend_env()` injection that
-    // #824 documented: previously this site routed every node through MiniMax
-    // regardless of the node's own provider, and silently failed for any
-    // user without a `MINIMAX_API_KEY`.
-    for k in crate::agent::provider::CLAUDE_BACKEND_ENV_VARS {
-        cmd.env_remove(k);
-    }
-    for (k, v) in &backend_env.env {
-        cmd.env(k, v);
+    #[cfg(unix)] {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
     }
 
     let mut child = cmd
@@ -664,12 +611,13 @@ pub(super) async fn summarize_and_rename_with(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn CLI: {}", e))?;
+    let _process_guard = child.id().map(crate::agent::background::BackgroundProcessGuard::new);
 
     let output = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             stdin
-                .write_all(full_input.as_bytes())
+                .write_all(backend_env.stdin_prompt(&full_input).as_bytes())
                 .await
                 .map_err(|e| format!("failed to write prompt+buffer to CLI: {}", e))?;
         }
@@ -682,14 +630,15 @@ pub(super) async fn summarize_and_rename_with(
     .map_err(|_| "CLI timed out after 30s".to_string())??;
 
     if !output.status.success() {
+        let diagnostic = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
         return Err(format!(
             "CLI exited with status {}: {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            crate::secret_scrubber::SecretScrubber::scrub(&String::from_utf8_lossy(diagnostic)).chars().take(2000).collect::<String>()
         ));
     }
 
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let raw = backend_env.final_output(String::from_utf8_lossy(&output.stdout).into_owned(), &result)?;
     let slug = slug_with_retry(&raw)?;
     Ok(slug)
 }

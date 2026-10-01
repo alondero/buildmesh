@@ -114,6 +114,54 @@ Muse, and Cline. Kimi Code and Freebuff support process resume
 but are **not** resumable from the archive picker because they have no
 transcript reader. DeepSeek Harness and Terminal do not resume at all.
 
+## Background inference
+
+`background_inference` is nullable. A non-null descriptor is generated from
+the adapter's `background_recipe`, which must fulfill all of these requirements:
+
+- Accept one supplied prompt without a terminal, using its declared input transport.
+- Return a final assistant answer through a declared channel that excludes progress,
+  reasoning, and tool results.
+- Exit after the request without requiring approval, questions, or terminal input.
+- Honor the selected native login or an explicitly supported provider route.
+
+The caller supplies an isolated temporary directory and a 30-second deadline;
+naming retains cancellation cleanup, and classifiers retain bounded pipe readers
+and process-tree cleanup. Interactive prefill and attention hooks alone do not
+establish background support. This capability concerns the inference backend;
+the node being named still needs a turn signal to trigger naming.
+
+| Harness | Prompt input | Final answer | Provider routing |
+|---|---|---|---|
+| Claude Code | stdin (`--print`) | text stdout | Native or configured route |
+| Codex | stdin (`exec -`) | `--output-last-message` file | Native only |
+| OpenCode | stdin (`run --format json`) | final text event | Native only |
+| Kimi Code | `--prompt` argument | final assistant JSON message | Native only |
+| Grok Code | `--prompt-file` | plain stdout | Native only |
+| Antigravity | `--print` argument | text stdout | Native only |
+| Command Code | stdin (`--print`) | JSON result event | Native only |
+| MiniMax Code | stdin (`exec --input -`) | `--output-last-message` file | Native only |
+
+Cursor, Cline, Freebuff, Meta Muse, DeepSeek Harness, and Terminal currently
+advertise no background recipe. This does not imply their CLI lacks a headless
+mode: Buildmesh requires a validated recipe and final-answer extractor before
+offering one. New adapters inherit unavailable background support by default.
+
+Saved model and effort settings use the existing capability mask. Extra CLI
+arguments, WSL, and Windows Interop selections are refused for background work;
+unsupported provider routing is refused without falling back to another login.
+Both the auto-naming and Circuit-classifier settings pickers consume the same
+descriptor, including custom profiles backed by a supported adapter.
+Argument transports (Kimi Code and Antigravity) advertise a 16,000-byte prompt
+limit to stay below Windows command-line limits; larger reports fail explicitly.
+Stdin and prompt-file transports do not have this argument-size restriction.
+
+Sources for the recipes: installed CLI help (Claude Code 2.1.286, Codex 0.159.3,
+OpenCode 1.18.3, Kimi Code 0.27.0, Grok Code 1.0.44, Command Code 1.72.4),
+[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference),
+[OpenCode run implementation](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/cli/cmd/run.ts),
+and [Kimi Code command reference](https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html).
+
 ## Attention hooks
 
 Non-boolean detail for the nine harnesses with a native attention hook
