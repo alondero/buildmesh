@@ -32,6 +32,7 @@ pub(crate) mod test_support;
 pub mod security;
 pub mod compatibility;
 pub mod evaluator;
+pub(crate) mod classifier;
 pub mod finish;
 pub(crate) mod delivery;
 pub(crate) mod verification;

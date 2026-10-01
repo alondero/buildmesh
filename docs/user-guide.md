@@ -79,9 +79,16 @@ across all meshes; leave it empty for no global cap, or use 0 to pause new launc
 Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
 Settings > Providers > **Circuit classifier provider** selects the background
-Claude Code launch configuration used to classify reports. It defaults to Claude
-Code and is independent of agent and reviewer defaults; select a host-native
-Claude Code configuration, including a compatible provider route if needed.
+launch configuration used to classify reports. It defaults to Claude Code and
+is independent of agent and reviewer defaults. Select host-native Claude Code
+(including a compatible provider route) or native Codex. Saved model and effort
+settings apply; for example, save a Codex configuration with model `gpt-6-luna`
+and effort `low`, then select it here. Codex uses its existing login and supports
+model and effort settings without extra CLI arguments.
+
+After five unsuccessful classifications, the step remains **Unverified** with
+the last failure displayed. Automatic retries stop, including after an app
+restart. Restore the configured backend, then use **Recheck evidence** to retry.
 
 Issue-driven review flows prepare a draft pull request. Customize prompts and
 publication steps in the Circuit editor. The shared wrap-up template is stored in

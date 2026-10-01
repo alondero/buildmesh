@@ -764,6 +764,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
             crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         context.set(&format!("node.{}.wait.attempt", step.node_id), "");
         context.set(&format!("node.{}.evaluated_attempt", step.node_id), "");
+        context.set(&format!("node.{}.classifier_error.{}", step.node_id, step.attempt), "");
         context.set(
             &format!("node.{}.classifier_failures.{}", step.node_id, step.attempt),
             "0",

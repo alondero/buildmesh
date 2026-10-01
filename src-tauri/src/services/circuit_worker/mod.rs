@@ -396,7 +396,7 @@ pub fn start_circuit_worker(app: AppHandle) {
                 });
                 run_worker_pass("circuits:drive", || run_pass(&app));
                 run_worker_pass("circuits:watchdog", || {
-                    jobs::watchdog(app.clone());
+                    apply_quiet_classifier_failures(&app, jobs::watchdog(app.clone()));
                 });
                 // Issue #1793: reap piloted nodes stuck `running` with no
                 // session identity or readable report. Self-throttled, so this
@@ -2011,7 +2011,7 @@ fn observe_gates(
                     events.push(CircuitEvent::ContinuationRetry { node_id: step.node_id.clone(), attempt: step.attempt });
                     continue;
                 }
-                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn, binding, observation_blocker }) =
+                if let Some(ClassifiedTurn { agent_node_id, classification, output, continuation, waiting_for_a_finished_turn, binding, observation_blocker, classifier_error }) =
                     jobs::classify(active, view, step)
                 {
                     if let Some(blocker) = observation_blocker {
@@ -2046,6 +2046,9 @@ fn observe_gates(
                             },
                         );
                     }
+                    if let Some(error) = classifier_error {
+                        events.push(CircuitEvent::ClassifierErrorObserved { node_id: step.node_id.clone(), attempt: step.attempt, error });
+                    }
                     events.push(CircuitEvent::TurnClassified { binding,
                         node_id: step.node_id.clone(),
                         classification,
@@ -2069,6 +2072,7 @@ fn observe_gates(
 /// Classify a yielded agent's report once per gate attempt. A readable
 /// transcript also recovers turns produced before restart restored buffering.
 struct ClassifiedTurn {
+    classifier_error: Option<String>,
     observation_blocker: Option<crate::circuit::observation::CircuitObservationBlocker>,
     binding: Option<crate::circuit::stepper::ClassificationBinding>,
     agent_node_id: i64,
@@ -2091,6 +2095,7 @@ fn classify_step_turn(
     if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
         return None;
     }
+    if classifier_budget_exhausted(view, node_id) { return None; }
     let probe_key = format!("report:{}:{node_id}:{}", active.run.id, step.attempt);
     // A bounded pull runs even without PTY bytes or a correct display status.
     // Polling evidence does not spend classifier budget.
@@ -2111,6 +2116,7 @@ fn classify_step_turn(
         Ok(Some(candidate)) => candidate,
         Ok(None) => return None,
         Err(blocker) => return Some(ClassifiedTurn {
+            classifier_error: None,
             observation_blocker: Some(blocker), agent_node_id, classification: None,
             binding: None, output: String::new(), continuation: None, waiting_for_a_finished_turn: false,
         }),
@@ -2120,11 +2126,18 @@ fn classify_step_turn(
     let changed_revision = view.context.get(&format!("node.{node_id}.evaluated_report_revision"))
         .is_some_and(|previous| previous != binding.report_revision);
     if !changed_revision && !should_classify_report(view, node_id, status, &output, since_evaluation_ms) { return None; }
+    let classifier_error = std::cell::RefCell::new(None);
     let classify = |prompt: &str| {
-        let preferences = crate::preferences::load().ok()?;
-        let provider = classifier_provider(&preferences);
-        let backend = crate::session_naming::naming_backend_env(provider).ok()?;
-        evaluator::classify_with_prompt(agent_node_id, &backend, prompt)
+        let result = (|| {
+            let preferences = crate::preferences::load()?;
+            let provider = classifier_provider(&preferences);
+            let backend = crate::circuit::classifier::resolve(provider).map_err(|error| format!("{provider}: {error}"))?;
+            evaluator::classify_with_prompt(agent_node_id, &backend, prompt).map_err(|error| format!("{provider}: {error}"))
+        })();
+        match result {
+            Ok(verdict) => Some(verdict),
+            Err(error) => { *classifier_error.borrow_mut() = Some(error); None }
+        }
     };
     let readiness = reviewer_readiness(view, node_id, status, &output, classify);
     evaluator::note_evaluation(agent_node_id);
@@ -2148,7 +2161,8 @@ fn classify_step_turn(
         fresh.then(|| stamp.map(|stamp| (stamp, binding.report_revision.clone(), binding.input_guard.input_stamp.clone()))).flatten()
     } else { None };
     tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {classification:?}", active.run.id);
-    Some(ClassifiedTurn { observation_blocker: None, agent_node_id, classification, output, continuation,
+    Some(ClassifiedTurn { classifier_error: classification.is_none().then(|| classifier_error.into_inner()).flatten(),
+        observation_blocker: None, agent_node_id, classification, output, continuation,
         waiting_for_a_finished_turn: readiness.parks(), binding: Some(binding) })
 }
 
@@ -2399,6 +2413,7 @@ fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, 
     if view.state != RunState::Running || !matches!(step.status, StepStatus::Running | StepStatus::Unverified) {
         return false;
     }
+    if classifier_budget_exhausted(view, node_id) { return false; }
     // The same report may first be observed on a watchdog/permission yield,
     // then on the real completion hook. That new lifecycle fact must win
     // over a previously parked WORKING verdict, including after restart.
@@ -2423,6 +2438,12 @@ fn should_classify_report(view: &RunView, node_id: &str, status: SessionStatus, 
         return false;
     }
     true
+}
+
+fn classifier_budget_exhausted(view: &RunView, node_id: &str) -> bool {
+    view.step(node_id).is_some_and(|step| view.context
+        .get(&format!("node.{node_id}.classifier_failures.{}", step.attempt))
+        .and_then(|value| value.parse::<u32>().ok()).unwrap_or(0) >= crate::circuit::stepper::MAX_CLASSIFIER_FAILURES)
 }
 
 /// Run a DeterministicVerification command in the mesh directory and
@@ -3269,12 +3290,52 @@ fn recover_quiet_turn(
 /// Fast-tick pass: recover every quiet piloted node bound to a running
 /// circuit run. Readiness classification is throttled per agent and runs on
 /// this dedicated worker thread, outside any DB connection.
-fn lost_turn_watchdog_pass(app: &AppHandle) {
+struct QuietClassifierFailure {
+    active: db::ActiveCircuitRun,
+    target: jobs::RecoveryTarget,
+    agent: i64,
+    step: String,
+    attempt: i32,
+    evidence: QuietTurnEvidence,
+    error: String,
+}
+
+fn apply_quiet_classifier_failures(app: &AppHandle, failures: Vec<QuietClassifierFailure>) {
+    for failure in failures {
+        let permit = begin_circuit_effect_batch(failure.active.run.id);
+        failure.target.publish(&permit, &failure.active, || {
+            let Ok(node) = db::get_agent_node_by_id(failure.agent) else { return; };
+            if !quiet_turn_is_current(&failure.evidence, &QuietTurnEvidence {
+                lifecycle: db::agent_turn_stamp(failure.agent).ok().flatten(),
+                input: crate::agent::process::PROCESS_REGISTRY.input_stamp(failure.agent),
+                report: crate::coordinator::enrichment::assistant_report(&node).map(|report| report.revision),
+            }, crate::agent::process::PROCESS_REGISTRY.is_alive(&failure.agent),
+                crate::circuit::evaluator::millis_since_last_output(failure.agent), node.status) { return; }
+            let Some(run) = db::get_circuit_run(failure.active.run.id).ok().flatten() else { return; };
+            let (Ok(graph), Ok(mut context), Ok(steps)) = (
+                CircuitGraph::from_json(&failure.active.circuit_graph_json),
+                CircuitContext::from_json(&run.context_json), load_steps(run.id)) else { return; };
+            let Ok(revision) = db::circuit::evidence::observation_revision(&run) else { return; };
+            context.set("evidence.revision", revision.to_string());
+            let mut view = RunView { run_id: run.id, state: RunState::from_db_str(&run.state), graph, context, steps };
+            if !failure.target.matches(&view) || permit.is_cancelled() { return; }
+            let event = CircuitEvent::ClassifierUnavailable { node_id: failure.step, attempt: failure.attempt, error: failure.error };
+            match advance_and_persist_observed_event(&mut view, &event,
+                |view, transition| persist_transition_checked(run.id, view, transition)) {
+                Ok(_) => { let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: run.id, state: run.state }); }
+                Err(error) => tracing::warn!("circuits: could not record readiness classifier failure: {}", error.into_message()),
+            }
+        });
+    }
+}
+
+fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFailure> {
+    let mut failures = Vec::new();
     let runs = match db::list_active_circuit_runs() {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("circuits: watchdog could not list active runs: {}", e);
-            return;
+            return failures;
         }
     };
     for active in runs {
@@ -3348,6 +3409,9 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                     });
                 }) { continue; }
             }
+            // Native observation may recover a lifecycle, but an exhausted gate
+            // must not restart inference through the quiet-turn fallback.
+            if classifier_budget_exhausted(&view, &step.node_id) { continue; }
             let quiet_ms = crate::circuit::evaluator::millis_since_last_output(agent_node_id);
             if !should_check_quiet_turn(
                 crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
@@ -3379,12 +3443,19 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                 evaluator::has_turn_start(agent_node_id),
                 || evaluator::cleaned_turn_tail(agent_node_id),
             ) else { continue; };
+            let classifier_error = std::cell::RefCell::new(None);
             recover_quiet_turn(&output, |prompt| {
                 if recovery_permit.is_cancelled() { return None; }
-                let preferences = crate::preferences::load().ok()?;
-                let provider = classifier_provider(&preferences);
-                let launch = crate::session_naming::naming_backend_env(provider).ok()?;
-                evaluator::classify_with_prompt(agent_node_id, &launch, prompt)
+                let result = (|| {
+                    let preferences = crate::preferences::load()?;
+                    let provider = classifier_provider(&preferences);
+                    let launch = crate::circuit::classifier::resolve(provider).map_err(|error| format!("{provider}: {error}"))?;
+                    evaluator::classify_with_prompt(agent_node_id, &launch, prompt).map_err(|error| format!("{provider}: {error}"))
+                })();
+                match result {
+                    Ok(verdict) => Some(verdict),
+                    Err(error) => { *classifier_error.borrow_mut() = Some(error); None }
+                }
             }, || {
                 // Classification can take 30s. A hook, user input, or resumed
                 // output during that interval invalidates the quiet observation.
@@ -3407,8 +3478,13 @@ fn lost_turn_watchdog_pass(app: &AppHandle) {
                     }
                 });
             });
+            if let Some(error) = classifier_error.into_inner() {
+                failures.push(QuietClassifierFailure { active: active.clone(), target: recovery_target,
+                    agent: agent_node_id, step: step.node_id.clone(), attempt: step.attempt, evidence, error });
+            }
         }
     }
+    failures
 }
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
@@ -4513,6 +4589,28 @@ mod tests {
         view.context.set("node.finish_classifier.classification", "unavailable");
         assert!(!should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, "Finished.", Some(10_000)));
         assert!(should_classify_report(&view, "finish_classifier", SessionStatus::AwaitingInput, "Finished.", Some(60_001)));
+    }
+
+    #[test]
+    fn circuit_classifier_exhaustion_survives_restart_and_new_reports() {
+        let mut view = report_gate_view();
+        for _ in 0..5 {
+            advance(&mut view, &CircuitEvent::TurnClassified {
+                binding: None, node_id: "finish_classifier".into(), classification: None,
+                output: Some("Finished.".into()),
+            });
+        }
+        assert_eq!(view.step("finish_classifier").unwrap().status, StepStatus::Unverified);
+        view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
+        for status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
+            for output in ["Finished.", "New finished report."] {
+                assert!(!should_classify_report(&view, "finish_classifier", status, output, None),
+                    "an exhausted classifier must wait for an explicit recheck");
+            }
+        }
+        view.context.set("node.finish_classifier.classifier_failures.1", "0");
+        view.context.set("node.finish_classifier.evaluated_attempt", "");
+        assert!(should_classify_report(&view, "finish_classifier", SessionStatus::Ready, "Finished.", None));
     }
 
     #[test]

@@ -126,7 +126,7 @@ impl<T: Send + 'static> Pool<T> {
     }
 }
 
-enum ResultValue { Classification(Option<Box<ClassifiedTurn>>, Option<AgentFence>), Verification(Option<bool>), Watchdog }
+enum ResultValue { Classification(Option<Box<ClassifiedTurn>>, Option<AgentFence>), Verification(Option<bool>), Watchdog(Vec<super::QuietClassifierFailure>) }
 static JOBS: once_cell::sync::Lazy<Pool<ResultValue>> = once_cell::sync::Lazy::new(|| Pool::new(4));
 
 #[derive(PartialEq, Eq)]
@@ -158,12 +158,12 @@ pub(super) fn cancel_run(run_id: i64) {
     JOBS.retain(|key| key.run != run_id);
 }
 
-pub(super) fn watchdog(app: tauri::AppHandle) {
+pub(super) fn watchdog(app: tauri::AppHandle) -> Vec<super::QuietClassifierFailure> {
     let key = Key { run: -1, step: "watchdog".into(), attempt: 0, verification: false, argument: String::new() };
-    JOBS.poll(key, None, move |_| {
-        super::lost_turn_watchdog_pass(&app);
-        ResultValue::Watchdog
-    });
+    match JOBS.poll(key, None, move |_| ResultValue::Watchdog(super::lost_turn_watchdog_pass(&app))) {
+        Some(ResultValue::Watchdog(failures)) => failures,
+        _ => Vec::new(),
+    }
 }
 
 /// A watchdog observes a borrowed session but may publish only while its
@@ -187,7 +187,7 @@ impl RecoveryTarget {
         }
     }
 
-    fn matches(&self, view: &RunView) -> bool {
+    pub(super) fn matches(&self, view: &RunView) -> bool {
         view.run_id == self.run && view.state == RunState::Running
             && view.step(&self.step).is_some_and(|step| step.attempt == self.attempt
                 && matches!(step.status, StepStatus::Running | StepStatus::Unverified)

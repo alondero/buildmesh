@@ -167,17 +167,17 @@ describe('AppSettingsModal reviewer provider', () => {
     // The plain shell is absent entirely: it is not an agent at all.
     expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
   });
-  it('configures the Circuit classifier independently of the Codex reviewer and excludes other harnesses', async () => {
+  it('configures a native Codex classifier independently of the reviewer and excludes other harnesses', async () => {
     await renderModal();
     const user = userEvent.setup();
     const trigger = await screen.findByRole('button', { name: 'Circuit classifier provider' });
     await user.click(trigger);
-    expect(screen.queryByRole('menuitem', { name: 'Codex' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Codex' })).toBeTruthy();
     expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
-    await user.click(await screen.findByRole('menuitem', { name: 'Anthropic' }));
-    await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenCalledWith('anthropic'));
+    await user.click(await screen.findByRole('menuitem', { name: 'Codex' }));
+    await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenCalledWith('codex'));
     expect(tauriMocks.setAppReviewerProvider).not.toHaveBeenCalled();
-    await waitFor(() => expect(trigger.textContent).toContain('Anthropic'));
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
     await user.click(trigger);
     await user.click(await screen.findByRole('menuitem', { name: 'Claude Code (built-in default)' }));
     await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenLastCalledWith(null));
