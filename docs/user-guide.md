@@ -79,9 +79,16 @@ across all meshes; leave it empty for no global cap, or use 0 to pause new launc
 Agent steps use their explicit launch configuration, then the mesh default, then
 the application default. Review agents use their configured reviewer selection.
 Settings > Providers > **Circuit classifier provider** selects the background
-Claude Code launch configuration used to classify reports. It defaults to Claude
-Code and is independent of agent and reviewer defaults; select a host-native
-Claude Code configuration, including a compatible provider route if needed.
+launch configuration used to classify reports. It defaults to Claude Code and
+is independent of agent and reviewer defaults. Select host-native Claude Code
+(including a compatible provider route) or native Codex. Saved model and effort
+settings apply; for example, save a Codex configuration with model `gpt-6-luna`
+and effort `low`, then select it here. Codex uses its existing login and supports
+model and effort settings without extra CLI arguments.
+
+After five unsuccessful classifications, the step remains **Unverified** with
+the last failure displayed. Automatic retries stop, including after an app
+restart. Restore the configured backend, then use **Recheck evidence** to retry.
 
 Issue-driven review flows prepare a draft pull request. Customize prompts and
 publication steps in the Circuit editor. The shared wrap-up template is stored in
@@ -337,9 +344,19 @@ Changing credentials or the Codex installation can require route verification
 again. Regenerate with a different recipe deliberately replaces the snapshot.
 
 Mobile exposes the same choices and **Manage Launch Configurations** in the
-new-node picker. Background auto-naming requires a host-native Claude Code
-configuration; unsupported background selections report an error rather than
-using another provider. Usage remains attached to the account, not each recipe.
+new-node picker. Background auto-naming and Circuit classification accept
+host-native configurations whose harness supports one-shot background inference:
+Claude Code, Codex, OpenCode, Kimi Code, Grok Code, Antigravity, Command Code, and
+MiniMax Code. Claude Code also accepts configured provider routes; the other
+background runners use the harness's native authentication. Saved model and
+effort settings apply where the harness supports those controls. Configurations
+with extra CLI arguments cannot run background inference. Unsupported choices
+show the missing requirement in the settings picker and are rejected by the
+backend. Usage remains attached to the account, not each recipe.
+
+If the selected configuration cannot be resolved, auto-naming retries on a later
+turn after you repair it. On Windows, Claude Code background work also checks
+the standard native and npm install locations when the app's PATH is stale.
 
 ## Settings that matter
 

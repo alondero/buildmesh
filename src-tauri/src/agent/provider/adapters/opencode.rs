@@ -200,6 +200,15 @@ impl AgentProvider for OpenCodeAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["run", "--format", "json"].map(str::to_owned).to_vec();
+        let mut recipe = BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::OpenCodeJsonLines);
+        recipe.env.push(("OPENCODE_CONFIG_CONTENT".into(), r#"{"permission":{"*":"deny"},"share":"disabled"}"#.into()));
+        Some(recipe)
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }

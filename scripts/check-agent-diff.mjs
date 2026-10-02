@@ -10,12 +10,14 @@ export function checkDiff(cwd, base = 'HEAD') {
   const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
   // A missing base must fail, rather than report an empty successful check.
   const commit = git('rev-parse', '--verify', '--end-of-options', `${base}^{commit}`).trim();
-  const paths = ['src', 'src-tauri'];
+  const paths = ['src', 'src-tauri', 'scripts'];
   const changed = git('diff', '--no-renames', '--name-only', '-z', '--diff-filter=ACMRT', commit, '--', ...paths).split('\0').filter(Boolean);
   const untracked = new Set(git('ls-files', '--others', '--exclude-standard', '-z', '--', ...paths).split('\0').filter(Boolean));
   const failures = [];
   for (const file of new Set([...changed, ...untracked])) {
-    if (!/\.(?:tsx?|jsx?|rs)$/.test(file)) continue;
+    // `.ps1` is here for the PowerShell condition rule (#1982): a wrong shell
+    // check is silent at runtime, so the gate has to see it outside the hooks.
+    if (!/\.(?:tsx?|jsx?|rs|ps1)$/i.test(file)) continue;
     const text = untracked.has(file)
       ? readFileSync(resolve(cwd, file), 'utf8')
       : git('diff', '--no-renames', '--no-ext-diff', '--no-textconv', '--unified=0', commit, '--', file)

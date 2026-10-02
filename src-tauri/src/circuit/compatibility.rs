@@ -744,6 +744,7 @@ mod tests {
             auto_resume_on_startup: true,
             requires_attention_hook: false, // pre-#1295 state
             attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            background_inference: None,
             supports_passive_turn_watcher: false,
             produces_readable_transcript: false,
             supports_model_override: true,
@@ -960,6 +961,7 @@ mod tests {
             auto_resume_on_startup: true,
             requires_attention_hook: true,
             attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            background_inference: None,
             supports_passive_turn_watcher: false,
             produces_readable_transcript: true,
             supports_model_override: true,
@@ -1102,6 +1104,7 @@ mod tests {
             auto_resume_on_startup: true,
             requires_attention_hook: false,
             attention_capability: crate::agent::capabilities::AttentionCapability::None,
+            background_inference: None,
             supports_passive_turn_watcher: false,
             produces_readable_transcript: true,
             supports_model_override: true,

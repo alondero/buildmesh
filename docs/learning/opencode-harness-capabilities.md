@@ -251,6 +251,31 @@ never parse as native Circuit hook receipts under any provider id
 (`NativeHook::parse` gate + regression test), so they cannot alter
 another harness's lifecycle.
 
+### SQLite report contract
+
+OpenCode stores message metadata directly in `message.data` (`role`, `time`,
+`finish`, etc.) and stores each content part in `part.data`, keyed by
+`message_id` and `session_id`. The `{info, parts}` envelope belongs to the
+export/API format, not to a stored message row. The transcript adapter assembles
+that envelope in one bounded SQLite query, ordering messages by creation time
+and id and parts by id. Report freshness includes both message and part data;
+changing a content part invalidates the saved report even if metadata is unchanged.
+
+The Circuit report reader requires the newest message to contain assistant text,
+no tool calls, and a completion timestamp. A newer user, tool, empty or unfinished
+message cannot revive an earlier final answer. Malformed stored JSON remains
+visible to validation rather than being skipped. Message completion establishes
+report publication only; it does not establish native session-idle or complete
+child/background ownership.
+
+Run 284 exposed the storage/export mismatch on Windows with OpenCode 1.18.3:
+agent 4732 was Ready, its final assistant message had a completion timestamp and
+its text part was present, but the report reader rejected the raw metadata as a
+malformed export envelope. Database regressions must store metadata and parts in
+their separate native tables; export-only parser fixtures cannot verify this
+boundary. The running app needs the corrected build before automatic rechecks
+can read these reports.
+
 ## Remaining follow-ups
 
 - Attention plugin (`session.idle` / `permission.asked`) so Autopilot can run. — **DONE issue #1295 (PR #1559).**

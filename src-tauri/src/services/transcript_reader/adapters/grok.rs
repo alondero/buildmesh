@@ -62,9 +62,9 @@ impl TranscriptAdapter for GrokAdapter {
             })
     }
 
-    fn classify_hook(
+    fn classify_hook_value(
         &self,
-        body: &[u8],
+        payload: &serde_json::Value,
         _provider: &str,
     ) -> Option<HookClassification> {
         // Grok posts `hookEventName: "notification"` with a structured
@@ -73,7 +73,6 @@ impl TranscriptAdapter for GrokAdapter {
         // mark input with QuestionRequested. Other notification types
         // and unrelated events fall through to the shared
         // post-processing.
-        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
         // The HookPayload struct in routes/attention.rs applies serde
         // aliases (`hookEventName`, `notificationType`); we read raw
         // `serde_json::Value` here, so handle both casings explicitly.

@@ -1298,7 +1298,7 @@ export const approveCircuitStep = (runId: number, nodeId: string) =>
 export const listCircuitRuns = (circuitId: number, limit?: number) =>
   _invoke<CircuitRunDetail[]>('list_circuit_runs', { circuitId, limit });
 
-/** Select the host-native Claude Code configuration used by Circuit classifiers. */
+/** Select a host-native Claude Code or native Codex configuration for Circuit classifiers. */
 export const setCircuitClassifierProvider = (provider: string | null) =>
   _invoke<void>('set_circuit_classifier_provider', { provider });
 

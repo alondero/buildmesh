@@ -1157,7 +1157,8 @@ pub(crate) fn set_cli_session_id_if_missing_inner(
 ) -> SqlResult<bool> {
     let changed = conn.execute(
         "UPDATE agent_nodes SET cli_session_id = ?1 \
-         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')",
+         WHERE id = ?2 AND (cli_session_id IS NULL OR cli_session_id = '')
+         AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND status != 'archived' AND cli_session_id = ?1)",
         params![cli_id, id],
     )?;
     Ok(changed > 0)
@@ -1216,7 +1217,7 @@ pub(crate) fn recover_suspended_cli_session_id_inner(
         AND worktree_name IS ?5 AND worktree_path IS ?6
         AND session_started_at IS ?7
         AND (cli_session_id IS NULL OR cli_session_id = '')
-        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
+        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND status != 'archived' AND cli_session_id = ?1)",
         params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
             generation])?;
     Ok(changed > 0)
@@ -1236,7 +1237,7 @@ pub(crate) fn recover_live_cli_session_id_inner(
         AND provider = ?3 AND path = ?4 AND worktree_name IS ?5 AND worktree_path IS ?6
         AND session_started_at = ?7 AND use_worktree = ?8 AND env = ?9
         AND (cli_session_id IS NULL OR cli_session_id = '')
-        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND cli_session_id = ?1)",
+        AND NOT EXISTS (SELECT 1 FROM agent_nodes WHERE id != ?2 AND status != 'archived' AND cli_session_id = ?1)",
         params![cli_id, node.id, node.provider, node.path, node.worktree_name, node.worktree_path,
             generation, node.use_worktree, node.env.to_string()])?;
     Ok(changed > 0)

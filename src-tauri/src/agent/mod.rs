@@ -19,6 +19,7 @@
 //! - `workspace_trust.rs` — pre-trust the spawned worktree in the agent CLI's
 //!   settings so it doesn't hit the workspace-trust dialog on first prompt
 
+pub mod background;
 pub mod capabilities;
 pub mod detection;
 pub mod harness_catalog;

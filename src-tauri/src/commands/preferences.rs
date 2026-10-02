@@ -1061,7 +1061,7 @@ mod resolved_view_tests {
 pub fn set_circuit_classifier_provider(provider: Option<String>) -> Result<(), String> {
     let provider = provider.filter(|value| !value.trim().is_empty());
     if let Some(selection) = provider.as_deref() {
-        crate::session_naming::naming_backend_env(selection)?;
+        crate::circuit::classifier::resolve(selection)?;
     }
     let mut prefs = preferences::load()?;
     prefs.circuit_classifier_provider = provider;

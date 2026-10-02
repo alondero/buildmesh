@@ -6,6 +6,8 @@ import type { SpawnOption } from '../../src/lib/groups';
 import * as api from '../../src/lib/tauri/provider';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
+import { backgroundInferenceOption } from '../../src/lib/backgroundInference';
+import { HARNESS_CAPABILITIES } from '../../src/types/generated/HarnessCapabilitiesTable';
 
 vi.mock('../../src/lib/tauri/provider', () => ({
   listSpawnConfigurations: vi.fn().mockResolvedValue([
@@ -29,6 +31,61 @@ const configuration = (id: string, name: string, option: string) => ({
 afterEach(() => cleanup());
 
 describe('launch configurations in the spawn menu', () => {
+  it('keeps background restrictions on submenu defaults and loaded configurations', async () => {
+    const onSelect = vi.fn();
+    const unsupported = { ...row('freebuff', 'freebuff'), capabilities: HARNESS_CAPABILITIES.freebuff };
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValueOnce([
+      configuration('launch/freebuff', 'Freebuff recipe', 'freebuff'),
+    ]);
+    render(<GroupedProviderMenu providers={[backgroundInferenceOption(unsupported)]}
+      decorate={backgroundInferenceOption} onSelect={onSelect} />);
+    await userEvent.click(screen.getByRole('button', { name: 'freebuff configurations' }));
+    const defaults = screen.getByRole('menuitem', { name: 'Spawn with defaults' });
+    expect(defaults.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(defaults);
+    const saved = await screen.findByRole('menuitem', { name: /^Freebuff recipe/ });
+    expect(saved.getAttribute('aria-disabled')).toBe('true');
+    await userEvent.click(saved);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('retains background restrictions after refreshing an edited configuration', async () => {
+    const saved: SpawnConfiguration = { ...configuration('launch/new', 'New Codex', 'codex'), extra_args: '--json' };
+    const native = { ...row('codex', 'codex'), capabilities: HARNESS_CAPABILITIES.codex };
+    vi.mocked(api.getLaunchTargets).mockResolvedValueOnce([
+      { id: 'codex', harness_id: 'codex', harness_name: 'Codex', provider_name: 'OpenAI', models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true },
+    ]);
+    vi.mocked(api.saveSpawnConfiguration).mockResolvedValueOnce(saved);
+    vi.mocked(api.listProviders).mockResolvedValueOnce([{
+      ...native, id: saved.id, color: '#fff', resumable: true, configuration: saved,
+    }]);
+    const onSelect = vi.fn();
+    render(<GroupedProviderMenu providers={[native]} decorate={backgroundInferenceOption} onSelect={onSelect} />);
+    await userEvent.click(screen.getByRole('button', { name: 'codex configurations' }));
+    await userEvent.click(await screen.findByRole('menuitem', { name: 'New configuration…' }));
+    await userEvent.type(screen.getByLabelText('Name'), 'New Codex');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+    const choice = await screen.findByRole('menuitem', { name: /^New Codex/ });
+    expect(choice.getAttribute('aria-disabled')).toBe('true');
+    expect(choice.textContent).toContain('remove extra CLI arguments');
+    await userEvent.click(choice);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('disables routed background configurations loaded without a provider-menu snapshot', async () => {
+    const native = { ...row('codex', 'codex'), capabilities: HARNESS_CAPABILITIES.codex };
+    vi.mocked(api.listSpawnConfigurations).mockResolvedValueOnce([
+      { ...configuration('launch/routed', 'Routed Codex', 'codex:custom'), provider_route_id: 'custom-route' },
+    ]);
+    const onSelect = vi.fn();
+    render(<GroupedProviderMenu providers={[native]} decorate={backgroundInferenceOption} onSelect={onSelect} />);
+    await userEvent.click(screen.getByRole('button', { name: 'codex configurations' }));
+    const choice = await screen.findByRole('menuitem', { name: /^Routed Codex/ });
+    expect(choice.getAttribute('aria-disabled')).toBe('true');
+    expect(choice.textContent).toContain('native authentication');
+    await userEvent.click(choice);
+    expect(onSelect).not.toHaveBeenCalled();
+  });
   it('never restores flat provider routes after the last recipe is deleted', () => {
     render(<GroupedProviderMenu providers={[row('claude', 'claude'), row('claude:minimax', 'claude', 'minimax')]} onSelect={vi.fn()} />);
     const root = screen.getByRole('menu', { name: 'Select a provider' });

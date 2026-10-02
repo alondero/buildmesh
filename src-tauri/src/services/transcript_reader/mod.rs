@@ -3319,7 +3319,7 @@ mod tests {
     // removes the file from the OS temp dir (no leaked files when CI runs
     // 50 tests in parallel and one panics).
 
-    /// Build a file-backed SQLite matching the assumed `message` schema
+    /// Build a file-backed SQLite matching the native `message`/`part` schema
     /// and insert the given `(time_created, role, raw_data_json)` rows
     /// (one `(1, "user", "...")` triplet per row). The function returns
     /// the temp file path; the test calls `read_opencode_messages(db_path,
@@ -3327,22 +3327,10 @@ mod tests {
     fn tempfile_opencode_db(rows: &[(i64, &str, &str)]) -> tempfile::NamedTempFile {
         let tmp = tempfile::NamedTempFile::new().expect("create temp file");
         let conn = rusqlite::Connection::open(tmp.path()).expect("open temp db");
-        conn.execute_batch(
-            "CREATE TABLE message (
-                id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                time_created INTEGER NOT NULL,
-                data TEXT NOT NULL
-            );",
-        )
-        .expect("create message table");
+        adapters::opencode::test_support::create_store(&conn);
         for (idx, (time, _role, data)) in rows.iter().enumerate() {
-            conn.execute(
-                "INSERT INTO message (id, session_id, time_created, data) \
-                 VALUES (?1, 'ses_fixedsid000000000000000000001', ?2, ?3)",
-                rusqlite::params![format!("row-{idx}"), time, data],
-            )
-            .expect("insert row");
+            adapters::opencode::test_support::insert_message(&conn, &format!("row-{idx}"),
+                "ses_fixedsid000000000000000000001", *time, data);
         }
         // RAII: the connection drops when this function returns.
         drop(conn);
@@ -3372,12 +3360,8 @@ mod tests {
             // re-open and write to that session id below.
         ]);
         let conn = rusqlite::Connection::open(tmp.path()).expect("reopen for foreign row");
-        conn.execute(
-            "INSERT INTO message (id, session_id, time_created, data) \
-             VALUES ('foreign', 'ses_othersessionid0000000000001', 150, ?1)",
-            rusqlite::params![opencode_text_message("user", "this should not surface")],
-        )
-        .expect("insert foreign row");
+        adapters::opencode::test_support::insert_message(&conn, "foreign", "ses_othersessionid0000000000001",
+            150, &opencode_text_message("user", "this should not surface"));
         drop(conn);
 
         let messages =
@@ -3411,8 +3395,8 @@ mod tests {
         let first = opencode_assistant_report(tmp.path(), session).unwrap();
         assert_eq!(first.text, "Done.");
         let conn = rusqlite::Connection::open(tmp.path()).unwrap();
-        conn.execute("INSERT INTO message (id, session_id, time_created, data) VALUES ('new-reply', ?1, 300, ?2)",
-            rusqlite::params![session, opencode_text_message("assistant", "Done.")]).unwrap();
+        adapters::opencode::test_support::insert_message(&conn, "new-reply", session, 300,
+            &opencode_text_message("assistant", "Done."));
         drop(conn);
         let second = opencode_assistant_report(tmp.path(), session).unwrap();
         assert_eq!(second.text, first.text);
@@ -3445,12 +3429,10 @@ mod tests {
         );
     }
 
-    /// A row whose `data` blob is not valid JSON is silently dropped —
-    /// a single bad row doesn't break the whole session (graceful
-    /// failure on bad rows, same defensive rule as
-    /// `services::opencode_session`).
+    /// Keep malformed records visible to the Circuit validator while the
+    /// display parser can still surface readable dialogue from other rows.
     #[test]
-    fn opencode_locator_drops_malformed_rows() {
+    fn opencode_locator_preserves_malformed_rows() {
         let tmp = tempfile_opencode_db(&[
             (100, "user", "not valid json"),
             (200, "user", &opencode_text_message("user", "good")),
@@ -3458,7 +3440,9 @@ mod tests {
         let messages = read_opencode_messages(tmp.path(), "ses_fixedsid000000000000000000001", 10)
             .expect("locator must not error on a bad row");
         let parsed = parse_opencode_messages(&messages, 10);
-        assert_eq!(parsed.turns.len(), 1, "the malformed row must be skipped");
+        assert_eq!(messages.len(), 2, "corrupt records must not disappear from the snapshot");
+        assert!(parsed.saw_malformed);
+        assert_eq!(parsed.turns.len(), 1, "the display can still show readable records");
         assert_eq!(parsed.turns[0].text, "good");
     }
 

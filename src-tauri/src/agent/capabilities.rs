@@ -129,6 +129,43 @@ pub enum AttentionCapability {
     },
 }
 
+/// How a one-shot background request supplies its prompt without a PTY.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "BackgroundPromptInput.ts")]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum BackgroundPromptInput {
+    Stdin,
+    Argument { flag: String },
+    File { flag: String },
+}
+
+/// The final-answer channel, separate from progress and reasoning output.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "BackgroundResultOutput.ts")]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundResultOutput {
+    Stdout,
+    LastMessageFile,
+    OpenCodeJsonLines,
+    AssistantJsonLines,
+    ResultJsonLines,
+}
+
+/// An adapter-owned, non-interactive one-shot inference contract. A recipe
+/// must accept a prompt, yield a distinguishable final answer, and exit without
+/// user input. The caller owns timeout/cancellation and an isolated directory.
+/// Interactive prefill, attention hooks, and resume support do not imply this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export, export_to = "BackgroundInferenceCapability.ts")]
+pub struct BackgroundInferenceCapability {
+    pub prompt_input: BackgroundPromptInput,
+    pub result_output: BackgroundResultOutput,
+    /// Whether the background recipe can honor Buildmesh-managed routes.
+    pub supports_provider_routing: bool,
+    /// Argument transports are bounded below the Windows command-line limit.
+    pub max_prompt_bytes: Option<u32>,
+}
+
 /// Backend-owned **Harness Capability Contract** (issue #1149, prefactor for
 /// #1148). One descriptor per Agent Harness — the same descriptor drives:
 ///
@@ -154,6 +191,8 @@ pub enum AttentionCapability {
 pub struct HarnessCapabilities {
     /// Adapter id (matches [`AgentProvider::id`]).
     pub harness_id: String,
+    /// None until the adapter supplies a validated one-shot background recipe.
+    pub background_inference: Option<BackgroundInferenceCapability>,
     /// Whether the harness's CLI accepts a resume invocation.
     pub supports_resume: bool,
     /// Whether the app auto-resumes suspended sessions for this harness.

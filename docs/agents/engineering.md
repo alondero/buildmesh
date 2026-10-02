@@ -39,10 +39,38 @@ Report the commands actually run, result, executed test counts, and relevant pla
 
 Before committing, inspect `git diff --check`, `git diff --stat`, and `git diff --cached --stat` against the intended changes. Verify that touched files produce zero compiler or linter warnings (`cargo clippy`, unused imports) and confirm commit message claims match the actual diff (no leftover dead casts or abandoned refactors). After committing, inspect the actual commit. Before handoff, run `npm run check:agent -- --base <recorded-base>` so already committed changes are covered. Keep scratch bodies/logs in ignored `.tmp/`; do not publish screenshots, PRs, or messages unless the task authorizes publication.
 
+## Verifying a push or merge
+
+Remote state comes from one run, never from a PR rollup. `gh pr checks <pr>` aggregates every workflow run the branch ever triggered, so a `pending` entry from a superseded or cancelled run keeps being reported after the live run has already finished. Resolve the run for the pushed commit — `--commit`, not `--branch`, so a new run that has not registered yet cannot hand you the previous one — then poll that run's jobs:
+
+```powershell
+$sha = git rev-parse HEAD
+$run = gh run list --commit $sha --limit 1 --json databaseId --jq '.[0].databaseId'
+gh run view $run --json status,conclusion,jobs
+```
+
+Inside one run there is no rollup, and a job that is still executing keeps the same job id on every poll. **A stable pending job id is what in-flight execution looks like — keep waiting on it.** Staleness only exists when comparing across runs, and the tell is that `gh run view <run>` reports `status: completed` while `gh pr checks` still lists something pending; that entry can only be left by an older or cancelled run. If `gh run list --commit` returns nothing yet, the workflow has not registered — re-poll for the run rather than reporting the push as unverified.
+
+PowerShell evaluates a command's **output**, not its exit code, so a silent native command used as a bare condition is always false. `git merge-base --is-ancestor` prints nothing on success, which makes the condition the empty string and sends every call down the `else` branch — the check can never report success, whatever the real state:
+
+```powershell
+# WRONG - always false on success: the condition is the command's empty output
+if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }
+
+# RIGHT - run the command, then branch on its exit code
+git merge-base --is-ancestor $sha origin/main 2>$dev
+if ($LASTEXITCODE -eq 0) { "YES" } else { "NO" }
+```
+
+The same trap applies to any silent native command in a condition: `git diff --quiet`, `gh`, `cargo`. Cmdlets that return a value are unaffected — `if (Test-Path $log)` is fine — as are explicit output comparisons such as `if ((git status --porcelain).Length -gt 0)`.
+
+When two commands disagree about repo state, check the commands before blaming the cache. One always-wrong command and one correct command produce two mutually inconsistent readings, and "stale refs" explains them no better than the bug that is actually there; trusting the first confident story instead of reading both commands is how a five-minute mistake becomes a ten-minute one.
+
 ## Enforcement and maintenance
 
-- `npm run check:agent` checks added lines in staged, unstaged, and untracked source files against HEAD. `--base <commit>` includes commits since that base. CI uses the PR base or push predecessor. It reuses `.claude/hooks/guard-antipatterns.mjs`; it does not alter the index.
-- These are content heuristics: terminal-named TS files, Rust WSL UNC strings outside `env/`, and component radius tokens. They do not establish terminal ownership, path correctness, DB lock safety, command registration, or wire-type completeness. Per-line exceptions require a local reason. Renames are checked as additions; existing unchanged violations are not a baseline-wide gate.
+- `npm run check:agent` checks added lines in staged, unstaged, and untracked `src/`, `src-tauri/`, and `scripts/` files against HEAD. `--base <commit>` includes commits since that base. CI uses the PR base or push predecessor. It reuses `.claude/hooks/guard-antipatterns.mjs`; it does not alter the index.
+- These are content heuristics: terminal-named TS files, Rust WSL UNC strings outside `env/`, component radius tokens, and PowerShell conditions wrapping a native command. They do not establish terminal ownership, path correctness, DB lock safety, command registration, wire-type completeness, or that a shell check reaches the branch it names. Per-line exceptions require a local reason. Renames are checked as additions; existing unchanged violations are not a baseline-wide gate.
+- The PowerShell rule matches any `.ps1` through the Claude hook, and `scripts/**/*.ps1` through `check:agent`. It fires when the condition *is* a native command call: `if`/`elseif`/`while`/`until`, optionally negated with `!` or `-not`, with the brace or a trailing comment on the same or the next line, and continued with `-and`/`-or`. `if (Test-Path $log)`, `if ((git status --porcelain).Length -gt 0)`, and `if (@(git ls-files).Count -gt 0)` stay clean because they compare the output instead of using it as the condition. Known limits: a condition split across several lines, `$ok = git …` followed by `if ($ok)` which never captures the exit code, and a native call in a later clause of a compound condition such as `if ($dirty -or (git diff --quiet))` — catching that one would also flag legitimate comparisons like `if ($env:PATH -like "*git *")`. All of them need `$LASTEXITCODE`. It deliberately does not police `.md`, because the wrong form above is quoted there on purpose to teach it. Escape a justified case with `# allow-native-condition` on that line.
 - Claude `Edit|Write|MultiEdit` hooks do not cover shell writes or other harnesses. The persistence hook checks modification time, not content; `git diff` remains the evidence. The staging hook only catches some empty commits. CI also checks process-spawn patterns and generated binding drift; those gates do not replace behavior tests.
 - `CLAUDE.md` is canonical; Git records `AGENTS.md -> CLAUDE.md` and `.agents/skills -> ../.claude/skills`. On Windows with symlink checkout disabled, these can be plain files containing the target. Follow that target and read `.claude/skills/<name>/SKILL.md` explicitly when discovery is unavailable; do not edit the pointer as if it were the instructions.
 - Documentation is a maintained product surface. Use `docs/README.md` for navigation, `docs/documentation-standards.md` for update rules, and `docs: none — <reason>` only when a behavior-sensitive commit truly needs no documentation. Keep historical specs/ADRs explicitly marked instead of silently presenting them as current.

@@ -121,6 +121,29 @@ state cannot be updated until a later callback succeeds. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## GitHub feeds fail for a WSL mesh
+
+On a Windows host, Buildmesh reads the repository through its WSL network
+path, then uses Windows-side GitHub credentials to fetch issues and pull
+requests. Signing in to `gh` inside WSL alone does not authenticate the desktop
+app. Run `gh auth login` in Windows if the error reports a missing token.
+
+If the error says the repository is **not owned by current user**, Windows
+libgit2 cannot verify the Linux owner's identity. For a repository you trust,
+add its exact Windows path to Windows Git's global configuration in PowerShell:
+
+```powershell
+git config --global --add safe.directory '//wsl$/Ubuntu/home/your-user/your-repo'
+```
+
+Use the distribution, repository path, and network hostname shown in the error;
+`wsl$` and `wsl.localhost` are distinct trust entries. Configure this in Windows,
+then refresh the Issues or Pull Requests tab. A linked worktree has its own path
+and needs its own entry if it reports the same error.
+
+An unreadable repository reports a load error. A readable repository with no
+GitHub origin still shows an empty feed.
+
 ## A phone cannot connect
 
 Check these in order:
@@ -162,6 +185,30 @@ only helps for sessions started outside Buildmesh. Buildmesh rewrites only
 that one line — your comments, ordering, API key and model catalog are left
 as they were. See
 [the MiniMax Code capability notes](learning/mcode-harness-capabilities.md).
+
+## Circuit classification keeps failing or reports an expired login
+
+The classifier has its own selection in Settings > Providers > **Circuit
+classifier provider**. Changing an implementer or reviewer does not change it.
+Select a working host-native Claude Code or native Codex configuration. A Codex
+configuration can use `gpt-6-luna` with `low` effort and the existing Codex login.
+
+The step displays the classifier's last error and stops automatic inference
+after five failures. Once authentication or configuration is restored, choose
+**Recheck evidence**. A restart or new report does not reset the exhausted budget.
+
+## MiniMax Code attaches the wrong conversation or never captures one
+
+Buildmesh routes MiniMax callbacks using the native conversation id and workspace,
+including callbacks from older shared plugins with a numeric URL. It no longer
+guesses session ownership from manifest creation times. Standalone conversations,
+duplicate conversation ownership, and ambiguous workspaces are rejected.
+
+Use separate worktrees for simultaneous fresh MiniMax agents. If an older run
+already has a wrong conversation id, preserve its worktree and history and recover
+the verified original conversation before rechecking the run. Rechecking alone
+cannot establish which conversation belongs to the implementer. See
+[the runs 276/277 investigation](development/circuit-runs-276-277.md).
 
 ## Muse fails to start with `os error 267` or `Not a directory`
 

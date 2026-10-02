@@ -23,6 +23,7 @@ import type {
 } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import { optimisticToggle } from '../../lib/optimisticToggle';
+import { backgroundInferenceOption } from '../../lib/backgroundInference';
 import { useExitPromptStore } from '../../stores/exitPromptStore';
 import { Modal, ModalCloseButton } from '../shared/Modal';
 import { Spinner } from '../shared/Spinner';
@@ -2141,11 +2142,12 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
           <SettingsRow label="Circuit classifier provider" htmlFor="circuit-classifier-provider"
             summary="Background model used to classify Circuit agent reports."
-            details={<>Independent of agent spawn defaults. Requires a host-native Claude Code launch configuration.</>}>
+            details={<>Independent of agent spawn defaults. Choose a host-native harness with background inference support; its model and effort settings apply. Configurations with extra CLI arguments cannot run background inference.</>}>
             <SpawnOptionPicker id="circuit-classifier-provider" size="md" ariaLabel="Circuit classifier provider" unsetValue={null}
               providers={providers} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
               disabled={!prefsLoaded || !providersLoaded || classifierSaving}
-              filter={(option) => option.harness_id === 'claude' || option.harness_id === 'anthropic'}
+              filter={(option) => option.harness_id !== 'terminal'}
+              decorate={backgroundInferenceOption}
               onSelect={(next) => {
                 setClassifierSaving(true);
                 setError(null);
@@ -2218,6 +2220,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               disabled={!prefsLoaded || !providersLoaded || namingSaving}
               filter={(option) => option.harness_id !== 'terminal'}
               onSelect={next => handleSaveNaming(next)}
+              decorate={backgroundInferenceOption}
             />
           </SettingsRow>
           {namingProvider === 'anthropic' && (

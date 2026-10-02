@@ -91,12 +91,21 @@ fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, R
     let rows = read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).ok_or(E::Unreadable)?;
     let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
     if parsed.saw_malformed { return Err(E::MalformedRecord); }
-    let last = parsed.turns.last().ok_or(E::NoReport)?;
+    let (id, message) = rows.last().ok_or(E::NoReport)?;
+    if message.pointer("/info/role").and_then(|role| role.as_str()) != Some("assistant") {
+        return Err(E::WorkInProgress);
+    }
+    // Digest parsing drops empty/reasoning-only messages. They must not let
+    // an older final answer borrow the newer message's completion timestamp.
+    let latest = parse_opencode_messages(std::slice::from_ref(message), 1);
+    let last = latest.turns.last().ok_or(E::WorkInProgress)?;
     if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
-    let report = opencode_assistant_report(path, session_id).ok_or(E::NoReport)?;
-    let published_at_ms = rows.last().and_then(|row| row.1.pointer("/info/time/completed"))
-        .and_then(|time| time.as_i64()).ok_or(E::NoTimestamp)?;
-    let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision, published_at_ms,
+    let published_at_ms = message.pointer("/info/time/completed")
+        .and_then(|time| time.as_i64()).ok_or(E::WorkInProgress)?;
+    let text = adapters::opencode::parse_opencode_messages_with_text_limit(std::slice::from_ref(message), 1, usize::MAX)
+        .last_assistant_message.ok_or(E::NoReport)?;
+    let revision = assistant_revision(id, &last.text, &text);
+    let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&text), revision, published_at_ms,
         // Message completion is not a native session-idle boundary.
         turn_finished: false,
         source: ReportSource::OpenCode { path: path.into(), session_id: session_id.into(), rows } };
@@ -725,10 +734,9 @@ mod tests {
         let db_path = dir.join("opencode.db");
         let _ = std::fs::remove_file(&db_path);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);").unwrap();
+        adapters::opencode::test_support::create_store(&conn);
         for (id, created, data) in rows {
-            conn.execute("INSERT INTO message (id, session_id, time_created, data) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![id, session_id, created, data.to_string()]).unwrap();
+            adapters::opencode::test_support::insert_message(&conn, id, session_id, *created, &data.to_string());
         }
         db_path
     }
@@ -736,6 +744,105 @@ mod tests {
     fn opencode_assistant_value(text: &str, completed: i64) -> serde_json::Value {
         serde_json::json!({"info":{"role":"assistant","time":{"completed":completed}},
             "parts":[{"type":"text","text":text}]})
+    }
+
+    #[test]
+    fn opencode_native_store_recovers_a_completed_circuit_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        adapters::opencode::test_support::create_store(&conn);
+        let session = "ses_run284";
+        // OpenCode 1.18.3 persists MessageV2.Info directly; export envelopes
+        // are assembled from the separate part table, never stored in data.
+        conn.execute("INSERT INTO message VALUES ('msg-final', ?1, 1790888777798, ?2)",
+            rusqlite::params![session, serde_json::json!({"role":"assistant", "parentID":"msg-user",
+                "time":{"created":1790888777798_i64,"completed":1790888790838_i64},"finish":"stop"}).to_string()]).unwrap();
+        conn.execute("INSERT INTO part VALUES ('prt-final', 'msg-final', ?1, 1790888786696, ?2)",
+            rusqlite::params![session, serde_json::json!({"type":"text","text":"Implementation complete; PR raised."}).to_string()]).unwrap();
+        drop(conn);
+
+        let snapshot = read_opencode_file(&path, session).unwrap();
+        assert_eq!(snapshot.text, "Implementation complete; PR raised.");
+        assert_eq!(snapshot.published_at_ms, 1790888790838);
+        assert!(!snapshot.turn_finished, "message completion is not a native session-idle receipt");
+        assert!(snapshot.is_current());
+        let (run, _) = classified_run(snapshot.clone());
+        let agent = crate::models::AgentNode { id: 900, provider: "opencode".into(),
+            cli_session_id: Some("session".into()), status: crate::models::SessionStatus::Ready, ..Default::default() };
+        assert!(crate::services::circuit_worker::readiness::prepare(&run, "await_source", &agent,
+            Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone())).unwrap().is_some());
+
+        // A part edit must invalidate the immutable report even without a
+        // message-row update; the next read must bind the revised text.
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE part SET data=?1 WHERE id='prt-final'",
+            [serde_json::json!({"type":"text","text":"Implementation still needs work."}).to_string()]).unwrap();
+        assert!(!snapshot.is_current());
+        let updated = read_opencode_file(&path, session).unwrap();
+        assert_eq!(updated.text, "Implementation still needs work.");
+        assert_ne!(snapshot.revision, updated.revision);
+    }
+
+    #[test]
+    fn opencode_newer_native_activity_cannot_reuse_an_older_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = "ses_newer";
+        for latest in [
+            serde_json::json!({"info":{"role":"user"}, "parts":[]}),
+            serde_json::json!({"info":{"role":"assistant"}, "parts":[{"type":"text","text":"Streaming"}]}),
+            serde_json::json!({"info":{"role":"assistant","time":{"completed":300}}, "parts":[]}),
+            serde_json::json!({"info":{"role":"assistant","time":{"completed":300}}, "parts":[{"type":"reasoning","text":"Thinking"}]}),
+            serde_json::json!({"info":{"role":"assistant","time":{"completed":300}}, "parts":[{"type":"tool","tool":"bash","state":{"status":"running","input":{}}}]}),
+        ] {
+            let path = opencode_db(dir.path(), session, &[
+                ("msg-old", 100, opencode_assistant_value("Old final answer", 150)),
+                ("msg-new", 200, latest.clone()),
+            ]);
+            assert_eq!(read_opencode_file(&path, session).unwrap_err(), ReportReadError::WorkInProgress, "{latest}");
+        }
+    }
+
+    #[test]
+    fn opencode_malformed_native_json_cannot_hide_newer_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = "ses_corrupt";
+        for table in ["message", "part"] {
+            let path = opencode_db(dir.path(), session, &[("msg-final", 100, opencode_assistant_value("Done", 150))]);
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            if table == "message" {
+                conn.execute("INSERT INTO message VALUES ('msg-new', ?1, 200, 'not JSON')", [session]).unwrap();
+            } else {
+                conn.execute("INSERT INTO part VALUES ('prt-new', 'msg-final', ?1, 200, 'not JSON')", [session]).unwrap();
+            }
+            assert_eq!(read_opencode_file(&path, session).unwrap_err(), ReportReadError::MalformedRecord, "{table}");
+        }
+    }
+
+    #[test]
+    fn opencode_native_join_limits_messages_and_orders_parts_and_timestamp_ties() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = "ses_order";
+        let path = opencode_db(dir.path(), session, &[
+            ("msg-c", 100, opencode_assistant_value("Newest", 150)),
+            ("msg-b", 100, opencode_assistant_value("Middle", 150)),
+            ("msg-a", 100, opencode_assistant_value("Oldest", 150)),
+        ]);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        for (id, text) in [("prt-z", "Last part"), ("prt-a", "Second part")] {
+            conn.execute("INSERT INTO part VALUES (?1, 'msg-c', ?2, 100, ?3)",
+                rusqlite::params![id, session, serde_json::json!({"type":"text","text":text}).to_string()]).unwrap();
+        }
+        // A foreign-session part with the same message id must not leak.
+        conn.execute("INSERT INTO part VALUES ('prt-foreign', 'msg-c', 'ses-other', 100, ?1)",
+            [serde_json::json!({"type":"text","text":"Foreign"}).to_string()]).unwrap();
+        let rows = read_opencode_message_rows(&path, session, 2).unwrap();
+        assert_eq!(rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["msg-b", "msg-c"]);
+        let snapshot = read_opencode_file(&path, session).unwrap();
+        assert_eq!(snapshot.text, "Newest\nSecond part\nLast part");
+        conn.execute("INSERT INTO part VALUES ('prt-new', 'msg-c', ?1, 200, ?2)",
+            rusqlite::params![session, serde_json::json!({"type":"text","text":"Added"}).to_string()]).unwrap();
+        assert!(!snapshot.is_current(), "part insertion must invalidate a report");
     }
 
     /// Every wired report adapter's valid fixture, read through the real

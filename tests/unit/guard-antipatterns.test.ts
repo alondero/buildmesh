@@ -194,6 +194,167 @@ describe("checkContentViolations — bare-rounded rules (#733)", () => {
   });
 });
 
+// Issue #1982 — PowerShell evaluates a command's OUTPUT, not its exit code, so a
+// silent native command used as a bare condition is always false. `if (git
+// merge-base --is-ancestor …)` printed the empty string on success and took the
+// else branch on every call: the check could never report "YES".
+describe("checkContentViolations — PowerShell native-command conditions (#1982)", () => {
+  it("blocks `if (git merge-base --is-ancestor ...)` in a PowerShell script", () => {
+    const v = checkContentViolations(
+      "scripts/check-merge.ps1",
+      'if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  // Review on #1988: requiring `)` or `{` immediately after the call missed the
+  // standard PowerShell spellings, so the trap walked straight through a rule
+  // that looked like coverage. Each case below is a real idiom, not a synthetic
+  // shape invented for the regex.
+  it("blocks the Allman brace style (opening brace on the next line)", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git diff --quiet)\n{\n    Write-Output "unchanged"\n}',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  it("blocks a trailing comment after the condition", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git diff --quiet) # is the worktree clean?\n{\n    Write-Output "unchanged"\n}',
+    );
+    expect(v.join()).toContain("powershell-if-native-command");
+  });
+
+  it("blocks `elseif (...)` and the two-word `else if (...)`", () => {
+    for (const line of [
+      'elseif (git diff --quiet) { Write-Output "clean" }',
+      'else if (git diff --quiet) { Write-Output "clean" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("blocks the idiomatic `-not` negation", () => {
+    for (const line of [
+      'if (-not (git diff --quiet)) { Write-Output "dirty" }',
+      'if (-not(git diff --quiet)) { Write-Output "dirty" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("blocks a native command continued into a compound condition", () => {
+    for (const line of [
+      'if (git diff --quiet) -and $dirty { Write-Output "x" }',
+      'if (git diff --quiet) -or $flag { Write-Output "x" }',
+    ]) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  // Pinned limit, not an oversight: a native call in a *later* clause of a
+  // compound condition is not matched. Matching it means allowing arbitrary
+  // text before the command, which also flags legitimate comparisons such as
+  // `if ($env:PATH -like "*git *")`. Prefer a false negative a reviewer can see
+  // over a false positive that blocks correct code — the limit is documented in
+  // the rule and in docs/agents/engineering.md.
+  it("does NOT reach a native call in a later clause of a compound condition", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if ($dirty -or (git diff --quiet)) { Write-Output "x" }',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("blocks other silent native commands used as a bare condition", () => {
+    const cases = [
+      'if (git diff --quiet) { "unchanged" }',
+      'if (!(gh pr checks 1977)) { "none" }',
+      'while (cargo fmt --check) { Start-Sleep 1 }',
+      'if (npm run lint) { "clean" }',
+    ];
+    for (const line of cases) {
+      expect(
+        checkContentViolations("scripts/probe.ps1", line).join(),
+        line,
+      ).toContain("powershell-if-native-command");
+    }
+  });
+
+  it("allows the $LASTEXITCODE form", () => {
+    const v = checkContentViolations(
+      "scripts/check-merge.ps1",
+      "git merge-base --is-ancestor $sha origin/main 2>$dev\nif ($LASTEXITCODE -eq 0) { \"YES\" } else { \"NO\" }",
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows a cmdlet that returns a value (`Test-Path`)", () => {
+    const v = checkContentViolations(
+      "scripts/run.ps1",
+      "if (Test-Path $logPath) { Get-Content $logPath -Tail 40 }",
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("allows explicit comparisons of a native command's output", () => {
+    // The widened terminator (end-of-line / comment) must not start matching
+    // these: `.Length`, `.Count` and `-gt` all follow the call, not `)`+brace.
+    for (const line of [
+      "if ((git status --porcelain).Length -gt 0) { Write-Output 'dirty' }",
+      "if ((git status --porcelain).Length -gt 0)\n{\n    Write-Output 'dirty'\n}",
+      "if (@(git ls-files).Count -gt 0) { Write-Output 'has files' }",
+      "if ($diff.Length -gt 0) { Write-Output 'has output' }",
+    ]) {
+      expect(checkContentViolations("scripts/probe.ps1", line).join(), line).toBe(
+        "",
+      );
+    }
+  });
+
+  it("allows the `# allow-native-condition` escape hatch", () => {
+    const v = checkContentViolations(
+      "scripts/probe.ps1",
+      'if (git branch --show-current) { "on a branch" } # allow-native-condition',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("does NOT police markdown, where the wrong form is quoted on purpose", () => {
+    const v = checkContentViolations(
+      "docs/agents/engineering.md",
+      'if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }',
+    );
+    expect(v).toHaveLength(0);
+  });
+
+  it("does NOT police TypeScript or Rust", () => {
+    expect(
+      checkContentViolations(
+        "src/components/Terminal.tsx",
+        "if (git status --porcelain) {}",
+      ),
+    ).toHaveLength(0);
+    expect(
+      checkContentViolations(
+        "src-tauri/src/agent/spawn.rs",
+        "if git status --porcelain {}",
+      ),
+    ).toHaveLength(0);
+  });
+});
+
 describe("collectNewText", () => {
   it("reads Write content, Edit new_string, and MultiEdit edits", () => {
     expect(collectNewText({ content: "a" })).toBe("a");
