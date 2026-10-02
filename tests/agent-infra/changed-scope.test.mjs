@@ -18,8 +18,17 @@ test('rust-only changes run the Rust graph and skip the frontend suites', () => 
 test('frontend-only changes run the frontend suites and skip the Rust graph', () => {
   assert.deepEqual(classifyPaths(['src/App.tsx']), { rust: false, frontend: true });
   assert.deepEqual(classifyPaths(['tests/unit/store.test.ts']), { rust: false, frontend: true });
-  assert.deepEqual(classifyPaths(['src/types/generated/bindings.ts']), { rust: false, frontend: true });
   assert.deepEqual(classifyPaths(['playwright.config.base.ts']), { rust: false, frontend: true });
+});
+
+test('generated bindings changes run both graphs so the drift gate runs', () => {
+  // src/types/generated/ is produced by ts-rs during cargo test and is
+  // drift-gated only by the rust-bindings job. Classifying it as frontend
+  // alone would let a hand-edited binding merge while every Rust check
+  // reports green-by-skip (review of PR #1991).
+  assert.equal(categorisePath('src/types/generated/bindings.ts'), 'both');
+  assert.deepEqual(classifyPaths(['src/types/generated/bindings.ts']), { rust: true, frontend: true });
+  assert.deepEqual(classifyPaths(['src/types/generated/file.ts']), { rust: true, frontend: true });
 });
 
 test('docs-only changes trigger neither graph', () => {

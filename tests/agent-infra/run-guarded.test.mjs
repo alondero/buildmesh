@@ -136,6 +136,39 @@ test('escalates to SIGKILL when the command ignores the terminate signal', {
   assert.equal(res.code, 124);
 });
 
+test('holds the guard open so SIGKILL reaches a descendant that outlives SIGTERM', {
+  skip: process.platform === 'win32' ? 'signal semantics differ on Windows' : false,
+}, async () => {
+  // The direct child dies immediately on SIGTERM (like cargo or bash does in
+  // CI), while its descendant traps SIGTERM and keeps running. The guard must
+  // not exit just because the direct child died: the SIGKILL escalation is the
+  // only thing that clears the descendant, and exiting first strands it
+  // forever (review of PR #1991).
+  await withTempDir(async (dir) => {
+    const marker = join(dir, 'marker.txt');
+    const grandchild = "process.on('SIGTERM', () => {}); setInterval(() => require('node:fs').appendFileSync(process.env.GUARDED_MARKER, 'x\\n'), 50)";
+    const childCode = [
+      "const { spawn } = require('node:child_process');",
+      `spawn(process.execPath, ['-e', ${JSON.stringify(grandchild)}], { stdio: 'ignore', env: process.env });`,
+      'setInterval(() => {}, 1000);',
+    ].join('');
+    const started = Date.now();
+    const res = await runGuard([
+      '--minutes', '0.02', '--kill-grace-seconds', '1', '--label', 'stubborn-grandchild',
+      '--', process.execPath, '-e', childCode,
+    ], { timeoutMs: 30000, env: { GUARDED_MARKER: marker } });
+    const elapsed = Date.now() - started;
+    assert.equal(res.code, 124, res.stderr);
+    // Deadline is 1.2s, grace 1s: the guard may only finish once the
+    // escalation has fired (~2.2s plus process startup).
+    assert.ok(elapsed >= 2100, `guard exited after ${elapsed}ms, before the SIGKILL escalation`);
+    const sizeAtExit = existsSync(marker) ? statSync(marker).size : 0;
+    assert.ok(sizeAtExit >= 4, `grandchild never started appending (marker ${sizeAtExit} bytes)`);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    assert.equal(statSync(marker).size, sizeAtExit, 'descendant still appends after the guard exited');
+  });
+});
+
 test('rejects a missing command with a usage error', async () => {
   const res = await runGuard(['--minutes', '1']);
   assert.equal(res.code, 2);

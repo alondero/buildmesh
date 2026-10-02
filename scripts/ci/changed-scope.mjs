@@ -46,6 +46,11 @@ export function categorisePath(rawPath) {
   if (path === '') return 'docs';
   if (DOCS_PREFIXES.some((prefix) => path.startsWith(prefix)) || DOCS_FILES.test(path)) return 'docs';
   if (RUST_PREFIXES.some((prefix) => path.startsWith(prefix)) || RUST_FILES.test(path)) return 'rust';
+  // Generated wire types live under src/ but are produced by ts-rs during
+  // `cargo test` and drift-gated only by the rust-bindings job; classifying
+  // them as frontend alone would let a hand-edited binding through while
+  // every Rust check reports green-by-skip (review of PR #1991).
+  if (path.startsWith('src/types/generated/')) return 'both';
   if (FRONTEND_PREFIXES.some((prefix) => path.startsWith(prefix)) || FRONTEND_FILES.test(path)) return 'frontend';
   // .github/, scripts/, and anything unknown: gate-relevant, run everything.
   return 'both';

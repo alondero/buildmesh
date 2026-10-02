@@ -8,9 +8,10 @@
 //
 //   1. `| tee` pipelines never see EOF when a descendant escapes the process
 //      group while holding the pipe, so the step outlives the guard meant to
-//      end it. This script streams output itself and never waits on the pipes
-//      after the kill: the deadline path exits after a bounded drain, whatever
-//      the descendants do with their inherited handles.
+//      end it. This script streams output itself and bounds every wait on the
+//      pipes after the kill: the deadline path waits out the kill grace (so
+//      the SIGKILL escalation always fires), then exits after a bounded
+//      drain, whatever the descendants do with their inherited handles.
 //   2. A job cancelled by its `timeout-minutes` cap flushes no log at all, so
 //      the wedged step produces no evidence. The log here is written
 //      incrementally as output arrives, and the `::error::` annotation is
@@ -35,8 +36,8 @@ Runs <command> under a hard deadline of --minutes. On expiry the command's
 whole process tree is terminated (SIGTERM, then SIGKILL after
 --kill-grace-seconds on POSIX; taskkill /T /F immediately on Windows), a
 GitHub Actions ::error:: annotation naming --label is emitted, and the script
-exits 124. Combined output is streamed live and, when --log is given,
-append-written to that file as it arrives.`;
+exits 124. Combined output is streamed live and, when --log is given, written
+to that file as it arrives (created or truncated when the guard starts).`;
 
 export function parseArgs(argv) {
   let minutes = null;
@@ -84,17 +85,28 @@ export function parseArgs(argv) {
 // Windows has no SIGTERM semantics worth waiting for on a console process, so
 // taskkill /T /F does the tree in one step.
 export function killTree(pid, killGraceMs) {
-  if (pid == null) return;
+  if (pid == null) return { escalated: Promise.resolve() };
   if (process.platform === 'win32') {
     const killer = spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
     killer.on('error', () => {});
-    return;
+    return { escalated: Promise.resolve() };
   }
   const signalGroup = (signal) => {
     try { process.kill(-pid, signal); } catch { /* already gone */ }
   };
   signalGroup('SIGTERM');
-  setTimeout(() => signalGroup('SIGKILL'), killGraceMs).unref();
+  // Deliberately NOT unref'd: the timer keeps the event loop alive until
+  // SIGKILL has actually been sent, so a direct child that dies on SIGTERM
+  // (cargo, bash) cannot let this script exit first and strand a descendant
+  // that ignored SIGTERM — the escalation is the whole point of the grace
+  // period (review of PR #1991).
+  const escalated = new Promise((resolve) => {
+    setTimeout(() => {
+      signalGroup('SIGKILL');
+      resolve();
+    }, killGraceMs);
+  });
+  return { escalated };
 }
 
 export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
@@ -122,6 +134,9 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
   return new Promise((resolve) => {
     let timedOut = false;
     let settled = false;
+    // Set when the deadline fires; the exit handler awaits it before
+    // finishing so SIGKILL always gets its chance to clear the tree.
+    let escalated = Promise.resolve();
 
     const finish = (code) => {
       if (settled) return;
@@ -168,11 +183,11 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
       const message = `${label} exceeded ${minutes} minutes and was killed - a test in it is hanging.`;
       // Emitted before the kill so a hard stop still leaves the reason behind.
       emit(`::error::${message}\n`);
-      killTree(child.pid, killGraceMs);
+      escalated = killTree(child.pid, killGraceMs).escalated;
       setTimeout(() => finish(124), postKillCapMs).unref();
     }, deadlineMs);
 
-    const overallCap = setTimeout(() => finish(1), Math.max(deadlineMs, 0) + postKillCapMs + 5_000);
+    const overallCap = setTimeout(() => finish(timedOut ? 124 : 1), Math.max(deadlineMs, 0) + postKillCapMs + 5_000);
 
     child.on('error', (err) => {
       emit(`run-guarded: failed to start ${command[0]}: ${err.message}\n`);
@@ -181,7 +196,11 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
 
     child.on('exit', (code, signal) => {
       if (timedOut) {
-        drainAndFinish(124);
+        // The direct child can die on SIGTERM while a descendant ignores it;
+        // the SIGKILL escalation is the only thing that clears that
+        // descendant, so hold the guard open until it has fired rather than
+        // exiting out from under the timer (review of PR #1991).
+        escalated.then(() => drainAndFinish(124));
         return;
       }
       if (code != null) {

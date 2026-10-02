@@ -18,18 +18,27 @@ runs:
         # A flaky mirror must fail the step, not burn the job cap in silence:
         # attempt 1 of run 36885525121 crawled through `apt-get update` for
         # seven minutes and then sat on a stalled download until the job was
-        # cancelled. `Acquire::Retries` re-tries transient fetch failures,
-        # the `Timeout` options cap each connection attempt, and `sudo
-        # timeout` puts a hard deadline on apt-get itself (under sudo, not on
-        # sudo) so a wedged download dies with 124 and the automatic re-run
-        # (ci-retry.yml) gets a clean second attempt.
+        # cancelled. `Acquire::Retries` re-tries transient fetch failures and
+        # the `Timeout` options cap each connection attempt, so a genuinely
+        # wedged mirror fails on its own. The `sudo timeout` deadlines are the
+        # backstop for a run that is still progressing too slowly — 10 minutes
+        # for update, 20 for install, because a progressing install of 85+
+        # packages (WebKitGTK and friends) blew through a 10-minute cap on run
+        # 36926316381 while still downloading. When a deadline does fire, say
+        # so in the step log instead of leaving a bare 124.
         APT_OPTS=(
           -o Acquire::Retries=5
           -o Acquire::http::Timeout=30
           -o Acquire::https::Timeout=30
         )
-        sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" update
-        sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" install -y \
+        rc=0
+        sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" update || rc=$?
+        if [ "$rc" -eq 124 ]; then
+          echo "::error::apt-get update hit its 10-minute deadline - the mirror stalled; re-run this job once it recovers."
+        fi
+        if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+        rc=0
+        sudo timeout --kill-after=30s 20m apt-get "${APT_OPTS[@]}" install -y \
           build-essential \
           curl \
           file \
@@ -40,4 +49,8 @@ runs:
           libxdo-dev \
           lld \
           patchelf \
-          wget
+          wget || rc=$?
+        if [ "$rc" -eq 124 ]; then
+          echo "::error::apt-get install hit its 20-minute deadline - downloads were still progressing too slowly; re-run this job."
+        fi
+        exit "$rc"

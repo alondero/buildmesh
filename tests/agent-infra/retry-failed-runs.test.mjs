@@ -128,6 +128,52 @@ test('main lists Build runs, re-runs the failed jobs of the selected runs', asyn
   assert.deepEqual(rerun, ['run', 'rerun', '42', '--failed']);
 });
 
+test('main queries only open pull requests so closed ones cannot crowd out live branches', async () => {
+  // `--state all` spends the 200-item limit on dead pull requests; on an
+  // active repo a still-open branch then falls outside the window, reads as
+  // missing, and is never retried (review of PR #1991).
+  const calls = [];
+  const gh = async (args) => {
+    calls.push(args);
+    if (args[0] === 'run' && args[1] === 'list') return [run()];
+    if (args[0] === 'pr' && args[1] === 'list') return [{ headRefName: 'feature-a', state: 'OPEN' }];
+    return [];
+  };
+  const code = await main(['--dry-run'], { gh, now: NOW });
+  assert.equal(code, 0);
+  const prList = calls.find((args) => args[0] === 'pr' && args[1] === 'list');
+  assert.ok(prList, 'expected a gh pr list call');
+  const stateFlag = prList.indexOf('--state');
+  assert.ok(stateFlag !== -1, 'pr list has no --state flag');
+  assert.equal(prList[stateFlag + 1], 'open', 'pr list must filter to open pull requests');
+});
+
+test('main prefers the open verdict when a branch has multiple pull requests', async () => {
+  // A reused branch name yields several PRs for one headRefName; whichever
+  // entry GitHub returns last must not be able to flip an open branch to
+  // closed (or vice versa) — the retry verdict has to be order-independent.
+  const orderings = [
+    [{ headRefName: 'feature-a', state: 'MERGED' }, { headRefName: 'feature-a', state: 'OPEN' }],
+    [{ headRefName: 'feature-a', state: 'OPEN' }, { headRefName: 'feature-a', state: 'MERGED' }],
+  ];
+  for (const prs of orderings) {
+    const calls = [];
+    const gh = async (args) => {
+      calls.push(args);
+      if (args[0] === 'run' && args[1] === 'list') return [run({ databaseId: 7 })];
+      if (args[0] === 'pr' && args[1] === 'list') return prs;
+      if (args[0] === 'run' && args[1] === 'rerun') return {};
+      return [];
+    };
+    const code = await main([], { gh, now: NOW });
+    assert.equal(code, 0);
+    assert.ok(
+      calls.some((args) => args[0] === 'run' && args[1] === 'rerun'),
+      `open verdict lost for response order ${JSON.stringify(prs)}`,
+    );
+  }
+});
+
 test('main in dry-run mode reports without re-running anything', async () => {
   const calls = [];
   const gh = async (args) => {

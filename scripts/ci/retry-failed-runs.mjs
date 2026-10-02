@@ -110,10 +110,20 @@ export async function main(argv, { gh = ghJson, now = Date.now() } = {}) {
   );
   const prStateByBranch = new Map();
   if (prBranches.size > 0) {
-    const prs = await gh(['pr', 'list', '--state', 'all', '--limit', '200', '--json', 'headRefName,state']);
+    // Open only: `--state all` spends the limit on dead pull requests, so a
+    // still-open branch can fall outside the window, read as missing, and
+    // never be retried (review of PR #1991). A missing entry already means
+    // "not open" to isPrStateRetryable, so closed/merged pull requests stay
+    // excluded without being fetched.
+    const prs = await gh(['pr', 'list', '--state', 'open', '--limit', '200', '--json', 'headRefName,state']);
     for (const pr of prs) {
       const branch = normaliseBranch(pr.headRefName);
-      if (prBranches.has(branch)) prStateByBranch.set(branch, pr.state);
+      if (!prBranches.has(branch)) continue;
+      // A reused branch name can appear on several pull requests; keep the
+      // open verdict so the retry decision does not depend on GitHub's
+      // response order.
+      if (String(prStateByBranch.get(branch) ?? '').toLowerCase() === 'open') continue;
+      prStateByBranch.set(branch, pr.state);
     }
   }
 
