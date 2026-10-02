@@ -372,12 +372,21 @@ the app-wide value when both exist.
 
 **Probe spawn prompts** (Settings → General) customise the initial prompt
 for agents spawned from the Probe's GitHub Issues and Pull Requests tabs.
+The built-in templates appear as editable text, so you can adjust their wording
+directly. Changes save when you leave the editor. Click a placeholder button to
+insert it at the cursor or replace selected text; each button explains its value
+with an example. Expand **Example prompt** for a live preview using fictional
+GitHub item #42 in `octocat/hello-world`.
+
 Both templates offer `{{number}}`, `{{url}}`, `{{owner}}`, and `{{repo}}`.
 The Issues template additionally offers `{{title}}` and `{{title_suffix}}`
-(the latter renders " — title", or nothing when the title is blank),
-while the PR template additionally offers `{{policy}}` (the shared review
-policy). Leave a template empty, or use **Reset to default**, to restore
-the built-in wording.
+(the latter renders " — title", or nothing when the title is blank).
+The PR template additionally offers `{{policy}}`, which inserts Buildmesh's
+shared review instructions: inspect the implementation, architecture, tests
+and previous findings, report actionable problems, and state an explicit
+approve or request changes verdict. The example prompt shows the full policy
+text that an agent receives. Clear a template and leave the editor, or use
+**Reset to default**, to restore the built-in wording in the editor.
 
 The **Sandbox agent processes** option is per Mesh and is off by default. It is
 an OS process boundary, not a VM or a promise that the agent cannot send data

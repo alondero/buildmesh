@@ -17,4 +17,8 @@ issue_template: string,
 /**
  * Built-in PR-probe template (placeholders unrendered).
  */
-pr_template: string, };
+pr_template: string, 
+/**
+ * Shared review instructions substituted for `{{policy}}` in PR prompts.
+ */
+review_policy: string, };
