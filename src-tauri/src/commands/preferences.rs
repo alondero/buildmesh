@@ -109,6 +109,8 @@ pub struct ProbeSpawnPromptDefaults {
     pub issue_template: String,
     /// Built-in PR-probe template (placeholders unrendered).
     pub pr_template: String,
+    /// Shared review instructions substituted for `{{policy}}` in PR prompts.
+    pub review_policy: String,
 }
 
 /// Read the built-in probe-spawn prompt templates. Pure, infallible read
@@ -119,6 +121,7 @@ pub fn get_probe_spawn_prompt_defaults() -> ProbeSpawnPromptDefaults {
     ProbeSpawnPromptDefaults {
         issue_template: crate::agent::spawn::DEFAULT_ISSUE_SPAWN_TEMPLATE.to_string(),
         pr_template: crate::agent::spawn::DEFAULT_PR_SPAWN_TEMPLATE.to_string(),
+        review_policy: crate::review_contract::REVIEW_POLICY.to_string(),
     }
 }
 

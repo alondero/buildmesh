@@ -1,0 +1,54 @@
+{
+  "cases": {
+    "issue": [
+      {
+        "rendered": "Please work on GitHub issue #42 — Fix login timeout\nhttps://github.com/octocat/hello-world/issues/42",
+        "template": "Please work on GitHub issue #{{number}}{{title_suffix}}\n{{url}}"
+      },
+      {
+        "rendered": "42|Fix login timeout| — Fix login timeout|https://github.com/octocat/hello-world/issues/42|octocat|hello-world|{{policy}}",
+        "template": "{{number}}|{{title}}|{{title_suffix}}|{{url}}|{{owner}}|{{repo}}|{{policy}}"
+      },
+      {
+        "rendered": "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
+        "template": "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url"
+      }
+    ],
+    "pr": [
+      {
+        "rendered": "Review PR #42\nReview the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the reviewed commit or revision under review and the complete change, including relevant project instructions, tests, and previous findings. Report actionable correctness, specification, and verification findings with file locations and impact. Treat optional style suggestions as non-blocking. State the reviewed commit or revision under review and an explicit final verdict: approve only if no actionable findings remain; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code.\nhttps://github.com/octocat/hello-world/pull/42",
+        "template": "Review PR #{{number}}\n{{policy}}\n{{url}}"
+      },
+      {
+        "rendered": "42|https://github.com/octocat/hello-world/pull/42|octocat|hello-world|Review the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the reviewed commit or revision under review and the complete change, including relevant project instructions, tests, and previous findings. Report actionable correctness, specification, and verification findings with file locations and impact. Treat optional style suggestions as non-blocking. State the reviewed commit or revision under review and an explicit final verdict: approve only if no actionable findings remain; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code.|{{title}}|{{title_suffix}}",
+        "template": "{{number}}|{{url}}|{{owner}}|{{repo}}|{{policy}}|{{title}}|{{title_suffix}}"
+      },
+      {
+        "rendered": "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
+        "template": "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url"
+      }
+    ]
+  },
+  "defaults": {
+    "issue": "Please work on GitHub issue #{{number}}{{title_suffix}}\n{{url}}",
+    "policy": "Review the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the reviewed commit or revision under review and the complete change, including relevant project instructions, tests, and previous findings. Report actionable correctness, specification, and verification findings with file locations and impact. Treat optional style suggestions as non-blocking. State the reviewed commit or revision under review and an explicit final verdict: approve only if no actionable findings remain; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code.",
+    "pr": "Review PR #{{number}}\n{{policy}}\n{{url}}"
+  },
+  "examples": {
+    "issue": {
+      "number": "42",
+      "owner": "octocat",
+      "repo": "hello-world",
+      "title": "Fix login timeout",
+      "title_suffix": " — Fix login timeout",
+      "url": "https://github.com/octocat/hello-world/issues/42"
+    },
+    "pr": {
+      "number": "42",
+      "owner": "octocat",
+      "policy": "Review the implementation as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Inspect the reviewed commit or revision under review and the complete change, including relevant project instructions, tests, and previous findings. Report actionable correctness, specification, and verification findings with file locations and impact. Treat optional style suggestions as non-blocking. State the reviewed commit or revision under review and an explicit final verdict: approve only if no actionable findings remain; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code.",
+      "repo": "hello-world",
+      "url": "https://github.com/octocat/hello-world/pull/42"
+    }
+  }
+}

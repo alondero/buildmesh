@@ -8,7 +8,7 @@ import { getOrderableHarnesses } from './harnessOrder';
 import { OpenCodeAccountCard } from './OpenCodeAccountCard';
 import { HarnessConfigList, type ProxyHarness } from './HarnessConfigList';
 import { HarnessDefaultsSection } from './HarnessDefaultsSection';
-import { ProbeSpawnPromptsSection, type ProbePromptKind } from './ProbeSpawnPromptsSection';
+import { ProbeSpawnPromptsSection, type ProbePromptDefaults, type ProbePromptKind } from './ProbeSpawnPromptsSection';
 import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
 import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import { UpdateAboutSection } from './UpdateAboutSection';
@@ -845,17 +845,15 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [harnessDefaults, setHarnessDefaults] = useState<Record<string, HarnessConfigValue>>({});
   // Probe spawn prompt templates. `probePrompts` holds the stored custom
   // templates (`null` = no override, the built-in default is active);
-  // `probePromptDefaults` holds the built-in templates for display
+  // `probePromptDefaults` seeds the editors with built-in templates and
+  // supplies the shared review policy for the example preview
   // (`null` until the defaults IPC resolves — the section stays
   // disabled until then).
   const [probePrompts, setProbePrompts] = useState<{ issue: string | null; pr: string | null }>({
     issue: null,
     pr: null,
   });
-  const [probePromptDefaults, setProbePromptDefaults] = useState<{
-    issue: string;
-    pr: string;
-  } | null>(null);
+  const [probePromptDefaults, setProbePromptDefaults] = useState<ProbePromptDefaults | null>(null);
   // Mirrored here so the rename picker only enables after the
   // preferences load resolves (issue #1534).
   // Realized exposure (issue #586). Mirrors `lanEnabled` (DB intent) until a
@@ -986,7 +984,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     return api
       .getProbeSpawnPromptDefaults()
       .then((d) => {
-        setProbePromptDefaults({ issue: d.issue_template, pr: d.pr_template });
+        setProbePromptDefaults({ issue: d.issue_template, pr: d.pr_template, policy: d.review_policy });
       })
       .catch((err) => {
         console.error('Failed to load probe prompt defaults:', err);
