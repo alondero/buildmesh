@@ -66,6 +66,16 @@ read/write counters stay separate from counted-once `prompt_tokens`. The
 Muse lifecycle task should call `telemetry::ingest_line` for every
 `MspTransport::events()` notification once that transport exists.
 
+**Usage page links.** Each `UsageAdapter` owns an optional `usage_page` for
+its billing identity: a `UsagePage` URL and label that distinguish dashboards
+from console, guide, or subscription fallbacks. `assemble_meters` attaches it as
+additive `ProviderMeters.usagePage`, including disabled, failed, and remembered readings;
+URLs are metadata, not stored in the reading caches. The catalog omits the link
+when a reading reports `managed_externally`, and unknown providers have none.
+The Usage panel renders it through `SafeLink` to open the system browser.
+Provider destinations and first-party evidence are recorded in
+[the usage-page research](research/provider-usage-pages.md).
+
 **Usage cache identity.** The five-minute cache is keyed by provider plus an
 opaque account/authentication-source fingerprint selected through the
 `UsageAdapter` seam. Keyed adapters receive a process-salted SHA-256

@@ -6,6 +6,7 @@
 //! response parsing. `usage.rs` keeps orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{BillingBalance, UsageError};
@@ -16,6 +17,10 @@ use serde::Deserialize;
 pub(crate) struct OpenrouterAdapter;
 
 impl UsageAdapter for OpenrouterAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://openrouter.ai/activity", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "openrouter"
     }

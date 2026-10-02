@@ -31,6 +31,11 @@ import { UsagePanel, UsageBar, BalanceCard, ExplicitUsageMeter } from '../../src
 import type { ProviderAccount, ProviderMeters, ProviderUsage } from '../../src/lib/tauri';
 import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 
+const { openUrlMock } = vi.hoisted(() => ({
+  openUrlMock: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: openUrlMock }));
+
 // Mirror the backend's derivation (preferences::is_claude_compatible_id):
 // every account except the self-authenticating built-ins is
 // Claude-compatible. Used to drive the "No API key" vs "Not logged in"
@@ -117,6 +122,42 @@ describe('BalanceCard (extracted, was on AccountCard)', () => {
 });
 
 describe('UsagePanel (issue #601 read-only surface)', () => {
+  it('uses the backend usage page and opens it in the system browser on keyboard activation', async () => {
+    const usagePage = { url: 'https://provider.example/account/usage', label: 'View usage' };
+    const user = userEvent.setup();
+    openUrlMock.mockClear();
+    render(<UsagePanel account={account()} meter={meter({ usage: usage(), usagePage })} />);
+
+    const link = screen.getByRole('link', { name: 'View usage for Anthropic / Claude on provider website' });
+    expect(link.getAttribute('href')).toBe(usagePage.url);
+    expect(link.getAttribute('target')).toBe('_blank');
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer');
+    await user.tab();
+    expect(document.activeElement).toBe(link);
+    await user.keyboard('{Enter}');
+    expect(openUrlMock).toHaveBeenCalledExactlyOnceWith(usagePage.url);
+  });
+
+  it.each([undefined, null, { url: '', label: 'View usage' }])('omits the link when usagePage is %s', (usagePage) => {
+    render(<UsagePanel account={account()} meter={meter({ usage: usage(), usagePage })} />);
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it.each(['Usage guide', 'Open console', 'Manage plan'])('labels the fallback destination as %s', (label) => {
+    render(<UsagePanel account={account()} meter={meter({ usagePage: { url: 'https://provider.example/', label } })} />);
+    expect(screen.getByRole('link', { name: `${label} for Anthropic / Claude on provider website` }).textContent).toContain(label);
+  });
+
+  it.each([
+    { usage: usage({ error: 'Request failed' }) },
+    { usage: usage({ loggedIn: false }) },
+    { usage: usage(), cachedAt: 1_790_000_000 },
+    { usage: null },
+  ])('keeps the provider page available when the reading is incomplete or cached: %s', (reading) => {
+    render(<UsagePanel account={account()} meter={meter({ ...reading, usagePage: { url: 'https://claude.ai/settings/usage', label: 'View usage' } })} />);
+    expect(screen.getByRole('link').getAttribute('href')).toBe('https://claude.ai/settings/usage');
+  });
+
   it('renders percentage bars for a plan account', () => {
     render(
       <UsagePanel

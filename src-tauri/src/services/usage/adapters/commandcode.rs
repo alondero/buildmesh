@@ -2,6 +2,7 @@
 //! detection-gated on the `commandcode` harness.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::UsageAdapter;
 use crate::services::usage::outcome::UsageOutcome;
 
@@ -9,6 +10,10 @@ use crate::services::usage::outcome::UsageOutcome;
 pub(crate) struct CommandcodeAdapter;
 
 impl UsageAdapter for CommandcodeAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://commandcode.ai/usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "commandcode"
     }

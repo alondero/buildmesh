@@ -60,7 +60,7 @@ export function Wordmark() {
       className="flex h-10 shrink-0 select-none items-center gap-[9px]"
     >
       <RelayMark className="pointer-events-none h-[30px] w-[30px]" />
-      <span className="pointer-events-none text-[14px] font-extrabold leading-none tracking-[-0.03em]">
+      <span className="pointer-events-none text-[14px] font-extrabold leading-none tracking-[-0.03em] max-[1099px]:hidden">
         <span className="text-text-primary">build</span>
         <span className="text-accent-cyan">mesh</span>
       </span>

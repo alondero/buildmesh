@@ -124,6 +124,9 @@ in [the release procedure](releasing.md#required-checks-and-branch-protection).
 
 ## Architecture documents
 
+The [October desktop UX audit](desktop-ux-audit-2026-10.md) records ranked
+findings, native evidence and the linked follow-up checklist.
+
 - [Knowledge primer](../knowledge-primer.md) is the detailed AI architecture
   reference; read only the sections relevant to the code you will touch.
 - [ADR index](../adr/README.md) explains which decisions are current,

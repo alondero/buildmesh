@@ -992,6 +992,36 @@ describe('useAgentNodeStore', () => {
   });
 
   describe('deleteAgentNode', () => {
+    it.each(['running', 'spawning', 'awaiting_input', 'ready'] as const)('keeps an active root session alive until close is confirmed (%s)', async (status) => {
+      const node = makeNode({id:70,status,use_worktree:false});
+      seedAgentNodes([node],70);
+      mockDeleteFlow(makeSafety({worktree_path:null}));
+      const close = useAgentNodeStore.getState().deleteAgentNode(70);
+      await vi.waitFor(()=>expect(useWorktreeClosePromptStore.getState().pending).not.toBeNull());
+      expect(useAgentNodeStore.getState().nodesById[70]).toBe(node);
+      expect(mockInvoke).not.toHaveBeenCalledWith('kill_agent', expect.anything());
+      useWorktreeClosePromptStore.getState().choose('cancel');
+      await close;
+      expect(useAgentNodeStore.getState().closingNodeIds.has(70)).toBe(false);
+      expect(useAgentNodeStore.getState().nodesById[70]).toBe(node);
+      const confirmed = useAgentNodeStore.getState().deleteAgentNode(70);
+      await vi.waitFor(()=>expect(useWorktreeClosePromptStore.getState().pending).not.toBeNull());
+      useWorktreeClosePromptStore.getState().choose('remove');
+      await confirmed;
+      expect(mockInvoke).toHaveBeenCalledWith('delete_agent_node', {nodeId:70,removeWorktree:false});
+    });
+
+    it('preserves a scheduled prompt when worktree closure is cancelled', async () => {
+      const node=makeNode({id:71});
+      seedAgentNodes([node],71);
+      mockDeleteFlow(makeSafety({has_uncommitted:true}));
+      setWorktreeCloseActionResolverForTests(vi.fn().mockResolvedValue('cancel'));
+      useAgentNodeStore.getState().scheduleInput(71,60000,'continue','1m');
+      const scheduled = useAgentNodeStore.getState().schedules[71];
+      await useAgentNodeStore.getState().deleteAgentNode(71);
+      expect(useAgentNodeStore.getState().schedules[71]).toBe(scheduled);
+      useAgentNodeStore.getState().cancelSchedule(71);
+    });
     it('silently removes a clean worktree when closing the node', async () => {
       seedAgentNodes([makeNode({ id: 15 })], 15);
       mockDeleteFlow(makeSafety());

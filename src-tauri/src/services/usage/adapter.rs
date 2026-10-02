@@ -44,7 +44,7 @@
 //! catalog) is the sole mint site of the wire shape.
 
 use super::outcome::{AuthPolicy, UsageOutcome};
-use super::types::{UsageError, UsageWindow};
+use super::types::{UsageError, UsagePage, UsageWindow};
 use crate::preferences::ProviderAccount;
 use reqwest::blocking::{Client, RequestBuilder};
 use sha2::{Digest, Sha256};
@@ -94,6 +94,10 @@ impl UsageIdentityFingerprint {
 ///   ([`UsageOutcome::into_usage`]) is the sole mint site of the wire shape.
 pub(crate) trait UsageAdapter: Send + Sync {
     fn id(&self) -> &'static str;
+    /// Provider-owned page for this meter's billing identity, when available.
+    fn usage_page(&self) -> Option<UsagePage> {
+        None
+    }
     fn native_harness(&self) -> Option<&'static str> {
         None
     }

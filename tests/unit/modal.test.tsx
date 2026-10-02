@@ -22,6 +22,79 @@ import { ConfirmDialog } from '../../src/components/ConfirmDialog/ConfirmDialog'
 
 afterEach(cleanup);
 
+describe('Modal visible tab order', () => {
+  it('wraps around hidden, inert, disabled and negative-tabindex descendants', () => {
+    render(<Modal onClose={() => {}} ariaLabel="Visible controls">
+      <button>First visible</button>
+      <section hidden><button>Hidden pane</button></section>
+      <section aria-hidden="true"><button>Hidden from assistive tech</button></section>
+      <section inert><button>Inert pane</button></section>
+      <section style={{ display: 'none' }}><button>CSS hidden</button></section>
+      <section style={{ visibility: 'hidden' }}><button>CSS invisible</button></section>
+      <fieldset disabled><button>Disabled fieldset</button></fieldset>
+      <button tabIndex={-1}>Programmatic only</button>
+      <button>Last visible</button>
+    </Modal>);
+    const dialog = screen.getByRole('dialog');
+    const first = screen.getByText('First visible');
+    const last = screen.getByText('Last visible');
+    last.focus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(first);
+    first.focus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('recomputes the order when panes switch and keeps an empty dialog focused', () => {
+    const content = (second: boolean) => <Modal onClose={() => {}} ariaLabel="Switch panes">
+      <section hidden={second}><button>Pane one</button></section>
+      <section hidden={!second}><button>Pane two</button></section>
+    </Modal>;
+    const { rerender } = render(content(false));
+    screen.getByText('Pane one').focus();
+    rerender(content(true));
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByText('Pane two'));
+    rerender(<Modal onClose={() => {}} ariaLabel="No controls"><p>Loading</p></Modal>);
+    const event = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    screen.getByRole('dialog').dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole('dialog'));
+  });
+
+  it('includes native disclosures while excluding controls inside closed details', () => {
+    render(<Modal onClose={() => {}} ariaLabel="Disclosure">
+      <button>First</button>
+      <details><summary>Pair manually</summary><button>Hidden detail control</button></details>
+    </Modal>);
+    const summary = screen.getByText('Pair manually');
+    summary.focus();
+    fireEvent.keyDown(summary, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByText('First'));
+    fireEvent.keyDown(screen.getByText('First'), { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(summary);
+    summary.parentElement!.setAttribute('open', '');
+    screen.getByText('First').focus();
+    fireEvent.keyDown(screen.getByText('First'), { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByText('Hidden detail control'));
+  });
+
+  it('traps the dirty confirmation within its two actions', () => {
+    render(<Modal onClose={() => {}} ariaLabel="Editing" dirty>
+      <button>Form action</button>
+    </Modal>);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    const keep = screen.getByText('Keep editing');
+    const discard = screen.getByText('Discard changes');
+    discard.focus();
+    fireEvent.keyDown(discard, { key: 'Tab' });
+    expect(document.activeElement).toBe(keep);
+    fireEvent.keyDown(keep, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(discard);
+  });
+});
+
 /** Issue #1292: with the portal, the wrapper/dimmer live in `document.body`,
  *  not in the render container. Walk from the dialog role upward to the
  *  fixed wrapper, then take its first child (the dimmer). The panel is

@@ -229,6 +229,12 @@ Desktop: shared `Modal.tsx` — `bg-bg-overlay`, `border-border-subtle`,
 `Sheet` anchored to `#root` so it survives the soft keyboard. Destructive
 confirmations go through `ConfirmDialog`, not ad-hoc prompts.
 
+Keep a viewport gutter around dialogs. Long dialogs need a bounded height,
+a non-scrolling title/close row, and one explicitly owned body scroller.
+Tab order includes visible, enabled, non-inert controls only; an unsaved-edit
+confirmation owns its own keyboard sequence. Destructive confirmations place
+initial focus on Cancel.
+
 ### Inputs
 
 `bg-bg-input`, `border-border-default`; focus moves the border to
