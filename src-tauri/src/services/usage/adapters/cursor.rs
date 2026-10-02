@@ -31,6 +31,7 @@
 //! optional plan probe — is the auth arbiter.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
@@ -60,6 +61,10 @@ const SESSION_EXPIRED: &str = "Cursor session expired — run 'cursor-agent logi
 pub(crate) struct CursorAdapter;
 
 impl UsageAdapter for CursorAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://cursor.com/dashboard?tab=usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "cursor"
     }

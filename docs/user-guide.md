@@ -43,6 +43,14 @@ up to seven days, marked **Last known value · …** on the Usage tab — so a f
 start does not blank the meters you were watching. If nothing has been recorded
 yet, its meter stays hidden.
 
+On the **Usage** tab, **View usage ↗** opens the provider's usage page in your
+system browser. The link also works beside a last known reading or a fetch
+error, so you can check the current figures directly. Where no direct dashboard
+is available, **Open console**, **Usage guide**, or **Manage plan** opens the
+provider's account console, quota documentation, or subscription settings.
+Custom providers and externally managed billing omit the link. The browser
+uses its own login; choose the same account or workspace as the meter.
+
 ## Your first session
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),

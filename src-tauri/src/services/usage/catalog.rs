@@ -15,7 +15,7 @@ use super::adapters::{
     OpencodeAdapter, OpenrouterAdapter,
 };
 use super::outcome::UsageOutcome;
-use super::types::ProviderUsage;
+use super::types::{ProviderUsage, UsagePage};
 use crate::preferences::ProviderAccount;
 use std::collections::HashSet;
 
@@ -74,6 +74,19 @@ pub(crate) fn contains(provider_id: &str) -> bool {
 
 pub(crate) fn native_harness(provider_id: &str) -> Option<&'static str> {
     dispatch(provider_id).and_then(|adapter| adapter.native_harness())
+}
+
+pub(crate) fn usage_page(provider_id: &str, usage: Option<&ProviderUsage>) -> Option<UsagePage> {
+    // A subscription dashboard would describe a different allowance when the
+    // reading explicitly says billing is owned by an external platform.
+    if usage.is_some_and(|usage| {
+        usage.meters.iter().any(|meter| {
+            matches!(meter, super::types::UsageMeter::ManagedExternally { .. })
+        })
+    }) {
+        return None;
+    }
+    dispatch(provider_id).and_then(|adapter| adapter.usage_page())
 }
 
 pub(crate) fn configured_keyed_provider_ids(accounts: &[ProviderAccount]) -> HashSet<String> {
@@ -338,6 +351,32 @@ mod tests {
         assert!(!contains("not-a-provider"));
         assert_eq!(native_harness("not-a-provider"), None);
         assert!(cached_or_fetch("not-a-provider", true, &[]).is_none());
+        assert_eq!(usage_page("not-a-provider", None), None);
+    }
+
+    #[test]
+    fn every_registered_provider_has_a_labelled_https_usage_destination() {
+        for adapter in USAGE_METERS {
+            let page = usage_page(adapter.id(), None).expect("registered provider usage page");
+            let url = reqwest::Url::parse(&page.url).expect("valid usage page URL");
+            assert_eq!(url.scheme(), "https", "{}", adapter.id());
+            assert!(url.host_str().is_some(), "{}", adapter.id());
+            assert!(!page.label.trim().is_empty(), "{}", adapter.id());
+        }
+        assert_eq!(usage_page("codex", None).unwrap().url, "https://chatgpt.com/codex/settings/usage");
+        assert_eq!(usage_page("openai", None).unwrap().url, "https://platform.openai.com/usage");
+        assert_eq!(usage_page("kimi", None).unwrap().url, "https://platform.kimi.ai/console/account");
+        assert_eq!(usage_page("agy", None).unwrap().label, "Usage guide");
+        assert_eq!(usage_page("muse-code", None).unwrap().label, "Manage plan");
+    }
+
+    #[test]
+    fn externally_managed_readings_do_not_link_to_an_unrelated_subscription() {
+        for platform in ["AWS Bedrock", "Google Vertex AI", "Microsoft Foundry", "Anthropic Console"] {
+            let usage = UsageOutcome::ManagedExternally { platform: platform.to_string() }
+                .into_usage("anthropic");
+            assert_eq!(usage_page("anthropic", Some(&usage)), None, "{platform}");
+        }
     }
 
     #[test]

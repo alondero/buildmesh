@@ -8,6 +8,7 @@ mod auth;
 mod parse;
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
 
@@ -59,6 +60,10 @@ fn auth_failure_detail(origin: &OauthOrigin) -> String {
 pub(crate) struct AnthropicAdapter;
 
 impl UsageAdapter for AnthropicAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://claude.ai/settings/usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         PROVIDER
     }
