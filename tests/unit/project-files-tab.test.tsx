@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ProjectFilesTab } from '../../src/components/Probe/ProjectFilesTab';
 import { useUIStore } from '../../src/stores/uiStore';
@@ -17,6 +17,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { FileNode, GitStatus, DiffResult } from '../../src/lib/tauri';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { useToastStore } from '../../src/stores/toastStore';
 
 const MESH: Mesh = {
   id: 1,
@@ -71,6 +72,7 @@ function mockBackend() {
 
 describe('ProjectFilesTab (#376)', () => {
   beforeEach(() => {
+    useToastStore.setState({toasts:[]});
     vi.mocked(invoke).mockReset();
     mockBackend();
     useMeshStore.setState({
@@ -100,11 +102,108 @@ describe('ProjectFilesTab (#376)', () => {
   it('collapses the File Tree when its header is clicked', async () => {
     render(<ProjectFilesTab />);
 
-    await screen.findByText('File Tree');
+    await screen.findByRole('treeitem', { name: /app.ts/ });
     fireEvent.click(screen.getByText('File Tree'));
     // The Changed Files section is unaffected — only the tree sub-tree hides.
     expect(screen.getByText('Changed Files')).toBeTruthy();
   });
+
+  it('opens changed tree files in the diff and unchanged files in the editor', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_git_status') return Promise.resolve([{ path: 'app.ts', status: 'modified', additions: 3, deletions: 1 }]);
+      if (cmd === 'list_directory') return Promise.resolve({ ...TREE, children: [
+        { name: 'app.ts', path: '/repo/app.ts', is_dir: false, children: [] },
+        { name: 'readme.md', path: '/repo/readme.md', is_dir: false, children: [] },
+      ] });
+      if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
+      return Promise.resolve(null);
+    });
+    render(<ProjectFilesTab />);
+    fireEvent.click(await screen.findByRole('treeitem', { name: /app.ts/ }));
+    await waitFor(() => expect(useUIStore.getState().activeDiffFile).toMatchObject({ filePath: 'app.ts', rootPath: '/repo', source: 'head' }));
+    expect(invoke).toHaveBeenCalledWith('diff_file_against_head', {sessionPath:'/repo',filePath:'app.ts'});
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === 'open_in_editor')).toBe(false);
+    fireEvent.click(screen.getByRole('treeitem', { name: /readme.md/ }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('open_in_editor', {path:'/repo/readme.md'}));
+  });
+
+  it('does not open a diff or editor when the changed tree file diff fails', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'get_git_status') return Promise.resolve([{ path: 'app.ts', status: 'modified', additions: 1, deletions: 0 }]);
+      if (cmd === 'list_directory') return Promise.resolve(TREE);
+      if (cmd === 'diff_file_against_head') return Promise.reject(new Error('Diff unavailable'));
+      return Promise.resolve(null);
+    });
+    render(<ProjectFilesTab />);
+    fireEvent.click(await screen.findByRole('treeitem', { name: /app.ts/ }));
+    await waitFor(() => expect(useToastStore.getState().toasts.some(t=>t.message.includes('Diff unavailable'))).toBe(true));
+    expect(useUIStore.getState().activeDiffFile).toBeNull();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd])=>cmd==='open_in_editor')).toBe(false);
+  });
+
+  function pendingTreeDiffs() {
+    const pending = new Map<string, { resolve: (diff: DiffResult) => void; reject: (error: Error) => void }>();
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'get_git_status') return Promise.resolve(['app.ts', 'other.ts'].map(path => ({ path, status: 'modified', additions: 1, deletions: 0 })));
+      if (cmd === 'list_directory') return Promise.resolve({ ...TREE, children: ['app.ts', 'other.ts'].map(name => ({ name, path: `/repo/${name}`, is_dir: false, children: [] })) });
+      if (cmd === 'diff_file_against_head') return new Promise<DiffResult>((resolve, reject) => { pending.set(args!.filePath as string, { resolve, reject }); });
+      return Promise.resolve(null);
+    });
+    return pending;
+  }
+
+  it.each(['older-first', 'newer-first', 'older-rejects'])(
+    'keeps the latest changed-file selection when loads complete %s', async order => {
+      const pending = pendingTreeDiffs();
+      render(<ProjectFilesTab />);
+      fireEvent.click(await screen.findByRole('treeitem', { name: /app.ts/ }));
+      fireEvent.click(screen.getByRole('treeitem', { name: /other.ts/ }));
+      if (order === 'older-first') {
+        await act(async () => { pending.get('app.ts')!.resolve(DIFF); });
+        expect(useUIStore.getState().activeDiffFile).toBeNull();
+      }
+      await act(async () => { pending.get('other.ts')!.resolve(DIFF); });
+      expect(useUIStore.getState().activeDiffFile?.filePath).toBe('other.ts');
+      await act(async () => {
+        if (order === 'older-rejects') pending.get('app.ts')!.reject(new Error('Stale failure'));
+        else pending.get('app.ts')!.resolve(DIFF);
+      });
+      expect(useUIStore.getState().activeDiffFile?.filePath).toBe('other.ts');
+      expect(useToastStore.getState().toasts).toHaveLength(0);
+    },
+  );
+
+  it.each(['collapse', 'unmount', 'owner-change'])(
+    'does not reopen a diff after the tree leaves its owner by %s', async departure => {
+      const pending = pendingTreeDiffs();
+      const { unmount } = render(<ProjectFilesTab />);
+      fireEvent.click(await screen.findByRole('treeitem', { name: /app.ts/ }));
+      if (departure === 'collapse') fireEvent.click(screen.getByText('File Tree'));
+      else if (departure === 'unmount') unmount();
+      else act(() => { useAgentNodeStore.getState().setActiveNode(NODE.id); });
+      await act(async () => { pending.get('app.ts')!.resolve(DIFF); });
+      expect(useUIStore.getState().activeDiffFile).toBeNull();
+    },
+  );
+
+  it.each(['tree-first', 'list-first'])(
+    'shares latest-selection ownership across list and tree (%s)', async order => {
+      const pending = pendingTreeDiffs();
+      render(<ProjectFilesTab />);
+      await screen.findByRole('treeitem', { name: /app.ts/ });
+      if (order === 'tree-first') {
+        fireEvent.click(screen.getByRole('treeitem', { name: /app.ts/ }));
+        fireEvent.click(screen.getByRole('button', { name: /other.ts/ }));
+      } else {
+        fireEvent.click(screen.getByRole('button', { name: /app.ts/ }));
+        fireEvent.click(screen.getByRole('treeitem', { name: /other.ts/ }));
+      }
+      await act(async () => { pending.get('other.ts')!.resolve(DIFF); });
+      expect(useUIStore.getState().activeDiffFile?.filePath).toBe('other.ts');
+      await act(async () => { pending.get('app.ts')!.resolve(DIFF); });
+      expect(useUIStore.getState().activeDiffFile?.filePath).toBe('other.ts');
+    },
+  );
 
   it('clicking a changed file opens the center diff overlay via openDiff (#379)', async () => {
     render(<ProjectFilesTab />);
@@ -187,9 +286,11 @@ describe('ProjectFilesTab (#376)', () => {
     // the header strip.
     render(<ProjectFilesTab />);
 
-    const treeToggle = await screen.findByText('File Tree');
+    await screen.findByRole('treeitem', { name: /app.ts/ });
+    const treeToggle = screen.getByText('File Tree');
     fireEvent.click(treeToggle);
     fireEvent.click(treeToggle);
+    await screen.findByRole('treeitem', { name: /app.ts/ });
 
     expect(
       screen.getByRole('button', { name: /open in file explorer/i }),

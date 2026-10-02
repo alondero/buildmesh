@@ -32,7 +32,7 @@
  * from the legacy panel's state machine.
  */
 
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { openInEditor } from '../../lib/tauri';
 import { FileTree } from '../FileTree/FileTree';
 import { ChangedFilesSection } from '../FileTree/ChangedFilesSection';
@@ -64,6 +64,16 @@ export function ProjectFilesTab() {
   const openDiff = useUIStore((s) => s.openDiff);
 
   const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
+  const selectionOwner = useRef<AbortController | null>(null);
+  const beginFileSelection = useCallback(() => {
+    selectionOwner.current?.abort();
+    selectionOwner.current = new AbortController();
+    return selectionOwner.current.signal;
+  }, []);
+  useEffect(() => {
+    const owner = selectionOwner;
+    return () => { owner.current?.abort(); };
+  }, [activePath, activeMeshId, activeNodeId]);
 
   // ProbeTabBody guarantees `activePath` and `activeMeshId` are non-null by the
   // time this component renders (it shows the explicit missing-Mesh empty state
@@ -74,7 +84,7 @@ export function ProjectFilesTab() {
   // A changed-file click opens the Center Workspace Diff Overlay (#379). The
   // diff is `'head'`-source (uncommitted vs HEAD) because that's what the
   // Changed Files list shows; `rootPath` is the probe's active path (the
-    // focused/pinned node's worktree, or the mesh root with no matching node), so the
+  // focused/pinned node's worktree, or the mesh root with no matching node), so the
   // path joins correctly for `diff_file_against_head`. We capture the focused
   // node/mesh as the lens so the overlay auto-closes if it later changes. The
   // `string | null` signature is dictated by `FileTree.onFileSelect`'s "clear
@@ -104,6 +114,7 @@ export function ProjectFilesTab() {
         rootPath={activePath}
         selectedFile={null}
         onChangedFileSelect={handleChangedFileSelect}
+        onFileSelectionStart={beginFileSelection}
       />
       <div className="border-b border-border-subtle">
         <button
@@ -121,17 +132,15 @@ export function ProjectFilesTab() {
         </button>
         {fileTreeExpanded && (
           <FileTree
+            key={`${activeMeshId}:${activeNodeId}`}
             rootPath={activePath}
             showGitStatus
             selectedFile={null}
-            // `FileTree` routes ALL clicks (changed + unchanged) through
-            // `onFileSelect` for our use case — the probe's 360px body
-            // can't host an inline diff, so a changed-file click should
-            // also switch to the review tab. `onChangedFileSelect` is
-            // intentionally omitted: the `FileTree` guards the call on
-            // the prop being defined, so leaving it out routes every
-            // click through `onFileSelect` without a no-op stub.
-            onFileSelect={handleChangedFileSelect}
+            // Open the overlay only after FileTree has loaded the diff.
+            // Its selection callback runs optimistically and on failure.
+            onFileSelect={() => {}}
+            onFileSelectionStart={beginFileSelection}
+            onChangedFileSelect={(_path, _diff, relativePath) => handleChangedFileSelect(relativePath)}
             onUnchangedFileSelect={handleUnchangedFileSelect}
           />
         )}

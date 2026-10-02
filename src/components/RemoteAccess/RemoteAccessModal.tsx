@@ -82,6 +82,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
   const [host, setHost] = useState<string>('discovering...');
   const [error, setError] = useState<string | null>(null);
   const [unreachable, setUnreachable] = useState(false);
+  const [networkStatus, setNetworkStatus] = useState<NetworkStatus | null>(null);
+  const [enabling, setEnabling] = useState(false);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // Server's current root CA fingerprint (issue #635). Shown below the QR so
   // a user whose installed root is stale can compare before re-installing.
   // Fetch failure is silent — the modal still works without it.
@@ -172,6 +180,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // run, holding React internals + IPC mocks alive for nothing.
         if (signal.aborted) return;
 
+        setNetworkStatus(status);
         const { url, host: displayHost, reachable } = buildRemoteAccessUrl(
           status,
           localIp,
@@ -491,29 +500,63 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
     }
   }, [certStatus]);
 
+  const enableRemoteAccess = async () => {
+    closeButtonRef.current?.focus();
+    setEnabling(true);
+    setError(null);
+    try {
+      await api.setLanExposureEnabled(true);
+      if (!mountedRef.current) return;
+      setNetworkStatus(null);
+      setQrDataUrl(null);
+      setInvitationVersion(version => version + 1);
+    } catch (e) {
+      if (mountedRef.current) setError(formatError(e));
+    } finally {
+      if (mountedRef.current) setEnabling(false);
+    }
+  };
+  const retryLoad = () => {
+    closeButtonRef.current?.focus();
+    setError(null);
+    setNetworkStatus(null);
+    setQrDataUrl(null);
+    setInvitationVersion(version => version + 1);
+  };
+
   return (
-    <Modal onClose={onClose} labelledBy="remote-access-title" maxWidth="max-w-lg" className="p-8">
-        <div className="absolute top-5 right-5">
-          <ModalCloseButton onClose={onClose} label="Close remote access" />
+    <Modal onClose={onClose} labelledBy="remote-access-title" maxWidth="max-w-lg" className="p-0 max-h-[calc(100dvh-2rem)] flex flex-col overflow-hidden">
+        <div className="shrink-0 flex items-start justify-between gap-4 border-b border-border-subtle p-6">
+          <div>
+            <h2 id="remote-access-title" className="text-xl font-semibold text-text-primary mb-1">Remote Access</h2>
+            <p className="text-sm text-text-secondary">Connect your phone to this workspace.</p>
+          </div>
+          <ModalCloseButton ref={closeButtonRef} onClose={onClose} label="Close remote access" />
         </div>
-
-        <h2 id="remote-access-title" className="text-2xl font-semibold text-text-primary mb-2">Remote Access</h2>
-        <p className="text-base text-text-muted mb-6">
-          Scan with your phone camera to connect.
-        </p>
-
+        <div className="min-h-0 overflow-y-auto overflow-x-hidden p-6" data-testid="remote-access-body">
         {error ? (
-          <div className="text-status-error text-base">{error}</div>
+          <div role="alert" className="text-status-error text-sm break-words">
+            <p>{error}</p>
+            <button type="button" onClick={retryLoad} className="mt-3 rounded-md border border-border-default px-3 py-2 text-text-secondary hover:bg-bg-card-hover">Retry</button>
+          </div>
+        ) : enabling || !networkStatus ? (
+          <p role="status" className="py-8 text-center text-sm text-text-secondary">{enabling ? 'Enabling remote access…' : 'Loading remote access…'}</p>
+        ) : !networkStatus.lan_exposure_enabled ? (
+          <div className="rounded-lg border border-border-default bg-bg-card p-5 text-center">
+            <p className="text-base font-semibold text-text-primary">Remote access is off</p>
+            <p className="mt-2 text-sm text-text-secondary">Enable access over your LAN or VPN, then pair your phone with a one-time QR code.</p>
+            <button type="button" onClick={enableRemoteAccess} className="mt-4 rounded-md border border-accent-cyan/30 bg-accent-cyan/10 px-4 py-2 text-sm font-medium text-accent-cyan hover:bg-accent-cyan/20">Enable remote access</button>
+          </div>
         ) : unreachable ? (
           <div
             data-testid="remote-access-warning"
             role="alert"
-            className="text-status-error text-base"
+            className="rounded-md border border-status-warning/30 bg-status-warning/10 p-4 text-sm text-text-secondary"
           >
-            LAN exposure is on, but no network interface is actually exposed —
-            your phone can't reach this computer. Check the "Expose to LAN"
-            status in Settings (TLS may have failed to start, or no LAN
-            interface is available).
+            <p className="font-medium text-status-warning">Your phone cannot reach this computer yet</p>
+            <p className="mt-2">LAN exposure is on, but no network interface is actually exposed. Check your LAN or VPN connection and try again.</p>
+            <p className="mt-2">TLS: {networkStatus.tls_active ? 'active' : 'not active'} · Exposed interfaces: {networkStatus.exposed_interfaces.length}</p>
+            <button type="button" onClick={enableRemoteAccess} className="mt-3 rounded-md border border-border-default px-3 py-2 text-text-primary hover:bg-bg-card-hover">Retry connection</button>
           </div>
         ) : certStatus &&
           ackedRootGeneration !== null &&
@@ -631,7 +674,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 {!expired && <img
                   src={qrDataUrl}
                   alt="QR Code to connect"
-                  className="w-96 h-96 rounded-md border border-border-subtle"
+                  className="w-96 max-w-full h-auto aspect-square rounded-md border border-border-subtle"
                 />}
                 <p className="mt-2 text-sm text-text-secondary">
                   {expired ? 'Pairing code expired.' : 'Scan once to pair this phone. This code works once and expires in 5 minutes.'}
@@ -641,13 +684,14 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                   <p>Open the address below on your phone and paste this pairing code:</p>
                   <code className="break-all select-all">{pairingTicket}</code>
                 </details>}
-                <button className="mt-2 text-sm text-accent" onClick={() => {
+                <button className="mt-2 text-sm text-accent-cyan" onClick={() => {
                   setExpired(true);
                   setInvitationVersion(v => v + 1);
                 }}>New pairing code</button>
                 <div className="mt-2 text-base text-text-secondary font-medium font-mono">
                   {host}
                 </div>
+                {networkStatus.exposed_interfaces.length > 1 && <p className="mt-2 break-all text-xs text-text-secondary">Also reachable at: {networkStatus.exposed_interfaces.filter(bind => bind.address !== host).map(bind => bind.address).join(', ')}</p>}
               </div>
             )}
             {activeTab === 'install-android' && installQrDataUrl && (
@@ -658,7 +702,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <img
                   src={installQrDataUrl}
                   alt="QR Code to install Buildmesh root CA on Android"
-                  className="w-96 h-96 rounded-md border border-border-subtle"
+                  className="w-96 max-w-full h-auto aspect-square rounded-md border border-border-subtle"
                 />
                 <div className="mt-2 text-sm text-text-muted text-center">
                   Scan with your Android phone to install the root CA.
@@ -673,7 +717,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                 <img
                   src={installIosQrDataUrl}
                   alt="QR Code to install Buildmesh root CA on iOS"
-                  className="w-96 h-96 rounded-md border border-border-subtle"
+                  className="w-96 max-w-full h-auto aspect-square rounded-md border border-border-subtle"
                 />
                 <div className="mt-2 text-sm text-text-muted text-center">
                   Scan with your iPhone to install the profile, then enable
@@ -830,6 +874,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           <p className="text-sm text-text-muted">
             Make sure your phone is on the same network as this computer.
           </p>
+        </div>
         </div>
     </Modal>
   );

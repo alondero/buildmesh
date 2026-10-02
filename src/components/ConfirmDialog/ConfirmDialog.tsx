@@ -1,4 +1,5 @@
 import { Modal } from '../shared/Modal';
+import { useRef } from 'react';
 
 interface ConfirmDialogProps {
   title: string;
@@ -10,12 +11,14 @@ interface ConfirmDialogProps {
 }
 
 export function ConfirmDialog({ title, message, confirmLabel = 'Delete', onConfirm, onCancel, className }: ConfirmDialogProps) {
+  const cancelRef = useRef<HTMLButtonElement>(null);
   return (
-    <Modal onClose={onCancel} labelledBy="confirm-dialog-title" maxWidth="max-w-sm" className={className}>
+    <Modal onClose={onCancel} labelledBy="confirm-dialog-title" maxWidth="max-w-sm" className={className} defaultFocusRef={cancelRef}>
       <h2 id="confirm-dialog-title" className="text-sm font-semibold text-text-primary mb-2">{title}</h2>
-      <p className="text-xs text-text-muted mb-5">{message}</p>
+      <p className="text-xs text-text-secondary mb-5 break-words">{message}</p>
       <div className="flex justify-end gap-2">
         <button
+          ref={cancelRef}
           type="button"
           onClick={onCancel}
           className="px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary border border-border-subtle rounded-md transition-colors"
