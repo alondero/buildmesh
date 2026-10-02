@@ -1,0 +1,65 @@
+name: CI retry
+
+# One automatic re-run for Build runs that failed or were cancelled, so a
+# flaky runner or a transient apt stall does not sit red until a human or an
+# agent notices it (the "hours to mergeable" investigation found every
+# attempt-2 in the sampled window was triggered manually).
+#
+# scripts/ci/retry-failed-runs.mjs does the selection: first attempts only,
+# less than six hours old, the newest run for its event + head branch, and
+# for pull requests only while the PR is still open. At most three runs per
+# invocation, re-running only each run's failed jobs (`--failed`), so one
+# wedged shard costs one shard rather than the whole fan-out.
+#
+# Every 15 minutes rather than on every push: the retry must observe runs
+# that failed with no follow-up event (a cancelled push run, a PR nobody
+# touched), and a scheduled workflow is the only trigger that fires on its
+# own. The workflow takes seconds, so the cadence costs almost nothing.
+#
+# Schedule triggers only run from the default branch, which is also where
+# the rerun permissions below are evaluated - do not move this file.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report which runs would be re-run without re-running anything
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    name: Re-run failed Build jobs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Job-level permissions replace the top-level set: rerunning runs needs
+    # `actions: write`, reading pull request states needs `pull-requests:
+    # read`, and the checkout needs `contents: read`. Nothing else is granted.
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Select failed runs and re-run their failed jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry-run || false }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            node scripts/ci/retry-failed-runs.mjs --dry-run
+          else
+            node scripts/ci/retry-failed-runs.mjs
+          fi

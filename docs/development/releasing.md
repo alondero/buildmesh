@@ -105,53 +105,71 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
-| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, and the vitest unit + integration suites. The fast frontend gate — it no longer compiles Rust. |
-| `Verification / Rust tests + TS bindings` | yes | The Rust export, doctest, and integration targets, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It also refuses to run unless the compile job and every test shard below passed. |
-| `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project). |
-| `Verification / Platform smoke (windows-latest)` | yes | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. |
-| `Verification / Platform smoke (macos-latest)` | yes | The Tauri app compiles and links on macOS. |
+| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, and bundle budget always; the vitest unit + integration suites as well whenever the change-scope job (`Detect changes`) reports frontend changes. The fast frontend gate — it no longer compiles Rust. |
+| `Verification / Rust tests + TS bindings` | yes | The Rust export, doctest, and integration targets, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It refuses to run unless the change-scope job succeeded and the compile job and every test shard passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
+| `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
+| `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. |
+| `Verification / Platform smoke (macos-latest)` | no — post-merge signal | The Tauri app compiles and links on macOS. Same triggers as the Windows leg. |
 
-The jobs fan out rather than chain. `Quality (Linux)` (frontend) and the
-**non-required** `Rust build (compile)` job both start immediately, and both
-`Platform smoke` jobs start with them — they consume nothing from either. The
-seven `Rust tests (<group>)` shards start once `Rust build (compile)` has
-populated the shared Cargo cache; the `Rust tests + TS bindings` aggregate then
-starts once `Quality (Linux)`, `Rust build (compile)`, and every shard have
-finished. It keeps `Quality (Linux)` in its `needs` so the authoritative pass
-only runs against a fully green tree — that dependency costs no wall-clock,
-because the frontend gate finishes in a few minutes, well before the shards.
-The old shape queued everything behind one ~10-minute frontend job; this one
-does not. `Rust build (compile)` compiles every Rust test binary once — with
-`lld` and a runner swapfile in place of the old single-threaded
-`CARGO_BUILD_JOBS=1` — and the shards restore that cache instead of rebuilding.
+The jobs fan out rather than chain. `Detect changes` classifies the pull
+request's diff (everything else — pushes, the schedule, dispatches, release
+tags — is classified as full scope), and `Quality (Linux)` (frontend) starts
+immediately after it. The Rust branch — the **non-required** `Rust build
+(compile)` job, the seven `Rust tests (<group>)` shards, and the required
+`Rust tests + TS bindings` aggregate — only starts when that classification
+says Rust moved, and `Quality (Linux)`'s browser/vitest steps and
+`Verify-smoke (Linux)` only run when it says frontend moved, so a Rust-only
+pull request never boots Chromium and a frontend-only pull request never
+compiles Rust. The two `Platform smoke` jobs are outside all of this: they
+are not required checks (see the table above) and run on pushes, release
+tags, and manual dispatches rather than on pull requests. The shards start
+once `Rust build (compile)` has populated the shared Cargo cache; the `Rust
+tests + TS bindings` aggregate then starts once `Quality (Linux)`, `Rust build
+(compile)`, every shard, and `Detect changes` have finished. It keeps
+`Quality (Linux)` in its `needs` so the authoritative pass only runs against a
+fully green tree — that dependency costs no wall-clock, because the frontend
+gate finishes in a few minutes, well before the shards. The old shape queued
+everything behind one ~10-minute frontend job; this one does not. `Rust build
+(compile)` compiles every Rust test binary once — with `lld` and a runner
+swapfile in place of the old single-threaded `CARGO_BUILD_JOBS=1` — and the
+shards restore that cache instead of rebuilding.
+
+A caller-supplied `profile` input narrows the graph for pushes to `main`:
+`build.yml` passes `light`, which skips the Rust branch entirely (the merge
+gate already ran it against the same commit through the pull request), while
+pull requests, the weekly schedule, manual dispatches, and release tags get
+`full`. Required checks are only ever evaluated on pull-request runs, so the
+narrowing never weakens the gate.
 
 The Rust unit target also runs as seven parallel `Rust tests (<group>)` jobs —
-`db`, `services`, `agent`, `commands-http`, `autopilot-coordinator`,
+`db`, `services`, `agent`, `commands-http`, `circuit-coordinator`,
 `git-env-preferences`, `remaining`. They exist because a hosted runner lost
 mid-`cargo-test` reports no step conclusion and no log, so a single combined
 run cannot say which test did it; one job per group means a loss costs one
 group. The shards are **not** required checks — `Rust tests + TS bindings` is
 the authoritative, single-writer pass and the gate.
 
-Each Rust test step carries its own in-shell `timeout` (30 minutes for a shard,
-45 for the non-shard pass) under a longer job cap, and writes its log to a file
-that an `if: always()` upload step preserves. The log is written by **redirection,
-not a `| tee` pipeline** (#1961): `timeout` signals the child's whole process
-group, but a descendant that leaves that group still holds the pipe open, so
-`tee` never sees EOF and the step outlives the guard that was supposed to end
-it. Run 36531715263 lost the `services` shard that way — about 45 minutes with
-no step conclusion, and no log, because a cancelled job flushes neither. With a
-redirect, nothing sits between the test and the step shell. A hung test now
-costs one failed shard with a retrievable log, instead of an open-ended stall
-that holds the required `Rust tests + TS bindings` gate open.
+Each Rust test step runs under `scripts/ci/run-guarded.mjs` (30 minutes for a
+shard, 45 for the non-shard pass) beneath a longer job cap, and writes its log
+to a file that an `if: always()` upload step preserves. The guard streams the
+command's output into the step log while appending it to that file, kills the
+command's whole process tree at the deadline (SIGTERM, then SIGKILL two
+minutes later), emits the `::error::` annotation itself, and exits with the
+command's own code — or 124 when the deadline fired. It is unit-tested in
+`tests/agent-infra/run-guarded.test.mjs`, which pins the exit-code contract,
+the tree kill, and the annotation.
 
-GitHub runs a `run:` block under `bash -e`, so the guard has to be captured
-erexit-safely: a bare `timeout` that fails ends the step on the spot, and the
-status capture, the log print, and the 124 annotation after it never run. Both
-steps initialise `status=0` and consume the guarded command's own failure with
-`|| status=$?`, which keeps the failure path reachable while the step still
-exits with the guarded command's code. The same rule applies to any new
-timeout-guarded step: a guard whose failure path cannot execute is not a guard.
+The guard exists because of #1961: with a `| tee` pipeline, a descendant that
+leaves the process group still holds the pipe open, so `tee` never sees EOF and
+the step outlives the guard that was supposed to end it — run 36531715263 lost
+the `services` shard that way, about 45 minutes with no step conclusion and no
+log, because a cancelled job flushes neither. The guard never waits
+*unboundedly* on the output pipes after the kill: every wait path has its own
+cap, so a descendant holding the write end cannot keep the step alive past its
+deadline, and because output reaches the log file as it arrives rather than at
+the end, even a hard job-level cancel leaves a retrievable log. A hung test
+therefore costs one failed shard with evidence, instead of an open-ended stall
+that holds the required `Rust tests + TS bindings` gate open.
 
 Because libtest filters are substring matches, they cannot express "this
 test's first path segment is X", so the split is a list of exact filters and
@@ -184,6 +202,15 @@ opening or updating a `ci-alert` issue from the workflow itself, because a
 scheduled run has no pull request to turn red. Its concurrency group is keyed
 by event name, so a push to `main` cannot cancel a weekly run and suppress the
 alert it would have raised.
+
+Infra flakiness clears itself, too: every 15 minutes `.github/workflows/
+ci-retry.yml` runs `scripts/ci/retry-failed-runs.mjs`, which re-runs the failed
+jobs of at most three Build runs — first attempts only, less than six hours
+old, the newest run for their event and head branch, and for pull requests
+only while the PR is still open. It never retries a second time, so a
+genuinely broken tree stays red instead of being re-rolled until it goes
+green, and `--failed` means a blip in one shard re-runs that shard rather than
+the whole fan-out.
 
 `WSL Codex profile contract (opt-in)` is `workflow_dispatch`-only. It runs a
 `#[ignore]`d test that needs a real WSL guest, and a hosted Windows image ships
