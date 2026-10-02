@@ -20,12 +20,9 @@ import { describe, it, expect, vi } from 'vitest';
 import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ProbeSpawnPromptsSection } from '../../src/components/AppSettings/ProbeSpawnPromptsSection';
+import productionExamples from '../../src/types/generated/ProbeSpawnPromptExamples.json';
 
-const DEFAULTS = {
-  issue: 'Please work on GitHub issue #{{number}}{{title_suffix}}\n{{url}}',
-  pr: 'Review PR #{{number}}\n{{policy}}\n{{url}}',
-  policy: 'Inspect changes, tests and previous findings. Report actionable problems and an explicit verdict.',
-};
+const DEFAULTS = productionExamples.defaults;
 
 function renderSection(overrides: {
   stored?: { issue: string | null; pr: string | null };
@@ -55,6 +52,87 @@ function inputValue(testId: string): string {
 }
 
 describe('ProbeSpawnPromptsSection', () => {
+  for (const kind of ['issue', 'pr'] as const) {
+    for (const [index, example] of productionExamples.cases[kind].entries()) {
+      it(`${kind} preview matches the Rust spawn renderer byte-for-byte (case ${index + 1})`, () => {
+        renderSection({ stored: { issue: null, pr: null, [kind]: example.template } });
+        expect(screen.getByTestId(`probe-prompt-preview-${kind}`).textContent).toBe(example.rendered);
+      });
+    }
+
+    it(`${kind} placeholder buttons and sample values match the Rust renderer`, () => {
+      renderSection();
+      const card = screen.getByTestId(`probe-prompt-card-${kind}`);
+      const tokens = Array.from(card.querySelectorAll('[data-prompt-insert]'))
+        .map((button) => button.querySelector('code')?.textContent).sort();
+      const examples = productionExamples.examples[kind];
+      expect(tokens).toEqual(Object.keys(examples).map((name) => `{{${name}}}`).sort());
+      const title = kind === 'issue' ? 'GitHub Issues probe' : 'Pull Requests probe';
+      for (const [name, value] of Object.entries(examples)) {
+        if (name === 'policy') continue; // The full policy is covered by the preview above.
+        expect(screen.getByRole('button', {
+          name: `Insert {{${name}}} into ${title} prompt`,
+          description: (description) => description.endsWith(`Example: ${value.trim()}`),
+        })).not.toBeNull();
+      }
+    });
+  }
+
+  it('appends on the first placeholder click when the editor has never held a cursor', async () => {
+    const user = userEvent.setup();
+    renderSection();
+    const input = screen.getByTestId('probe-prompt-input-issue') as HTMLTextAreaElement;
+    input.setSelectionRange(0, 0);
+    await user.click(screen.getByRole('button', { name: 'Insert {{repo}} into GitHub Issues probe prompt' }));
+    expect(input.value).toBe(`${DEFAULTS.issue}{{repo}}`);
+    expect(document.activeElement).toBe(input);
+    expect(input.selectionStart).toBe(input.value.length);
+  });
+
+  it('exposes placeholder help and examples as the accessible description', () => {
+    renderSection();
+    expect(screen.getByRole('button', {
+      name: 'Insert {{repo}} into GitHub Issues probe prompt',
+      description: 'Repository name, without the owner. Example: hello-world',
+    })).not.toBeNull();
+  });
+
+  it('does not dispatch the same saved text twice while its write is pending', async () => {
+    let finish!: (ok: boolean) => void;
+    const onSave = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'Pending edit' } });
+    fireEvent.blur(input);
+    fireEvent.blur(input);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    await act(async () => finish(true));
+    expect(inputValue('probe-prompt-input-issue')).toBe('Pending edit');
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
+  it('serializes newer saves and keeps the editor consistent with persisted text', async () => {
+    const finishes: (() => void)[] = [];
+    let persisted: string | null = null;
+    const onSave = vi.fn((_kind: 'issue' | 'pr', value: string) => new Promise<boolean>((resolve) => {
+      finishes.push(() => { persisted = value; resolve(true); });
+    }));
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'First edit' } });
+    fireEvent.blur(input);
+    fireEvent.change(input, { target: { value: 'Second edit' } });
+    fireEvent.blur(input);
+    expect(onSave).toHaveBeenCalledTimes(1);
+    await act(async () => finishes[0]());
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(inputValue('probe-prompt-input-issue')).toBe('Second edit');
+    await act(async () => finishes[1]());
+    expect(persisted).toBe('Second edit');
+    expect(inputValue('probe-prompt-input-issue')).toBe(persisted);
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
   it('populates editable defaults without saving an override on untouched blur', () => {
     const { onSave } = renderSection();
     expect(screen.getByTestId('probe-prompt-badge-issue').textContent).toBe('Using default');
@@ -180,31 +258,33 @@ describe('ProbeSpawnPromptsSection', () => {
     await waitFor(() => expect(onSave).toHaveBeenCalledWith('issue', 'Newer edit'));
   });
 
-  it('ignores an older reset completion after a newer edit has saved', async () => {
+  it('queues a newer save behind a pending reset', async () => {
     let resolveReset!: (ok: boolean) => void;
     const onReset = vi.fn(() => new Promise<boolean>((resolve) => { resolveReset = resolve; }));
-    renderSection({ stored: { issue: 'Custom', pr: null }, onReset });
+    const { onSave } = renderSection({ stored: { issue: 'Custom', pr: null }, onReset });
     fireEvent.click(screen.getByTestId('probe-prompt-reset-issue'));
     const input = screen.getByTestId('probe-prompt-input-issue');
     fireEvent.change(input, { target: { value: 'New saved edit' } });
     fireEvent.blur(input);
-    await waitFor(() => expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull());
+    expect(onSave).not.toHaveBeenCalled();
     await act(async () => resolveReset(true));
+    expect(onSave).toHaveBeenCalledWith('issue', 'New saved edit');
     expect(inputValue('probe-prompt-input-issue')).toBe('New saved edit');
     expect(screen.getByTestId('probe-prompt-badge-issue').textContent).toBe('Custom');
     expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
   });
 
-  it('ignores an older save completion after a newer reset', async () => {
+  it('queues a reset behind a pending save so the persisted reset wins', async () => {
     let resolveSave!: (ok: boolean) => void;
     const onSave = vi.fn(() => new Promise<boolean>((resolve) => { resolveSave = resolve; }));
-    renderSection({ stored: { issue: 'Custom', pr: null }, onSave });
+    const { onReset } = renderSection({ stored: { issue: 'Custom', pr: null }, onSave });
     const input = screen.getByTestId('probe-prompt-input-issue');
     fireEvent.change(input, { target: { value: 'Stale saved edit' } });
     fireEvent.blur(input);
     fireEvent.click(screen.getByTestId('probe-prompt-reset-issue'));
-    await waitFor(() => expect(inputValue('probe-prompt-input-issue')).toBe(DEFAULTS.issue));
+    expect(onReset).not.toHaveBeenCalled();
     await act(async () => resolveSave(true));
+    expect(onReset).toHaveBeenCalledWith('issue');
     expect(inputValue('probe-prompt-input-issue')).toBe(DEFAULTS.issue);
     expect(screen.getByTestId('probe-prompt-badge-issue').textContent).toBe('Using default');
     expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
@@ -219,6 +299,98 @@ describe('ProbeSpawnPromptsSection', () => {
     await user.click(screen.getByTestId('probe-prompt-reset-issue'));
     await waitFor(() => expect(inputValue('probe-prompt-input-issue')).toBe(DEFAULTS.issue));
     expect(onSave).not.toHaveBeenCalled();
+  });
+
+  it('preserves a cursor selection after blur when a placeholder is clicked later', async () => {
+    const user = userEvent.setup();
+    renderSection({ stored: { issue: 'Keep selected text', pr: null } });
+    const input = screen.getByTestId('probe-prompt-input-issue') as HTMLTextAreaElement;
+    await user.click(input);
+    input.setSelectionRange(5, 13);
+    await user.click(screen.getByTestId('probe-prompt-input-pr'));
+    await user.click(screen.getByRole('button', { name: 'Insert {{repo}} into GitHub Issues probe prompt' }));
+    expect(input.value).toBe('Keep {{repo}} text');
+    expect(input.selectionStart).toBe(13);
+    expect(input.selectionEnd).toBe(13);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it('deduplicates the cross-card focus transfer while another editor is saving', async () => {
+    const user = userEvent.setup();
+    let finish!: (ok: boolean) => void;
+    const onSave = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    renderSection({ onSave });
+    const issue = screen.getByTestId('probe-prompt-input-issue');
+    await user.click(issue);
+    fireEvent.change(issue, { target: { value: 'Pending issue edit' } });
+    fireEvent.blur(issue);
+    await user.click(screen.getByRole('button', { name: 'Insert {{repo}} into Pull Requests probe prompt' }));
+    expect(document.activeElement).toBe(screen.getByTestId('probe-prompt-input-pr'));
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledWith('issue', 'Pending issue edit');
+    await act(async () => finish(true));
+    expect(inputValue('probe-prompt-input-issue')).toBe('Pending issue edit');
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
+  it('rolls a failed queued save back to the last text that actually persisted', async () => {
+    const finishes: ((ok: boolean) => void)[] = [];
+    const onSave = vi.fn(() => new Promise<boolean>((resolve) => { finishes.push(resolve); }));
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'Persisted first' } });
+    fireEvent.blur(input);
+    fireEvent.change(input, { target: { value: 'Rejected second' } });
+    fireEvent.blur(input);
+    await act(async () => finishes[0](true));
+    expect(inputValue('probe-prompt-input-issue')).toBe('Rejected second');
+    await act(async () => finishes[1](false));
+    expect(inputValue('probe-prompt-input-issue')).toBe('Persisted first');
+    expect(screen.getByTestId('probe-prompt-badge-issue').textContent).toBe('Custom');
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
+  it('continues a queued save after the previous request rejects', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const onSave = vi.fn()
+      .mockImplementationOnce(() => new Promise<boolean>((_resolve, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(true);
+    renderSection({ onSave });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'Rejected first' } });
+    fireEvent.blur(input);
+    fireEvent.change(input, { target: { value: 'Saved second' } });
+    fireEvent.blur(input);
+    await act(async () => rejectFirst(new Error('IPC unavailable')));
+    expect(onSave).toHaveBeenCalledTimes(2);
+    expect(inputValue('probe-prompt-input-issue')).toBe('Saved second');
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
+  it('allows an unsaved default edit to be reset without saving it first', async () => {
+    const user = userEvent.setup();
+    const { onSave } = renderSection();
+    await user.click(screen.getByTestId('probe-prompt-input-issue'));
+    await user.keyboard(' edited');
+    await user.click(screen.getByTestId('probe-prompt-reset-issue'));
+    expect(inputValue('probe-prompt-input-issue')).toBe(DEFAULTS.issue);
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
+  });
+
+  it('does not save discarded text when a preferences refresh blurs an editor during reset', async () => {
+    let finish!: (ok: boolean) => void;
+    const onReset = vi.fn(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    const { onSave } = renderSection({ onReset });
+    const input = screen.getByTestId('probe-prompt-input-issue');
+    fireEvent.change(input, { target: { value: 'Discard this edit' } });
+    fireEvent.click(screen.getByTestId('probe-prompt-reset-issue'));
+    // The parent's preferences refresh disables the focused editor, causing blur.
+    fireEvent.blur(input);
+    await act(async () => finish(true));
+    expect(onSave).not.toHaveBeenCalled();
+    expect(inputValue('probe-prompt-input-issue')).toBe(DEFAULTS.issue);
+    expect(screen.queryByTestId('probe-prompt-dirty-issue')).toBeNull();
   });
 
   it('inserts at the cursor, returns focus and saves the full edited default on blur', async () => {

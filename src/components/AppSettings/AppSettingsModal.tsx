@@ -845,7 +845,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const [harnessDefaults, setHarnessDefaults] = useState<Record<string, HarnessConfigValue>>({});
   // Probe spawn prompt templates. `probePrompts` holds the stored custom
   // templates (`null` = no override, the built-in default is active);
-  // `probePromptDefaults` holds the built-in templates for display
+  // `probePromptDefaults` seeds the editors with built-in templates and
+  // supplies the shared review policy for the example preview
   // (`null` until the defaults IPC resolves — the section stays
   // disabled until then).
   const [probePrompts, setProbePrompts] = useState<{ issue: string | null; pr: string | null }>({

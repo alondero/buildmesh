@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { SettingsSection } from './SettingsRow';
 
 export type ProbePromptKind = 'issue' | 'pr';
@@ -69,7 +69,7 @@ const PLACEHOLDER_HELP: Record<string, string> = {
   url: 'Full GitHub link to the issue or pull request.',
   owner: 'GitHub user or organisation that owns the repository.',
   repo: 'Repository name, without the owner.',
-  policy: 'Shared review instructions: inspect code, architecture, tests and previous findings; report actionable problems and give an explicit approve or request changes verdict. Expand the example prompt below to read the full instructions.',
+  policy: 'Shared Buildmesh review instructions. Expand the example prompt below to read the full instructions.',
 };
 
 function exampleValues(kind: ProbePromptKind, policy: string): Record<string, string> {
@@ -108,9 +108,27 @@ export function ProbeSpawnPromptsSection({
   disabled = false,
 }: ProbeSpawnPromptsSectionProps) {
   const [drafts, setDrafts] = useState<Partial<Record<ProbePromptKind, PromptDraft>>>({});
+  const helpId = useId();
   const inputs = useRef<Partial<Record<ProbePromptKind, HTMLTextAreaElement>>>({});
+  const focused = useRef<Record<ProbePromptKind, boolean>>({ issue: false, pr: false });
   const insertion = useRef<{ kind: ProbePromptKind; caret: number } | null>(null);
-  const mutations = useRef<Record<ProbePromptKind, number>>({ issue: 0, pr: 0 });
+  const edits = useRef<Record<ProbePromptKind, number>>({ issue: 0, pr: 0 });
+  const writes = useRef<Partial<Record<ProbePromptKind, { key: string; done: Promise<void> }>>>({});
+
+  const queueWrite = useCallback((kind: ProbePromptKind, key: string, write: () => Promise<void>) => {
+    const previous = writes.current[kind];
+    if (previous?.key === key) return previous.done;
+    // Queue writes as well as their settlements: a completion guard cannot
+    // stop an older concurrent write from winning on disk.
+    const done = previous ? previous.done.then(write, write) : write();
+    const pending = { key, done };
+    writes.current[kind] = pending;
+    const clear = () => {
+      if (writes.current[kind] === pending) delete writes.current[kind];
+    };
+    void done.then(clear, clear);
+    return done;
+  }, []);
 
   useLayoutEffect(() => {
     const pending = insertion.current;
@@ -154,6 +172,7 @@ export function ProbeSpawnPromptsSection({
   }, [drafts, onDirtyChange]);
 
   const updateDraft = useCallback((kind: ProbePromptKind, value: string) => {
+    edits.current[kind]++;
     setDrafts((prev) => {
       const current = prev[kind] ?? EMPTY_DRAFT;
       return { ...prev, [kind]: { ...current, draft: value, dirty: value !== current.committed } };
@@ -164,73 +183,68 @@ export function ProbeSpawnPromptsSection({
     const input = inputs.current[kind];
     if (!input) return;
     const token = `{{${name}}}`;
-    const { selectionStart, selectionEnd, value } = input;
+    const { value } = input;
+    const selectionStart = focused.current[kind] ? input.selectionStart : value.length;
+    const selectionEnd = focused.current[kind] ? input.selectionEnd : value.length;
     insertion.current = { kind, caret: selectionStart + token.length };
     updateDraft(kind, value.slice(0, selectionStart) + token + value.slice(selectionEnd));
   };
 
   const commit = useCallback(
-    async (kind: ProbePromptKind) => {
+    (kind: ProbePromptKind) => {
       const current = drafts[kind];
       if (!current || !current.dirty) return;
-      const operation = ++mutations.current[kind];
       // Normalise at the commit boundary: the backend trims before
       // storing (blank collapses to "no override"), so the draft must be
       // trimmed too — otherwise a padded draft would compare dirty
       // against its own trimmed stored value forever.
-      const raw = current.draft;
-      const saved = raw.trim();
+      const saved = current.draft.trim();
       const committed = saved || defaults?.[kind] || '';
       const custom = saved !== '';
-      const ok = await onSave(kind, saved);
-      if (mutations.current[kind] !== operation) return;
-      // Functional update: the textarea stays editable while the save is
-      // in flight, so only settle a draft the user hasn't touched since.
-      // Newer keystrokes keep their text; only their baseline moves.
-      setDrafts((prev) => {
-        const cur = prev[kind];
-        if (!cur) return prev;
-        const next: Partial<Record<ProbePromptKind, PromptDraft>> = { ...prev };
-        if (cur.draft !== raw) {
-          // Typed during the save: keep the newer text. On success only
-          // the baseline moves to what the backend stored (compared
-          // trimmed, so padding-only differences settle); on failure
-          // everything stays so no keystroke is lost either way.
-          if (ok) next[kind] = { ...cur, committed, custom, dirty: cur.draft.trim() !== committed };
-          return next;
-        }
-        next[kind] = ok
-          ? { committed, draft: committed, dirty: false, custom }
-          : { ...cur, draft: cur.committed, dirty: false };
-        return next;
+      const revision = edits.current[kind];
+      // Refreshing preferences disables a focused input and can blur it.
+      // An explicit reset already discards this revision; do not save it again.
+      if (writes.current[kind]?.key === `reset:${revision}`) return;
+      return queueWrite(kind, `save:${saved}`, async () => {
+        const ok = await onSave(kind, saved).catch(() => false);
+        setDrafts((prev) => {
+          const cur = prev[kind];
+          if (!cur) return prev;
+          if (edits.current[kind] !== revision) {
+            // Every serialized success moves the persisted baseline, including
+            // when a newer queued write might subsequently fail.
+            return ok
+              ? { ...prev, [kind]: { ...cur, committed, custom, dirty: cur.draft.trim() !== committed } }
+              : prev;
+          }
+          return { ...prev, [kind]: ok
+            ? { committed, draft: committed, dirty: false, custom }
+            : { ...cur, draft: cur.committed, dirty: false } };
+        });
       });
     },
-    [drafts, defaults, onSave],
+    [drafts, defaults, onSave, queueWrite],
   );
 
   const reset = useCallback(
-    async (kind: ProbePromptKind) => {
+    (kind: ProbePromptKind) => {
       const current = drafts[kind];
       if (!current) return;
-      const operation = ++mutations.current[kind];
-      const cleared = current.draft;
-      const ok = await onReset(kind);
-      if (mutations.current[kind] !== operation) return;
-      if (!ok) return;
-      // Same in-flight guard as `commit`: a draft typed after pressing
-      // Reset is newer than the clear and must survive it.
-      setDrafts((prev) => {
-        const cur = prev[kind];
-        if (!cur) return prev;
-        const committed = defaults?.[kind] ?? '';
-        const next: Partial<Record<ProbePromptKind, PromptDraft>> = { ...prev };
-        next[kind] = cur.draft === cleared
-          ? { committed, draft: committed, dirty: false, custom: false }
-          : { ...cur, committed, custom: false, dirty: cur.draft !== committed };
-        return next;
+      const revision = edits.current[kind];
+      const committed = defaults?.[kind] ?? '';
+      return queueWrite(kind, `reset:${revision}`, async () => {
+        const ok = await onReset(kind).catch(() => false);
+        if (!ok) return;
+        setDrafts((prev) => {
+          const cur = prev[kind];
+          if (!cur) return prev;
+          return { ...prev, [kind]: edits.current[kind] === revision
+            ? { committed, draft: committed, dirty: false, custom: false }
+            : { ...cur, committed, custom: false, dirty: cur.draft !== committed } };
+        });
       });
     },
-    [drafts, defaults, onReset],
+    [drafts, defaults, onReset, queueWrite],
   );
 
   const inputsDisabled = disabled || defaults === null;
@@ -287,7 +301,7 @@ export function ProbeSpawnPromptsSection({
                 >
                   {hasCustom ? 'Custom' : 'Using default'}
                 </span>
-                {hasCustom && (
+                {(hasCustom || state.dirty) && (
                   <button
                     type="button"
                     onClick={() => void reset(kind)}
@@ -307,6 +321,7 @@ export function ProbeSpawnPromptsSection({
                 value={state.draft}
                 placeholder={defaults === null ? 'Loading default prompt…' : ''}
                 onChange={(e) => updateDraft(kind, e.target.value)}
+                onFocus={() => { focused.current[kind] = true; }}
                 onBlur={(event) => {
                   if (event.relatedTarget instanceof HTMLElement && event.relatedTarget.dataset.promptInsert === kind) return;
                   void commit(kind);
@@ -326,6 +341,7 @@ export function ProbeSpawnPromptsSection({
                     disabled={inputsDisabled}
                     data-prompt-insert={kind}
                     aria-label={`Insert {{${name}}} into ${meta.title} prompt`}
+                    aria-describedby={`${helpId}-${kind}-${name}-help ${helpId}-${kind}-${name}-example`}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => insertPlaceholder(kind, name)}
                     onBlur={(event) => {
@@ -336,9 +352,11 @@ export function ProbeSpawnPromptsSection({
                     className={`min-w-0 text-left border border-border-subtle rounded-md px-3 py-2 hover:bg-bg-card-hover focus-visible:outline-none focus-visible:border-accent-cyan disabled:opacity-50 ${name === 'policy' ? 'sm:col-span-2' : ''}`}
                   >
                     <code className="text-sm text-accent-cyan">{`{{${name}}}`}</code>
-                    <span className="block text-xs text-text-secondary mt-1">{PLACEHOLDER_HELP[name]}</span>
-                    <span className="block text-xs text-text-secondary mt-1 break-words">
-                      Example: <code>{name === 'policy' ? `${examples[name].slice(0, 90)}…` : examples[name]}</code>
+                    <span id={`${helpId}-${kind}-${name}-help`} className="block text-xs text-text-secondary mt-1">{PLACEHOLDER_HELP[name]}</span>
+                    <span id={`${helpId}-${kind}-${name}-example`} className="block text-xs text-text-secondary mt-1 break-words">
+                      Example: <code>{name === 'policy'
+                        ? examples[name].match(/^[\s\S]*?[.!?](?:\s|$)/)?.[0].trim() ?? examples[name]
+                        : examples[name]}</code>
                     </span>
                   </button>
                 ))}

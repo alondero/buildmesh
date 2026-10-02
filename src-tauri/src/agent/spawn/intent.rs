@@ -741,6 +741,60 @@ https://github.com/alondero/buildmesh/issues/7"
         );
     }
 
+    /// Refresh the cross-language preview contract alongside ts-rs bindings.
+    /// Frontend tests consume these production-rendered outputs; CI gates drift
+    /// under src/types/generated after running cargo test.
+    #[test]
+    fn export_bindings_probe_spawn_prompt_examples() {
+        let issue_names = ["number", "title", "title_suffix", "url", "owner", "repo"];
+        let pr_names = ["number", "url", "owner", "repo", "policy"];
+        let issue_render = |template: &str| {
+            render_issue_spawn_prompt(template, "octocat", "hello-world", 42, "Fix login timeout")
+        };
+        let pr_render = |template: &str| {
+            render_pr_spawn_prompt(template, "octocat", "hello-world", 42)
+        };
+        let issue_examples: serde_json::Map<String, serde_json::Value> = issue_names
+            .iter()
+            .map(|name| (name.to_string(), serde_json::json!(issue_render(&format!("{{{{{name}}}}}")))))
+            .collect();
+        let pr_examples: serde_json::Map<String, serde_json::Value> = pr_names
+            .iter()
+            .map(|name| (name.to_string(), serde_json::json!(pr_render(&format!("{{{{{name}}}}}")))))
+            .collect();
+        let issue_cases: Vec<_> = [
+            DEFAULT_ISSUE_SPAWN_TEMPLATE,
+            "{{number}}|{{title}}|{{title_suffix}}|{{url}}|{{owner}}|{{repo}}|{{policy}}",
+            "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
+        ].into_iter().map(|template| serde_json::json!({
+            "template": template, "rendered": issue_render(template),
+        })).collect();
+        let pr_cases: Vec<_> = [
+            DEFAULT_PR_SPAWN_TEMPLATE,
+            "{{number}}|{{url}}|{{owner}}|{{repo}}|{{policy}}|{{title}}|{{title_suffix}}",
+            "{{unknown}}|{{toString}}|{{constructor}}|{{ number }}|{{\nnumber}}|{{{number}}|{{url",
+        ].into_iter().map(|template| serde_json::json!({
+            "template": template, "rendered": pr_render(template),
+        })).collect();
+        let fixture = serde_json::json!({
+            "defaults": {
+                "issue": DEFAULT_ISSUE_SPAWN_TEMPLATE,
+                "pr": DEFAULT_PR_SPAWN_TEMPLATE,
+                "policy": crate::review_contract::REVIEW_POLICY,
+            },
+            "examples": { "issue": issue_examples, "pr": pr_examples },
+            "cases": { "issue": issue_cases, "pr": pr_cases },
+        });
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+            std::env::var_os("TS_RS_EXPORT_DIR")
+                .unwrap_or_else(|| "../src/types/generated".into()),
+        );
+        std::fs::create_dir_all(&dir).expect("create generated bindings directory");
+        let contents = serde_json::to_string_pretty(&fixture).expect("serialize preview contract") + "\n";
+        std::fs::write(dir.join("ProbeSpawnPromptExamples.json"), contents)
+            .expect("export production prompt examples");
+    }
+
     /// Custom issue templates substitute every placeholder; the title is
     /// trimmed before substitution.
     #[test]
