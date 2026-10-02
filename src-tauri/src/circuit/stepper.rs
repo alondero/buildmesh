@@ -111,6 +111,13 @@ pub struct StepView {
 }
 
 impl StepView {
+    pub(crate) fn cancellation_reason(&self, reason: &str) -> String {
+        match self.error.as_deref().filter(|error| !error.is_empty()) {
+            Some(checkpoint) => format!("{reason} Previous checkpoint: {checkpoint}"),
+            None => reason.to_owned(),
+        }
+    }
+
     fn new(node_id: &str, status: StepStatus) -> Self {
         Self {
             node_id: node_id.to_string(),
@@ -1083,7 +1090,10 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 })
                 .map(|s| s.node_id.clone());
             if let Some(step_node) = bound {
-                cancel_step(run, &mut t, &step_node);
+                cancel_step(run, &mut t, &step_node, &format!(
+                    "Piloted agent node {agent_node_id} is no longer available (deleted, archived or marked lost)."));
+                run.state = RunState::Failed;
+                t.run_state_changed = true;
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -1703,8 +1713,8 @@ fn has_retry_path(run: &RunView, node_id: &str) -> bool {
     })
 }
 
-fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
-    const CANCEL_REASON: &str = "piloted agent node was closed";
+fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: &str) {
+    let reason = run.step(node_id).map_or_else(|| reason.to_owned(), |step| step.cancellation_reason(reason));
     match run.step_mut(node_id) {
         Some(step) => {
             if step.status.is_terminal() {
@@ -1712,14 +1722,14 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
             }
             step.status = StepStatus::Cancelled;
             step.outcome = Some(StepOutcome::Cancelled);
-            step.error = Some(CANCEL_REASON.to_string());
+            step.error = Some(reason.clone());
         }
         // Symmetrical with fail_step: an absent step still gets a
         // Cancelled StepView so run.steps and t.step_writes agree.
         None => {
             let mut step = StepView::new(node_id, StepStatus::Cancelled);
             step.outcome = Some(StepOutcome::Cancelled);
-            step.error = Some(CANCEL_REASON.to_string());
+            step.error = Some(reason.clone());
             run.steps.push(step);
         }
     }
@@ -1729,13 +1739,11 @@ fn cancel_step(run: &mut RunView, t: &mut Transition, node_id: &str) {
         node_id: node_id.to_string(),
         status: StepStatus::Cancelled,
         outcome: Some(Some(StepOutcome::Cancelled)),
-        error: Some(Some(CANCEL_REASON.to_string())),
+        error: Some(Some(reason)),
         agent_node_id: None,
         attempt,
         fresh_attempt: false,
     });
-    run.state = RunState::Failed;
-    t.run_state_changed = true;
 }
 
 /// Is `node_id` eligible to schedule? All incoming edges satisfied by
@@ -2303,7 +2311,12 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
             .map(|s| s.node_id.clone())
             .collect();
         for node_id in leftovers {
-            cancel_step(run, t, &node_id);
+            let reason = if run.state == RunState::Cancelled {
+                "Cancelled because the circuit run was cancelled."
+            } else {
+                "Cancelled because the circuit run failed."
+            };
+            cancel_step(run, t, &node_id, reason);
         }
         return;
     }
@@ -2696,6 +2709,37 @@ mod tests {
         assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
         assert_eq!(run.state, RunState::Failed);
         assert!(transition.run_state_changed);
+    }
+
+    #[test]
+    fn circuit_agent_loss_retains_the_checkpoint_that_preceded_removal() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        run.step_mut("spawn").unwrap().status = StepStatus::Unverified;
+        let checkpoint = "Classifier unavailable after 5 attempts. Restore the configured classifier and recheck evidence.";
+        run.step_mut("spawn").unwrap().error = Some(checkpoint.into());
+        let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+        let reason = run.step("spawn").unwrap().error.as_deref().unwrap();
+        assert!(reason.contains("900"));
+        assert!(reason.contains(checkpoint));
+        assert_eq!(transition.step_writes[0].error, Some(Some(reason.into())));
+        assert_eq!(run.state, RunState::Failed);
+    }
+
+    #[test]
+    fn circuit_failure_cancels_siblings_without_claiming_their_agents_were_closed() {
+        let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5, 5));
+        run.attach_agent_node("a", 11);
+        run.attach_agent_node("b", 12);
+        let transition = advance(&mut run, &agent_finished(11, false));
+        assert_eq!(run.step("a").unwrap().error.as_deref(), Some("piloted agent node reported error"));
+        assert_eq!(run.step("b").unwrap().error.as_deref(), Some("Cancelled because the circuit run failed."));
+        assert!(transition.step_writes.iter().any(|write| write.node_id == "b"
+            && write.error == Some(Some("Cancelled because the circuit run failed.".into()))));
     }
 
     #[test]

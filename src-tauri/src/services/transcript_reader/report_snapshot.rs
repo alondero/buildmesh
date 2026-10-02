@@ -405,6 +405,62 @@ mod tests {
     }
 
     #[test]
+    fn circuit_issue_handoff_keeps_report_admission_fences() {
+        use crate::agent::process::InputUnavailable;
+        use crate::circuit::observation::CircuitObservationBlocker as B;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let text = "Implementation and verification finished.\nBUILDMESH_HANDOFF_V1: READY";
+        let lines = format!("{}\n{}\n", serde_json::json!({
+            "message_id":"final", "turn_id":"implementation", "message":{"role":"assistant",
+            "timestamp":1790856000000i64, "content":[{"type":"text", "text":text}]}
+        }), serde_json::json!({"message_id":"settlement", "turn_id":"implementation",
+            "message":{"role":"custom", "customType":"background_task_read_settlement",
+            "content":"", "timestamp":1790856001000i64}}));
+        fs::write(&path, lines).unwrap();
+        let snapshot = read_file(&path, TranscriptFormat::Mcode).unwrap();
+        assert!(!snapshot.turn_finished);
+        let (mut run, _) = classified_run(snapshot.clone());
+        run.graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
+        run.steps[0].node_id = "implementation_classifier".into();
+        run.steps[0].status = StepStatus::Running;
+        run.steps.push(StepView { node_id:"implementer".into(), status:StepStatus::Completed,
+            agent_node_id:Some(900), attempt:1, outcome:Some(crate::circuit::model::StepOutcome::Completed), error:None });
+        let mut agent = AgentNode { id:900, cli_session_id:Some("session".into()),
+            status:SessionStatus::Running, ..Default::default() };
+        let prepare = |run: &RunView, agent: &AgentNode, stamp, input| readiness::prepare(
+            run, "implementation_classifier", agent, stamp, input, Ok(snapshot.clone()));
+        let candidate = prepare(&run, &agent, Some("100:projection"), Ok("1:0".into()))
+            .unwrap().expect("explicit final phase report");
+        assert_eq!(candidate.status, SessionStatus::Ready);
+        assert_eq!(candidate.output, text);
+        let mut routed = run.clone();
+        let transition = advance(&mut routed, &CircuitEvent::TurnClassified {
+            node_id:"implementation_classifier".into(), classification:Some(crate::circuit::evaluator::Classification::Completed),
+            output:Some(candidate.output), binding:Some(candidate.binding) });
+        assert_eq!(routed.step("implementation_classifier").unwrap().status, StepStatus::Completed);
+        assert_eq!(routed.step("finish").unwrap().status, StepStatus::Running);
+        assert!(!transition.classifications[0].lifecycle_verified);
+
+        assert_eq!(prepare(&run, &agent, Some("100:projection"), Err(InputUnavailable::Draft)).err(), Some(B::InputDraft));
+        agent.cli_session_id = None;
+        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::SessionIdentityUnavailable));
+        agent.cli_session_id = Some("session".into());
+        let next_incarnation = format!("{}:projection", snapshot.published_at_ms + 1);
+        assert_eq!(prepare(&run, &agent, Some(&next_incarnation), Ok("1:0".into())).err(), Some(B::ReportSuperseded));
+        run.context.set("agent.900.previous_report_revision", &snapshot.revision);
+        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::ReportSuperseded));
+        run.context.set("agent.900.previous_report_revision", "");
+        let mut evidence = WorkEvidence::default();
+        evidence.children.insert("background-task".into(), false);
+        run.context.set("node.implementation_classifier.evidence.1", serde_json::to_string(&evidence).unwrap());
+        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::KnownWorkOutstanding));
+    }
+
+    #[test]
     fn native_report_preflight_recovers_running_projection_and_unverified_checkpoint() {
         use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};

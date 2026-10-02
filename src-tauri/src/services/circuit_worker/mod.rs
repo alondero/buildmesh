@@ -782,7 +782,8 @@ fn drive_run(
     jobs::reconcile(&view);
 
     if let Some(source) = active.run.source_agent_node_id {
-        let lost = db::get_agent_node_by_id(source).map(|n|
+        let lost = agent_lookup_for_observation(source, db::get_agent_node_by_id(source))
+            .map_err(|error| error.to_string())?.map(|n|
             matches!(n.status, SessionStatus::Archived | SessionStatus::Error)
         ).unwrap_or(true);
         if lost {
@@ -1679,6 +1680,20 @@ fn observe_agent_projection(
     }
 }
 
+fn agent_lookup_for_observation(
+    agent_node_id: i64,
+    lookup: db::SqlResult<crate::models::AgentNode>,
+) -> db::SqlResult<Option<crate::models::AgentNode>> {
+    match lookup {
+        Ok(node) => Ok(Some(node)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => {
+            tracing::warn!("circuits: agent {agent_node_id} lookup failed; loss is unconfirmed: {error}");
+            Err(error)
+        }
+    }
+}
+
 /// Observe the world and turn it into pure events for this run.
 fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> Vec<CircuitEvent> {
     let mut events = match native_hooks::pending(view) {
@@ -1726,13 +1741,10 @@ fn observe(_app: &AppHandle, active: &db::ActiveCircuitRun, view: &RunView) -> V
         ) else {
             continue;
         };
-        let node = db::get_agent_node_by_id(agent_node_id).ok();
-        match node {
-            // Closed/deleted mid-run → clean cancel.
-            None => {
-                events.push(CircuitEvent::AgentLost { agent_node_id });
-            }
-            Some(n) => match n.status {
+        match agent_lookup_for_observation(agent_node_id, db::get_agent_node_by_id(agent_node_id)) {
+            Ok(None) => events.push(CircuitEvent::AgentLost { agent_node_id }),
+            Err(_) => {},
+            Ok(Some(n)) => match n.status {
                 SessionStatus::Archived => {
                     events.push(CircuitEvent::AgentLost { agent_node_id });
                 }
@@ -3078,21 +3090,25 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
             };
             match &node.kind {
                 CircuitNodeKind::SpawnAgentNode { .. } => {
-                    let node_state = step.agent_node_id.and_then(|id| {
-                        db::get_agent_node_by_id(id).ok().map(|n| ReconcileNodeState {
+                    let lookup = step.agent_node_id.map(|id|
+                        agent_lookup_for_observation(id, db::get_agent_node_by_id(id))).transpose();
+                    let agent = match lookup {
+                        Ok(agent) => agent.flatten(),
+                        Err(_) => continue,
+                    };
+                    let node_state = agent.map(|n| ReconcileNodeState {
                             archived: n.status == SessionStatus::Archived,
                             worktree_dir_exists: if n.use_worktree {
                                 Some(std::path::Path::new(&n.path).exists())
                             } else {
                                 None
                             },
-                        })
                     });
                     match reconcile_spawn_step(step.agent_node_id, node_state) {
                         SpawnReconciliation::Leave => {}
                         SpawnReconciliation::Lost => {
-                            let reason =
-                                "piloted agent was lost while the app was offline".to_string();
+                            let reason = step.cancellation_reason(
+                                "piloted agent was lost while the app was offline");
                             tracing::warn!("circuits: run {}: {}", active.run.id, reason);
                             let _ = fail_run_step(
                                 app,
@@ -3135,26 +3151,23 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                 | CircuitNodeKind::ReviewVerdict { .. }
                 | CircuitNodeKind::SetNodeStatus { .. }
                 | CircuitNodeKind::CloseAgentNode { .. } => {
-                    let observed =
-                        observed_agent_for_step(
+                    let target = observed_agent_for_step(
                             step,
                             &view.graph,
                             &view.steps,
                             view.context.source_agent_id(),
-                        )
-                        .and_then(|id| {
-                            // A present-but-archived lineage target is
-                            // also lost from the run's perspective.
-                            db::get_agent_node_by_id(id)
-                                .ok()
-                                .filter(|n| n.status != SessionStatus::Archived)
-                                .map(|_| id)
-                        });
+                        );
+                    let lookup = target.map(|id|
+                        agent_lookup_for_observation(id, db::get_agent_node_by_id(id))).transpose();
+                    let observed = match lookup {
+                        Ok(agent) => agent.flatten().filter(|node| node.status != SessionStatus::Archived),
+                        Err(_) => continue,
+                    };
                     if observed.is_none() {
-                        let reason = format!(
+                        let reason = step.cancellation_reason(&format!(
                             "target agent lineage for step {} was lost while the app was offline",
                             step.node_id
-                        );
+                        ));
                         tracing::warn!("circuits: run {}: {}", active.run.id, reason);
                         let _ = fail_run_step(
                             app,
@@ -4678,6 +4691,39 @@ mod tests {
                     |_| panic!("structured verdict needs no inference")), Some(expected));
             }
         }
+    }
+
+    #[test]
+    fn circuit_issue_handoffs_route_without_classifier_after_dispatch() {
+        use crate::circuit::evaluator::Classification;
+        let view = report_gate_view();
+        for (dispatch, gate) in [("implementer", "implementation_classifier"),
+            ("finish", "finish_classifier"), ("wrapup_correction", "finish_classifier"),
+            ("follow_feedback", "feedback_classifier")] {
+            assert!(report_contract::prompt(&view, dispatch, "Do the assigned phase")
+                .contains("BUILDMESH_HANDOFF_V1: READY"));
+            for (value, expected) in [("READY", Classification::Completed), ("BLOCKED", Classification::Blocked)] {
+                let report = format!("Changes and verification for this phase.\nBUILDMESH_HANDOFF_V1: {value}");
+                for status in [SessionStatus::Ready, SessionStatus::Completed, SessionStatus::AwaitingInput] {
+                    assert_eq!(reviewer_readiness(&view, gate, status, &report,
+                        |_| panic!("explicit phase report needs no readiness inference")), ReviewerReadiness::Reportable);
+                    assert_eq!(classify_gate_report(&view, gate, status, &report,
+                        |_| panic!("explicit phase report needs no inference")), Some(expected));
+                }
+            }
+        }
+        let report = "Implementation details.\nBUILDMESH_HANDOFF_V1: READY";
+        assert_eq!(reviewer_readiness(&view, "implementer", SessionStatus::AwaitingInput, report,
+            |_| panic!("explicit first-turn report needs no readiness inference")), ReviewerReadiness::Reportable);
+        assert_eq!(classify_gate_report(&view, "implementer", SessionStatus::Ready, report,
+            |_| panic!("spawn hands the report to its gate")), Some(Classification::Completed));
+    }
+
+    #[test]
+    fn circuit_agent_lookup_error_does_not_report_a_closed_node() {
+        assert!(agent_lookup_for_observation(4730, Err(rusqlite::Error::InvalidQuery)).is_err(),
+            "tick and startup must distinguish an unavailable database from an absent node");
+        assert!(agent_lookup_for_observation(4730, Err(rusqlite::Error::QueryReturnedNoRows)).unwrap().is_none());
     }
 
     #[test]
