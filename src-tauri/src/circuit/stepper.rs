@@ -1072,6 +1072,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
         }
         CircuitEvent::AgentLost { agent_node_id } => {
             if !matches!(run.state, RunState::Running | RunState::Paused) { return t; }
+            let source_lost = run.context.source_agent_id() == Some(*agent_node_id);
             // Match both direct (`step.agent_node_id == Some(*id)`) and
             // lineage-resolved targets — `InjectPty` / `LlmTurnClassifier` /
             // `SetNodeStatus` / `CloseAgentNode` steps carry their target
@@ -1089,9 +1090,32 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     run.resolve_target_agent(&s.node_id) == Some(*agent_node_id)
                 })
                 .map(|s| s.node_id.clone());
-            if let Some(step_node) = bound {
+            // A borrowed source is a run-level dependency. It can disappear
+            // while a different piloted step is active, so retain that step's
+            // checkpoint as the primary loss record instead of failing the run
+            // with no step write.
+            let step_to_cancel = bound.or_else(|| {
+                if !source_lost {
+                    return None;
+                }
+                run.steps
+                    .iter()
+                    .find(|step| {
+                        matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+                    })
+                    .or_else(|| run.steps.iter().find(|step| !step.status.is_terminal()))
+                    .map(|step| step.node_id.clone())
+            });
+            if let Some(step_node) = step_to_cancel {
                 cancel_step(run, &mut t, &step_node, &format!(
                     "Piloted agent node {agent_node_id} is no longer available (deleted, archived or marked lost)."));
+                run.state = RunState::Failed;
+                t.run_state_changed = true;
+                finish_run_if_done(run, &mut t);
+            } else if source_lost {
+                // There may be no materialized step yet (or every step may
+                // already be terminal), but the run still depends on this
+                // borrowed source and must not remain admitted as Running.
                 run.state = RunState::Failed;
                 t.run_state_changed = true;
                 finish_run_if_done(run, &mut t);
@@ -2958,6 +2982,30 @@ mod tests {
             t.step_writes
         );
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    }
+
+    #[test]
+    fn agent_lost_for_the_borrowed_source_cancels_active_work_with_its_checkpoint() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 88);
+        run.context.set("source.agent_id", "77");
+        let checkpoint = "Classifier unavailable after five attempts.";
+        run.step_mut("spawn").unwrap().error = Some(checkpoint.into());
+
+        let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 77 });
+
+        assert_eq!(run.state, RunState::Failed);
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
+        assert!(
+            run.step("spawn").unwrap().error.as_deref().unwrap().contains(checkpoint),
+            "the source-loss cancellation must retain the step's preceding checkpoint"
+        );
+        assert!(
+            transition.step_writes.iter().any(|write| write.node_id == "spawn"),
+            "source loss must durably terminalize active work"
+        );
     }
 
     #[test]

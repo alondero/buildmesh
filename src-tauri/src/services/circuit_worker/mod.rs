@@ -784,11 +784,15 @@ fn drive_run(
     if let Some(source) = active.run.source_agent_node_id {
         let lost = agent_lookup_for_observation(source, db::get_agent_node_by_id(source))
             .map_err(|error| error.to_string())?.map(|n|
-            matches!(n.status, SessionStatus::Archived | SessionStatus::Error)
+            matches!(n.status, SessionStatus::Archived | SessionStatus::Lost | SessionStatus::Error)
         ).unwrap_or(true);
         if lost {
-            db::commit_circuit_advance(active.run.id, Some("failed"), None, &[])
-                .map_err(|e| e.to_string())?;
+            persist_source_agent_loss(
+                &mut view,
+                source,
+                |view, transition| persist_transition_checked(active.run.id, view, transition),
+            )
+            .map_err(TransitionPersistFailure::into_message)?;
             close_run_agents(&view);
             crate::circuit::evaluator::unregister(source);
             let _ = app.emit("circuit-run-updated", CircuitRunUpdatedPayload { run_id: active.run.id, state: "failed".into() });
@@ -1346,6 +1350,21 @@ fn advance_and_persist_observed_event(
     }
 }
 
+fn persist_source_agent_loss(
+    view: &mut RunView,
+    source_agent_id: i64,
+    persist: impl FnMut(&mut RunView, &Transition) -> Result<bool, TransitionPersistFailure>,
+) -> Result<(Transition, bool), TransitionPersistFailure> {
+    // The run row identifies the borrowed source even for legacy contexts
+    // persisted before source.agent_id was added.
+    view.context.set("source.agent_id", source_agent_id.to_string());
+    advance_and_persist_observed_event(
+        view,
+        &CircuitEvent::AgentLost { agent_node_id: source_agent_id },
+        persist,
+    )
+}
+
 /// Retire every agent attached to a failed circuit run. The operation is
 /// idempotent with the normal close effect: a missing row simply means a
 /// previous cleanup already won the race.
@@ -1680,10 +1699,10 @@ fn observe_agent_projection(
     }
 }
 
-fn agent_lookup_for_observation(
+fn agent_lookup_for_observation<T>(
     agent_node_id: i64,
-    lookup: db::SqlResult<crate::models::AgentNode>,
-) -> db::SqlResult<Option<crate::models::AgentNode>> {
+    lookup: db::SqlResult<T>,
+) -> db::SqlResult<Option<T>> {
     match lookup {
         Ok(node) => Ok(Some(node)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -3022,6 +3041,27 @@ fn reconcile_spawn_step(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageReconciliation {
+    Leave,
+    Lost,
+    PreserveOnLookupError,
+}
+
+fn reconcile_lineage_target(
+    target_agent_id: Option<i64>,
+    lookup: impl FnOnce(i64) -> db::SqlResult<SessionStatus>,
+) -> LineageReconciliation {
+    let Some(target_agent_id) = target_agent_id else {
+        return LineageReconciliation::Leave;
+    };
+    match agent_lookup_for_observation(target_agent_id, lookup(target_agent_id)) {
+        Err(_) => LineageReconciliation::PreserveOnLookupError,
+        Ok(None) | Ok(Some(SessionStatus::Archived)) => LineageReconciliation::Lost,
+        Ok(Some(_)) => LineageReconciliation::Leave,
+    }
+}
+
 /// One-shot per-launch sweep over `running` circuit runs. Maps the
 /// spec's three verdicts (issue #1208) onto what observation leaves
 /// behind: `Leave` = **resume** (the node row is intact and auto-resume
@@ -3157,13 +3197,9 @@ pub fn startup_reconcile_pass(app: &AppHandle) {
                             &view.steps,
                             view.context.source_agent_id(),
                         );
-                    let lookup = target.map(|id|
-                        agent_lookup_for_observation(id, db::get_agent_node_by_id(id))).transpose();
-                    let observed = match lookup {
-                        Ok(agent) => agent.flatten().filter(|node| node.status != SessionStatus::Archived),
-                        Err(_) => continue,
-                    };
-                    if observed.is_none() {
+                    if reconcile_lineage_target(target, |target| {
+                        db::get_agent_node_by_id(target).map(|node| node.status)
+                    }) == LineageReconciliation::Lost {
                         let reason = step.cancellation_reason(&format!(
                             "target agent lineage for step {} was lost while the app was offline",
                             step.node_id
@@ -4721,9 +4757,15 @@ mod tests {
 
     #[test]
     fn circuit_agent_lookup_error_does_not_report_a_closed_node() {
-        assert!(agent_lookup_for_observation(4730, Err(rusqlite::Error::InvalidQuery)).is_err(),
+        assert!(agent_lookup_for_observation::<crate::models::AgentNode>(
+            4730,
+            Err(rusqlite::Error::InvalidQuery),
+        ).is_err(),
             "tick and startup must distinguish an unavailable database from an absent node");
-        assert!(agent_lookup_for_observation(4730, Err(rusqlite::Error::QueryReturnedNoRows)).unwrap().is_none());
+        assert!(agent_lookup_for_observation::<crate::models::AgentNode>(
+            4730,
+            Err(rusqlite::Error::QueryReturnedNoRows),
+        ).unwrap().is_none());
     }
 
     #[test]
@@ -5381,6 +5423,101 @@ mod tests {
             SpawnReconciliation::Lost,
             "archived while offline"
         );
+    }
+
+    #[test]
+    fn startup_requires_a_resolved_target_before_confirming_lineage_loss() {
+        assert_eq!(
+            reconcile_lineage_target(None, |_| -> db::SqlResult<SessionStatus> {
+                panic!("no agent lookup is valid when the step has no lineage")
+            }),
+            LineageReconciliation::Leave,
+            "a step with no resolvable lineage has no agent whose absence can be confirmed"
+        );
+        assert_eq!(
+            reconcile_lineage_target(Some(7), |_| Err(rusqlite::Error::QueryReturnedNoRows)),
+            LineageReconciliation::Lost,
+            "a looked-up missing row is lost"
+        );
+        assert_eq!(
+            reconcile_lineage_target(Some(7), |_| Ok(SessionStatus::Archived)),
+            LineageReconciliation::Lost,
+        );
+        assert_eq!(
+            reconcile_lineage_target(Some(7), |_| Ok(SessionStatus::Running)),
+            LineageReconciliation::Leave,
+        );
+        assert_eq!(
+            reconcile_lineage_target(Some(7), |_| Err(rusqlite::Error::InvalidQuery)),
+            LineageReconciliation::PreserveOnLookupError,
+            "a failed database read is not confirmed loss"
+        );
+    }
+
+    #[test]
+    fn borrowed_source_loss_persists_cancelled_step_and_its_checkpoint() {
+        use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
+        use crate::circuit::stepper::StepView;
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');")
+            .unwrap();
+        let graph = CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![CircuitNode {
+                id: "work".into(),
+                kind: CircuitNodeKind::SpawnAgentNode {
+                    prompt: "work".into(), name: None, provider: None, model: None,
+                    effort: None, extra_args: None, timeout_seconds: None,
+                },
+            }],
+            edges: vec![],
+        };
+        crate::db::circuit::ledger::create_autopilot_circuit_inner(
+            &conn, 1, "source-loss", "", 1, &graph.to_json().unwrap(),
+        ).unwrap();
+        conn.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state)
+            VALUES(1,1,1,'running');").unwrap();
+        let checkpoint = "Classifier unavailable after five attempts.";
+        conn.execute(
+            "INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id,error_message)
+             VALUES(1,'work',1,'running',88,?1)",
+            [checkpoint],
+        ).unwrap();
+
+        let mut view = RunView {
+            run_id: 1,
+            graph,
+            state: RunState::Running,
+            context: CircuitContext::default(),
+            steps: vec![StepView {
+                node_id: "work".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: Some(checkpoint.into()),
+                agent_node_id: Some(88),
+                attempt: 1,
+            }],
+        };
+        persist_source_agent_loss(&mut view, 77, |view, transition| {
+            persist_transition_checked_with(1, view, transition, |run_id, state, context, steps, evidence| {
+                crate::db::circuit::evidence::commit_transition_locked(
+                    &mut conn, run_id, state, context, steps, evidence,
+                )
+            })
+        }).expect("the source-loss transition should commit atomically");
+
+        let (run_state, step_status, error): (String, String, String) = conn.query_row(
+            "SELECT r.state,s.status,s.error_message FROM autopilot_circuit_runs r
+             JOIN autopilot_circuit_run_steps s ON s.run_id=r.id WHERE r.id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((run_state.as_str(), step_status.as_str()), ("failed", "cancelled"));
+        assert!(error.contains("Piloted agent node 77"));
+        assert!(error.contains(checkpoint));
     }
 
     #[test]
