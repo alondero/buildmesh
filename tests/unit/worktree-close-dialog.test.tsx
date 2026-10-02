@@ -41,6 +41,16 @@ describe('WorktreeCloseDialog (#643)', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('focuses Cancel and preserves repository files when confirming a live root session close', async () => {
+    const action = useWorktreeClosePromptStore.getState().request('Live session', {...SAFETY,worktree_path:null},'active-session');
+    render(<WorktreeCloseDialog />);
+    expect(screen.getByRole('heading',{name:'Close active session?'})).toBeTruthy();
+    expect(screen.getByText(/Files in the repository will be kept/)).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button',{name:'Cancel'}));
+    fireEvent.click(screen.getByRole('button',{name:'Close session'}));
+    await expect(action).resolves.toBe('remove');
+  });
+
   it('renders the header, risk copy, and three choices when a prompt is pending', async () => {
     const actionPromise = useWorktreeClosePromptStore.getState().request('occluded-node', SAFETY);
 

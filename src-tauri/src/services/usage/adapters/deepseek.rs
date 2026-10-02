@@ -6,6 +6,7 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{BillingBalance, UsageError};
@@ -16,6 +17,10 @@ use serde::Deserialize;
 pub(crate) struct DeepseekAdapter;
 
 impl UsageAdapter for DeepseekAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://platform.deepseek.com/", "Open console"))
+    }
+
     fn id(&self) -> &'static str {
         "deepseek"
     }

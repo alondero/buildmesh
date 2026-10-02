@@ -109,6 +109,23 @@ pub struct ProviderUsage {
     pub error: Option<String>,
 }
 
+/// A provider-owned usage dashboard or clearly labelled account/help fallback.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ts_rs::TS)]
+#[ts(export, export_to = "UsagePage.ts")]
+pub struct UsagePage {
+    pub url: String,
+    pub label: String,
+}
+
+impl UsagePage {
+    pub(crate) fn new(url: &str, label: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            label: label.to_string(),
+        }
+    }
+}
+
 /// One **Model Provider**'s entry on the Providers page (issue #574): its
 /// identity plus the **Usage Meters** it exposes on this host, if any.
 ///
@@ -129,6 +146,11 @@ pub struct ProviderUsage {
 pub struct ProviderMeters {
     /// Provider account id ("anthropic", "minimax", a custom slug, …).
     pub provider: String,
+    /// Provider-owned usage page, independent of live or cached readings.
+    /// Absent when no corresponding web page is known for this billing identity.
+    #[serde(default, rename = "usagePage", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, rename = "usagePage")]
+    pub usage_page: Option<UsagePage>,
     /// Whether Buildmesh ships a usage fetcher for this provider. `false` →
     /// the UI shows "usage not tracked" (camelCase on the wire).
     #[serde(rename = "usageTracked")]
@@ -230,6 +252,24 @@ mod tests {
         .expect("legacy ProviderUsage should remain compatible");
 
         assert!(usage.meters.is_empty());
+    }
+
+    #[test]
+    fn provider_meters_usage_page_is_additive_and_camel_case() {
+        let mut meter: ProviderMeters = serde_json::from_str(
+            r#"{"provider":"codex","usageTracked":true,"usage":null}"#,
+        )
+        .expect("older meter payloads remain compatible");
+        assert_eq!(meter.usage_page, None);
+        assert!(serde_json::to_value(&meter).unwrap().get("usagePage").is_none());
+
+        meter.usage_page = Some(UsagePage::new("https://chatgpt.com/codex/settings/usage", "View usage"));
+        let value = serde_json::to_value(&meter).unwrap();
+        assert_eq!(value["usagePage"]["url"], "https://chatgpt.com/codex/settings/usage");
+        assert_eq!(value["usagePage"]["label"], "View usage");
+        assert!(value.get("usage_page").is_none());
+        let restored: ProviderMeters = serde_json::from_value(value).unwrap();
+        assert_eq!(restored.usage_page, meter.usage_page);
     }
 
     // After #1689 dropped `plan: Option<String>` from ProviderUsage, a

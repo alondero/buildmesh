@@ -7,6 +7,7 @@
 //! orchestration only.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{api_key_for, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{BillingBalance, UsageError};
@@ -19,6 +20,10 @@ use std::time::Duration;
 pub(crate) struct OpenaiAdapter;
 
 impl UsageAdapter for OpenaiAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://platform.openai.com/usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "openai"
     }

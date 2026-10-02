@@ -7,6 +7,7 @@
 //! `usage.rs` keeps only the cached-read path.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::UsageAdapter;
 use crate::services::usage::outcome::UsageOutcome;
 
@@ -14,6 +15,10 @@ use crate::services::usage::outcome::UsageOutcome;
 pub(crate) struct OpencodeAdapter;
 
 impl UsageAdapter for OpencodeAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://opencode.ai/auth", "Open console"))
+    }
+
     fn id(&self) -> &'static str {
         "opencode"
     }

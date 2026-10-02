@@ -43,6 +43,14 @@ up to seven days, marked **Last known value · …** on the Usage tab — so a f
 start does not blank the meters you were watching. If nothing has been recorded
 yet, its meter stays hidden.
 
+On the **Usage** tab, **View usage ↗** opens the provider's usage page in your
+system browser. The link also works beside a last known reading or a fetch
+error, so you can check the current figures directly. Where no direct dashboard
+is available, **Open console**, **Usage guide**, or **Manage plan** opens the
+provider's account console, quota documentation, or subscription settings.
+Custom providers and externally managed billing omit the link. The browser
+uses its own login; choose the same account or workspace as the meter.
+
 ## Your first session
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
@@ -65,9 +73,30 @@ yet, its meter stays hidden.
    configured Build and Run commands when appropriate, then commit or create a
    pull request only after reviewing the worktree.
 
+Changed files open the in-app diff from either list. Unchanged files in the
+File Tree open in your configured editor. If a diff cannot load, an error
+appears and the file is not presented as successfully reviewed.
+
+Closing an active node that runs in the repository root asks for confirmation.
+**Cancel** keeps the session and any scheduled prompt; **Close session** stops
+its process and removes the node while preserving repository files. Worktree
+nodes retain their separate confirmation for uncommitted or unpushed work.
+
 The first successful loop is: **install → configure → spawn → inspect → verify
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
+
+## Open tools from the title bar
+
+Use **More** at the right of the title bar to open **Project Files**,
+**Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
+**Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
+The menu uses the same names, descriptions, and icons as the command palette.
+**Usage** has its own title-bar button, alongside **Settings** and **Mobile**.
+
+Select a tool to open it and close the menu. Use Tab and Enter to choose a tool,
+or Escape to close the menu and return focus to **More**. Clicking outside also
+closes the menu. On short windows, scroll the menu to reach every tool.
 
 ## Configure Autopilot Circuits
 
@@ -363,6 +392,10 @@ the standard native and npm install locations when the app's PATH is stale.
 Open **Settings** for app-wide defaults. A Mesh's **Project Settings** override
 the app-wide value when both exist.
 
+Tab and Shift+Tab stay within the visible pane. If you try to close with
+unsaved edits, focus moves to **Keep editing**; only **Discard changes**
+abandons the edits.
+
 | Settings area | Use it for |
 |---|---|
 | General | Appearance, quit confirmation, global Circuit agent capacity, the default worktree directory, and the Probe spawn prompts |
@@ -409,7 +442,8 @@ an app restart.
 Remote access is optional and off by default.
 
 1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN over
-   self-signed TLS**. The setting applies immediately.
+   self-signed TLS**, or choose **Enable remote access** from the Remote Access
+   dialog. The setting applies immediately.
 2. Open the **Remote Access** modal and scan the one-time pairing QR code from
    the phone you want to authorize. The invitation expires after five minutes.
 3. For a fresh phone, use the Android or iOS **Install** tab to install and
@@ -421,6 +455,9 @@ Remote access is optional and off by default.
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
+The Remote Access dialog distinguishes disabled access from a connection
+failure and offers a retry with the actual TLS/interface status. Its header
+stays visible while expanded certificate instructions scroll below it.
 Do not share QR codes, pairing invitations, cookies, certificates, or logs.
 
 ### Using Buildmesh on your phone

@@ -6,6 +6,7 @@
 //! `credits`, `spend_control`, and top-level `additional_rate_limits`.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::{
@@ -26,6 +27,10 @@ const SESSION_EXPIRED: &str = "Codex session expired — run 'codex' in your ter
 pub(crate) struct CodexAdapter;
 
 impl UsageAdapter for CodexAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://chatgpt.com/codex/settings/usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "codex"
     }
