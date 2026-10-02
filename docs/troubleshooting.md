@@ -121,6 +121,29 @@ state cannot be updated until a later callback succeeds. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## GitHub feeds fail for a WSL mesh
+
+On a Windows host, Buildmesh reads the repository through its WSL network
+path, then uses Windows-side GitHub credentials to fetch issues and pull
+requests. Signing in to `gh` inside WSL alone does not authenticate the desktop
+app. Run `gh auth login` in Windows if the error reports a missing token.
+
+If the error says the repository is **not owned by current user**, Windows
+libgit2 cannot verify the Linux owner's identity. For a repository you trust,
+add its exact Windows path to Windows Git's global configuration in PowerShell:
+
+```powershell
+git config --global --add safe.directory '//wsl$/Ubuntu/home/your-user/your-repo'
+```
+
+Use the distribution, repository path, and network hostname shown in the error;
+`wsl$` and `wsl.localhost` are distinct trust entries. Configure this in Windows,
+then refresh the Issues or Pull Requests tab. A linked worktree has its own path
+and needs its own entry if it reports the same error.
+
+An unreadable repository reports a load error. A readable repository with no
+GitHub origin still shows an empty feed.
+
 ## A phone cannot connect
 
 Check these in order:
