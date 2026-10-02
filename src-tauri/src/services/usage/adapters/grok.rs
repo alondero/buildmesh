@@ -2,6 +2,7 @@
 //! detection-gated on the `grok` harness.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::UsageAdapter;
 use crate::services::usage::outcome::UsageOutcome;
 
@@ -9,6 +10,10 @@ use crate::services::usage::outcome::UsageOutcome;
 pub(crate) struct GrokAdapter;
 
 impl UsageAdapter for GrokAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://grok.com/?_s=usage", "View usage"))
+    }
+
     fn id(&self) -> &'static str {
         "grok"
     }

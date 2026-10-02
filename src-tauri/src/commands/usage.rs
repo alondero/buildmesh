@@ -142,6 +142,7 @@ fn assemble_meters(
             if !a.enabled {
                 return Some(ProviderMeters {
                     provider: a.id.clone(),
+                    usage_page: None,
                     usage_tracked: tracked,
                     usage: None,
                     cached_at: None,
@@ -151,6 +152,7 @@ fn assemble_meters(
             if !tracked {
                 return Some(ProviderMeters {
                     provider: a.id.clone(),
+                    usage_page: None,
                     usage_tracked: false,
                     usage: None,
                     cached_at: None,
@@ -189,6 +191,7 @@ fn assemble_meters(
                     if let Some(last_known) = previous.get(&a.id) {
                         return Some(ProviderMeters {
                             provider: a.id.clone(),
+                            usage_page: None,
                             usage_tracked: tracked,
                             usage: Some(last_known.usage.clone()),
                             cached_at: Some(last_known.cached_at),
@@ -197,6 +200,7 @@ fn assemble_meters(
                 }
                 return Some(ProviderMeters {
                     provider: a.id.clone(),
+                    usage_page: None,
                     usage_tracked: tracked,
                     usage: Some(usage?.clone()),
                     cached_at: None,
@@ -210,10 +214,15 @@ fn assemble_meters(
             let last_known = previous.get(&a.id)?;
             Some(ProviderMeters {
                 provider: a.id.clone(),
+                usage_page: None,
                 usage_tracked: tracked,
                 usage: Some(last_known.usage.clone()),
                 cached_at: Some(last_known.cached_at),
             })
+        })
+        .map(|mut meter| {
+            meter.usage_page = usage::catalog::usage_page(&meter.provider, meter.usage.as_ref());
+            meter
         })
         .collect()
 }
@@ -531,6 +540,33 @@ mod tests {
         assert_eq!(rows[0].provider, "anthropic");
         assert!(rows[0].usage_tracked);
         assert!(rows[0].usage.is_none());
+        assert_eq!(rows[0].usage_page.as_ref().unwrap().url, "https://claude.ai/settings/usage");
+    }
+
+    #[test]
+    fn assemble_meters_attaches_usage_pages_to_live_failed_and_remembered_rows() {
+        let accounts = [account("codex", true)];
+        let profiles = [profile("codex", "codex")];
+        for (outcome, previous) in [
+            (reading_outcome("codex"), HashMap::new()),
+            (UsageOutcome::Unavailable { reason: "Offline".to_string() }, HashMap::new()),
+            (
+                no_credential_outcome("codex"),
+                [remembered("codex", 45.0, 1_700_000_000)].into_iter().collect(),
+            ),
+            (
+                UsageOutcome::Unavailable { reason: "Offline".to_string() },
+                [remembered("codex", 45.0, 1_700_000_000)].into_iter().collect(),
+            ),
+        ] {
+            let usages = [("codex".to_string(), outcome.clone().into_usage("codex"))].into_iter().collect();
+            let outcomes = [("codex".to_string(), outcome)].into_iter().collect();
+            let rows = assemble_meters(&accounts, &profiles, &usages, &outcomes, &HashSet::new(), &previous);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].usage_page.as_ref().unwrap().url, "https://chatgpt.com/codex/settings/usage");
+            let value = serde_json::to_value(&rows).unwrap();
+            assert_eq!(value[0]["usagePage"]["url"], "https://chatgpt.com/codex/settings/usage");
+        }
     }
 
     #[test]

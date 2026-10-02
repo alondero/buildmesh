@@ -28,6 +28,7 @@
 import type { ProviderAccount, ProviderMeters } from '../../lib/tauri';
 import type { UsageWindow, BillingBalance, UsageAmount, UsageMeter } from '../../lib/tauri';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { SafeLink } from '../shared/SafeLink';
 import { formatRelativeAge } from '../../lib/time';
 
 /** A single subscription-quota window as a labeled fill bar. The "0%
@@ -300,9 +301,9 @@ export function UsagePanel({
       className="border border-border-subtle rounded-lg p-3.5 bg-bg-card/30"
       data-testid={`usage-panel-${account.id}`}
     >
-      <div className="flex items-center gap-2 mb-2">
+      <div className="flex items-center gap-2 mb-2 min-w-0">
         <ProviderIcon providerId={account.id} className="h-4 w-4" />
-        <span className="text-sm font-medium text-text-primary truncate">{account.name}</span>
+        <span className="text-sm font-medium text-text-primary truncate min-w-0" title={account.name}>{account.name}</span>
         {meter.cachedAt != null && (
           <span
             className="text-2xs text-text-muted border border-border-subtle rounded-md px-1 py-px shrink-0"
@@ -336,6 +337,16 @@ export function UsagePanel({
       </div>
 
       {renderBody()}
+      {meter.usagePage?.url && (
+        <SafeLink
+          url={meter.usagePage.url}
+          ariaLabel={`${meter.usagePage.label} for ${account.name} on provider website`}
+          title={`Open ${account.name} ${meter.usagePage.label.toLowerCase()} page in your browser`}
+          className="inline-flex items-center gap-1 mt-2 text-xs text-accent-cyan hover:underline focus-visible:outline focus-visible:outline-accent-cyan"
+        >
+          {meter.usagePage.label} <span aria-hidden="true">↗</span>
+        </SafeLink>
+      )}
     </div>
   );
 }

@@ -10,6 +10,7 @@
 //! to the next source before returning logged-out.
 
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::UsageAdapter;
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageError;
@@ -28,6 +29,10 @@ pub(crate) const AGY_OAUTH_TOKEN_FILE: &str = "antigravity-oauth-token";
 pub(crate) struct AgyAdapter;
 
 impl UsageAdapter for AgyAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://antigravity.google/docs/plans", "Usage guide"))
+    }
+
     fn id(&self) -> &'static str {
         "agy"
     }

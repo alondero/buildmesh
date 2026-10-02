@@ -1,5 +1,6 @@
 //! Account quota returned by the same key reconciliation endpoint as Muse /usage.
 use crate::preferences::ProviderAccount;
+use crate::services::usage::types::UsagePage;
 use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentityFingerprint};
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageWindow;
@@ -9,6 +10,10 @@ pub(crate) struct MuseCodeAdapter;
 const ENDPOINT: &str = "https://api.meta.ai/muse-code/key";
 
 impl UsageAdapter for MuseCodeAdapter {
+    fn usage_page(&self) -> Option<UsagePage> {
+        Some(UsagePage::new("https://accountscenter.meta.com/", "Manage plan"))
+    }
+
     fn id(&self) -> &'static str {
         "muse-code"
     }
