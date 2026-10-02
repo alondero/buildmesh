@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { parseArgs } from '../../scripts/ci/run-guarded.mjs';
+import { parseArgs, runGuarded } from '../../scripts/ci/run-guarded.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/ci/run-guarded.mjs', import.meta.url));
 
@@ -76,6 +76,24 @@ test('exits with the guarded command status and streams its output to the log', 
 test('propagates a failing guarded command exit code', async () => {
   const res = await runGuard(['--minutes', '5', '--', process.execPath, '-e', 'process.exit(3)']);
   assert.equal(res.code, 3);
+});
+
+test('embedded runner preserves cwd, child environment and a separate output sink', async () => {
+  await withTempDir(async dir => {
+    const log = join(dir, 'embedded.log');
+    let output = '';
+    const code = await runGuarded({
+      minutes: 1, killGraceSeconds: 0, log, label: 'embedded', cwd: dir,
+      env: { ...process.env, BUILDMESH_GUARD_FIXTURE: 'child-only', FORCE_COLOR: '', NODE_TEST_CONTEXT: '' },
+      output: chunk => { output += chunk.toString(); },
+      command: [process.execPath, '-e', 'console.log(JSON.stringify({cwd: process.cwd(), marker: process.env.BUILDMESH_GUARD_FIXTURE}))'],
+    });
+    assert.equal(code, 0);
+    const result = JSON.parse(output.trim());
+    assert.equal(result.cwd, dir);
+    assert.equal(result.marker, 'child-only');
+    assert.equal(readFileSync(log, 'utf8'), output);
+  });
 });
 
 test('kills a hung command at the deadline, exits 124, and annotates the step', async () => {

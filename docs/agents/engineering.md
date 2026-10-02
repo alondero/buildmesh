@@ -4,6 +4,13 @@ Read this for implementation and review. Architecture belongs in `docs/knowledge
 
 ## Before changing code
 
+Use the [development harness](development-harness.md) to record the goal,
+observable criteria, planned edits and immutable comparison base. Resume from
+`npm run harness -- status`. `npm run verify` selects applicable checks and
+records current-tree evidence; `finish` requires current gate, acceptance and
+independent review evidence. Missing prerequisites and timeouts remain distinct
+from code failure and cannot mark a task complete.
+
 Confirm `git rev-parse --show-toplevel`, branch, and `git status --short`. Record the requested behavior and the base commit used for comparisons. Read the originating issue and available review findings when the task references them. Translate acceptance criteria into observable outcomes and identify the production boundary each test will exercise. A review finding is closed by code and evidence, not by rewriting the description.
 
 ## Design for evidence
@@ -34,6 +41,12 @@ Use the smallest existing seam that hides the external dependency. Avoid exporti
 Vitest defaults to threads, rejects zero discovered tests, and fails on unhandled errors. Do not weaken assertions, ignore errors globally, or change test discovery to get a green result. `cargo check`, `--no-run`, and successful compilation are not executed tests. A filtered Rust invocation that ran zero tests provides no behavioral evidence.
 
 ## Evidence at handoff
+
+Prefer the canonical `npm run verify` receipt over reconstructing check results
+from conversation. Named scenarios and outcome/timing records live in the
+development harness; a case's stated mock or module boundary does not establish
+the remaining real-runtime promise. Unavailable checks produce BLOCKED;
+deadlines produce TIMEOUT and still require diagnosis before attribution.
 
 Report the commands actually run, result, executed test counts, and relevant platform/runtime. Separate passed, failed, and not run checks. State whether browser evidence used mock IPC or the real backend. A failed command stays failed even if a subset passes. Call a failure pre-existing only after reproducing it at a recorded base with equivalent conditions; unrelated file paths alone are insufficient. If baseline comparison is unavailable, say attribution is unverified.
 

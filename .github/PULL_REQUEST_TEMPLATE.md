@@ -7,7 +7,9 @@
 
 <!-- Record actual results, not intended checks. Remove irrelevant rows.
      Compilation is not executed tests; a failed suite is not green because
-     focused tests passed. See docs/agents/engineering.md. -->
+     focused tests passed. Include npm run verify outcome/base and the current
+     receipt's gate results; keep local .harness files out of the PR.
+     BLOCKED/TIMEOUT are incomplete checks. See docs/agents/engineering.md. -->
 
 | Check / command | Result and executed count | Scope / limitation |
 |---|---|---|

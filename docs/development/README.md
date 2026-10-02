@@ -54,6 +54,12 @@ select the safe Vitest pool, and handle Windows worktree behavior.
 
 ## Verification matrix
 
+Start with `npm run verify` for an active harness task, or pass
+`-- --base <commit>` for standalone verification. The
+[development harness](../agents/development-harness.md) documents selected
+gates, current-tree receipts, prerequisites, completion, evaluations and
+recovery. Focused commands below remain useful during iteration.
+
 | Scope | Command | Evidence it provides |
 |---|---|---|
 | Documentation and agent infrastructure | `npm run test:docs` and `npm run check:docs` | Link/structure contract, source drift, and documentation-impact regression tests |
