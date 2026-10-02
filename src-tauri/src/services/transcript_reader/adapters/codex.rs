@@ -243,6 +243,11 @@ pub(crate) fn parse_codex_turns_with_text_limit(
         match payload.get("type").and_then(|t| t.as_str()) {
             Some("message") => {
                 let role = payload.get("role").and_then(|r| r.as_str());
+                // Codex emits context updates during model/mode switches.
+                // They are not dialogue, and must not poison a later report.
+                if matches!(role, Some("system" | "developer")) {
+                    continue;
+                }
                 if role != Some("user") && role != Some("assistant") {
                     saw_malformed = true;
                     continue;

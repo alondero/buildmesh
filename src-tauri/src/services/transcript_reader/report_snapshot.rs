@@ -546,6 +546,83 @@ mod tests {
     }
 
     #[test]
+    fn codex_context_messages_allow_a_completed_report_to_recover_review() {
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let report = concat!(
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-10-02T09:08:24.300Z\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn\"}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-10-02T09:08:24.381Z\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<model_switch>Continue the conversation.</model_switch>\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-10-02T09:08:24.381Z\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"<collaboration_mode>Default</collaboration_mode>\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-10-02T09:08:24.382Z\",\"payload\":{\"type\":\"message\",\"role\":\"system\",\"content\":[{\"type\":\"input_text\",\"text\":\"Session instructions.\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-10-02T09:08:24.383Z\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Open the PR.\"}]}}\n",
+            "{\"type\":\"response_item\",\"timestamp\":\"2026-10-02T09:08:35.596Z\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"PR #327 is open against master.\"}]}}\n",
+            "{\"type\":\"event_msg\",\"timestamp\":\"2026-10-02T09:08:35.632Z\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn\",\"last_agent_message\":\"PR #327 is open against master.\"}}\n"
+        );
+        fs::write(&path, report).unwrap();
+        let snapshot = read_file(&path, TranscriptFormat::Codex).unwrap();
+        assert_eq!(snapshot.text, "PR #327 is open against master.");
+        assert_eq!(snapshot.published_at_ms, 1_790_932_115_632);
+        assert!(snapshot.turn_finished);
+        let parsed = parse_transcript(TranscriptFormat::Codex, report.lines().map(str::to_owned), 10);
+        assert!(!parsed.saw_malformed);
+        assert_eq!(parsed.turns.len(), 2, "context instructions are not dialogue turns");
+
+        let (mut run, _) = classified_run(snapshot.clone());
+        run.graph = CircuitGraph::agent_review(None, None, 3);
+        run.steps.clear();
+        run.state = RunState::Pending;
+        advance(&mut run, &CircuitEvent::Triggered);
+        let tick = CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 1 });
+        advance(&mut run, &tick);
+        advance(&mut run, &CircuitEvent::ObservationDeferred { node_id: "await_source".into(), attempt: 1, agent_node_id: 900,
+            blocker: crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
+                reason: ReportReadError::MalformedRecord.reason().into(),
+            } });
+        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified);
+        let agent = AgentNode { id: 900, provider: "codex".into(), cli_session_id: Some("session".into()),
+            status: SessionStatus::Ready, ..Default::default() };
+        let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
+            Ok("1:0".into()), Ok(snapshot.clone())).unwrap().expect("completed source report");
+        let transition = advance(&mut run, &CircuitEvent::TurnClassified {
+            node_id: "await_source".into(), classification: Some(crate::circuit::evaluator::Classification::Completed),
+            output: Some(candidate.output), binding: Some(candidate.binding),
+        });
+        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Completed);
+        assert_eq!(run.context.get("node.await_source.observation_blocker"), Some(""));
+        assert!(!transition.classifications[0].lifecycle_verified);
+        advance(&mut run, &tick);
+        assert_eq!(run.step("reviewer").unwrap().status, StepStatus::Running);
+
+        // Context changes after the receipt can belong to a newer turn.
+        for role in ["developer", "system", "unexpected"] {
+            let context = serde_json::json!({"type":"response_item", "timestamp":"2026-10-02T09:08:36Z",
+                "payload":{"type":"message", "role":role, "content":[{"type":"input_text", "text":"New instructions."}]}});
+            fs::write(&path, format!("{report}{context}\n")).unwrap();
+            assert!(!snapshot.is_current());
+            assert!(read_file(&path, TranscriptFormat::Codex).is_err(), "post-completion {role} cannot reuse the report");
+        }
+    }
+
+    #[test]
+    fn codex_unknown_message_roles_still_reject_completed_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        for role in [serde_json::Value::Null, serde_json::json!("unexpected")] {
+            let malformed = serde_json::json!({"type":"response_item", "payload":{"type":"message",
+                "role":role, "content":[{"type":"input_text", "text":"Unrecognised message."}]}});
+            let report = serde_json::json!({"type":"response_item", "timestamp":"2026-10-02T09:08:35.596Z",
+                "payload":{"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"Done."}]}});
+            let complete = serde_json::json!({"type":"event_msg", "timestamp":"2026-10-02T09:08:35.632Z",
+                "payload":{"type":"task_complete", "turn_id":"turn", "last_agent_message":"Done."}});
+            fs::write(&path, format!("{malformed}\n{report}\n{complete}\n")).unwrap();
+            assert_eq!(read_file(&path, TranscriptFormat::Codex).unwrap_err(), ReportReadError::MalformedRecord);
+        }
+    }
+
+    #[test]
     fn codex_report_snapshot_requires_the_current_native_completion() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rollout.jsonl");
