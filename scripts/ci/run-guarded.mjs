@@ -109,7 +109,7 @@ export function killTree(pid, killGraceMs) {
   return { escalated };
 }
 
-export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
+export function runGuarded({ minutes, killGraceSeconds, log, label, command, cwd, env, output = chunk => process.stdout.write(chunk) }) {
   const deadlineMs = minutes * 60_000;
   const killGraceMs = killGraceSeconds * 1000;
   // After the kill the script must exit whatever the descendants do with the
@@ -122,10 +122,12 @@ export function runGuarded({ minutes, killGraceSeconds, log, label, command }) {
 
   const emit = (chunk) => {
     if (logFd != null) writeSync(logFd, chunk);
-    process.stdout.write(chunk);
+    output(chunk);
   };
 
   const child = spawn(command[0], command.slice(1), {
+    cwd,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: process.platform !== 'win32',
     windowsHide: true,

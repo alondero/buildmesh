@@ -1,0 +1,193 @@
+# Development harness
+
+Current contributor and agent workflow. The repository harness records a task,
+selects checks, and refuses a successful `finish` without current check,
+acceptance, and review evidence. It complements Buildmesh's product Circuits;
+it does not change their state machine or automatically publish anything.
+
+## Start and resume
+
+Run from the intended worktree with Git, Node/npm, and installed dependencies.
+Rust checks also require Cargo and the Tauri platform dependencies. Browser
+smoke requires `npx playwright install chromium`. Windows worktree setup is
+documented in [CLAUDE.md](../../CLAUDE.md).
+
+Create an ignored `.tmp/task.json`, for example:
+
+```json
+{
+  "goal": "Preserve terminal state while switching meshes",
+  "criteria": ["Switch away and back; the same terminal retains its buffer"],
+  "plannedEdits": ["src/components/Terminal/TerminalRegistry.ts"],
+  "nextAction": "Inspect terminal ownership and the existing retention test",
+  "agent": "codex",
+  "model": "record the actual model when known"
+}
+```
+
+```powershell
+npm run harness -- start --spec .tmp/task.json
+npm run harness -- status
+```
+
+Start resolves HEAD as the immutable comparison base. Supply `base` in the spec
+when resuming work that already contains commits. Unfinished tasks cannot be
+overwritten. State lives in ignored `.harness/active-task.json` in this worktree,
+so separate worktrees cannot share a task or receipt. `status` is the resumption
+entrypoint after compaction or restart; it includes goal, criteria, plan, phase,
+decisions, blockers, next action and check status. Do not load the entire
+architecture primer: follow the relevant section to its owning module.
+
+Use `update --spec .tmp/progress.json` for phase, next action, decisions,
+blockers, acceptance evidence and review result. Goal, identity and base stay
+fixed. Phases are understand, plan, implement, verify, review and blocked;
+`finish` alone sets complete. Each criterion needs one evidence string, in
+criterion order, describing the command/artifact and observed outcome. A review
+entry identifies reviewer, findings, summary and an explicit
+APPROVE/REQUEST_CHANGES/BLOCKED verdict. Completion requires APPROVE with no
+unresolved findings.
+Both evidence and review are bound to the tree when recorded; editing code
+requires recording them again.
+
+```json
+{
+  "phase": "review",
+  "nextAction": "Finish after independent review",
+  "evidence": ["terminal-container-reuse regression passed; real PTY check recorded separately"],
+  "review": { "reviewer": "independent reviewer", "verdict": "APPROVE", "findings": [], "summary": "Approved current revision" },
+  "blockers": []
+}
+```
+
+## Verify and finish
+
+```powershell
+npm run verify
+npm run harness -- update --spec .tmp/progress.json
+npm run harness -- finish
+```
+
+Without an active task, `npm run verify -- --base <commit>` runs the same checks
+and records a standalone receipt. It cannot finish a task. `--full` expands
+verification to both frontend and Rust even for documentation changes.
+
+Committed, staged, unstaged, deleted and untracked paths determine scope.
+Unknown paths select both product layers; generated wire types always select
+both. Executable hooks and harness tests still run infrastructure gates.
+Adding only harness package scripts, or the exact `.harness` ESLint ignore,
+keeps infrastructure scope; dependency/build/rule changes retain product gates.
+
+| Scope | Required gates |
+|---|---|
+| Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
+| Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
+| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, serial locked Rust tests, generated-binding drift |
+
+Cargo runs inside `src-tauri` so its binding-export configuration applies.
+Rust tests compile the desktop target as well as executing tests; this is a
+compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
+mock IPC. Visible UI or backend acceptance still requires the relevant real
+dev-profile evidence from [verify-ui](../../.claude/skills/verify-ui/SKILL.md).
+
+There is no established frontend formatter, so this harness uses ESLint and
+Git whitespace checks rather than imposing a new formatting policy. Clippy's
+existing warning backlog remains visible as `warningCount`; any warning in a
+touched file fails. This is not a repository-wide zero-warning certificate.
+Rust formatting checks the entire Rust crate. An existing failure stays red:
+reproduce at the recorded base before attributing it to baseline debt.
+
+Checks run under deadlines using the existing process-tree guard. Output goes
+to `.harness/logs/`; agents receive gate names, results, counts and log paths.
+Child environments force `NODE_ENV=test`, clear `BUILDMESH_PREFILL` and
+`FORCE_COLOR`, and use `NO_COLOR`. The outer npm/Node process may still warn if
+its parent shell exports both color variables; clear `FORCE_COLOR` there too.
+
+| Outcome | Meaning and next action | Exit |
+|---|---|---|
+| PASS | Every required gate passed, including executed tests | 0 |
+| FAIL | Compiler, assertion, lint, drift or source-change failure; inspect the log and repair | 1 |
+| BLOCKED | A known prerequisite or command is unavailable; repair the environment or hand off with the reason | 2 |
+| TIMEOUT | Deadline exceeded; inspect for code hangs and resource contention before retrying | 124 |
+
+Unexpected nonzero commands are FAIL, not automatically attributed to the
+environment. The first nonpassing gate stops the attempt; unrun gates remain
+absent and cannot count as green. Receipt JSON preserves the command, base,
+HEAD, worktree, paths, outcome, count, duration and log reference. Its content
+fingerprint includes tracked/untracked inputs, tests, harness configuration,
+lockfiles, HEAD, index content and tool versions. Staged paths must match the
+working content being tested. Source changes during verification invalidate
+the result. An unchanged retry reuses passing gates; changed inputs invalidate
+the entire receipt in this initial implementation.
+
+`finish` launches no tests. It requires all planned gates, current source,
+one current evidence entry per criterion, a current independent review entry,
+and no unresolved blockers. Evidence prose is an agent/reviewer assertion;
+the harness cannot prove a natural-language criterion or a reviewer's honesty.
+Green checks do not replace semantic review.
+
+## Hooks and guardrails
+
+Claude SessionStart injects bounded Git/task context. PostToolUse performs
+asynchronous changed-file lint and source type checks plus the portable agent
+rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
+PreToolUse protects direct edits of `.harness` state; use the CLI instead.
+Stop checks the current receipt and evidence rather than rerunning expensive
+suites at every turn. A first nonpassing stop presents the diagnostic. A
+recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. For a failed
+implementation that cannot be repaired, record `phase: blocked` and nonempty
+blockers to permit that handoff. None of these paths marks the task complete.
+
+These hooks apply to Claude; other agents use the portable CLI and existing CI
+gates. Tasks must be started explicitly for this completion guard to apply;
+read-only sessions are unaffected. Hooks are not a security sandbox: shell
+writes can bypass direct-edit protection, and agents can modify local files.
+Do not disable hooks or edit a receipt to obtain green. CI independently tests
+the harness through `test:agent`; it does not trust local receipts.
+
+Task operations serialize with `.harness/lock`; advisory fast checks use
+`.harness/fast-lock` and publish only if the tested tree stayed current.
+After an interrupted process,
+inspect the PID recorded there before removing a stale lock. Otherwise resume
+the existing task and rerun verification. State survives context resets and
+process restarts, but deleting the worktree deletes its local continuity data.
+
+## Checkpoints, evaluations and feedback
+
+```powershell
+npm run harness -- checkpoint
+npm run harness -- record-rollback --ref <recorded-ref>
+npm run eval:harness
+npm run eval:behaviour
+npm run harness -- evaluate --case terminal-mesh-switch
+npm run harness -- metrics
+```
+
+`checkpoint` requires a clean worktree, creates a task-specific Git ref pointing
+to committed HEAD, and records it in the task. It does not snapshot uncommitted
+edits or `.harness` state. `record-rollback` verifies that clean HEAD matches a
+recorded checkpoint after an operator has restored it; it never resets a
+branch or discards files. Checkpoint refs remain recovery anchors until
+explicitly removed by the operator. These new developer refs are separate
+from product Circuit evidence checkpoints; the old product Git-checkpoint
+table was removed.
+
+[harness-corpus.json](../../scripts/harness-corpus.json) names seven important
+product scenarios, the existing test selectors, evidence boundaries and
+remaining live-runtime checks. The harness evaluation suite exercises actual
+Git repositories/worktrees, task/receipt isolation, checkpoint recovery,
+outcomes, zero-test rejection, hooks and stale evidence. The product corpus
+executes targeted existing tests, not a coverage quota. Cargo cases require
+fresh mobile assets (`npm run build:mobile`) and Tauri dependencies. A passing
+case proves its stated boundary; it does not erase its remaining runtime gap.
+
+Append-only `.harness/events.jsonl` records task/model identity when supplied,
+verification attempts, individual gate outcomes/durations, progress phases,
+checkpoints, recovery and evaluation results. Explicit phase transitions also
+accumulate elapsed time in understand/plan/implement/verify/review phases;
+completion records those phase durations. `metrics` aggregates outcomes,
+verification time, failed gates, phase durations and recovery use. Phase and
+task elapsed time include idle time; they do not measure active CPU work or
+tokens. Native token counters and causal first-pass improvement metrics
+are future work. Promote repeated failures into captured fixtures or an
+executable regression, using the [audit](harness-audit-2026-10-02.md) as the
+initial evidence. Avoid adding every incident to always-on instructions.

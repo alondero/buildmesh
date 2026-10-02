@@ -16,6 +16,7 @@ the complete product manual.
 | UI contributor | [DESIGN.md](../DESIGN.md) | Design tokens, typography, and component patterns shared by desktop and mobile |
 | Maintainer | [Releasing](development/releasing.md) and [release notes](releases/README.md) | Release procedure, updater signing, and release-note discipline |
 | AI coding agent | [CLAUDE.md](../CLAUDE.md) and [AI context](knowledge-primer.md) | Always-on rules, architecture, conventions, and anti-patterns |
+| Agent developer / harness maintainer | [Development harness](agents/development-harness.md) and [review friction audit](agents/harness-audit-2026-10-02.md) | Task continuity, verification, outcomes, stopping controls, evaluation cases and evidence |
 
 ## Source-of-truth order
 

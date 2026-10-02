@@ -7,12 +7,18 @@ description: Verify a Buildmesh change with scoped build, test, and runtime evid
 
 Read `docs/agents/engineering.md` for the shared verification contract. Establish the change's base commit and acceptance outcomes before choosing checks. A user request to verify does not authorize unrelated repairs or publishing.
 
+Use `npm run verify` with the active task, or `npm run verify -- --base <commit>`
+without one, for the canonical scope-selected gate and durable receipt. Read
+`docs/agents/development-harness.md` for PASS/FAIL/BLOCKED/TIMEOUT, continuity,
+current acceptance/review evidence and `finish`. Reuse unchanged passing gates;
+do not replace a failed full check with a successful subset.
+
 ## Tiers
 
 Default to standard; narrow to affected layers for documentation-only or frontend-only changes and state the scope.
 
 - **quick:** Run `npm run test:agent`, `npm run check:agent -- --base <base>`, and focused behavior tests. For frontend changes run `npm run build`; for Rust changes compile the affected target with mobile assets built. A compile-only result is not Rust test coverage.
-- **standard:** Run the scope-appropriate commands in the engineering contract (`scripts\check.ps1 all-ts`, `rust`, or `all` on Windows). For Rust changes also run `cargo clippy --locked --manifest-path src-tauri/Cargo.toml -- -D warnings`; ensure zero new compiler warnings on touched files and inspect generated binding changes when wire types change. Add `npx playwright test --project=verify-smoke` for terminal/browser behavior.
+- **standard:** Run `npm run verify` for the scope-appropriate gates. It includes all-targets Clippy with zero warnings in touched files, serial Rust tests, binding drift, and frontend browser smoke where applicable. The repository has an acknowledged Clippy warning backlog; do not claim a global `-D warnings` baseline is green. Inspect generated binding changes when wire types change. The existing Windows `check.ps1` targets remain focused iteration commands, with the exclusions documented in the engineering contract.
 - **full:** Standard plus actual dev-profile runtime verification using `scripts\run-dev.ps1` on Windows or `scripts/run-dev.sh` elsewhere. These scripts build and launch; a separate Tauri build first is redundant. Read `../verify-ui/SKILL.md` for visible UI changes (for Probe tabs, verify layout and keyboard navigation at the 240px minimum width constraint). Capture startup log offsets and inspect only new lines as below.
 - **--escalate:** Run quick, standard, full, reusing successful checks for the same unchanged tree. Stop escalation at a failure.
 
