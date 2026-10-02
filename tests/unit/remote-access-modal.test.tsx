@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import type { NetworkStatus } from '../../src/types/generated/NetworkStatus';
@@ -225,6 +225,62 @@ describe('RemoteAccessModal', () => {
     expect(warning.textContent).toMatch(/no.*interface|not.*exposed|reach/i);
   });
 
+  it('explains disabled access and offers an enable action instead of reporting a failure', async () => {
+    mockBackend(status({ lan_exposure_enabled: false, tls_active: false }));
+    render(<RemoteAccessModal onClose={() => {}} />);
+    expect(await screen.findByText('Remote access is off')).toBeTruthy();
+    expect(screen.queryByTestId('remote-access-warning')).toBeNull();
+    expect(screen.queryByAltText('QR Code to connect')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Enable remote access' })).toBeTruthy();
+  });
+
+  it('waits for enabling to finish, then shows the newly realized connection', async () => {
+    const user = userEvent.setup();
+    mockBackend(status({ lan_exposure_enabled: false, tls_active: false }));
+    render(<RemoteAccessModal onClose={() => {}} />);
+    const enable = await screen.findByRole('button', { name: 'Enable remote access' });
+    let complete!: () => void;
+    vi.mocked(invoke).mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    await user.click(enable);
+    expect(invoke).toHaveBeenCalledWith('set_lan_exposure_enabled', { enabled: true });
+    expect(screen.getByRole('status').textContent).toMatch(/enabling/i);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close remote access' }));
+    expect(screen.queryByAltText('QR Code to connect')).toBeNull();
+    mockBackend(status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }));
+    await act(async () => { complete(); });
+    expect(await screen.findByAltText('QR Code to connect')).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close remote access' }));
+    expect(screen.queryByText('Remote access is off')).toBeNull();
+  });
+
+  it('lets the user recover from an enable failure without closing the dialog', async () => {
+    const user = userEvent.setup();
+    mockBackend(status({ lan_exposure_enabled: false, tls_active: false }));
+    render(<RemoteAccessModal onClose={() => {}} />);
+    const enable = await screen.findByRole('button', { name: 'Enable remote access' });
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('Listener could not start'));
+    await user.click(enable);
+    expect((await screen.findByRole('alert')).textContent).toContain('Listener could not start');
+    await user.click(screen.getByRole('button', { name: 'Retry', exact: true }));
+    expect(await screen.findByRole('button', { name: 'Enable remote access' })).toBeTruthy();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close remote access' }));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not start another invitation load when enabling completes after close', async () => {
+    const user = userEvent.setup();
+    mockBackend(status({ lan_exposure_enabled: false, tls_active: false }));
+    const { unmount } = render(<RemoteAccessModal onClose={() => {}} />);
+    const enable = await screen.findByRole('button', { name: 'Enable remote access' });
+    let complete!: () => void;
+    vi.mocked(invoke).mockImplementationOnce(() => new Promise<void>(resolve => { complete = resolve; }));
+    await user.click(enable);
+    unmount();
+    await act(async () => { complete(); });
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'create_pairing_ticket')).toHaveLength(1);
+    expect(toDataURL).not.toHaveBeenCalled();
+  });
+
   // --- issue #635: cert status surface ------------------------------------
   // The QR modal surfaces the server's current root CA fingerprint so a user
   // whose installed root is stale (LAN-IP change forced a regen) can see the
@@ -399,7 +455,8 @@ describe('RemoteAccessModal', () => {
     ) as HTMLImageElement | null;
     expect(img).toBeTruthy();
     expect(img!.className).toMatch(/w-96/);
-    expect(img!.className).toMatch(/h-96/);
+    expect(img!.className).toMatch(/aspect-square/);
+    expect(img!.className).toMatch(/max-w-full/);
   });
 
   it('encodes all three QRs at the same pixel size as their render box (no upscale blur)', async () => {

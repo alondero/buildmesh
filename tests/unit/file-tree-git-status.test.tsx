@@ -114,7 +114,7 @@ describe('FileTree git status reconciliation', () => {
         filePath: 'src/app.ts',
       })
     );
-    await waitFor(() => expect(onChangedFileSelect).toHaveBeenCalled());
+    await waitFor(() => expect(onChangedFileSelect).toHaveBeenCalledWith('/repo/src/app.ts', DIFF, 'src/app.ts'));
   });
 
   // Regression for issue #804: a background GIT_CHANGED refresh used to

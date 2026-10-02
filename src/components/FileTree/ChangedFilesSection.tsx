@@ -32,12 +32,15 @@ interface ChangedFilesSectionProps {
   selectedFile: string | null;
   /** Called with the file's relative path and freshly-loaded diff. */
   onChangedFileSelect: (path: string, diff: DiffResult) => void;
+  /** Share request ownership with the tree in the destination. */
+  onFileSelectionStart?: () => AbortSignal;
 }
 
 export function ChangedFilesSection({
   rootPath,
   selectedFile,
   onChangedFileSelect,
+  onFileSelectionStart,
 }: ChangedFilesSectionProps) {
   // Shared git-status cache: dedupes the fetch with FileTree / useMeshGitStatus
   // and refreshes on GIT_CHANGED (the old hand-rolled fetch did neither — it
@@ -49,10 +52,13 @@ export function ChangedFilesSection({
   // get_git_status returns paths relative to the repo root, which is exactly
   // what diff_file_against_head expects — no conversion needed.
   const handleClick = async (path: string) => {
+    const selectionSignal = onFileSelectionStart?.();
     try {
       const diff = await diffFileAgainstHead(rootPath, path);
+      if (selectionSignal?.aborted) return;
       onChangedFileSelect(path, diff);
     } catch (e) {
+      if (selectionSignal?.aborted) return;
       // Issue #1245 — surface the failure instead of swallowing it. A
       // worktree lock, oversized binary, or transient git error used to
       // leave the row highlight looking like an open diff with nothing

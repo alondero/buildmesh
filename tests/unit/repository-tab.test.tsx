@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -278,6 +278,7 @@ describe('RepositoryTab (issue #1460)', () => {
   it('carries no worktree-configuration controls (they belong to Project Settings)', async () => {
     mockBackend();
     openProbeDestination('worktrees');
+    await act(async () => { await vi.dynamicImportSettled(); });
 
     // Wait for the maintenance list so the negative assertions are stable.
     expect(await screen.findByText('main')).toBeTruthy();

@@ -15,7 +15,7 @@
  * models focus tracking.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 
 const windowApi = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -357,54 +357,59 @@ describe('TitleBar (bespoke window chrome)', () => {
       }
     });
 
-    // Issue #1460 — the two project destinations are reachable from the
-    // title bar through one disclosure, and take no permanent space while it
-    // is closed (the issue's "must not consume permanent Probe rail space").
-    describe('project overflow disclosure (issue #1460)', () => {
+    // Tools share one disclosure and take no permanent space while it is closed.
+    describe('tools overflow disclosure', () => {
       it('renders nothing until the trigger is clicked', async () => {
         await renderTitleBar();
         expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
-        expect(screen.getByRole('button', { name: 'More project actions' }).getAttribute('aria-expanded')).toBe('false');
+        expect(screen.getByRole('button', { name: 'More tools' }).getAttribute('aria-expanded')).toBe('false');
       });
 
-      it('lists both destinations with their user-facing names and one-line scope', async () => {
+      it('lists every inspector tool except Usage, which has its own title-bar button', async () => {
         await renderTitleBar();
-        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
+        fireEvent.click(screen.getByRole('button', { name: 'More tools' }));
 
-        const panel = screen.getByTestId('titlebar-overflow-panel');
-        expect(panel.textContent).toContain('Project Settings');
-        expect(panel.textContent).toContain('Repository');
-        // The descriptions are what stop the two entries looking like an
-        // undifferentiated pair again.
-        expect(panel.textContent).toMatch(/Health, recovery, cleanup/);
-        // Not the pre-#1460 name.
-        expect(panel.textContent).not.toContain('Worktree Manager');
+        const panel = screen.getByRole('dialog', { name: 'Tools' });
+        const buttons = within(panel).getAllByRole('button');
+        expect(buttons.map((button) => button.querySelector('.font-medium')?.textContent)).toEqual([
+          'Project Files', 'Agent Changes', 'Project Settings', 'Repository',
+          'GitHub Issues', 'Pull Requests', 'Circuits', 'Agent History', 'Notes',
+        ]);
+        for (const button of buttons) {
+          expect(button.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+        }
+        expect(panel.textContent).toContain('Review what the focused agent changed');
+        expect(panel.textContent).toContain('Check health, recover, and clean up branches');
+        expect(within(panel).queryByText('Usage')).toBeNull();
+        expect(screen.getByRole('button', { name: 'Open Usage' })).toBeTruthy();
       });
 
-      it('opens the Project Settings destination in the inspector', async () => {
-        await renderTitleBar();
-        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
-        fireEvent.click(screen.getByTestId('titlebar-overflow-properties'));
+      it.each([
+        'files', 'review', 'properties', 'worktrees', 'issues', 'pulls',
+        'circuits', 'sessions', 'scratchpad',
+      ])('opens %s in the inspector, closes the disclosure, and restores focus', async (tab) => {
+        const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+          cb(0);
+          return 1;
+        });
+        try {
+          await renderTitleBar();
+          const trigger = screen.getByRole('button', { name: 'More tools' });
+          fireEvent.click(trigger);
+          fireEvent.click(screen.getByTestId(`titlebar-overflow-${tab}`));
 
-        expect(useUIStore.getState().probeOpen).toBe(true);
-        expect(useUIStore.getState().probeTab).toBe('properties');
-        // Choosing an entry closes the disclosure and hands focus back, so
-        // the keyboard user is not stranded at the title bar.
-        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
-      });
-
-      it('opens the Repository destination in the inspector', async () => {
-        await renderTitleBar();
-        fireEvent.click(screen.getByRole('button', { name: 'More project actions' }));
-        fireEvent.click(screen.getByTestId('titlebar-overflow-worktrees'));
-
-        expect(useUIStore.getState().probeOpen).toBe(true);
-        expect(useUIStore.getState().probeTab).toBe('worktrees');
+          expect(useUIStore.getState().probeOpen).toBe(true);
+          expect(useUIStore.getState().probeTab).toBe(tab);
+          expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+          expect(document.activeElement).toBe(trigger);
+        } finally {
+          raf.mockRestore();
+        }
       });
 
       it('toggles closed and closes on Escape', async () => {
         await renderTitleBar();
-        const trigger = screen.getByRole('button', { name: 'More project actions' });
+        const trigger = screen.getByRole('button', { name: 'More tools' });
         fireEvent.click(trigger);
         expect(screen.getByTestId('titlebar-overflow-panel')).toBeTruthy();
         fireEvent.click(trigger);
@@ -414,6 +419,21 @@ describe('TitleBar (bespoke window chrome)', () => {
         expect(screen.getByTestId('titlebar-overflow-panel')).toBeTruthy();
         fireEvent.keyDown(document, { key: 'Escape' });
         expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+      });
+
+      it('closes on an outside click', async () => {
+        await renderTitleBar();
+        fireEvent.click(screen.getByRole('button', { name: 'More tools' }));
+        fireEvent.mouseDown(document.body);
+        expect(screen.queryByTestId('titlebar-overflow-panel')).toBeNull();
+      });
+
+      it('names the active overflow tool in its tooltip', async () => {
+        await renderTitleBar();
+        act(() => useUIStore.getState().openProbeTab('review'));
+        expect(screen.getByRole('button', { name: 'More tools' }).title).toBe('Agent Changes is open in the inspector');
+        act(() => useUIStore.getState().openProbeTab('usage'));
+        expect(screen.getByRole('button', { name: 'More tools' }).title).toBe('Open more tools');
       });
     });
 
@@ -451,7 +471,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
       const searchWrapper = searchButton.parentElement!;
-      expect(searchWrapper.className).toContain('min-w-44');
+      expect(searchWrapper.className).toContain('min-w-0');
     });
 
     it('keeps the utility pills borderless like the switcher segments (#1609)', async () => {

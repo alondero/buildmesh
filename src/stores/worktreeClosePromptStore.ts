@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { WorktreeCloseAction, WorktreeCloseSafety } from '../lib/worktreeClose';
 
 interface WorktreeClosePrompt {
+  reason?: 'active-session';
   nodeName: string;
   safety: WorktreeCloseSafety;
   resolve: (action: WorktreeCloseAction) => void;
@@ -9,21 +10,21 @@ interface WorktreeClosePrompt {
 
 interface WorktreeClosePromptState {
   pending: WorktreeClosePrompt | null;
-  request: (nodeName: string, safety: WorktreeCloseSafety) => Promise<WorktreeCloseAction>;
+  request: (nodeName: string, safety: WorktreeCloseSafety, reason?: 'active-session') => Promise<WorktreeCloseAction>;
   choose: (action: WorktreeCloseAction) => void;
 }
 
 export const useWorktreeClosePromptStore = create<WorktreeClosePromptState>((set, get) => ({
   pending: null,
 
-  request: (nodeName, safety) => new Promise<WorktreeCloseAction>((resolve) => {
+  request: (nodeName, safety, reason) => new Promise<WorktreeCloseAction>((resolve) => {
     // A back-to-back close (× on A, then × on B before dismissing A's
     // dialog) would otherwise orphan A's resolver — deleteAgentNode awaits
     // a promise that never settles, leaving the row stuck dimmed
     // (issue #644). Settle any prior pending as 'cancel': that's the same
     // path deleteAgentNode takes on manual dismiss.
     get().choose('cancel');
-    set({ pending: { nodeName, safety, resolve } });
+    set({ pending: { nodeName, safety, resolve, reason } });
   }),
 
   choose: (action) => {

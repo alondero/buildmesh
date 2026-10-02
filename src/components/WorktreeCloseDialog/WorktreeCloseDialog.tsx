@@ -1,4 +1,5 @@
 import { Modal } from '../shared/Modal';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useWorktreeClosePromptStore } from '../../stores/worktreeClosePromptStore';
 import { useChangedFiles } from '../../hooks/useChangedFiles';
 import { fileDiffStatusMeta } from '../../lib/status';
@@ -23,6 +24,12 @@ export function WorktreeCloseDialog() {
   // but Modal — and therefore its window keydown listener — only mounts while
   // `pending` is set, so Escape is never stolen from agent CLIs in the grid.
   if (!pending) return null;
+
+  if (pending.reason === 'active-session') {
+    return <ConfirmDialog title="Close active session?"
+      message={`${pending.nodeName} is still active. Closing stops its process and removes the node. Files in the repository will be kept.`}
+      confirmLabel="Close session" onConfirm={() => choose('remove')} onCancel={() => choose('cancel')} />;
+  }
 
   const riskParts = [
     pending.safety.has_uncommitted ? 'uncommitted changes' : null,

@@ -3,42 +3,25 @@ import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { useUIStore } from '../../stores/uiStore';
 import { HeaderPillButton } from './HeaderPillButton';
-import { ProbeTab, PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
 import { PROBE_TAB_ICONS } from '../Probe/probeIcons';
+import { TOOL_DISCOVERY_TILES } from '../CommandOmnibar/toolDiscovery';
 import { dropdownId } from '../../lib/dropdownId';
 
 /**
- * Title-bar overflow for the two project destinations (issue #1460).
- *
- * The maintainer note on #1460 requires Project Settings and Repository to be
- * reachable as "clearly labelled global/project actions from the command
- * palette and title-bar overflow", and to consume no permanent Probe rail
- * space. The palette half already existed (`probe-properties` /
- * `probe-worktrees`); this is the title-bar half. It is a *disclosure*, not
- * a rail: nothing is rendered until the user opens it, and the inspector
- * still closes back to nothing at all.
+ * Title-bar overflow for inspector tools without a dedicated title-bar button.
+ * Shares the palette's tool order, labels, descriptions, and inspector icons.
  *
  * It is a disclosure dialog rather than an ARIA `menu` on purpose: the panel
  * holds plain buttons, so Tab order, Enter, and Escape all work without a
  * roving-tabindex implementation — the same contract `ZoomControl` already
  * establishes for the popover in this cluster (Escape returns focus to the
  * trigger; an outside click closes without stealing focus).
- *
- * Entries read their labels and icons from `probeContext` / `probeIcons`
- * rather than restating them, so the title bar, the palette, and the
- * inspector header cannot drift into three names for one destination
- * (ADR-0030 "one name per destination").
  */
 
-const OVERFLOW_ID = dropdownId('titlebar', 'project-overflow');
+const OVERFLOW_ID = dropdownId('titlebar', 'tools-overflow');
 
-/** Ordered here, not derived: the overflow's order is a task order
- *  (configure, then maintain), and `PROBE_TAB_ORDER` is presentation order
- *  for the inspector's chip list. */
-const ENTRIES: { tab: ProbeTab; description: string }[] = [
-  { tab: 'properties', description: 'Identity, agents, commands, worktrees' },
-  { tab: 'worktrees', description: 'Health, recovery, cleanup' },
-];
+// Usage already has a dedicated title-bar button.
+const ENTRIES = TOOL_DISCOVERY_TILES.filter((entry) => entry.tab !== 'usage');
 
 /** Lucide `ellipsis` — the conventional overflow affordance. */
 function MoreIcon({ className }: { className?: string }) {
@@ -72,26 +55,23 @@ export function TitleBarOverflow() {
   useClickOutside(open ? OVERFLOW_ID : null, () => setOpen(false));
   useEscapeKey(closeAndReturnFocus, open);
 
-  // Both entries open an inspector destination, so the trigger's tooltip
-  // names whichever one is already in the inspector — the same "entry
-  // point, not readout" contract `UsageButton` follows. The `active` styling
-  // itself tracks the disclosure, not the destination.
-  const activeLabel = ENTRIES.find((e) => e.tab === probeTab)?.tab;
+  // Active styling tracks the disclosure; the tooltip names the open tool.
+  const activeEntry = ENTRIES.find((entry) => entry.tab === probeTab);
 
   return (
     <div className="relative" data-dropdown-for={open ? OVERFLOW_ID : undefined}>
       <HeaderPillButton
         buttonRef={triggerRef}
         testId="titlebar-overflow"
-        ariaLabel="More project actions"
+        ariaLabel="More tools"
         ariaExpanded={open}
         ariaHasPopup="dialog"
         ariaControls={open ? OVERFLOW_ID : undefined}
         onClick={() => setOpen((value) => !value)}
         title={
-          probeOpen && activeLabel
-            ? `${PROBE_TAB_DEFINITIONS[activeLabel].label} is open in the inspector`
-            : 'Project settings and repository maintenance'
+          probeOpen && activeEntry
+            ? `${activeEntry.title} is open in the inspector`
+            : 'Open more tools'
         }
         label="More"
         active={open}
@@ -101,12 +81,11 @@ export function TitleBarOverflow() {
         <div
           id={OVERFLOW_ID}
           role="dialog"
-          aria-label="Project actions"
+          aria-label="Tools"
           data-testid="titlebar-overflow-panel"
-          className="absolute right-0 top-full z-50 mt-1 w-60 rounded-md border border-border-default bg-bg-card p-1 shadow-md animate-scale-in origin-top-right"
+          className="absolute right-0 top-full z-50 mt-1 max-h-[calc(100dvh-4rem)] w-72 overflow-y-auto rounded-md border border-border-default bg-bg-card p-1 shadow-md animate-scale-in origin-top-right"
         >
           {ENTRIES.map((entry) => {
-            const definition = PROBE_TAB_DEFINITIONS[entry.tab];
             const Icon = PROBE_TAB_ICONS[entry.tab];
             const isActive = probeOpen && probeTab === entry.tab;
             return (
@@ -127,7 +106,7 @@ export function TitleBarOverflow() {
                       isActive ? 'text-accent-cyan' : 'text-text-primary'
                     }`}
                   >
-                    {definition.label}
+                    {entry.title}
                   </span>
                   <span className="block text-2xs text-text-muted break-words">
                     {entry.description}
