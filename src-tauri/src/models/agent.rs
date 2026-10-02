@@ -126,37 +126,35 @@ impl Provider {
     /// the silent fallback shows up in the buildmesh.log file — empty strings
     /// are treated as an intentional default and not logged.
     pub fn from_db_str(s: &str) -> Provider {
+        if s.trim().is_empty() { return Provider::Anthropic; }
+        Self::try_from_db_str(s).unwrap_or_else(|| {
+            tracing::warn!(
+                "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
+                s
+            );
+            Provider::Anthropic
+        })
+    }
+
+    /// Parse a known harness identifier without the legacy database fallback.
+    pub fn try_from_db_str(s: &str) -> Option<Provider> {
         let normalized = s.trim().to_ascii_lowercase();
         match normalized.as_str() {
-            "" | "anthropic" => Provider::Anthropic,
-            "agy" => Provider::Agy,
-            "opencode" => Provider::OpenCode,
-            "codex" => Provider::Codex,
-            "cursor" => Provider::Cursor,
-            "grok" => Provider::Grok,
-            "kimi" => Provider::Kimi,
-            "mcode" | "minimax-code" => Provider::Mcode,
-            "dsh" | "deepseek-harness" | "deepseek" => Provider::Dsh,
-            "commandcode" | "command-code" | "cmdc" | "cmd" => Provider::CommandCode,
-            "freebuff" => Provider::Freebuff,
-            "muse" => Provider::Muse,
-            "cline" => Provider::Cline,
-            "terminal" => Provider::Terminal,
-            // "minimax" is no longer a first-class executor: it is Claude Code
-            // with a swapped backend, configured as a harness profile whose
-            // paired provider account injects the endpoint at spawn (#538). A
-            // bare legacy id with no configured profile falls through to the
-            // Anthropic executor here (resolve_harness_provider checks profiles
-            // first, so a configured "minimax" account resolves cleanly).
-            // "kimi" USED to fall through here too — Kimi Code (#918) is now a
-            // native binary executor, so it gets its own arm above.
-            _ => {
-                tracing::warn!(
-                    "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
-                    s
-                );
-                Provider::Anthropic
-            }
+            "anthropic" | "claude" => Some(Provider::Anthropic),
+            "agy" => Some(Provider::Agy),
+            "opencode" => Some(Provider::OpenCode),
+            "codex" => Some(Provider::Codex),
+            "cursor" => Some(Provider::Cursor),
+            "grok" => Some(Provider::Grok),
+            "kimi" => Some(Provider::Kimi),
+            "mcode" | "minimax-code" => Some(Provider::Mcode),
+            "dsh" | "deepseek-harness" | "deepseek" => Some(Provider::Dsh),
+            "commandcode" | "command-code" | "cmdc" | "cmd" => Some(Provider::CommandCode),
+            "freebuff" => Some(Provider::Freebuff),
+            "muse" => Some(Provider::Muse),
+            "cline" => Some(Provider::Cline),
+            "terminal" => Some(Provider::Terminal),
+            _ => None,
         }
     }
 

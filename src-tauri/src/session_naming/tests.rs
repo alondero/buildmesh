@@ -4,6 +4,81 @@ use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
 use crate::env::{with_env_vars, ENV_LOCK};
 use crate::models::AgentNode;
 
+#[test]
+fn naming_accepts_native_codex_launch_configuration() {
+    let prefs = crate::preferences::AppPreferences::default();
+    let plan = crate::preferences::launch_configurations::capture(
+        &prefs,
+        "codex",
+        &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    ).unwrap();
+    let result = naming_backend_env_from_plan(plan, &prefs);
+    assert!(result.is_ok(), "native Codex supports background inference: {:?}", result.err());
+}
+
+#[tokio::test]
+#[ignore = "requires an installed and authenticated harness; set BUILDMESH_BACKGROUND_HARNESS"]
+async fn live_background_inference() {
+    let harness = std::env::var("BUILDMESH_BACKGROUND_HARNESS").expect("select the live harness explicitly");
+    let prefs = crate::preferences::AppPreferences::default();
+    let plan = crate::preferences::launch_configurations::capture(
+        &prefs, &harness, &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    ).unwrap();
+    let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
+    let slug = summarize_and_rename_with(
+        0, "The user asked to fix background naming. Reply only with fix-background-naming.", launch,
+    ).await.unwrap();
+    assert_eq!(slug, "fix-background-naming");
+}
+
+#[tokio::test]
+async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join(if cfg!(windows) { "naming.ps1" } else { "naming.sh" });
+    let args_file = directory.path().join("args.txt");
+    if cfg!(windows) {
+        std::fs::write(&script, format!(
+            "$promptText = [Console]::In.ReadToEnd()\n\
+             if (-not $promptText.Contains('Terminal log to summarize:')) {{ exit 9 }}\n\
+             if (-not $promptText.Contains('fix background naming')) {{ exit 8 }}\n\
+             if ($env:OPENAI_API_KEY -or $env:OPENAI_BASE_URL -or $env:BUILDMESH_SESSION_ID) {{ exit 7 }}\n\
+             [IO.File]::WriteAllLines({}, [string[]]$args)\n\
+             $index = [Array]::IndexOf([object[]]$args, '--output-last-message')\n\
+             [IO.File]::WriteAllText($args[$index + 1], 'fix-background-naming')\n\
+             [Console]::Out.WriteLine('wrong-stdout-answer')\nexit 0\n",
+            crate::env::powershell_literal(&args_file.to_string_lossy()),
+        )).unwrap();
+    } else {
+        std::fs::write(&script, format!(
+            "#!/bin/sh\ninput=$(cat)\ncase \"$input\" in *'Terminal log to summarize:'*'fix background naming'*) ;; *) exit 9;; esac\n\
+             [ -z \"$OPENAI_API_KEY$OPENAI_BASE_URL$BUILDMESH_SESSION_ID\" ] || exit 7\n\
+             printf '%s\\n' \"$@\" > {}\nwhile [ \"$#\" -gt 0 ]; do\n\
+             if [ \"$1\" = '--output-last-message' ]; then shift; printf fix-background-naming > \"$1\"; break; fi\n\
+             shift\ndone\nprintf wrong-stdout-answer\n",
+            shell_words::quote(&args_file.to_string_lossy()),
+        )).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let prefs = crate::preferences::AppPreferences::default();
+    let mut plan = crate::preferences::launch_configurations::capture(
+        &prefs, "codex", &crate::preferences::launch_configurations::LaunchOverrides {
+            model: Some("gpt-6-luna".into()), effort: Some("low".into()), extra_args: None,
+        },
+    ).unwrap();
+    plan.harness.executable = Some(script);
+    let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
+    assert_eq!(summarize_and_rename_with(0, "fix background naming", launch).await.unwrap(), "fix-background-naming");
+    let args = std::fs::read_to_string(args_file).unwrap();
+    let args: Vec<_> = args.lines().collect();
+    assert!(args.windows(2).any(|pair| pair == ["--model", "gpt-6-luna"]));
+    assert!(args.contains(&"model_reasoning_effort=\"low\""));
+    assert!(args.contains(&"--ephemeral"));
+    assert_eq!(args.last(), Some(&"-"));
+}
+
 /// Open the buffering gate for a node so `on_output` writes immediately.
 /// Real code opens the gate via `should_trigger_rename`; tests use this
 /// to simulate "the agent has already had at least one turn".
@@ -858,6 +933,41 @@ impl SessionNamingRepository for MockRepo {
 }
 
 #[test]
+fn failed_backend_resolution_releases_rename_ownership_and_allows_repaired_configuration() {
+    let node_id = 70100;
+    cleanup(node_id);
+    let repo = MockRepo::with_name("bold-keen-brook");
+    let prefs = crate::preferences::AppPreferences::default();
+    let valid_plan = crate::preferences::launch_configurations::capture(
+        &prefs, "codex", &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    ).unwrap();
+    let buffer = "fix background naming\n".repeat(100);
+    open_gate(node_id);
+    on_output(node_id, &buffer);
+
+    let mut invalid_plan = valid_plan.clone();
+    invalid_plan.extra_args = Some("--json".into());
+    let error = prepare_rename_with(&repo, node_id, || naming_backend_env_from_plan(invalid_plan, &prefs))
+        .err().expect("extra arguments must fail background resolution");
+    assert!(error.contains("remove extra CLI arguments"), "{error}");
+    {
+        let states = naming();
+        let state = states.get(&node_id).unwrap();
+        assert!(!state.renaming, "failed preflight must release rename ownership");
+        assert_eq!(state.attempts, 0, "configuration failures must not consume inference attempts");
+        assert!(state.buffering_ready);
+        assert_eq!(state.buffer, buffer);
+    }
+
+    let (trigger, _) = prepare_rename_with(&repo, node_id, || naming_backend_env_from_plan(valid_plan, &prefs))
+        .unwrap().expect("repairing configuration must let the same node retry");
+    assert_eq!(trigger.buffer, buffer);
+    assert!(naming().get(&node_id).unwrap().renaming);
+    assert!(repo.updates.lock().unwrap().is_empty());
+    cleanup(node_id);
+}
+
+#[test]
 fn should_trigger_rename_skips_already_renamed_node() {
     let node_id = 70001;
     open_gate(node_id);
@@ -1626,86 +1736,5 @@ fn resolve_claude_binary_error_does_not_mislead_to_settings() {
                 err
             );
         },
-    );
-}
-
-/// Static guard: the rename call site must go through
-/// `resolve_claude_binary` rather than the previous literal
-/// `Command::new("claude")`. A regression that re-introduces the
-/// literal would re-trigger the "program not found" toast for
-/// users with a stale buildmesh PATH.
-///
-/// Brace-counts the function body instead of a file-level
-/// `source.contains("...")`, because the assertion message itself
-/// contains the literal being checked (a file-level check would
-/// always pass). Matches the established gh824 test shape at
-/// `session_naming.rs:2377`.
-#[test]
-fn summarize_and_rename_uses_resolved_claude_path_not_literal() {
-    let source = include_str!("engine.rs");
-
-    // Pull out the body of `fn summarize_and_rename_with(..)` by
-    // brace-counting so nested closures don't false-match.
-    let sig = "async fn summarize_and_rename_with(";
-    let sig_idx = source
-        .find(sig)
-        .expect("summarize_and_rename_with must exist");
-    let open_rel = source[sig_idx..]
-        .find('{')
-        .expect("summarize_and_rename_with body must open with `{`");
-    let body_start = sig_idx + open_rel + 1;
-    let bytes = source.as_bytes();
-    let mut depth: usize = 1;
-    let mut i = body_start;
-    while i < bytes.len() && depth > 0 {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-    assert_eq!(depth, 0, "summarize_and_rename_with body must close");
-    let body_end = i - 1;
-    let body = &source[body_start..body_end];
-
-    // Strip line comments so the explanatory prose in the body
-    // (the rejected-v1 design note) doesn't false-positive.
-    let code_only: String = body
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                ""
-            } else {
-                line
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    // The call site must go through the resolver so the
-    // well-known install-location fallback applies when the
-    // process's PATH is stale (the "program not found" toast).
-    assert!(
-        code_only.contains("resolve_claude_binary()?"),
-        "summarize_and_rename_with must call resolve_claude_binary() \
-             (PATH-stale spawn failure). A direct `Command::new(\"claude\")` \
-             falls back to the process's inherited PATH, which on Windows \
-             can be stale if Claude Code was installed after buildmesh \
-             launched."
-    );
-
-    // And the call site must NOT still spawn the literal "claude"
-    // string — that would re-introduce the bug. The
-    // `command_no_window("claude")` shape is unique to the old
-    // call site (the regular Claude Code spawn goes through
-    // `claude_direct_recipe` / `spawn_environment`, not
-    // `command_no_window`).
-    assert!(
-        !code_only.contains("command_no_window(\"claude\")"),
-        "summarize_and_rename_with must NOT spawn the literal \
-             \"claude\" anymore — use resolve_claude_binary() so the \
-             well-known install-location fallback applies."
     );
 }

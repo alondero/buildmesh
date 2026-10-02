@@ -357,6 +357,10 @@ pub struct ProviderInfo {
     /// offering settings it would silently drop. Generated to
     /// `src/types/generated/ProviderInfo.ts`.
     pub capabilities: crate::agent::capabilities::HarnessCapabilities,
+    /// Execution runtime of this profile, also present on saved menu choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime: Option<crate::models::EnvType>,
     /// Saved configurations offered under this Spawn Option on every client.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub configurations: Vec<crate::preferences::spawn_configurations::SpawnConfiguration>,
@@ -619,6 +623,13 @@ pub trait AgentProvider: Send + Sync {
         vec!["--model".into(), model.into()]
     }
 
+    /// A pure, adapter-owned recipe for one-shot background inference.
+    /// Defaults to unavailable; a headless CLI flag alone does not establish
+    /// prompt delivery, final-answer extraction, or non-interactive completion.
+    fn background_recipe(&self, _platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        None
+    }
+
     /// Args for effort override.
     fn effort_args(&self, effort: &str) -> Vec<String> {
         vec!["--effort".into(), effort.into()]
@@ -741,6 +752,7 @@ pub trait AgentProvider: Send + Sync {
         let effort_control = self.effort_control();
         HarnessCapabilities {
             harness_id: self.id().to_string(),
+            background_inference: self.background_recipe(Platform::current()).map(|recipe| recipe.capability),
             supports_resume: self.supports_resume(),
             auto_resume_on_startup: self.auto_resume_on_startup(),
             requires_attention_hook: self.requires_attention_hook(),

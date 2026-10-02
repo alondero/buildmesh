@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { openSettingsPane } from '../utils/settings-panes';
+import { HARNESS_CAPABILITIES, type InspectorHarnessId } from '../../src/types/generated/HarnessCapabilitiesTable';
 
 const tauriMocks = vi.hoisted(() => ({
   getAppPreferences: vi.fn(),
@@ -14,6 +15,7 @@ const tauriMocks = vi.hoisted(() => ({
   getNetworkStatus: vi.fn(),
   setAppReviewerProvider: vi.fn(),
   setCircuitClassifierProvider: vi.fn(),
+  setAppNamingProvider: vi.fn(),
 }));
 
 vi.mock('../../src/lib/tauri', async (importOriginal) => ({
@@ -27,6 +29,7 @@ vi.mock('../../src/lib/tauri', async (importOriginal) => ({
   getNetworkStatus: tauriMocks.getNetworkStatus,
   setAppReviewerProvider: tauriMocks.setAppReviewerProvider,
   setCircuitClassifierProvider: tauriMocks.setCircuitClassifierProvider,
+  setAppNamingProvider: tauriMocks.setAppNamingProvider,
 }));
 
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
@@ -42,33 +45,27 @@ function provider(id: string, label: string) {
     provider_id: null,
     is_proxied: false,
     group_key: id,
-    capabilities: {
-      harness_id: id,
-      supports_resume: id !== 'terminal',
-      auto_resume_on_startup: id !== 'terminal',
-      requires_attention_hook: false,
-      produces_readable_transcript: id !== 'terminal',
-      supports_model_override: id !== 'terminal',
-      supports_effort_override: false,
-      supports_prefill: id !== 'terminal',
-      is_plain_terminal: id === 'terminal',
-      effort_control: { kind: 'none' },
-      available_on: ['windows'],
-    },
+    capabilities: HARNESS_CAPABILITIES[id as InspectorHarnessId],
   };
 }
 
 describe('AppSettingsModal reviewer provider', () => {
   let storedReviewer: string | null;
+  let storedNaming: string | null;
 
   beforeEach(() => {
     storedReviewer = 'codex';
+    storedNaming = null;
+    tauriMocks.setAppNamingProvider.mockReset().mockImplementation((value: string | null) => {
+      storedNaming = value;
+      return Promise.resolve(undefined);
+    });
     tauriMocks.setCircuitClassifierProvider.mockReset().mockResolvedValue(undefined);
     tauriMocks.getAppPreferences.mockReset().mockImplementation(() =>
       Promise.resolve({
         default_provider: null,
         reviewer_provider: storedReviewer,
-        naming_provider: null,
+        naming_provider: storedNaming,
         circuit_agent_pool_size: null,
         worktree_directory: null,
         harness_defaults: {},
@@ -167,7 +164,7 @@ describe('AppSettingsModal reviewer provider', () => {
     // The plain shell is absent entirely: it is not an agent at all.
     expect(screen.queryByRole('menuitem', { name: 'Terminal' })).toBeNull();
   });
-  it('configures a native Codex classifier independently of the reviewer and excludes other harnesses', async () => {
+  it('configures a native Codex classifier independently of the reviewer', async () => {
     await renderModal();
     const user = userEvent.setup();
     const trigger = await screen.findByRole('button', { name: 'Circuit classifier provider' });
@@ -181,6 +178,29 @@ describe('AppSettingsModal reviewer provider', () => {
     await user.click(trigger);
     await user.click(await screen.findByRole('menuitem', { name: 'Claude Code (built-in default)' }));
     await waitFor(() => expect(tauriMocks.setCircuitClassifierProvider).toHaveBeenLastCalledWith(null));
+  });
+
+  it('uses background capabilities for naming and disables unsupported harnesses', async () => {
+    tauriMocks.listProviders.mockResolvedValue([
+      provider('codex', 'Codex'), provider('opencode', 'OpenCode'),
+      provider('freebuff', 'Freebuff'), provider('terminal', 'Terminal'),
+    ]);
+    await renderModal();
+    const user = userEvent.setup();
+    const trigger = await screen.findByRole('button', { name: 'Auto-naming' });
+    await user.click(trigger);
+    expect(screen.getByRole('menuitem', { name: 'OpenCode' }).getAttribute('aria-disabled')).toBe('false');
+    const unavailable = screen.getByRole('menuitem', { name: 'Freebuff' });
+    expect(unavailable.getAttribute('aria-disabled')).toBe('true');
+    expect(unavailable.textContent).toContain('no one-shot background inference support');
+    await user.click(unavailable);
+    expect(tauriMocks.setAppNamingProvider).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('menuitem', { name: 'Codex' }));
+    await waitFor(() => expect(tauriMocks.setAppNamingProvider).toHaveBeenCalledWith('codex'));
+    await waitFor(() => expect(trigger.textContent).toContain('Codex'));
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: 'Disabled (auto-naming off)' }));
+    await waitFor(() => expect(tauriMocks.setAppNamingProvider).toHaveBeenLastCalledWith(null));
   });
 
   it('keeps the classifier selection when persistence fails and shows the error', async () => {

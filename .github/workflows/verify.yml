@@ -662,3 +662,8 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames -- --test-threads=1
         working-directory: src-tauri
+
+      - name: Verify Windows background inference
+        if: runner.os == 'Windows'
+        run: cargo test --locked --lib agent::background::tests -- --test-threads=1
+        working-directory: src-tauri

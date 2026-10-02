@@ -129,6 +129,13 @@ impl AgentProvider for KimiAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--output-format", "stream-json"].map(str::to_owned).to_vec();
+        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Argument { flag: "--prompt".into() }, BackgroundResultOutput::AssistantJsonLines))
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }

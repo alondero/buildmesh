@@ -335,6 +335,13 @@ impl AgentProvider for GrokAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--output-format", "plain", "--tools=", "--permission-mode", "dontAsk"].map(str::to_owned).to_vec();
+        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::File { flag: "--prompt-file".into() }, BackgroundResultOutput::Stdout))
+    }
+
     fn auto_resume_on_startup(&self) -> bool {
         true
     }

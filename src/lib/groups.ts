@@ -30,6 +30,7 @@ export type SpawnOption = Pick<
   | 'provider_id'
   | 'is_proxied'
   | 'group_key'
+  | 'runtime'
 > & {
   /** Tailwind class (e.g. `bg-blue-500`) derived from `id`. */
   color: string;
@@ -52,6 +53,7 @@ export type SpawnOption = Pick<
 export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
   return backend.map((p) => ({
     id: p.id,
+    runtime: p.runtime,
     capabilities: p.capabilities,
     configuration: p.configuration,
     unavailable_reason: p.unavailable_reason,

@@ -344,9 +344,19 @@ Changing credentials or the Codex installation can require route verification
 again. Regenerate with a different recipe deliberately replaces the snapshot.
 
 Mobile exposes the same choices and **Manage Launch Configurations** in the
-new-node picker. Background auto-naming requires a host-native Claude Code
-configuration; unsupported background selections report an error rather than
-using another provider. Usage remains attached to the account, not each recipe.
+new-node picker. Background auto-naming and Circuit classification accept
+host-native configurations whose harness supports one-shot background inference:
+Claude Code, Codex, OpenCode, Kimi Code, Grok Code, Antigravity, Command Code, and
+MiniMax Code. Claude Code also accepts configured provider routes; the other
+background runners use the harness's native authentication. Saved model and
+effort settings apply where the harness supports those controls. Configurations
+with extra CLI arguments cannot run background inference. Unsupported choices
+show the missing requirement in the settings picker and are rejected by the
+backend. Usage remains attached to the account, not each recipe.
+
+If the selected configuration cannot be resolved, auto-naming retries on a later
+turn after you repair it. On Windows, Claude Code background work also checks
+the standard native and npm install locations when the app's PATH is stale.
 
 ## Settings that matter
 

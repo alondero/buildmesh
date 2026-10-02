@@ -237,6 +237,7 @@ export function SpawnOptionPicker({
               <GroupedProviderMenu
                 providers={options}
                 filter={filter}
+                decorate={decorate}
                 onSelect={(providerId, _altKey, configurationId) => pick(configurationId ?? providerId)}
                 onClose={close}
               />

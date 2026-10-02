@@ -42,6 +42,7 @@ function fixtureCaps(overrides: Partial<HarnessCapabilities> & Pick<HarnessCapab
   return {
     harness_id: 'fixture',
     supports_resume: false,
+    background_inference: null,
     auto_resume_on_startup: false,
     requires_attention_hook: false,
     attention_capability: { kind: 'none' },

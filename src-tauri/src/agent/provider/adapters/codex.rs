@@ -1511,6 +1511,16 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--ask-for-approval", "never", "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never", "-c", "features.shell_tool=false", "-c", "features.multi_agent=false"].map(str::to_owned).to_vec();
+        spawn.trailing_args = vec!["-".into()];
+        let mut recipe = BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::LastMessageFile);
+        recipe.env_remove = vec!["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()];
+        Some(recipe)
+    }
+
     fn spawn_recipe_for_resume(
         &self,
         platform: Platform,

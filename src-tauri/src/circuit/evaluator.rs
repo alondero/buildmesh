@@ -528,8 +528,8 @@ pub(crate) fn classify_with_prompt(node_id: i64, launch: &super::classifier::Cla
     // No repository rules, tools, or hooks belong in a report classification task.
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let result = directory.path().join("verdict.txt");
-    let cmd = launch.command(directory.path(), &result)?;
-    let output = match run_classifier_command(cmd, prompt, std::time::Duration::from_secs(30)) {
+    let cmd = launch.command(directory.path(), &result, prompt)?;
+    let output = match run_classifier_command(cmd, launch.stdin_prompt(prompt), std::time::Duration::from_secs(30)) {
         Ok(output) => output,
         Err(error) => {
             tracing::warn!("circuit evaluator({node_id}): {error}");
@@ -571,6 +571,7 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().map_err(io_error)?;
+    let process_guard = crate::agent::background::BackgroundProcessGuard::new(child.id());
     let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
     let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
     let errors = child.stderr.take().ok_or_else(|| "classifier stderr was not piped".to_string())?;
@@ -595,7 +596,6 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         let result = drain_classifier_stderr(errors, MAX_OUTPUT, errors_oversized_reader);
         let _ = errors_tx.send(result);
     });
-    let job = crate::process_util::JobHandle::contain(child.id());
     let deadline = std::time::Instant::now() + timeout;
     let mut timed_out = false;
     let mut over_budget = false;
@@ -612,14 +612,14 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             Ok(None) => {
                 timed_out = std::time::Instant::now() >= deadline;
                 over_budget = output_oversized.load(std::sync::atomic::Ordering::Acquire);
-                terminate_classifier_tree(child.id(), job.as_ref());
+                process_guard.terminate();
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
             }
             Err(error) => {
                 status_error = Some(format!("classifier wait failed: {error}"));
-                terminate_classifier_tree(child.id(), job.as_ref());
+                process_guard.terminate();
                 let _ = child.kill();
                 let _ = child.wait();
                 break;
@@ -627,7 +627,7 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         }
     }
     if input_rx.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
-        terminate_classifier_tree(child.id(), job.as_ref());
+        process_guard.terminate();
         let _ = child.kill();
         let _ = child.wait();
     }
@@ -637,7 +637,7 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             // A descendant can inherit stdout after the direct child exits.
             // Close the process group before giving up so the reader cannot
             // keep the serial circuit worker blocked indefinitely.
-            terminate_classifier_tree(child.id(), job.as_ref());
+            process_guard.terminate();
             let _ = child.kill();
             let _ = child.wait();
             output_rx.recv_timeout(std::time::Duration::from_secs(1))
@@ -648,14 +648,14 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     let errors = match errors_rx.recv_timeout(std::time::Duration::from_secs(1)) {
         Ok(result) => result.map_err(io_error)?,
         Err(_) => {
-            terminate_classifier_tree(child.id(), job.as_ref());
+            process_guard.terminate();
             let _ = child.kill();
             let _ = child.wait();
             errors_rx.recv_timeout(std::time::Duration::from_secs(1))
                 .map_err(|_| "classifier error reader did not finish".to_string())?.map_err(io_error)?
         }
     };
-    drop(job);
+    drop(process_guard);
     let errors_were_truncated = errors_oversized.load(std::sync::atomic::Ordering::Acquire);
     let stderr_diagnostic = if errors_were_truncated {
         format!("{} [stderr truncated after 64 KiB]", classifier_diagnostic(&errors))
@@ -685,20 +685,6 @@ fn drain_classifier_stderr(
         if retained.len() > max_bytes { oversized.store(true, std::sync::atomic::Ordering::Release); }
     }
     Ok(retained)
-}
-
-fn terminate_classifier_tree(pid: u32, job: Option<&crate::process_util::JobHandle>) {
-    if let Some(job) = job {
-        job.terminate();
-    }
-    crate::process_util::kill_process_tree(pid);
-    #[cfg(unix)]
-    {
-        let group = format!("-{pid}");
-        let _ = crate::process_util::command_no_window("kill")
-            .args(["-KILL", "--", &group])
-            .status();
-    }
 }
 
 #[cfg(test)]

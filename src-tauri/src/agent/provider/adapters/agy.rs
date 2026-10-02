@@ -125,6 +125,13 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
+    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+        let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
+        spawn.base_args = ["--output-format", "text", "--disable-slash-commands", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
+        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Argument { flag: "--print".into() }, BackgroundResultOutput::Stdout))
+    }
+
     fn produces_readable_transcript(&self) -> bool {
         // Issue #1283: AGY writes per-conversation JSONL under
         // `~/.gemini/antigravity-cli/brain/<conversation-id>/.system_generated/
