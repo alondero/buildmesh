@@ -563,11 +563,8 @@ export function TitleBar() {
               label="Mobile"
               icon={<MobileIcon className="h-4 w-4 shrink-0" />}
             />
-            {/* Issue #1460 — Project Settings and Repository maintenance are
-                project-scoped destinations, not permanent Probe navigation.
-                They get a disclosure here (and the palette) instead of
-                dedicated pills, so the bar's utility cluster does not grow
-                two more buttons as destinations are added. */}
+            {/* Inspector tools without a dedicated title-bar button share
+                this disclosure and the palette's labels and iconography. */}
             <TitleBarOverflow />
           </div>
 
