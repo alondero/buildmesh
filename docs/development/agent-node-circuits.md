@@ -41,6 +41,19 @@ or resending prompts. Removing an agent, or a confirmed agent error, terminates 
 waiting run so queued runs can use its capacity. Ambiguous GitHub actions and prompt
 deliveries retain their existing manual reconciliation controls.
 
+Issue-driven review runs request an explicit final result from the implementation,
+wrap-up and feedback phases: `BUILDMESH_HANDOFF_V1: READY` or `BLOCKED`. A valid
+result advances its matching report gate without calling the Circuit classifier,
+after the same session, input, freshness and known-work checks. READY means the
+assigned phase is ready for its next gate; independent review still decides
+approval. Older reports without a result use the configured classifier, and an
+exhausted classifier budget still requires an explicit evidence recheck.
+
+When an agent disappears, its cancellation explanation retains the preceding
+checkpoint. Siblings stopped by a failed run identify that failure as their cause.
+See the [agent loss audit](circuit-agent-loss-2026-10-02.md) for the historical
+classifier and identity failures hidden by the old closure message.
+
 ## Review presentation contract
 
 The title-bar review preset and the issue-driven Autopilot review blueprint
