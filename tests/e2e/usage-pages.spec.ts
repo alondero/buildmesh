@@ -49,6 +49,22 @@ test('provider usage link fits a 240px dock and opens externally from a cached o
   expect(linkBounds!.x + linkBounds!.width).toBeLessThanOrEqual(panelBounds!.x + panelBounds!.width);
   expect(await probe.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
 
+  // The link rides the header row beside the provider name — it overlaps
+  // the name's line, so it adds no vertical row to the panel.
+  const nameBounds = await panel
+    .locator(`[title="${fixtures.get_provider_accounts[0].name}"]`)
+    .boundingBox();
+  expect(nameBounds).not.toBeNull();
+  expect(linkBounds!.y).toBeLessThan(nameBounds!.y + nameBounds!.height);
+  expect(linkBounds!.y + linkBounds!.height).toBeGreaterThan(nameBounds!.y);
+  // Icon-only: the destination travels in the tooltip, not as visible text.
+  await expect(link).toHaveText('↗');
+  await expect(link).toHaveAttribute('title', 'View usage — opens in your browser');
+  // DESIGN.md's icon-button rule — a square hit area, not a bare glyph.
+  // The negative vertical margin keeps that square from growing the row.
+  expect(linkBounds!.width).toBeGreaterThanOrEqual(18);
+  expect(linkBounds!.height).toBeGreaterThanOrEqual(18);
+
   const externalOpen = page.waitForEvent('console', message => message.text() === `usage-page-open ${usagePage.url}`);
   await page.evaluate(() => {
     const mock = (window as unknown as { __BUILDMESH_MOCK__: { on: (command: string, handler: (args: { url: string }) => void) => void } }).__BUILDMESH_MOCK__;

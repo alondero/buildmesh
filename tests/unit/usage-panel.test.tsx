@@ -143,9 +143,35 @@ describe('UsagePanel (issue #601 read-only surface)', () => {
     expect(screen.queryByRole('link')).toBeNull();
   });
 
-  it.each(['Usage guide', 'Open console', 'Manage plan'])('labels the fallback destination as %s', (label) => {
+  it.each(['Usage guide', 'Open console', 'Manage plan'])('names the fallback destination as %s via its accessible name', (label) => {
     render(<UsagePanel account={account()} meter={meter({ usagePage: { url: 'https://provider.example/', label } })} />);
-    expect(screen.getByRole('link', { name: `${label} for Anthropic / Claude on provider website` }).textContent).toContain(label);
+    // The link body is the bare `↗` glyph — the destination travels in the
+    // accessible name and the hover tooltip, never as visible text.
+    const link = screen.getByRole('link', { name: `${label} for Anthropic / Claude on provider website` });
+    expect(link.textContent).toBe('↗');
+    expect(link.getAttribute('title')).toBe(`${label} — opens in your browser`);
+  });
+
+  it('puts the usage-page link in the header row beside the provider name, not below the meter', () => {
+    // Vertical space contract: the link must not add a row of its own to
+    // the panel. The header row is the flex container that holds both the
+    // provider name and the link; the meter body is a later sibling of it.
+    render(
+      <UsagePanel
+        account={account({ name: 'MiniMax' })}
+        meter={meter({
+          usagePage: { url: 'https://platform.minimax.io/console/plan', label: 'View usage' },
+          usage: usage({ windows: [{ label: '5-hour', usedPercent: 1, resetsAt: null }] }),
+        })}
+      />,
+    );
+    const link = screen.getByRole('link', { name: /View usage for/ });
+    const header = screen.getByTestId('usage-panel-header');
+    // Same row as the provider name…
+    expect(header.querySelector('[title="MiniMax"]')).not.toBeNull();
+    expect(header.contains(link)).toBe(true);
+    // …while the meter body is a later sibling of that row, not inside it.
+    expect(header.contains(screen.getByText('5-hour'))).toBe(false);
   });
 
   it.each([
