@@ -34,6 +34,8 @@ Linux and platform smoke builds.
 
 For the Circuit side-effect inventory and restart/replay policy, see the
 [Circuit effect recovery contract](circuit-effect-recovery.md).
+For a Codex model-switch report checkpoint, see the
+[run 293 investigation](circuit-run-293-codex-context.md).
 
 ## Local development
 

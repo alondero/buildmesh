@@ -71,6 +71,22 @@ keyboard sequence; older builds could consume that recovery key as part of the
 sequence and remain uncertain. Alt+Enter, paste contents and terminal string payloads
 cannot establish a submission boundary.
 
+## A completed Codex agent is waiting for a usable harness report
+
+A Circuit can remain **Unverified** after Codex finishes when an older Buildmesh
+report reader rejects valid system or developer context messages, such as those
+emitted during a model switch. The checkpoint says the transcript contains an
+unrecognised or malformed record. Rechecking the same transcript with that
+reader cannot clear the problem.
+
+Update Buildmesh to a build containing the Codex context-message fix. The
+worker automatically rechecks a running Circuit's checkpoint. Handoff still
+requires a current source process, session and input boundary. If updating
+restarts the source, inspect the checkpoint and follow its displayed recovery
+action; a report from before the new process incarnation cannot authorize
+handoff. Newer activity, unknown message roles, pending human requests and known
+unfinished work still block review.
+
 ## An Agent Node will not resume
 
 Terminal nodes and agents that have not captured a session id are
