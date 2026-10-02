@@ -55,6 +55,7 @@ export default [
       '.claude/**',
       // Local smoke tests, logs, and screenshots; never product source.
       '.tmp/**',
+      '.harness/**',
       '.opencode/**',
       // `.agents/` is a Claude-Code runtime dir (hooks, sessions, tasks,
       // memory) — every entry is gitignored at the per-file level

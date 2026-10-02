@@ -52,6 +52,8 @@ NUL
 # passed to `gh issue create`). Anything worth keeping should move out of
 # `.tmp/` and into `docs/` before commit.
 .tmp/
+# Worktree-local task state, gate receipts, logs and session continuity.
+.harness/
 # Wayfinder working-draft mirrors (per-map resolution transcripts, map-body
 # drafts). Never intended to ship — the canonical artifacts are the issue
 # comments and the map's body on GitHub. Mirrors stay local for the session

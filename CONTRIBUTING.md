@@ -41,13 +41,11 @@ npm install
 npm run tauri dev        # launches the Tauri shell + Vite dev server
 ```
 
-**Quality gate before pushing.** All three must be green:
+**Quality gate before pushing.** Record the change's base and run the canonical
+scope-selected gate:
 
 ```bash
-scripts\check.ps1 all    # Windows/worktree wrapper (dist/mobile build, vitest, cargo test)
-npm run check:docs        # required docs, local links/anchors, source drift
-npm run test:ci          # vitest unit + integration + Playwright e2e (needs the app on :1991)
-cargo test               # Rust unit tests (run inside src-tauri/)
+npm run verify -- --base <base-commit>
 ```
 
 On every pull request, CI runs the required checks: the static agent/docs/lint
@@ -65,9 +63,11 @@ and the authoritative required-status-check names — plus the release gate and
 emergency bypass — live in
 [the release procedure](docs/development/releasing.md#required-checks-and-branch-protection).
 
-The `/verify` skill is the project-blessed verification flow — run it before
-requesting review. It calls `check.ps1`, launches the dev profile, and scans
-the debug log.
+The [development harness](docs/agents/development-harness.md) adds task
+continuity, current-tree receipts, explicit outcomes and guarded completion.
+The `/verify` skill routes to this gate. Acceptance involving the real desktop
+or backend also needs the dev-profile runtime checks; browser smoke uses mock
+IPC. Focused `check.ps1` targets remain available during implementation.
 
 > **Worktree tip.** Inside a worktree (path contains `.claude/worktrees/`),
 > `check.ps1` already handles the Windows-specific gotchas (clears

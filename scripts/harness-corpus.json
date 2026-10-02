@@ -1,0 +1,51 @@
+[
+  {
+    "id": "terminal-mesh-switch",
+    "promise": "Switching meshes preserves each terminal",
+    "boundary": "React/TerminalRegistry with mock xterm and IPC",
+    "gate": { "command": ["node", "node_modules/vitest/vitest.mjs", "run", "tests/integration/terminal-container-reuse.test.tsx"], "tests": "vitest" },
+    "remaining": "Real PTY survival across mesh switches requires a dev-profile runtime check."
+  },
+  {
+    "id": "mesh-isolation",
+    "promise": "Old mesh saves cannot overwrite the selected mesh",
+    "boundary": "Project Settings async ownership with mock IPC",
+    "gate": { "command": ["node", "node_modules/vitest/vitest.mjs", "run", "tests/unit/project-settings-tab.test.tsx"], "tests": "vitest" },
+    "remaining": "This does not prove command routing between live meshes."
+  },
+  {
+    "id": "restart-reconnect",
+    "promise": "Resumed sessions reconnect independently",
+    "boundary": "TerminalRegistry agent-spawned listener with mock IPC",
+    "gate": { "command": ["node", "node_modules/vitest/vitest.mjs", "run", "tests/unit/terminal-registry-agent-spawned.test.ts"], "tests": "vitest" },
+    "remaining": "Actual process reconnection after app restart needs live runtime evidence."
+  },
+  {
+    "id": "windows-wsl-routing",
+    "promise": "Native and WSL launch recipes preserve command arguments",
+    "boundary": "Rust spawn recipe quoting; platform independent contract",
+    "gate": { "command": ["cargo", "test", "--locked", "--lib", "agent::spawn_environment::tests::format_powershell_command", "--", "--test-threads=1"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
+    "remaining": "Installed WSL distribution and native CLI execution need a Windows runtime check."
+  },
+  {
+    "id": "concurrent-agents",
+    "promise": "Multiple resumed terminals are reconciled independently",
+    "boundary": "Frontend terminal ownership and capacity controls",
+    "gate": { "command": ["node", "node_modules/vitest/vitest.mjs", "run", "tests/unit/terminal-registry-agent-spawned.test.ts", "tests/unit/circuit-run-capacity.test.tsx"], "tests": "vitest" },
+    "remaining": "Simultaneous live process/layout contention remains a runtime scenario."
+  },
+  {
+    "id": "agent-loss",
+    "promise": "Confirmed lost agents are surfaced without reaping uncertain active agents",
+    "boundary": "Rust zombie sweep against isolated production DB seams",
+    "gate": { "command": ["cargo", "test", "--locked", "--lib", "services::circuit_worker::zombie_sweep::tests::", "--", "--test-threads=1"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
+    "remaining": "UI notification of an actual killed agent remains a live runtime scenario."
+  },
+  {
+    "id": "git-checkpoint-restore",
+    "promise": "A goal-linked committed checkpoint is identified and recovery is recorded",
+    "boundary": "Real temporary Git repository through the harness CLI",
+    "gate": { "command": ["node", "--test", "--test-name-pattern=checkpoint", "tests/agent-infra/harness.test.mjs"], "tests": "node" },
+    "remaining": "The CLI does not discard edits or automatically reset branches; recovery is an explicit operator action."
+  }
+]
