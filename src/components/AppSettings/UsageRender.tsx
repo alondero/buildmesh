@@ -17,7 +17,8 @@
  *   - header `Cached` badge — same signal at the row title, with the absolute
  *     fetch instant on hover (`title`)
  *   - `UsagePanel`   — one provider's row on the glanceable surface
- *                      (icon + name + optional Refresh + meter body)
+ *                      (icon + name + optional `↗` usage-page link +
+ *                      optional Refresh + meter body)
  *
  * What's NOT here: any edit affordance (enable toggle, credential editor,
  * Remove). Those live on the Settings-side `AccountCard`. This split is
@@ -301,9 +302,27 @@ export function UsagePanel({
       className="border border-border-subtle rounded-lg p-3.5 bg-bg-card/30"
       data-testid={`usage-panel-${account.id}`}
     >
-      <div className="flex items-center gap-2 mb-2 min-w-0">
+      <div className="flex items-center gap-2 mb-2 min-w-0" data-testid="usage-panel-header">
         <ProviderIcon providerId={account.id} className="h-4 w-4" />
         <span className="text-sm font-medium text-text-primary truncate min-w-0" title={account.name}>{account.name}</span>
+        {/* Provider destination, as an icon-only external link (the `↗`
+            affordance `ProbeRow` uses): it sits in the header row so it
+            costs no vertical space, and the hover tooltip plus
+            `ariaLabel` carry the destination instead of visible text.
+            The square hit area is DESIGN.md's icon-button rule; the
+            negative vertical margin keeps it from driving the header
+            row's height, and `shrink-0` keeps it pinned while a long
+            provider name truncates. */}
+        {meter.usagePage?.url && (
+          <SafeLink
+            url={meter.usagePage.url}
+            ariaLabel={`${meter.usagePage.label} for ${account.name} on provider website`}
+            title={`${meter.usagePage.label} — opens in your browser`}
+            className="inline-flex items-center justify-center h-[18px] w-[18px] -my-1 shrink-0 rounded-sm text-text-muted hover:text-accent-cyan transition-colors text-xs leading-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan"
+          >
+            ↗
+          </SafeLink>
+        )}
         {meter.cachedAt != null && (
           <span
             className="text-2xs text-text-muted border border-border-subtle rounded-md px-1 py-px shrink-0"
@@ -337,16 +356,6 @@ export function UsagePanel({
       </div>
 
       {renderBody()}
-      {meter.usagePage?.url && (
-        <SafeLink
-          url={meter.usagePage.url}
-          ariaLabel={`${meter.usagePage.label} for ${account.name} on provider website`}
-          title={`Open ${account.name} ${meter.usagePage.label.toLowerCase()} page in your browser`}
-          className="inline-flex items-center gap-1 mt-2 text-xs text-accent-cyan hover:underline focus-visible:outline focus-visible:outline-accent-cyan"
-        >
-          {meter.usagePage.label} <span aria-hidden="true">↗</span>
-        </SafeLink>
-      )}
     </div>
   );
 }
