@@ -131,7 +131,7 @@ export function GridControls() {
       // `ml-1` lives here (not on a wrapper in TitleBar) so the gap to the
       // switcher's last segment exists only while the bar is mounted — an
       // unmounted mode must not leave an empty margin behind (#1609 review).
-      className="ml-1 flex items-center gap-1"
+      className="ml-1 flex min-w-0 items-center gap-1"
       data-testid="grid-controls"
     >
       <input
@@ -151,7 +151,7 @@ export function GridControls() {
         // announce the field as a search input. The custom button
         // (rendered conditionally below) is the only visible clear
         // affordance.
-        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-56 min-w-36 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
+        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-56 max-[1099px]:w-32 min-w-24 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
       />
       {query !== '' && (
         <button

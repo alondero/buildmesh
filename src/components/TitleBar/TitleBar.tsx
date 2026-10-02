@@ -121,13 +121,9 @@ function NavigationControls() {
   // directly keeps the subscription cheap so unrelated store ticks
   // (terminal output, agent node updates) don't re-render this header.
   const omnibarOpen = useUIStore((s) => s.omnibarOpen);
-  // `min-w-44` pins this wrapper's floor to the field's own `min-w-40`
-  // (130px at the 13px root) + padding — without it the wrapper's
-  // content-based minimum keeps ~100px of dead slack above the field's
-  // real floor, so flex/grid pressure starves the wordmark before the
-  // field yields.
+  // The command field yields to the side clusters at compact widths.
   return (
-    <div className="flex items-center px-2 min-w-44">
+    <div className="flex min-w-0 items-center justify-center px-2">
       <button
         type="button"
         onClick={() => useUIStore.getState().openOmnibar('files')}
@@ -136,32 +132,9 @@ function NavigationControls() {
         aria-haspopup="dialog"
         aria-expanded={omnibarOpen}
         title="Search or open… (command palette)"
-        // The field's design width is 640px (VS Code Command Palette
-        // parity). `w-80` is the typical-viewport width — Tailwind v4
-        // compiles it to `width: calc(var(--spacing) * 80)` where
-        // `--spacing` defaults to `0.25rem`, so `w-80 = 20rem`. At the
-        // 13px root font (`--font-size-base: 13px`), that's 260px — NOT
-        // 320px (the 16px-root ghost). `max-w-full` is the safety belt
-        // that prevents the centre cell from pushing past its parent
-        // when the side clusters can't yield (PR #1623 review: a
-        // hardcoded 640px centre broke the ViewModeSwitcher below
-        // 1920px because the 1fr siblings couldn't yield past their
-        // min-content — at 1440px with labels visible the left cluster
-        // needs ~565px and only allows ~260–310px centre). At ≥1786px
-        // the field bumps to its VS Code-parity `w-[640px]`; below
-        // that, `w-80` keeps the side clusters intact. `min-w-40`
-        // (130px at the 13px root — 10rem × 13px) is the floor the
-        // field collapses to on half-screen windows (PR #1489 review —
-        // drag-region starvation at sub-1000px). At the floor the
-        // placeholder still reads "Search or open…" without truncation;
-        // on tighter screens the user types into the palette, not the
-        // bar. The class strings MUST stay literals so Tailwind v4's
-        // source scanner picks them up — a template literal would defeat
-        // JIT detection and the rules would never compile (PR #1623
-        // review). Note: `w-[40rem]` is WRONG here because `1rem =
-        // 13px` at the 13px root, giving 520px — use literal
-        // `w-[640px]` for the VS Code-parity target.
-        className="flex h-10 w-80 min-[1786px]:w-[640px] min-w-40 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
+        // Keep the wide-screen target; max-w-full lets Filtered search
+        // and the native caption controls claim their required space first.
+        className="flex h-10 w-80 min-[1786px]:w-[640px] min-w-0 max-w-full items-center gap-2 rounded-md border border-border-default bg-bg-base px-3 text-sm text-text-muted transition-colors hover:border-accent-cyan/50 hover:text-text-primary"
       >
         <SearchIcon className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate text-left">Search or open…</span>
@@ -478,36 +451,14 @@ export function TitleBar() {
 
   return (
     <>
-      {/* Three-column grid (`1fr auto 1fr`): the palette field's column is
-          `auto` and its siblings get equal `1fr` tracks, so the field is
-          centred on the VIEWPORT — flanking `flex-1` spacers only centre it
-          between unequal side clusters, which is not centring. The side
-          cells are drag regions, so their empty space still grabs the
-          window while buttons inside stay clickable.
-
-          The palette's design width is 640px (VS Code Command Palette
-          parity). At narrower viewports the field shrinks via
-          `max-w-full` to whatever the centre cell can spare without
-          starving the ViewModeSwitcher — measured viewport-width
-          breakpoint per PR #1623 review: the field hits 640px at
-          ≥1786px when the switcher labels are visible (left cluster
-          needs ~565px to render all 5 segments). Below that, the field
-          uses `w-80` (320px) so the side clusters always fit. This
-          means users at typical laptop viewports (1366–1785px) see the
-          same 320px palette as before — they don't lose switcher
-          labels — while users on wide displays (1786px+, common for
-          external monitors) get the full VS Code parity 640px trigger.
-
-          Height: `h-14` (45.5px at the 13px root) is the floor that clears
-          the tallest in-bar content — the `h-10` palette field and
-          wordmark (32.5px) — with a symmetric 6.5px bezel; anything
-          taller is dead space taken from the terminals below. */}
+      {/* Filtered and compact layouts budget side-cluster width first.
+          Regular wide layouts keep the command field viewport-centered. */}
       <header
         data-tauri-drag-region
-        className="grid h-14 shrink-0 grid-cols-[1fr_auto_1fr] items-stretch bg-bg-surface border-b border-border-subtle select-none"
+        className={`grid h-14 shrink-0 grid-cols-[auto_minmax(0,1fr)_auto] items-stretch bg-bg-surface border-b border-border-subtle select-none ${viewMode === 'filtered' ? '' : 'min-[1100px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'}`}
       >
         {/* Left cell — clusters hug the start edge. */}
-        <div data-tauri-drag-region className="flex items-center pl-3 pr-2">
+        <div data-tauri-drag-region className="flex min-w-0 items-center pl-3 pr-2">
           {isMac && (
             // `group` lives on the cluster, not on each light: macOS reveals
             // all three glyphs together as soon as the pointer enters the

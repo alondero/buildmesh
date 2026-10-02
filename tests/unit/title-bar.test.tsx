@@ -471,7 +471,7 @@ describe('TitleBar (bespoke window chrome)', () => {
       // Flex floor: the palette field's wrapper must never collapse below
       // its yield-first floor.
       const searchWrapper = searchButton.parentElement!;
-      expect(searchWrapper.className).toContain('min-w-44');
+      expect(searchWrapper.className).toContain('min-w-0');
     });
 
     it('keeps the utility pills borderless like the switcher segments (#1609)', async () => {

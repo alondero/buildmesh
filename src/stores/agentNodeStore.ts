@@ -4,7 +4,8 @@ import { useShallow } from 'zustand/react/shallow';
 import * as api from '../lib/tauri';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
-import { requestWorktreeCloseAction } from './worktreeClosePromptStore';
+import { requestWorktreeCloseAction, useWorktreeClosePromptStore } from './worktreeClosePromptStore';
+import { isActiveForExit } from '../lib/exitGuard';
 // Issue #1001 — `deleteAgentNode` Phase 2 (delete_commit) now surfaces
 // its failure via the shared toast pipeline instead of the previously
 // silent `state.error` Zustand field. Phase 1 (worktree safety check)
@@ -810,10 +811,6 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // fire a duplicate safety/kill/delete round-trip.
     if (get().closingNodeIds.has(id)) return;
 
-    // A scheduled send outlives the node it targets otherwise — cancel it
-    // up front so a stray timeout can't fire `sendToAgent` for a deleted node.
-    get().cancelSchedule(id);
-
     // Flag the node closing *synchronously* so the click registers instantly.
     // We can't drop the row yet — the safety check below decides whether to
     // prompt about uncommitted/unpushed work — so until it resolves NodeItem
@@ -847,12 +844,21 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
         const action = await worktreeCloseActionResolver(node, safety);
         if (action === 'cancel') { clearClosing(); return; }
         removeWorktree = action === 'remove';
+      } else if (!safety.worktree_path) {
+        const liveNode = get().nodesById[id];
+        if (liveNode && isActiveForExit(liveNode.status)) {
+          const action = await useWorktreeClosePromptStore.getState().request(liveNode.name, safety, 'active-session');
+          if (action === 'cancel') { clearClosing(); return; }
+        }
       }
     } catch (e) {
       clearClosing();
       set({ error: formatError(e) });
       return;
     }
+
+    // Cancellation keeps scheduled work intact; cancel only after acceptance.
+    get().cancelSchedule(id);
 
     // Re-capture the row RIGHT BEFORE the optimistic remove so the restore
     // path below sees the version of the node that's actually being dropped

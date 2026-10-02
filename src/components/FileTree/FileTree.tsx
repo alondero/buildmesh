@@ -72,19 +72,27 @@ function FileIcon({ className }: { className?: string }) {
   );
 }
 
-interface FileTreeProps {
+type ChangedFileSelect = (path: string, diff: DiffResult, relativePath: string) => void;
+
+interface FileTreeSelectionProps {
   rootPath: string;
-  /** Show M badges on changed files */
-  showGitStatus: boolean;
-  /** Called when a changed file is selected (for inline diff) */
-  onChangedFileSelect?: (path: string, diff: DiffResult) => void;
   /** Called when an unchanged file is selected (to open in editor) */
   onUnchangedFileSelect?: (path: string) => void;
   /** Currently selected file path (to show diff inline) */
   selectedFile: string | null;
   /** Callback to set the selected file */
   onFileSelect: (path: string | null) => void;
+  /** Optional destination owner shared with other file-selection entrypoints. */
+  onFileSelectionStart?: () => AbortSignal;
 }
+
+// A badged changed file must have a diff action; it cannot fall through to
+// the unchanged-file editor action. The callback carries an absolute selection
+// path, loaded diff, and repository-relative action path.
+type FileTreeProps = FileTreeSelectionProps & (
+  | { showGitStatus: true; onChangedFileSelect: ChangedFileSelect }
+  | { showGitStatus: false; onChangedFileSelect?: ChangedFileSelect }
+);
 
 /** A flat row entry — one per currently-visible node, in DOM/visual order. */
 interface VisibleRow {
@@ -99,6 +107,7 @@ export function FileTree({
   onUnchangedFileSelect,
   selectedFile,
   onFileSelect,
+  onFileSelectionStart,
 }: FileTreeProps) {
   const [treeState, setTreeState] = useState<FileNode | null>(null);
   const [loadingState, setLoadingState] = useState(true);
@@ -108,6 +117,12 @@ export function FileTree({
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
   // Roving tabindex — exactly one row is `tabIndex={0}` at a time.
   const [activeIndex, setActiveIndex] = useState(0);
+  const selectionVersion = useRef(0);
+  useEffect(() => {
+    const owner = selectionVersion;
+    owner.current++;
+    return () => { owner.current++; };
+  }, [rootPath]);
 
   useAsyncEffect((signal) => {
     if (!rootPath) return;
@@ -153,6 +168,8 @@ export function FileTree({
 
   const handleFileClick = useCallback(
     async (path: string, relPath: string, isChanged: boolean) => {
+      const version = ++selectionVersion.current;
+      const selectionSignal = onFileSelectionStart?.();
       if (isChanged && onChangedFileSelect) {
         // Capture the previous selection so the failure branch can roll
         // it back. A bare `onFileSelect(null)` would clear any pre-existing
@@ -165,8 +182,10 @@ export function FileTree({
           // diff_file_against_head joins session_path + file_path, so the
           // file_path must be relative to the repo root.
           const diff = await diffFileAgainstHead(rootPath, relPath);
-          onChangedFileSelect(path, diff);
+          if (version !== selectionVersion.current || selectionSignal?.aborted) return;
+          onChangedFileSelect(path, diff, relPath);
         } catch (e) {
+          if (version !== selectionVersion.current || selectionSignal?.aborted) return;
           // Issue #1245 — surface the failure AND undo the optimistic
           // highlight. Without the rollback the row sits selected as if a
           // diff had opened, while nothing actually did — the highlight
@@ -185,7 +204,7 @@ export function FileTree({
         onUnchangedFileSelect(path);
       }
     },
-    [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect, selectedFile]
+    [rootPath, onChangedFileSelect, onUnchangedFileSelect, onFileSelect, onFileSelectionStart, selectedFile]
   );
 
   // Flatten the tree to the rows the user can see right now. The keyboard

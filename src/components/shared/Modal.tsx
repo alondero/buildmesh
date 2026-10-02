@@ -66,7 +66,25 @@ interface ModalProps {
 }
 
 const FOCUSABLE =
-  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), summary, [tabindex]:not([tabindex="-1"])';
+
+function tabbableElements(root: HTMLElement): HTMLElement[] {
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE))
+    .filter(element => {
+      const nativeSummary = element.matches('details > summary:first-of-type') && !element.hasAttribute('tabindex');
+      if ((!nativeSummary && element.tabIndex < 0) || element.matches(':disabled, input[type="hidden"]')) return false;
+      if (element.matches('summary') && !element.matches('details > summary:first-of-type')) return false;
+      for (let ancestor: HTMLElement | null = element; ancestor; ancestor = ancestor.parentElement) {
+        if (ancestor.matches('[hidden], [inert], [aria-hidden="true"]')) return false;
+        if (ancestor.matches('details:not([open])') && !ancestor.querySelector(':scope > summary')?.contains(element)) return false;
+        const style = getComputedStyle(ancestor);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+        if (ancestor === root) break;
+      }
+      return true;
+    })
+    .sort((a, b) => (a.tabIndex > 0 ? a.tabIndex : Number.MAX_SAFE_INTEGER) - (b.tabIndex > 0 ? b.tabIndex : Number.MAX_SAFE_INTEGER));
+}
 
 /**
  * The one modal shell. Owns the behaviours every dialog needs and that the
@@ -190,21 +208,23 @@ export function Modal({
     if (confirmingDiscard) cancelButtonRef.current?.focus();
   }, [confirmingDiscard]);
 
-  // Keep Tab cycling inside the panel. A full roving-focus implementation is
-  // overkill for these dialogs; wrapping first<->last covers the trap.
+  // Recompute from the visible pane on every keypress. Mounted inactive
+  // Settings panes and the discard banner must not leak into the tab order.
   const trapTab = (e: ReactKeyboardEvent<HTMLDivElement>) => {
     if (e.key !== 'Tab' || !panelRef.current) return;
-    const focusable = panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE);
-    if (focusable.length === 0) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    const active = document.activeElement;
-    if (e.shiftKey && (active === first || active === panelRef.current)) {
+    const root = confirmingDiscard
+      ? panelRef.current.querySelector<HTMLElement>('[data-testid="modal-discard-banner"]') ?? panelRef.current
+      : panelRef.current;
+    const focusable = tabbableElements(root);
+    if (focusable.length === 0) {
       e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && active === last) {
+      panelRef.current.focus();
+      return;
+    }
+    const index = focusable.findIndex(element => element === document.activeElement);
+    if (index < 0 || (e.shiftKey ? index === 0 : index === focusable.length - 1)) {
       e.preventDefault();
-      first.focus();
+      focusable[e.shiftKey ? focusable.length - 1 : 0].focus();
     }
   };
 
@@ -282,7 +302,7 @@ export function Modal({
   // identical, only the DOM parent moves.
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
       onMouseDown={captureFocusBeforeBackdrop}
       onClick={handleBackdropClick}
     >
@@ -373,7 +393,7 @@ export function ModalCloseButton({
       type="button"
       onClick={requestClose ?? onClose}
       aria-label={label}
-      className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 transition-colors text-xl leading-none"
+      className="shrink-0 flex items-center justify-center w-7 h-7 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-card-hover transition-colors text-xl leading-none"
     >
       ×
     </button>

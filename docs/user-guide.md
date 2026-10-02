@@ -65,6 +65,15 @@ yet, its meter stays hidden.
    configured Build and Run commands when appropriate, then commit or create a
    pull request only after reviewing the worktree.
 
+Changed files open the in-app diff from either list. Unchanged files in the
+File Tree open in your configured editor. If a diff cannot load, an error
+appears and the file is not presented as successfully reviewed.
+
+Closing an active node that runs in the repository root asks for confirmation.
+**Cancel** keeps the session and any scheduled prompt; **Close session** stops
+its process and removes the node while preserving repository files. Worktree
+nodes retain their separate confirmation for uncommitted or unpushed work.
+
 The first successful loop is: **install → configure → spawn → inspect → verify
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
@@ -375,6 +384,10 @@ the standard native and npm install locations when the app's PATH is stale.
 Open **Settings** for app-wide defaults. A Mesh's **Project Settings** override
 the app-wide value when both exist.
 
+Tab and Shift+Tab stay within the visible pane. If you try to close with
+unsaved edits, focus moves to **Keep editing**; only **Discard changes**
+abandons the edits.
+
 | Settings area | Use it for |
 |---|---|
 | General | Appearance, quit confirmation, global Circuit agent capacity, the default worktree directory, and the Probe spawn prompts |
@@ -410,7 +423,8 @@ an app restart.
 Remote access is optional and off by default.
 
 1. Open **Settings → Remote Access** and enable **Expose to LAN / VPN over
-   self-signed TLS**. The setting applies immediately.
+   self-signed TLS**, or choose **Enable remote access** from the Remote Access
+   dialog. The setting applies immediately.
 2. Open the **Remote Access** modal and scan the one-time pairing QR code from
    the phone you want to authorize. The invitation expires after five minutes.
 3. For a fresh phone, use the Android or iOS **Install** tab to install and
@@ -422,6 +436,9 @@ Remote access is optional and off by default.
 The loopback listener stays plain HTTP for local agent hooks. LAN/VPN interfaces
 use HTTPS/WSS. The status panel lists the interfaces that are actually exposed;
 an enabled toggle with no exposed interface is not a usable phone connection.
+The Remote Access dialog distinguishes disabled access from a connection
+failure and offers a retry with the actual TLS/interface status. Its header
+stays visible while expanded certificate instructions scroll below it.
 Do not share QR codes, pairing invitations, cookies, certificates, or logs.
 
 ### Using Buildmesh on your phone
