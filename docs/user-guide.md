@@ -69,6 +69,18 @@ The first successful loop is: **install → configure → spawn → inspect → 
 → integrate**. If a step does not behave as described, start with
 [Troubleshooting](troubleshooting.md).
 
+## Open tools from the title bar
+
+Use **More** at the right of the title bar to open **Project Files**,
+**Agent Changes**, **Project Settings**, **Repository**, **GitHub Issues**,
+**Pull Requests**, **Circuits**, **Agent History**, or **Notes** in the inspector.
+The menu uses the same names, descriptions, and icons as the command palette.
+**Usage** has its own title-bar button, alongside **Settings** and **Mobile**.
+
+Select a tool to open it and close the menu. Use Tab and Enter to choose a tool,
+or Escape to close the menu and return focus to **More**. Clicking outside also
+closes the menu. On short windows, scroll the menu to reach every tool.
+
 ## Configure Autopilot Circuits
 
 Open **Circuits** to configure automated flows and their triggers. **Max concurrent
