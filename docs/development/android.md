@@ -65,8 +65,10 @@ task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Launch selections come
 from the backend menu, including saved configurations and capability filtering.
 Drafts persist privately on the phone until an acknowledged action succeeds.
-Archive HTTP 207 is surfaced as an imported-but-not-started failure, with its
-node identity, so a user can inspect Work before attempting another import.
+Issue launch requires a configuration that supports prefill; archive resume
+requires a resumable configuration. Unavailable configurations are excluded.
+Archive HTTP 207 dismisses the launch dialog and reports the imported node and
+launch failure, so a user can inspect Work before attempting another import.
 PR creation uses the mesh branch, matching the current web route; an agent
 worktree PR can be requested through that agent's terminal.
 
@@ -112,10 +114,45 @@ forgetting, Main-thread network discipline, cancelled mutation callbacks,
 snapshot ownership, diff retry and the real bundled WebView's snapshot/binary
 rendering, visible pixels in the native window, viewport geometry, resize and
 input, including replayed queries that must not become keystrokes.
-A real backend smoke additionally needs a disposable dev-profile
-mesh: pair, open its terminal, send a command, inspect changes, background and
-resume, restart the app, then revoke the device on the desktop. Keep test
-invitations, session cookies and screenshots in ignored `.tmp/`.
+Native form tests also exercise capture, replies, issue launch, archive partial
+failure and PR authentication through real OkHttp requests to MockWebServer.
+These assert literal payloads, retained drafts after failures, and acknowledged
+success. They do not create a real GitHub pull request.
+
+For actual desktop acceptance, start the dev profile with Remote Access enabled,
+connect an Android device through adb, and run from the repository root:
+
+```powershell
+node scripts/check-android-live.mjs --device YOUR_ADB_SERIAL --origin https://YOUR_LAN_IP:2992
+```
+
+The optional `--bridge` and `--http` origins default to the dev profile's
+loopback ports 2991 and 2992; they must be loopback HTTP origins. `--origin`
+must be the desktop HTTPS address reachable directly from the phone. This test
+does not use an HTTP fallback or TLS relay. Avoid concurrent device pairing
+while it runs, so the new QA device can be identified unambiguously.
+
+The runner builds an isolated `live` variant (`dev.buildmesh.remote.live`),
+creates a disposable Git repository and mesh, and supplies a single-use
+invitation through stdin to private app storage. It refuses to overwrite an
+existing live QA installation. The headless `LiveDesktopTest` requires that
+fixture and fails when it is missing; it is excluded from the default debug
+instrumentation source set. No unlocked screen is required for this test.
+
+The live test verifies fingerprint-based pairing, encrypted session restore,
+20 batches of three concurrent HTTPS reads, native task creation, ViewModel
+pause/resume, production terminal WebSocket input/output/resize/reconnect,
+real Git status/diff, and revocation clearing the phone's credential. It checks
+command output in the desktop PTY; visible terminal rendering is covered by the
+separate default device suite. The runner revokes its controller and any
+confirmed QA device, stops its fixture nodes, deletes its own mesh and uninstalls
+both QA packages. Cleanup failures are reported as failures. Logs and the
+disposable Git fixture remain in ignored `.tmp/android-live/`; credentials are
+never written to host files or command arguments.
+
+`scripts/check-android.mjs` builds both debug and live instrumentation and
+requires executed, passing JVM tests. CI compiles the live suite; running it
+still requires the reachable desktop and selected device above.
 
 Build prerequisites follow the [Android Gradle Plugin 8.10 compatibility
 table](https://developer.android.com/build/releases/agp-8-10-0-release-notes).

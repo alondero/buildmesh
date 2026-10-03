@@ -27,6 +27,10 @@ async function main() {
   const directory = new URL('../android/app/build/test-results/testDebugUnitTest/', import.meta.url);
   const reports = readdirSync(directory).filter(name => name.endsWith('.xml')).map(name => readFileSync(new URL(name, directory), 'utf8'));
   process.stdout.write(`Android tests: ${executedAndroidTests(reports)} passed\n`);
+  const liveCommand = command.slice(0, process.platform === 'win32' ? 6 : 4);
+  liveCommand.push('assembleLive', 'assembleLiveAndroidTest', '-Pbuildmesh.testBuildType=live', '--console=plain');
+  const liveCode = await runGuarded({ minutes: 20, killGraceSeconds: 10, label: 'Live Android test compilation', command: liveCommand, cwd: root, env: process.env });
+  if (liveCode !== 0) process.exitCode = liveCode;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

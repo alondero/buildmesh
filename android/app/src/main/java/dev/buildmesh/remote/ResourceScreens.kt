@@ -55,7 +55,10 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
     val data = load.data
     var selected by remember { mutableStateOf<JsonObject?>(null) }
     var provider by rememberSaveable { mutableStateOf("") }
-    val options = state.providers.filter { it.text("unavailable_reason").isEmpty() && (screen != "archive" || it.flag("resumable")) }
+    val options = state.providers.filter {
+        it.text("unavailable_reason").isEmpty() &&
+            if (screen == "archive") it.flag("resumable") else it.objectAt("capabilities")?.flag("supports_prefill") == true
+    }
     LaunchedEffect(options) { if (options.none { it.text("id") == provider }) provider = options.firstOrNull()?.text("id").orEmpty() }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { TextButton(onClick = { reload++ }) { Text("Reload ${if (screen == "issues") "issues" else "archive"}") } }
@@ -78,12 +81,15 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
             text = { Selector("Agent", options.map { it.text("id") to it.text("label") }, provider, { provider = it }) },
             confirmButton = { TextButton(enabled = !state.busy && provider.isNotEmpty(), onClick = {
                 vm.action { client ->
-                    val node = if (screen == "issues") client.post("/api/meshes/$meshId/issues/${item.number("number")}/spawn", buildJsonObject {
+                    val node = try { if (screen == "issues") client.post("/api/meshes/$meshId/issues/${item.number("number")}/spawn", buildJsonObject {
                         put("title", item.text("title")); put("provider", provider)
                     }) else client.post("/api/meshes/$meshId/agent-nodes/import-and-resume", buildJsonObject {
                         put("cli_session_id", item.text("session_id")); put("branch", item.text("branch").ifEmpty { "main" }); put("provider", provider)
                         item.text("worktree_name").takeIf { it.isNotEmpty() }?.let { put("worktree_name", it) }
-                    })
+                    }) } catch (e: ApiException) {
+                        if (e.status == 207) selected = null
+                        throw e
+                    }
                     vm.acceptNode(node.obj())
                     selected = null; openNode(node.obj().number("id"))
                 }

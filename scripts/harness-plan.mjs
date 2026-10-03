@@ -26,7 +26,7 @@ export function planGates(paths, { full = false } = {}) {
   npm('lint-tests', 'test:lint', { tests: 'node' });
   npm('lint', 'lint');
   npm('lint-fixtures', 'lint:fixtures');
-  if (paths.some(path => path.startsWith('android/') || path === 'scripts/check-android.mjs' || path === '.github/workflows/android.yml')) {
+  if (paths.some(path => path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml')) {
     node('android', ['scripts/check-android.mjs'], { minutes: 25, tests: 'android' });
   }
   if (frontend) {

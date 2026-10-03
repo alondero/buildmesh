@@ -15,6 +15,14 @@ android {
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    buildTypes {
+        create("live") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".live"
+            matchingFallbacks += "debug"
+        }
+    }
+    testBuildType = providers.gradleProperty("buildmesh.testBuildType").getOrElse("debug")
     buildFeatures { compose = true; buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

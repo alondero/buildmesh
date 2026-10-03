@@ -2,10 +2,10 @@ name: Android
 
 on:
   pull_request:
-    paths: ['android/**', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
+    paths: ['android/**', 'scripts/check-android*.mjs', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
   push:
     branches: [main]
-    paths: ['android/**', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
+    paths: ['android/**', 'scripts/check-android*.mjs', 'package.json', 'package-lock.json', '.github/workflows/android.yml']
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,7 @@ jobs:
       - run: npm ci
       - run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
       - run: bash android/gradlew -p android assembleDebug testDebugUnitTest lintDebug assembleDebugAndroidTest --console=plain
+      - run: bash android/gradlew -p android assembleLive assembleLiveAndroidTest -Pbuildmesh.testBuildType=live --console=plain
       - uses: actions/upload-artifact@v4
         if: always()
         with:
