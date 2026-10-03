@@ -220,14 +220,25 @@ impl AgentProcess {
         Ok(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
     }
 
+    /// Shared fence for observing or submitting an already staged draft.
+    /// Unlike report admission, a nonempty draft is allowed: the post-write
+    /// stamp owns it. Pending input sequences still make ownership ambiguous.
+    /// The caller must hold writer_tx before this takes input_decoder, keeping
+    /// the comparison atomic with writes and process retirement.
+    fn owns_staged_draft(&self, expected: &InputStamp) -> bool {
+        !self.retired.load(Ordering::SeqCst)
+            && *expected == (InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
+            && !self.input_decoder.lock().unwrap().has_pending_sequence()
+    }
+
     fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>, framing: InputFraming) -> Result<(Option<InputStamp>, InputActivity), std::sync::mpsc::TrySendError<Vec<u8>>> {
         let guard = self.writer_tx.lock().unwrap();
         if self.retired.load(Ordering::SeqCst) { return Err(std::sync::mpsc::TrySendError::Disconnected(data)); }
-        let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
-        let mut input = self.input_decoder.lock().unwrap();
-        if expected.is_some_and(|expected| expected != stamp || input.has_pending_sequence()) {
+        if expected.is_some_and(|expected| !self.owns_staged_draft(&expected)) {
             return Ok((None, InputActivity::default()));
         }
+        let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
+        let mut input = self.input_decoder.lock().unwrap();
         // Failed sends must not advance the decoder, including half a reply.
         let mut next = input.clone();
         let activity = match framing {
@@ -403,10 +414,7 @@ impl AgentProcessRegistry {
         let Some(agent) = self.get(&session_id) else { return false; };
         let Some(expected) = InputStamp::decode(expected) else { return false; };
         let _guard = agent.writer_tx.lock().unwrap();
-        let input = agent.input_decoder.lock().unwrap();
-        !agent.retired.load(Ordering::SeqCst)
-            && expected == (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
-            && !input.has_pending_sequence()
+        agent.owns_staged_draft(&expected)
     }
 
     pub(crate) fn input_stamp_result(&self, session_id: i64) -> Result<String, InputUnavailable> {
@@ -425,10 +433,9 @@ impl AgentProcessRegistry {
         let Some(expected) = InputStamp::decode(expected) else { return Ok(false); };
         let Some(agent) = self.get(&session_id) else { return Ok(false); };
         let _guard = agent.writer_tx.lock().unwrap();
-        if expected != (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
+        if !agent.owns_staged_draft(&expected)
             || !agent.input_decoder.lock().unwrap().empty_prompt()
             || agent.last_submit_ms.load(Ordering::Relaxed) >= completed_at_ms
-            || agent.retired.load(Ordering::SeqCst)
             || !agent.reader_alive.load(Ordering::SeqCst)
         { return Ok(false); }
         commit()
@@ -904,6 +911,7 @@ mod tests {
         registry.write_input(id, b"\x1b[").unwrap();
         rx.recv().unwrap();
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert!(!registry.input_is_current(id, &stamp));
         assert!(!registry.commit_recovered_turn(id, &stamp, 1, || panic!("incomplete input is ambiguous")).unwrap());
         assert!(registry.write_bytes_if_current(id, b"continue", &stamp).unwrap().is_none());
         assert!(rx.try_recv().is_err());

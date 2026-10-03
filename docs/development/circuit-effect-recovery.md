@@ -44,8 +44,9 @@ generation.
 ## Operator and test fences
 
 Multiline Codex and Muse prompt delivery waits for a complete matching paste
-marker and one second of quiet output before sending Enter. Marker matching
-ignores terminal padding and line breaks while retaining the exact character
+echo (a marker, or full visible text for short drafts) and one second of quiet
+output before sending Enter. Marker matching ignores terminal padding and line
+breaks while retaining the exact character
 count and closing bracket. A captured Codex 0.160.0 Windows ConPTY redraw at
 22 columns inserted extra spaces inside `[Pasted Content 9407 chars]`; the
 previous literal matcher rejected it. Run 320's ledger retained prompt intent
@@ -53,12 +54,20 @@ and timed out after 30 seconds; its Codex transcript later contained the full
 9,407-character feedback prompt. The historical paste screen was not retained,
 so that record alone cannot establish its exact rendering.
 
-Delivery now rechecks readiness in up to three 30-second windows. These checks
-observe the existing draft without writing it again. A complete echo is retained
-while redraws settle, even if later output evicts the marker from the bounded
-tail. A changed input ownership stamp or a closed process ends the wait. Quiet
-output without a complete matching marker cannot authorize Enter. Once ready,
-the existing bounded Enter acknowledgement retry applies. Exhaustion still
+Delivery rechecks readiness every 250 ms within one 90-second total budget,
+with progress logs at 30 and 60 seconds and elapsed time in the exhaustion error.
+The budget allows two extra original 30-second intervals for a slow console
+reader or redraw. Guarded delivery blocks the shared circuit dispatcher during
+this wait, delaying other effects and the Unverified checkpoint by up to 90
+seconds; that bounded delay is accepted to recover an already staged paste
+without risking a duplicate prompt. Separate Enter acknowledgement can then
+take up to three six-second attempts.
+
+Readiness checks observe the existing draft without writing it again. A complete
+echo is retained while redraws settle, even if later output evicts the marker
+from the bounded tail. A changed input ownership stamp or a closed process ends
+the wait. Quiet output without a complete matching echo cannot authorize Enter.
+Once ready, the existing bounded Enter acknowledgement retry applies. Exhaustion still
 records an Unverified checkpoint; restart never repeats the uncertain prompt.
 
 The delivery regressions replay the captured ANSI fragment through the real
