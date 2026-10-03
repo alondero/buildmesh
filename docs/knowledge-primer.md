@@ -388,6 +388,20 @@ A `#[command]` on an `async fn` **and** `#[command(async)]` on a sync `fn` both 
 
 ### Injectable Caches (avoid process-global statics)
 
+The frontend Git-query caches share one `GIT_CHANGED` bus in
+`src/lib/pathInvalidatedCache.ts`. A dispatch invalidates each client/key once
+before notifying its consumers, so their refreshes share the same request.
+Events during a slow request defer one follow-up refresh rather than repeatedly
+superseding it; the running request can publish while edits continue.
+Only the currently registered pending promise may commit a value/error or clear
+request ownership; superseded callers adopt the current request/value. Trailing
+refreshes retain subscription objects and unsubscribe removes them, cancelling
+the timer when no consumers remain. The native file-watcher coalescer uses a
+single-slot non-blocking wake channel: signals contain no file data and one wake
+is enough to request the latest state. See the
+[performance review](development/performance-audit-2026-10.md) for evidence and
+remaining retention/coverage work.
+
 Process-global `static OnceCell<Mutex<_>>` caches with test-only `#[cfg(test)]` forks (or per-test `GH_AUTH_CACHE_TEST_LOCK`) are flaky — `cargo test -- --test-threads=8` still racy via snapshot-delta tricks and they hide production synchronization bugs (see #1482 preferences, #1483 gh-auth). Prefer an injectable struct (`services::gh_auth_cache::GhAuthCache` — single `Arc<Inner>` with `slot: Mutex<(Instant,bool)>` + `misses: AtomicU64` + injectable `now`/`auth` closures, `Mutex` held across `auth_fn` to coalesce concurrent misses to one HTTPS call). Wire one instance via `tauri::Builder::manage(GhAuthCache::new())` and take `tauri::State<GhAuthCache>` in the `#[command] async fn`; the `*_blocking` core takes `&GhAuthCache` and calls `cache.check()` directly (runs on `spawn_blocking`, so blocking there is the intended coalescing). Tests use `GhAuthCache::for_test_with_auth()` per `#[test]` (isolated counter, stubbed network, controllable `now` via `for_test_with_clock_and_auth` or `expire_for_test()`). See `src-tauri/src/services/gh_auth_cache.rs` and `src-tauri/src/lib.rs:manage`.
 
 ### Pattern Guards (lint-style unit tests)
