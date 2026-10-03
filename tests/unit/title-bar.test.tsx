@@ -658,7 +658,7 @@ describe('TitleBar (bespoke window chrome)', () => {
 
       const reset = screen.getByTestId('zoom-reset') as HTMLButtonElement;
       expect(reset.disabled).toBe(true);
-      expect(reset.className).toContain('disabled:text-text-muted/60');
+      expect(reset.className).toContain('disabled:text-text-muted');
 
       fireEvent.change(screen.getByTestId('zoom-slider'), { target: { value: '15' } });
       expect(reset.disabled).toBe(false);

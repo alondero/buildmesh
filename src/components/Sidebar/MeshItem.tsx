@@ -436,9 +436,10 @@ function MeshItemView({
             aria-label="Change mesh colour"
             // Issue #1939 — inactive-band rows mute the swatch (still the
             // same size and still clickable; only the colour is suppressed).
-            className={`h-3 w-3 shrink-0 rounded-full border border-black/20 hover:scale-125 transition-transform ${dimmed ? 'opacity-30' : ''}`}
-            style={{ backgroundColor: meshColor.hex }}
-          />
+            className={`flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-md hover:bg-bg-card-hover transition-colors ${dimmed ? 'opacity-30' : ''}`}
+          >
+            <span className="h-3 w-3 rounded-full border border-border-strong" style={{ backgroundColor: meshColor.hex }} />
+          </button>
           <span
             id={`mesh-item-name-${mesh.id}`}
             className={`font-sans font-semibold text-sm truncate flex-1 ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}

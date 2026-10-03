@@ -535,6 +535,47 @@ pub(super) fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]
     providers
 }
 
+/// Routing preferences need labels and capabilities, not subprocess discovery.
+/// OpenAI routes remain visibly unavailable until the live menu verifies them.
+fn routing_options(
+    prefs: &crate::preferences::AppPreferences,
+    profiles: Vec<crate::preferences::HarnessProfile>,
+    accounts: Vec<crate::preferences::ProviderAccount>,
+    host: Platform,
+) -> Vec<ProviderInfo> {
+    let menu = compose_provider_menu(
+        profiles, accounts, prefs.provider_pairings.clone(), host, None,
+        &prefs.harness_order, &prefs.proxied_provider_order,
+    );
+    let pending_routes = prefs.provider_pairings.iter()
+        .filter(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI)
+        .map(|pairing| format!("{}:{}", pairing.harness_id, pairing.provider_id))
+        .collect::<std::collections::HashSet<_>>();
+    let mut menu = configuration_menu(menu, prefs, host);
+    for row in &mut menu {
+        let selection = row.configuration.as_ref().map(|configuration| configuration.spawn_option_id.as_str())
+            .unwrap_or(&row.id);
+        if pending_routes.contains(selection) {
+            row.unavailable_reason = Some("Runtime verification pending; retry provider checks if needed".into());
+        }
+    }
+    menu
+}
+
+#[command]
+pub async fn list_routing_options() -> Result<Vec<ProviderInfo>, String> {
+    crate::commands::run_blocking("list_routing_options", || {
+        let mut prefs = crate::preferences::load()?;
+        crate::preferences::launch_configurations::reconcile(&mut prefs);
+        Ok(routing_options(
+            &prefs,
+            crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles()),
+            crate::preferences::provider_accounts(),
+            Platform::current(),
+        ))
+    }).await
+}
+
 /// Tauri command — returns the derived Spawn Menu to the desktop / mobile
 /// frontend (issue #575 / ADR-0016). Wraps `available_providers` in
 /// `commands::run_blocking` so the menu derivation stays off the async
@@ -542,20 +583,40 @@ pub(super) fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]
 /// and the mobile provider picker render — the single source of truth
 /// for "what can I spawn?".
 #[command]
-pub async fn list_providers() -> Vec<ProviderInfo> {
-    match crate::commands::run_blocking("list_providers", || Ok(available_providers())).await {
-        Ok(providers) => providers,
-        Err(error) => {
-            tracing::warn!("failed to derive provider menu: {error}");
-            Vec::new()
-        }
-    }
+pub async fn list_providers() -> Result<Vec<ProviderInfo>, String> {
+    crate::commands::run_blocking("list_providers", || {
+        crate::preferences::load()?;
+        Ok(available_providers())
+    }).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::preferences::ProxiedProviderOrder;
+
+    #[test]
+    fn routing_catalog_has_native_capabilities_and_explains_unverified_routes() {
+        let mut prefs = crate::preferences::AppPreferences::default();
+        prefs.provider_pairings.push(crate::preferences::ProviderPairing {
+            harness_id: "codex".into(), provider_id: "custom".into(),
+            surface: crate::preferences::ApiSurface::OpenAI,
+            base_url: Some("https://example.test/v1".into()),
+            model_tiers: crate::preferences::ModelTiers::default(),
+        });
+        let account = crate::preferences::ProviderAccount {
+            id: "custom".into(), name: "Custom".into(), enabled: true,
+            billing_mode: crate::preferences::BillingMode::PayAsYouGo,
+            claude_compatible: true, api_key: Some("fixture".into()),
+        };
+        let menu = routing_options(&prefs, vec![profile("codex", "codex"), profile("terminal", "terminal")], vec![account], Platform::Windows);
+        let native = menu.iter().find(|row| row.id == "codex").unwrap();
+        assert!(native.unavailable_reason.is_none());
+        assert!(native.capabilities.supports_resume);
+        let route = menu.iter().find(|row| row.id == "codex:custom").unwrap();
+        assert_eq!(route.unavailable_reason.as_deref(), Some("Runtime verification pending; retry provider checks if needed"));
+        assert!(menu.iter().any(|row| row.id == "terminal"));
+    }
 
     /// Issue #1934: `available_providers` must discover the two runtimes
     /// concurrently. The runtime chains are independent, so serializing them
@@ -725,8 +786,8 @@ mod tests {
 
     #[test]
     fn launch_configurations_keep_harness_parents_for_spawn_submenus() {
-        let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.spawn_configurations = vec![
+        let prefs = crate::preferences::AppPreferences {
+            spawn_configurations: vec![
             crate::preferences::spawn_configurations::SpawnConfiguration {
                 id: "launch/codex-sol".into(), name: "Sol".into(),
                 spawn_option_id: "codex".into(), ..Default::default()
@@ -735,7 +796,9 @@ mod tests {
                 id: "launch/claude:minimax".into(), name: "MiniMax".into(),
                 spawn_option_id: "claude:minimax".into(), ..Default::default()
             },
-        ];
+            ],
+            ..Default::default()
+        };
         let menu = configuration_menu(vec![row_native("claude"), row_proxied("claude", "minimax"), row_native("codex")], &prefs, Platform::Windows);
         let ids: Vec<_> = menu.iter().map(|row| row.id.as_str()).collect();
         assert!(ids.contains(&"claude"), "Claude Code must remain a submenu parent: {ids:?}");
@@ -1744,8 +1807,9 @@ mod tests {
                 self.fields.push((field.name().to_string(), unquoted));
             }
         }
+        type CapturedEvents = Arc<Mutex<Vec<Vec<(String, String)>>>>;
         struct Capture {
-            events: Arc<Mutex<Vec<Vec<(String, String)>>>>,
+            events: CapturedEvents,
         }
         impl tracing::Subscriber for Capture {
             fn enabled(&self, _: &Metadata<'_>) -> bool {
@@ -1765,7 +1829,7 @@ mod tests {
             fn exit(&self, _: &Id) {}
         }
 
-        let events: Arc<Mutex<Vec<Vec<(String, String)>>>> = Arc::new(Mutex::new(Vec::new()));
+        let events: CapturedEvents = Arc::new(Mutex::new(Vec::new()));
         // `tracing` caches per-callsite interest globally: a first hit under
         // the default no-op dispatcher pins the site as disabled, and a
         // rebuild only reaches already-registered sites - so a sibling test

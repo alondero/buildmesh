@@ -288,3 +288,7 @@ export function fileDiffStatusMeta(status: string): FileDiffStatusMeta {
     FILE_DIFF_STATUS_META[key] ?? FILE_DIFF_STATUS_META.modified
   );
 }
+
+export function needsAgentAttention(status: AgentNode['status']): boolean {
+  return ['error', 'lost', 'awaiting_input', 'suspended'].includes(status);
+}

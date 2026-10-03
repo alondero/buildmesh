@@ -16,6 +16,28 @@ mod tests {
     use crate::models::SessionStatus;
     use rusqlite::{params, Connection};
 
+    #[test]
+    fn history_includes_archived_and_reopen_preserves_session_and_live_status() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api'),(2,'Web','C:/web')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,cli_session_id,provider,created_at) VALUES
+            (1,1,'active','C:/api','running','active-session','codex','2026-10-01'),
+            (2,2,'archived','C:/web','archived','saved-session','claude','2026-10-02')", []).unwrap();
+        let history = crate::db::list_agent_history_inner(&conn).unwrap();
+        assert_eq!(history.iter().map(|node| node.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(history[0].status, SessionStatus::Archived);
+        let reopened = crate::db::reopen_agent_node_inner(&conn, 2).unwrap();
+        assert_eq!(reopened.status, SessionStatus::Suspended);
+        assert_eq!(reopened.cli_session_id.as_deref(), Some("saved-session"));
+        assert_eq!(reopened.mesh_id, 2);
+        assert_eq!(reopened.provider, "claude");
+        let active = crate::db::reopen_agent_node_inner(&conn, 1).unwrap();
+        assert_eq!(active.status, SessionStatus::Running);
+        assert_eq!(active.cli_session_id.as_deref(), Some("active-session"));
+        assert!(crate::db::reopen_agent_node_inner(&conn, 404).is_err());
+    }
+
     /// Minimal `agent_nodes` schema carrying only the columns the conditional
     /// update touches. The full schema is overkill for a SQL-semantics test.
     fn conn_with_agent_nodes() -> Connection {

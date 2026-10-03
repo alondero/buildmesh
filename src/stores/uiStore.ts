@@ -3,6 +3,7 @@ import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeContextPin, ProbeTab } from '../lib/probeContext';
+import { rememberProbeSubview, restoredProbeSubview } from '../lib/probeGroups';
 import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } from '../lib/probeWorkingSet';
 
 // The destination vocabulary itself lives in `lib/probeContext.ts` (alongside
@@ -472,12 +473,13 @@ interface UIState extends GridControls {
 export const useUIStore = create<UIState>((set, get) => {
   const initialViewMode = loadViewMode(useMeshStore.getState().selectedMeshId);
   const initialGridControls = loadGridControls();
+  const initialProbeTab = restoredProbeSubview('files');
   return {
     probeOpen: false,
-    probeTab: 'files',
+    probeTab: initialProbeTab,
     // Matches the default `probeTab` so the rail is never empty and the
     // body's aria-labelledby always resolves, from boot onward.
-    probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, 'files'),
+    probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, initialProbeTab),
     probeContextPins: {},
     activeDiffFile: null,
 
@@ -495,6 +497,7 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     setProbeTab: (tab: ProbeTab) => {
+      rememberProbeSubview(tab);
       // Pure tab switch. The Center Workspace Diff Overlay (issue #379) is
       // independent of the active tab — it floats over the terminal grid — so
       // switching tabs no longer clears `activeDiffFile`. The overlay closes

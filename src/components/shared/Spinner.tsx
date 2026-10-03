@@ -86,7 +86,7 @@ export function EmptyState({ label, hint, icon, fill, testId }: EmptyStateProps)
       </div>
       <span className="text-xs text-text-muted">{label}</span>
       {hint && (
-        <span className="text-2xs text-text-muted/80 mt-1 max-w-[280px]">{hint}</span>
+        <span className="text-2xs text-text-secondary mt-1 max-w-[280px]">{hint}</span>
       )}
     </div>
   );
@@ -137,7 +137,7 @@ export function ErrorState({ title, detail, testId }: ErrorStateProps) {
       </div>
       <span className="text-xs text-status-error">{title}</span>
       {detail && (
-        <span className="text-2xs text-text-muted mt-1 max-w-[280px] text-center">
+        <span className="text-2xs text-text-muted mt-1 max-w-full break-all text-center">
           {detail}
         </span>
       )}

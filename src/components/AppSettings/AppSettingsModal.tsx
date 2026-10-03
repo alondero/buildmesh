@@ -657,6 +657,8 @@ function humanResourceName(resource: ResourceKey): string {
       return 'preferences';
     case 'providers':
       return 'providers';
+    case 'routing':
+      return 'routing choices';
     case 'accounts':
       return 'provider accounts';
     case 'pairings':
@@ -671,6 +673,7 @@ function humanResourceName(resource: ResourceKey): string {
 }
 
 export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
+  const [routingProviders, setRoutingProviders] = useState<ProviderInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
   const [reviewerProvider, setReviewerProvider] = useState<string>(NO_OVERRIDE);
@@ -702,6 +705,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   const {
     resources,
     loadPreferences,
+    loadRouting,
     loadProviders,
     loadAccounts,
     loadPairings,
@@ -731,6 +735,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
         pr: prefs.pr_spawn_prompt ?? null,
       });
     },
+    onRoutingLoaded: setRoutingProviders,
     onProvidersLoaded: (list) => {
       setProviders(list);
       providersRef.current = list;
@@ -767,6 +772,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // it were the real persisted state.
   const prefsLoaded = resources.preferences.status === 'loaded';
   const providersLoaded = resources.providers.status === 'loaded';
+  const routingLoaded = resources.routing.status === 'loaded';
+  const routingChoices = providersLoaded ? providers : routingProviders;
+  const routingReady = providersLoaded || routingLoaded;
   const accountsLoaded = resources.accounts.status === 'loaded';
   const coordinatorLoaded = resources.coordinator.status === 'loaded';
   const devicesLoaded = resources.devices.status === 'loaded';
@@ -1019,6 +1027,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     // verifications.
     void Promise.allSettled([
       loadPreferences(),
+      loadRouting(),
       loadProviders(),
       loadAccounts(),
       loadPairings(),
@@ -1028,6 +1037,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     ]);
   }, [
     loadPreferences,
+    loadRouting,
     loadProviders,
     loadAccounts,
     loadPairings,
@@ -1120,7 +1130,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // reads its own harness ids from the backend, so waiting for
       // `loadProviders` only added the provider-menu probe to the
       // latency of a user-initiated refresh.
-      await Promise.all([loadProviders(), loadAccounts(), loadPairings()]);
+      await Promise.all([loadRouting(), loadProviders(), loadAccounts(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1139,7 +1149,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // Update changes pairings too (model tiers / base URL live
       // on the pairing, not on the provider). Concurrent since
       // issue #1935 — neither refresh needs the other's result.
-      await Promise.all([loadProviders(), loadPairings()]);
+      await Promise.all([loadRouting(), loadProviders(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1153,7 +1163,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // Detach removes the pairing — both providers and pairings
       // need refresh. Concurrent since issue #1935 (same reasoning
       // as attach).
-      await Promise.all([loadProviders(), loadPairings()]);
+      await Promise.all([loadRouting(), loadProviders(), loadPairings()]);
     } catch (e) {
       setError(formatError(e));
       throw e;
@@ -1522,7 +1532,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // silently leaving the optimistic data stale. The optimistic
       // roll-back below catches the *mutation* failure; the loader
       // catches the *refresh* failure.
-      await Promise.all([loadAccounts(), loadProviders()]);
+      await Promise.all([loadRouting(), loadAccounts(), loadProviders()]);
       return true;
     } catch (e) {
       setAccounts(previous);
@@ -1545,7 +1555,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
       // the providers/accounts resource states reflect the post-
       // remove snapshot. A refresh failure surfaces in the per-
       // resource banners, not as silent staleness.
-      await Promise.all([loadAccounts(), loadProviders()]);
+      await Promise.all([loadRouting(), loadAccounts(), loadProviders()]);
     } catch (e) {
       setError(formatError(e));
     }
@@ -1556,7 +1566,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
     // the loaders update both data and resource status atomically,
     // so a refresh failure is visible in the banner rather than
     // leaving stale data + `loaded` status.
-    await Promise.all([loadAccounts(), loadProviders()]);
+    await Promise.all([loadRouting(), loadAccounts(), loadProviders()]);
   };
 
   /** Materialise a keyed first-class template from the catalog (ADR-0025). */
@@ -1743,7 +1753,21 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               key={tab.id}
               type="button"
               role="tab"
+              id={`settings-tab-${tab.id}`}
+              aria-controls={`settings-panel-${tab.id}`}
+              tabIndex={activeTab === tab.id ? 0 : -1}
               aria-selected={activeTab === tab.id}
+              onKeyDown={e => {
+                const index = SETTINGS_TABS.findIndex(t => t.id === tab.id);
+                const next = e.key === 'ArrowDown' ? (index + 1) % SETTINGS_TABS.length
+                  : e.key === 'ArrowUp' ? (index + SETTINGS_TABS.length - 1) % SETTINGS_TABS.length
+                  : e.key === 'Home' ? 0 : e.key === 'End' ? SETTINGS_TABS.length - 1 : null;
+                if (next === null) return;
+                e.preventDefault();
+                e.stopPropagation();
+                setActiveTab(SETTINGS_TABS[next].id);
+                e.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`#settings-tab-${SETTINGS_TABS[next].id}`)?.focus();
+              }}
               onClick={() => setActiveTab(tab.id)}
               className={`w-full flex items-center justify-between text-left px-3 py-2 rounded-md text-base ${
                 activeTab === tab.id
@@ -1772,6 +1796,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <section
           role="tabpanel"
+          id="settings-panel-general"
+          aria-labelledby="settings-tab-general"
+          tabIndex={0}
           aria-label="General"
           hidden={activeTab !== 'general'}
           className="space-y-2"
@@ -1982,6 +2009,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <section
           role="tabpanel"
+          id="settings-panel-harnesses"
+          aria-labelledby="settings-tab-harnesses"
+          tabIndex={0}
           aria-label="Launch Configurations"
           hidden={activeTab !== 'harnesses'}
           className="space-y-2"
@@ -2082,6 +2112,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <section
           role="tabpanel"
+          id="settings-panel-providers"
+          aria-labelledby="settings-tab-providers"
+          tabIndex={0}
           aria-label="Providers"
           hidden={activeTab !== 'providers'}
           className="space-y-2"
@@ -2110,6 +2143,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           />
         )}
 
+        {!routingReady && <ResourceLoadStatus resource="routing" state={resources.routing} onRetry={() => retryResource('routing')} />}
+        {!providersLoaded && routingLoaded && <p className="mb-3 text-sm text-text-secondary">Saved routing choices are ready. Runtime checks are pending; routes needing verification stay unavailable. Confirm harness login before launching.</p>}
         <SettingsSection
           title="Provider defaults"
           description={
@@ -2129,11 +2164,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               id="default-provider"
               size="md"
               ariaLabel="Default provider"
-              providers={providers}
+              providers={routingChoices}
               value={selected === NO_OVERRIDE ? null : selected}
               unsetLabel="Anthropic (built-in default)"
               unsetValue={NO_OVERRIDE}
-              disabled={!prefsLoaded || !providersLoaded || saving}
+              disabled={!prefsLoaded || !routingReady || saving}
               onSelect={next => handleSave(next ?? NO_OVERRIDE)}
             />
           </SettingsRow>
@@ -2142,8 +2177,8 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
             summary="Background model used to classify Circuit agent reports."
             details={<>Independent of agent spawn defaults. Choose a host-native harness with background inference support; its model and effort settings apply. Configurations with extra CLI arguments cannot run background inference.</>}>
             <SpawnOptionPicker id="circuit-classifier-provider" size="md" ariaLabel="Circuit classifier provider" unsetValue={null}
-              providers={providers} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
-              disabled={!prefsLoaded || !providersLoaded || classifierSaving}
+              providers={routingChoices} value={classifierProvider} unsetLabel="Claude Code (built-in default)"
+              disabled={!prefsLoaded || !routingReady || classifierSaving}
               filter={(option) => option.harness_id !== 'terminal'}
               decorate={backgroundInferenceOption}
               onSelect={(next) => {
@@ -2172,11 +2207,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               id="reviewer-provider"
               size="md"
               ariaLabel="Reviewer provider"
-              providers={providers}
+              providers={routingChoices}
               value={reviewerProvider === NO_OVERRIDE ? null : reviewerProvider}
               unsetLabel="Source agent provider"
               unsetValue={NO_OVERRIDE}
-              disabled={!prefsLoaded || !providersLoaded || reviewerSaving}
+              disabled={!prefsLoaded || !routingReady || reviewerSaving}
               filter={(option) => option.harness_id !== 'terminal'}
               // A reviewer whose harness cannot yield a turn never lets the
               // `verdict` gate fire, so it is offered but not pickable.
@@ -2211,11 +2246,11 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
               id="auto-naming"
               size="md"
               ariaLabel="Auto-naming"
-              providers={providers}
+              providers={routingChoices}
               value={namingProvider ?? null}
               unsetLabel="Disabled (auto-naming off)"
               unsetValue={null}
-              disabled={!prefsLoaded || !providersLoaded || namingSaving}
+              disabled={!prefsLoaded || !routingReady || namingSaving}
               filter={(option) => option.harness_id !== 'terminal'}
               onSelect={next => handleSaveNaming(next)}
               decorate={backgroundInferenceOption}
@@ -2301,6 +2336,9 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
 
         <section
           role="tabpanel"
+          id="settings-panel-remote"
+          aria-labelledby="settings-tab-remote"
+          tabIndex={0}
           aria-label="Remote Access"
           hidden={activeTab !== 'remote'}
           className="space-y-2"

@@ -25,7 +25,7 @@ export function Field({ label, htmlFor, hint, children }: FieldProps) {
     <div>
       <label htmlFor={htmlFor} className="block text-xs text-text-muted mb-1">
         {label}
-        {hint && <span className="text-text-muted/60"> ({hint})</span>}
+        {hint && <span className="text-text-muted"> ({hint})</span>}
       </label>
       {children}
     </div>

@@ -54,6 +54,8 @@ vi.mock('../../src/components/AgentNodeView/GridSplitter', () => ({
 // ready" — those tests need the Spawn-agent CTA. `__reset…` clears the
 // module snapshot so the mock applies mid-test.
 vi.mock('../../src/hooks/useProviderList', () => ({
+  useProviderReadiness: () => ({ status: 'loaded', error: null }),
+  retryProviderList: () => undefined,
   useProviderList: () => [{
     id: 'claude',
     label: 'Claude Code',

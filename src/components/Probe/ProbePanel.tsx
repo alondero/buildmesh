@@ -52,6 +52,8 @@ import {
 } from '../../lib/probeContext';
 import { useProbeResize, PROBE_PANEL_BOUNDS } from './useProbeResize';
 import { ProbeToolRail, LABEL_COLLAPSE_WIDTH } from './ProbeToolRail';
+import { RelatedTools } from './RelatedTools';
+import { probeGroupId } from '../../lib/probeGroups';
 import { EmptyState } from '../shared/Spinner';
 import {
   CompassIcon,
@@ -74,7 +76,7 @@ const RepositoryTab = lazy(() => import('./RepositoryTab').then((m) => ({ defaul
 const CircuitsProbeTab = lazy(() => import('./CircuitsProbeTab').then((m) => ({ default: m.CircuitsProbeTab })));
 const GitIssuesTab = lazy(() => import('./GitIssuesTab').then((m) => ({ default: m.GitIssuesTab })));
 const GitPullRequestsTab = lazy(() => import('./GitPullRequestsTab').then((m) => ({ default: m.GitPullRequestsTab })));
-const ArchivedNodesTab = lazy(() => import('./ArchivedNodesTab').then((m) => ({ default: m.ArchivedNodesTab })));
+const AgentHistoryTab = lazy(() => import('./AgentHistoryTab').then((m) => ({ default: m.AgentHistoryTab })));
 const ScratchpadTab = lazy(() => import('./ScratchpadTab').then((m) => ({ default: m.ScratchpadTab })));
 const UsageTab = lazy(() => import('./UsageTab').then((m) => ({ default: m.UsageTab })));
 
@@ -289,7 +291,7 @@ function ProbePanelContent() {
               </div>
               <span
                 data-testid="probe-context-mode"
-                className="text-2xs text-text-muted/80 truncate"
+                className="text-2xs text-text-secondary truncate"
               >
                 {contextModeLabel}
               </span>
@@ -358,13 +360,14 @@ function ProbePanelContent() {
             so we wrap the keyed body in `<Suspense>` to host the brief
             loading state the chunk fetch produces on first open. The
             tabpanel wiring points at the tool rail's tabs (ADR-0032). */}
-        <div className="flex-1 overflow-y-auto">
+        <RelatedTools />
+        <div className="flex-1 min-h-0 min-w-0 overflow-hidden">
           <div
             key={probeTab}
             role="tabpanel"
             id="probe-tab-panel"
-            aria-labelledby={`probe-rail-tab-${probeTab}`}
-            className="animate-fade-in h-full flex flex-col"
+            aria-labelledby={`probe-rail-tab-${probeGroupId(probeTab)}`}
+            className="animate-fade-in h-full min-h-0 min-w-0 flex flex-col"
           >
             <Suspense fallback={<ProbeTabLoadingShell />}>
               <ProbeTabBody tab={probeTab} />
@@ -390,6 +393,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // a new host-lens tab means a new branch here.
   if (definition.lens === 'host') {
     if (tab === 'usage') return <UsageTab />;
+    if (tab === 'sessions') return <AgentHistoryTab />;
     return <ProbeTabPlaceholder tab={tab} />;
   }
 
@@ -412,7 +416,6 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   if (tab === 'worktrees') return <RepositoryTab />;
   if (tab === 'issues') return <GitIssuesTab />;
   if (tab === 'pulls') return <GitPullRequestsTab />;
-  if (tab === 'sessions') return <ArchivedNodesTab />;
   if (tab === 'scratchpad') return <ScratchpadTab />;
 
   return <ProbeTabPlaceholder tab={tab} />;

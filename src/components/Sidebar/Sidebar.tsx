@@ -19,6 +19,8 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivities';
+import { AttentionList } from './AttentionList';
+import { needsAgentAttention } from '../../lib/status';
 import { MeshItem } from './MeshItem';
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
@@ -74,6 +76,8 @@ export function Sidebar() {
   // interpretation participates — so it holds for both the close path
   // (row deleted) and the archive path (status set, excluded above).
   const agentNodes = useAllAgentNodes();
+  const [attentionView, setAttentionView] = useState(false);
+  const attentionCount = useMemo(() => agentNodes.reduce((count, node) => count + Number(needsAgentAttention(node.status)), 0), [agentNodes]);
   const circuitOwnerships = useAgentNodeStore(state => state.circuitOwnerships);
   const manualGroups = useNodeActivityStore(state => state.groups);
   // Paired agents share one Node Activity card in the grid. The same pass that
@@ -333,9 +337,13 @@ export function Sidebar() {
             scope (driven by `uiStore.createMeshOpen`); both Sidebar
             buttons and the canvas empty state's "New mesh" CTA hit the
             same `openCreateMesh` action. */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex shrink-0 gap-1 border-b border-border-subtle p-2" aria-label="Sidebar views">
+          <button type="button" aria-pressed={!attentionView} onClick={() => setAttentionView(false)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${!attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Workspace</button>
+          <button type="button" aria-pressed={attentionView} onClick={() => setAttentionView(true)} className={`min-h-[24px] flex-1 rounded-md px-2 text-xs ${attentionView ? 'bg-bg-card text-text-primary' : 'text-text-secondary hover:bg-bg-card-hover'}`}>Attention ({attentionCount})</button>
+        </div>
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
           <div className="p-2">
-            {meshes.length === 0 ? (
+            {attentionView ? <AttentionList /> : meshes.length === 0 ? (
               <div className="flex flex-col items-center gap-3 px-2 py-8 text-center">
                 <p className="text-xs text-text-muted font-sans">
                   No meshes yet. Add a repository to start orchestrating agents.

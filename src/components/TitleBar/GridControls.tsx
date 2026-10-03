@@ -1,20 +1,16 @@
 import { useLayoutEffect, useRef } from 'react';
 
+import { GridFilterPopover } from './GridFilterPopover';
 import { useUIStore } from '../../stores/uiStore';
 
 /**
- * The grid search control (issue #998).
+ * Grid search and persisted filter/sort controls (issues #998, #997, #2004).
  *
  * Lives in the slim top View Header — the same right-hand strip as the
- * ViewModeSwitcher. This is the *minimum* UI #998 needs in order for the
- * keyboard shortcuts to have a target: a controlled text input bound to
- * `uiStore.gridSearchQuery`, with a clear button, an Esc handler, and a
- * subscription to the `focus-grid-search` request counter. The filter
- * popover, sort selector, direction toggle, active-filter badges, and
- * global reset button called out in ticket #997 ("Build View Header
- * Filter & Sort UI components") are intentionally not here — that ticket
- * is the natural home for them, and stacking them on this PR would
- * conflate the work and balloon the diff.
+ * ViewModeSwitcher. Search binds to `uiStore.gridSearchQuery`; the adjacent
+ * popover exposes provider/status filters, sorting, counts and active chips.
+ * A header reset restores the complete grid state in one action. Compact
+ * widths preserve the window-control budget at the 900px minimum.
  *
  * ## Focus request flow
  *
@@ -151,7 +147,7 @@ export function GridControls() {
         // announce the field as a search input. The custom button
         // (rendered conditionally below) is the only visible clear
         // affordance.
-        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-56 max-[1099px]:w-32 min-w-24 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
+        className="bg-bg-card border border-border-default rounded-md px-2.5 py-1.5 text-sm text-text-primary placeholder:text-text-muted w-40 max-[1099px]:w-24 min-w-24 outline-none focus:border-accent-cyan focus:ring-1 focus:ring-accent-cyan/30 transition-colors [&::-webkit-search-cancel-button]:appearance-none"
       />
       {query !== '' && (
         <button
@@ -160,11 +156,12 @@ export function GridControls() {
           data-testid="grid-search-clear"
           aria-label="Clear search"
           title="Clear search (Esc)"
-          className="text-text-muted hover:text-status-error text-sm px-1 transition-colors"
+          className="text-text-muted hover:text-status-error text-sm min-w-[24px] min-h-[24px] transition-colors"
         >
           ✕
         </button>
       )}
+      <GridFilterPopover />
     </div>
   );
 }

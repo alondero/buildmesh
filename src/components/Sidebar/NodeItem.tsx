@@ -435,7 +435,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         id={`node-item-name-${node.id}`}
         value={node.name}
         onCommit={(next) => renameAgentNode(node.id, next)}
-        className="flex-1 truncate text-text-primary font-sans text-left text-sm"
+        className="flex-1 min-w-0 truncate text-text-primary font-sans text-left text-sm"
       />
       {lostConversation && <MissingSessionIdBadge />}
       {showRestart && (
@@ -447,7 +447,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               addToast('Restart failed', formatError(err), 'error');
             });
           }}
-          className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="text-text-muted hover:text-status-warning text-xs min-h-[24px] min-w-[24px] shrink-0 rounded-md hover:bg-bg-card-hover transition-colors"
           title={
             node.cli_session_id != null
               ? 'Retry resume with existing session'
@@ -483,7 +483,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
           // matches the Suspended status dot so a user hovering a
           // Suspended-vs-error row gets a colour cue tied to the
           // status.
-          className="text-text-muted hover:text-accent-violet text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="text-text-muted hover:text-accent-violet text-xs min-h-[24px] min-w-[24px] shrink-0 rounded-md hover:bg-bg-card-hover transition-colors"
           title="Resume agent"
           aria-label={`Resume ${node.name}`}
           data-testid="resume-button"
@@ -503,7 +503,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         <button
           type="button"
           onClick={handleDelete}
-          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="text-text-muted hover:text-status-error text-xs min-h-[24px] min-w-[24px] shrink-0 rounded-md hover:bg-bg-card-hover transition-colors"
           title="Delete node"
           aria-label={`Delete ${node.name}`}
         >

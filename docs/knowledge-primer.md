@@ -293,7 +293,8 @@ lens,
 baseline, selection-following, pinning, and statefulness. The three lenses are
 `Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
 its configuration, GitHub feeds, worktrees, automation, and notes), and
-`Agent` (one Agent Node's changes and node-specific history/actions). Usage is
+`Agent` (one Agent Node's changes and actions). Agent History is a Host finder
+with an explicit repository filter and a separate discovered-session source. Usage is
 Host-lens and must never display or infer a Mesh name. Project Files is
 Mesh-owned but may show a focused Agent Node's working tree; Agent Changes is
 Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
@@ -312,6 +313,20 @@ ADR-0032 added a working-set tab strip *inside* the open inspector
 (`ProbeToolRail`, MRU-capped, ⊞ opens the ADR-0031 tool grid) for fast
 alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
+
+Related Files/Changes and Issues/Pull Requests share a strip slot, with
+per-destination context pins and unchanged command IDs. The working-set reducer
+owns group identity and replaces a group's remembered subview in place;
+recency affects eviction only. The Files subview is persisted independently
+of the session-only working set. Agent History reads all database nodes,
+including archived rows; reopen restores Suspended without spawning and adopts
+the returned row into the live store. See [ADR 0039](adr/0039-desktop-audit-navigation-and-readiness.md).
+
+Routing defaults use `list_routing_options`, a preferences/cached-installation
+catalog that does no subprocess or WSL probing. Unverified OpenAI routes stay
+disabled pending the live provider menu. Settings owns separate preference,
+routing and probe request sequences; mutations refresh both routing sources.
+Failed preferences disable writes, and retries/unmount invalidate stale reads.
 
 ### Configuration vs maintenance destinations (issue #1460, ADR-0038)
 Two Mesh-lens destinations are split by job and must never merge again:
@@ -348,7 +363,14 @@ without a GitHub origin produce an empty list. WSL ownership trust is an exact
 authentication (see [troubleshooting](troubleshooting.md#github-feeds-fail-for-a-wsl-mesh)).
 
 ### Probe Panel shell (scroll ownership + narrow width)
-`ProbePanel.tsx` wraps every tab in `flex-1 overflow-y-auto` (`:359`) around an `h-full flex flex-col` keyed div (`:360-365`). A tab root must therefore be **layout-only** (`flex flex-col h-full min-h-0`) with **one** inner `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` body — the shared `<ProbeTabBody>` primitive exists to provide exactly that. Because the root is `h-full`, the panel's outer scroller has content precisely its own height and stays inert, so the inner body is the single *effective* scroll owner; adding `overflow-y-auto` to the root as well stacks two scrollers (the #1468 defect in `CircuitsProbeTab`). Two further traps: `overflow-y-auto` **alone computes `overflow-x: auto`** (CSS forbids one axis being `visible` while the other scrolls), so wide content can scroll the tab sideways unless you state `overflow-x-hidden`; and the dock's **240px minimum** (`PROBE_PANEL_BOUNDS`) means unbounded text (errors, identifiers, node ids) must wrap — `truncate` there hides the tail that carries the diagnosis, and `truncate` combined with `flex-wrap` on one row is self-contradictory. Note `ProbePanel.tsx` also declares a *local* `function ProbeTabBody` that is only the tab router — same name as the shared primitive, different component. Full checklist: `docs/development/probe-ui-checklist.md` (umbrella issue #1464).
+The panel and keyed destination wrapper are layout-only, with `min-h-0`,
+`min-w-0` and `overflow-hidden`. A destination owns one inner
+`flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden` body; the shared
+`ProbeTabBody` supplies this contract. Toolbars and recovery controls are
+`shrink-0` siblings. A bounded error excerpt may scroll separately, but must
+leave Retry visible. At the dock's 240px minimum, unbounded prose wraps and
+unspaced paths/errors use `break-all`. Stating only vertical overflow computes
+horizontal auto overflow. Keep Notes' mesh-aware save/restore ownership.
 
 ### Frameless Window & Bespoke TitleBar
 The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher with the Filtered segment, the Filtered view's `GridControls` search bar, the centred "Search or open…" palette field flanked by drag spacers, and the right-hand utility cluster — Usage / Settings / Remote Access pills sharing the `HeaderPillButton` skeleton — plus min/max/close). Traps this recipe has already burned once:

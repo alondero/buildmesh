@@ -44,6 +44,15 @@ the same change.
    badge is a standing claim on attention; spend it only when there is
    something to do. See [Pills, badges, chips](#pills-badges-chips).
 
+Compact desktop controls still provide a **24 by 24 CSS pixel minimum hit
+area**. A small colour swatch or glyph may sit inside that area; the surrounding
+button owns pointer and keyboard input. Recovery actions remain visible in
+waiting and failed rows. First-session guidance presents repository, runtime
+and session readiness before advanced shortcuts. Use a solid accent and
+inverse text for the primary action, bordered secondary actions, and the
+surface hover tokens for quiet controls. Existing reduced-motion rules apply
+to feedback and transitions on these surfaces.
+
 ## Colour
 
 ### Surfaces

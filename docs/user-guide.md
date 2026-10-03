@@ -53,6 +53,13 @@ its own login; choose the same account or workspace as the meter.
 
 ## Your first session
 
+The empty workspace offers three readiness steps: add a repository, check your
+harness and runtime, then open a session. **Skip setup** hides the guide;
+**Show setup guide** restores it. Detection confirms an installation, so sign
+in using the CLI in that runtime before launching an agent. **Start Terminal**
+lets you start locally without agent credentials or network access once a
+repository is selected. Help contains the advanced keyboard shortcuts.
+
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).
 2. Install at least one supported agent CLI on the runtime where it will run.
@@ -97,6 +104,34 @@ The menu uses the same names, descriptions, and icons as the command palette.
 Select a tool to open it and close the menu. Use Tab and Enter to choose a tool,
 or Escape to close the menu and return focus to **More**. Clicking outside also
 closes the menu. On short windows, scroll the menu to reach every tool.
+
+The inspector groups **Project Files** and **Agent Changes** under **Files &
+changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
+subviews inside the panel. The header shows the subject and whether it follows
+selection or is pinned; each subview retains its own pin. Files shows the
+working tree, while Agent Changes compares against HEAD or the selected
+repository's base merge point. Commands still open the exact requested view.
+The last Files subview is restored when you restart.
+
+**Agent History** finds lifecycle records across repositories, including
+archived nodes. Search by name, repository, branch or session, and filter by
+repository or lifecycle state. **Reopen** restores an archived node to the
+workspace without starting its process; **Resume** starts it separately using
+its saved session when available. **Discovered sessions** scans CLI history
+for the explicitly selected repository.
+
+## Find agents that need attention
+
+Choose **Attention** in the sidebar to see failed, waiting and suspended nodes
+across repositories. Each row names its repository and offers **Open terminal**
+and, where applicable, **Retry** or **Resume**. Return to **Workspace** to use
+the existing repository and drag order.
+
+In **Filtered** view, use the header's **Filters** button for provider, status,
+sort and direction. The count shows matching nodes out of all loaded nodes.
+Remove an active chip or use **Clear all** to clear search and filters and
+restore the default sort. Your choices survive a restart, including a filter
+with no matches.
 
 ## Configure Autopilot Circuits
 
@@ -395,6 +430,16 @@ the app-wide value when both exist.
 Tab and Shift+Tab stay within the visible pane. If you try to close with
 unsaved edits, focus moves to **Keep editing**; only **Discard changes**
 abandons the edits.
+
+The selected Settings tab is the tablist's single Tab stop. Up/Down wrap
+through tabs, and Home/End choose the first/last tab. Tab then enters the
+selected panel. Switching tabs preserves unsaved edits.
+
+Default, classifier, reviewer and naming choices load independently of live
+CLI and WSL probes. Routes awaiting runtime verification explain that state
+and remain unavailable until verified. Failed checks keep a **Retry** action;
+defaults stay disabled if preferences failed to load, so a failed read cannot
+overwrite saved choices.
 
 | Settings area | Use it for |
 |---|---|

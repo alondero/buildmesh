@@ -171,7 +171,7 @@ export function SpawnButtonCluster({
           onFocus={refreshDefaultProvider}
           disabled={isDisabled}
           aria-label={primaryAriaLabel ?? undefined}
-          className="flex items-center px-1.5 h-5 text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="flex min-h-[24px] min-w-[24px] items-center px-1.5 text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
           {isSpawning ? busyLabel : primaryLabel}
@@ -196,7 +196,7 @@ export function SpawnButtonCluster({
           aria-label={primaryAriaLabel
             ? `Choose provider to ${primaryAriaLabel.toLowerCase()} with`
             : 'Choose provider'}
-          className={`flex items-center px-1 h-5 text-xs hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan/70'}`}
+          className={`flex min-h-[24px] min-w-[24px] items-center justify-center px-1 text-xs hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-accent-cyan/10' : 'text-accent-cyan'}`}
           title="Choose provider"
         >
           ▾
