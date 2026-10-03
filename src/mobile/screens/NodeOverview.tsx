@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentNode, isAuthError, listNodes, sendNodeKeys } from "../api";
-import { getNodeStatusConfig, isSignalHealthProblem, nodeInputContext, signalHealthNote } from "../../lib/status";
+import { getNodeStatusConfig, isSignalHealthProblem, lifecycleNodePatch, nodeInputContext, signalHealthNote } from "../../lib/status";
 import { AppBar } from "../ui";
 import { useVisibilityPolling } from "../useVisibilityPolling";
 import { useWsEvents } from "../useWsEvents";
@@ -113,12 +113,8 @@ export default function NodeOverview({
   useWsEvents((msg) => {
     if (msg.type === "agent-lifecycle" && msg.session_id === initial.id) {
       eventVersion.current += 1;
-      setNode((current) => ({
-        ...current,
-        ...(msg.kind === 'signal_unavailable' ? {} : { status: msg.status, lifecycle: msg }),
-        signal_health: msg.signal_health,
-      }));
-      if (msg.kind === 'signal_unavailable') return;
+      setNode((current) => ({ ...current, ...lifecycleNodePatch(msg) }));
+      if (msg.kind === 'signal_unavailable' || msg.kind === 'process_running') return;
       updateContext(
         msg.status === "awaiting_input"
           ? (msg.semantic_turn?.description ?? msg.message ?? undefined)

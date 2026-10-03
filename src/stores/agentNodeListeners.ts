@@ -51,6 +51,7 @@ import type { AgentNode } from '../types/generated/AgentNode';
 import type { CircuitPrReadyPayload, CircuitRunUpdatedPayload } from '../types/generated/CircuitEvents';
 import { invalidateNodeCaches } from '../hooks/invalidateNodeCaches';
 import { getNodeGitPath } from '../lib/paths';
+import { lifecycleNodePatch } from '../lib/status';
 
 /**
  * Typed dispatch seam for the agent-node event listeners. The store
@@ -186,16 +187,10 @@ export async function attachAgentNodeListeners(
   unlistens.push(
     await listen<LifecycleChangedPayload>('agent-lifecycle', (event) => {
       const nodeId = event.payload.session_id;
-      const { signal_health } = event.payload;
-      if (event.payload.kind === 'signal_unavailable') {
-        surface.patchAgentNode(nodeId, { signal_health });
+      surface.patchAgentNode(nodeId, lifecycleNodePatch(event.payload));
+      if (event.payload.kind === 'signal_unavailable' || event.payload.kind === 'process_running') {
         return;
       }
-      surface.patchAgentNode(nodeId, {
-        status: event.payload.status,
-        lifecycle: event.payload,
-        ...(signal_health ? { signal_health } : {}),
-      });
       if (event.payload.semantic_turn) {
         surface.setSemanticTurn(nodeId, event.payload.semantic_turn);
       } else if (
