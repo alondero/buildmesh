@@ -122,6 +122,17 @@ export function __resetProviderCachesForTests(): void {
   resetProviderCachesForTests();
 }
 
+/**
+ * Cross-surface invalidation event. Emitted by
+ * `commands::preferences::{upsert,remove}_provider_account` (and siblings)
+ * after a successful save, and re-emitted frontend-side after
+ * default-provider writes (`updateMeshColumn` / `setAppDefaultProvider` in
+ * the root facade). Owned here in `lib/` so hooks and the facade both
+ * import in the same direction — `useProviderListInvalidation` re-exports
+ * this symbol so its existing importers keep working.
+ */
+export const PROVIDER_LIST_CHANGED_EVENT = 'provider-list-changed';
+
 // ----- Provider catalogue ------------------------------------------------
 
 /** Per-mesh provider lookup. Cached by mesh id (issue #405). */

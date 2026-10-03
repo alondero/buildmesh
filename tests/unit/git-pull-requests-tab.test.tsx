@@ -138,7 +138,7 @@ const PR_DRAFT = {
  * `get_prs_mergeability` commands survive on the backend for compat but the
  * panel must not call them.
  */
-function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequest[] } = {}) {
+function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequest[]; providers?: Array<Record<string, unknown>> } = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'get_repo_pulls': {
@@ -146,7 +146,7 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
         return Promise.resolve(state === 'closed' ? (opts.closed ?? CLOSED_PRS) : (opts.open ?? OPEN_PRS));
       }
       case 'list_providers':
-        return Promise.resolve(PROVIDERS);
+        return Promise.resolve(opts.providers ?? PROVIDERS);
       case 'get_default_provider':
         return Promise.resolve('anthropic');
       case 'create_pr_node':
@@ -1207,6 +1207,25 @@ describe('GitPullRequestsTab', () => {
       });
     });
     expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
+  });
+
+  it('shows the mesh default on the quick-spawn button', async () => {
+    // The row cluster receives the same mesh-default resolver the `+`
+    // click uses, so its icon matches the action without hovering first.
+    // Rows must be wire-shaped (`harness_id` etc.) — the legacy bare
+    // fixtures crash `mapBackendProviders` and leave the list empty.
+    mockBackend({
+      providers: [
+        { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', harness_id: 'anthropic', provider_id: null, is_proxied: false, group_key: 'anthropic' },
+        { id: 'minimax', label: 'Minimax', color: '#000', icon: '', harness_id: 'minimax', provider_id: null, is_proxied: false, group_key: 'minimax' },
+      ],
+    });
+    render(<GitPullRequestsTab />);
+
+    const spawns = await screen.findAllByTestId('spawn-default');
+    await waitFor(() => {
+      expect(spawns[0].textContent).toContain('Anthropic');
+    });
   });
 
   it('keeps the dock open after a successful spawn (mirrors issue-tab contract)', async () => {

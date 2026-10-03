@@ -155,3 +155,12 @@ full_diff.txt
 # Scratch file used to upload the PR body via `gh pr create --body-file`.
 # Committed by accident in 3924814b — should not be in the tree.
 .pr-body.md
+# Incremental TypeScript build info dropped beside the configs by an
+# incidental `tsc -b` (the repo build runs plain `tsc` + vite, which do not
+# emit these). Never source.
+*.tsbuildinfo
+# tsc-emitted shadows of the real vite config (`vite.config.ts`). Vite
+# resolves vite.config.js first, so a stale emit silently hijacks the next
+# dev/build — always delete, never commit.
+vite.config.js
+vite.config.d.ts

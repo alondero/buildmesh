@@ -192,13 +192,17 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
   }, [search, sessions]);
 
   // Close dropdown on outside click. The dropdown container carries a
-  // `data-dropdown-for` attribute set to the session id, mirroring the
-  // GitIssuesTab pattern — the guard prevents the mousedown that *opens*
+  // `data-dropdown-for` attribute set to the prefixed session id, mirroring
+  // the GitIssuesTab pattern — the guard prevents the mousedown that *opens*
   // the option click (or the click on the option itself) from racing
   // the document-level mousedown handler and tearing the dropdown out
   // of the DOM before the click event lands.
-  // Issue #492 — shared `useClickOutside` hook.
-  useClickOutside(openDropdown, () => setOpenDropdown(null));
+  // Issue #492 — shared `useClickOutside` hook. The key must be the same
+  // pre-prefixed value the cluster tags its root with
+  // (`dropdownId('session', ...)`) — the raw session id matches nothing,
+  // which today is only masked by the row's mousedown stopPropagation
+  // wrapper around the cluster.
+  useClickOutside(openDropdown !== null ? dropdownId('session', openDropdown) : null, () => setOpenDropdown(null));
 
   const handleResume = async (session: ArchivedAgentNode, providerId: string) => {
     if (activeMeshId === null || activeMeshPath === null) return;

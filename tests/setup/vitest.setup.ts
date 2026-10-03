@@ -376,16 +376,21 @@ beforeEach(async () => {
   // top-level import would cause `platform.ts` to be cached with the
   // real `navigator.platform` value, defeating the test files that
   // mock it to force `isWindows = true` (issue #354 follow-up).
-  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }] =
+  const [{ resetPathInvalidatedCacheForTests }, { resetProviderCachesForTests }, { __resetSharedProviderListForTests }, { _resetEscapeKeyStackForTests }, { __resetDefaultChangedListeningForTests }] =
     await Promise.all([
       import('../../src/lib/pathInvalidatedCache'),
       import('../../src/lib/providerCache'),
       import('../../src/hooks/useProviderList'),
       import('../../src/hooks/useEscapeKey'),
+      import('../../src/components/Sidebar/SpawnButtonCluster'),
     ]);
   resetPathInvalidatedCacheForTests();
   resetProviderCachesForTests();
   __resetSharedProviderListForTests();
+  // Same discipline as the pathInvalidatedCache primitive above: the spawn
+  // cluster holds ONE process-lifetime `provider-list-changed` subscription
+  // shared by every mounted row, so reset it alongside the mock bus.
+  __resetDefaultChangedListeningForTests();
   // Issue #649 — the useEscapeKey hook maintains a module-level LIFO
   // stack of Escape handlers so the topmost mounted surface wins. RTL's
   // `cleanup()` already unmounts components between tests, but the reset
