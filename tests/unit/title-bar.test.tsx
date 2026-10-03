@@ -35,8 +35,8 @@ vi.mock('@tauri-apps/api/window', () => ({
 }));
 
 vi.mock('../../src/components/AppSettings/AppSettingsModal', () => ({
-  AppSettingsModal: ({ onClose }: { onClose: () => void }) => (
-    <div role="dialog" aria-label="App settings">
+  AppSettingsModal: ({ onClose, initialTab }: { onClose: () => void; initialTab?: string }) => (
+    <div role="dialog" aria-label="App settings" data-initial-tab={initialTab}>
       <button type="button" onClick={onClose}>stub-close-settings</button>
     </div>
   ),
@@ -96,6 +96,9 @@ beforeEach(() => {
     probeTab: 'files',
     activeDiffFile: null,
     probeContextPins: {},
+    appSettingsOpen: false,
+    appSettingsTab: 'general',
+    remoteAccessOpen: false,
   });
   // The zoom slider is a view over the module-level terminal font size, which
   // persists to localStorage; reset it so slider assertions start from the
@@ -295,6 +298,14 @@ describe('TitleBar (bespoke window chrome)', () => {
   });
 
   describe('modal wiring (icons moved from the Sidebar header)', () => {
+    it('passes the requested Settings pane through and resets normal opens to General', async () => {
+      await renderTitleBar();
+      act(() => useUIStore.getState().openAppSettings('providers'));
+      expect(screen.getByRole('dialog', { name: 'App settings' }).getAttribute('data-initial-tab')).toBe('providers');
+      fireEvent.click(screen.getByRole('button', { name: 'stub-close-settings' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Open settings' }));
+      expect(screen.getByRole('dialog', { name: 'App settings' }).getAttribute('data-initial-tab')).toBe('general');
+    });
     it('opens and closes the App Settings modal', async () => {
       await renderTitleBar();
       expect(screen.queryByRole('dialog')).toBeNull();

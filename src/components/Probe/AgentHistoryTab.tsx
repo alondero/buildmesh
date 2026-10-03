@@ -85,7 +85,7 @@ export function AgentHistoryTab() {
     {discovered ? selectedMesh ? <ArchivedNodesTab key={`${selectedMesh.id}:${reload}`} meshId={selectedMesh.id} meshPath={selectedMesh.path} />
       : <p className="p-3 text-xs text-text-secondary">Add a repository to discover previous sessions.</p>
       : <ProbeTabBody>
-        {loading && history.length === 0 ? <LoadingState label="Loading agent history…" /> : nodes.length === 0 ? <p className="text-xs text-text-secondary">{search || scope || statusFilter ? 'No matching agents. Clear search or filters to see more.' : 'No agent history yet.'}</p>
+        {loading && history.length === 0 && live.length === 0 ? <LoadingState label="Loading agent history…" /> : nodes.length === 0 ? <p className="text-xs text-text-secondary">{error ? 'Agent history unavailable.' : search || scope || statusFilter ? 'No matching agents. Clear search or filters to see more.' : 'No agent history yet.'}</p>
           : <div className="space-y-2">{nodes.map(node => {
             const config = getNodeStatusConfig(node);
             return <div key={node.id} className="min-w-0 rounded-md border border-border-default p-2">

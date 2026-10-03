@@ -53,12 +53,16 @@ its own login; choose the same account or workspace as the meter.
 
 ## Your first session
 
-The empty workspace offers three readiness steps: add a repository, check your
-harness and runtime, then open a session. **Skip setup** hides the guide;
-**Show setup guide** restores it. Detection confirms an installation, so sign
+The empty workspace and each selected empty repository offer three readiness
+steps: add a repository, check your harness and runtime, then open a session.
+**Check runtime and login** opens **Settings → Providers**. **Skip setup guide**
+hides the guide across repositories; **Show setup guide** restores it.
+Detection confirms an installation, so sign
 in using the CLI in that runtime before launching an agent. **Start Terminal**
-lets you start locally without agent credentials or network access once a
-repository is selected. Help contains the advanced keyboard shortcuts.
+lets you start locally without agent credentials or completed runtime checks
+once a repository is selected, using that repository's worktree setting.
+It stays available when the guide is hidden or other repositories have agents.
+Help contains the advanced keyboard shortcuts.
 
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).

@@ -24,7 +24,8 @@ export function GridFilterPopover() {
   const actions = useUIStore.getState();
   const fieldClass = 'w-full min-w-0 rounded-md border border-border-default bg-bg-input px-2 py-1.5 text-text-primary';
   return (
-    <div className="relative flex shrink-0 items-center gap-1" data-dropdown-for="grid-filters">
+    <div className="relative flex shrink-0 items-center gap-1" data-dropdown-for="grid-filters"
+      onKeyDown={e => { if (open && e.key === 'Escape') { e.stopPropagation(); setOpen(false); trigger.current?.focus(); } }}>
       <button ref={trigger} type="button" aria-label={`Filters and sort: ${count} of ${nodes.length} nodes, ${activeCount} active filters`}
         aria-expanded={open} aria-controls="grid-filter-panel" title="Filters and sort"
         onClick={() => setOpen(v => !v)}
@@ -37,8 +38,7 @@ export function GridFilterPopover() {
         onClick={actions.resetGridControls} className="min-h-[24px] min-w-[24px] rounded-md text-text-secondary hover:bg-bg-card-hover">×</button>}
       {open && (
         <div id="grid-filter-panel" role="region" aria-label="Filters and sort"
-          className="absolute left-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-16px)] space-y-3 rounded-md border border-border-default bg-bg-overlay p-3 text-xs shadow-lg"
-          onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); trigger.current?.focus(); } }}>
+          className="absolute left-0 top-full z-50 mt-2 w-72 max-w-[calc(100vw-16px)] space-y-3 rounded-md border border-border-default bg-bg-overlay p-3 text-xs shadow-lg">
           <p className="text-text-secondary" role="status">{count} of {nodes.length} nodes</p>
           <label className="block text-text-secondary">Provider
             <select aria-label="Filter provider" value={provider ?? ''} className={fieldClass}

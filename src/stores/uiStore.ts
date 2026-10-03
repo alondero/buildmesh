@@ -10,6 +10,8 @@ import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } fr
 // the ownership lenses) so pure domain modules never import from `stores/`;
 // re-exported here because every store consumer addresses it as a Probe
 // Panel concern.
+export type AppSettingsTab = 'general' | 'providers' | 'harnesses' | 'remote';
+
 export type { ProbeTab };
 
 // The five canvas View Modes (wayfinder #982 — tickets #983 state model,
@@ -373,7 +375,8 @@ interface UIState extends GridControls {
   closeCheatsheet: () => void;
   toggleCheatsheet: () => void;
   appSettingsOpen: boolean;
-  openAppSettings: () => void;
+  appSettingsTab: AppSettingsTab;
+  openAppSettings: (tab?: AppSettingsTab) => void;
   closeAppSettings: () => void;
   remoteAccessOpen: boolean;
   openRemoteAccess: () => void;
@@ -599,8 +602,9 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     appSettingsOpen: false,
-    openAppSettings: () => {
-      set({ appSettingsOpen: true });
+    appSettingsTab: 'general',
+    openAppSettings: (tab = 'general') => {
+      set({ appSettingsOpen: true, appSettingsTab: tab });
     },
     closeAppSettings: () => {
       set({ appSettingsOpen: false });

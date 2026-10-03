@@ -9,12 +9,14 @@ export function probeGroup(tab: ProbeTab) {
   return PROBE_GROUPS.find(group => group.tabs.some(value => value === tab));
 }
 
-export function probeGroupId(tab: ProbeTab): ProbeTab {
-  return probeGroup(tab)?.id ?? tab;
+export type ProbeGroupId = Exclude<ProbeTab, (typeof PROBE_GROUPS)[number]['tabs'][number]> | (typeof PROBE_GROUPS)[number]['id'];
+
+export function probeGroupId(tab: ProbeTab): ProbeGroupId {
+  return (probeGroup(tab)?.id ?? tab) as ProbeGroupId;
 }
 
 export function groupedProbeTabs(tabs: readonly ProbeTab[], active: ProbeTab, mru: readonly ProbeTab[]): ProbeTab[] {
-  const seen = new Set<ProbeTab>();
+  const seen = new Set<ProbeGroupId>();
   return tabs.flatMap(tab => {
     const id = probeGroupId(tab);
     if (seen.has(id)) return [];

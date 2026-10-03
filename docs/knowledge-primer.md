@@ -325,7 +325,11 @@ the returned row into the live store. See [ADR 0039](adr/0039-desktop-audit-navi
 Routing defaults use `list_routing_options`, a preferences/cached-installation
 catalog that does no subprocess or WSL probing. Unverified OpenAI routes stay
 disabled pending the live provider menu. Settings owns separate preference,
-routing and probe request sequences; mutations refresh both routing sources.
+routing and probe request sequences; account, route and Launch Configuration
+mutations refresh both routing sources. Anthropic routes share the live menu's
+pure launchability predicate, and configuration-specific errors retain their
+remediation. The cheap catalog reads the default WSL distribution only if
+startup has already observed it; it never initializes discovery itself.
 Failed preferences disable writes, and retries/unmount invalidate stale reads.
 
 ### Configuration vs maintenance destinations (issue #1460, ADR-0038)

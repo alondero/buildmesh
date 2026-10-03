@@ -1,3 +1,4 @@
+import type { AppSettingsTab } from '../../stores/uiStore';
 import { formatError } from '../../lib/errorUtils';
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -36,6 +37,7 @@ import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
 
 interface AppSettingsModalProps {
   onClose: () => void;
+  initialTab?: AppSettingsTab;
 }
 
 const NO_OVERRIDE = '__no_override__';
@@ -672,7 +674,7 @@ function humanResourceName(resource: ResourceKey): string {
   }
 }
 
-export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
+export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSettingsModalProps) {
   const [routingProviders, setRoutingProviders] = useState<ProviderInfo[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selected, setSelected] = useState<string>(NO_OVERRIDE);
@@ -817,7 +819,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
   // trivial content and shouldn't inherit the node's model.
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<SettingsTabId>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
   // Circuit agent pool size (app-wide cap on concurrent Circuit agents). The
   // draft is a string so the input can hold a cleared/in-progress value;
   // `''` means "no global cap". Committed on blur / Enter rather than per
@@ -2016,7 +2018,7 @@ export function AppSettingsModal({ onClose }: AppSettingsModalProps) {
           hidden={activeTab !== 'harnesses'}
           className="space-y-2"
         >
-        <SettingsSection title="Launch Configurations"><LaunchConfigurations api={launchConfigurationApi} onDirtyChange={launchDirtyChange} refreshToken={providers} /></SettingsSection>
+        <SettingsSection title="Launch Configurations"><LaunchConfigurations api={launchConfigurationApi} onDirtyChange={launchDirtyChange} onChanged={() => { void loadRouting(); void loadProviders(); }} refreshToken={providers} /></SettingsSection>
         {/* Issue #1534 — the Agent Harness defaults section below is
             preferences-backed, so a failed preferences load must be visible
             here rather than silently disabling the per-harness inputs. */}

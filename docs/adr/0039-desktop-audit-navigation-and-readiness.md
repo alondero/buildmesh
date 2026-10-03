@@ -12,10 +12,13 @@ also been removed. Circuits remains the supported automation destination.
 
 ## Decision
 
-The empty workspace shows three skippable readiness steps: repository,
+The empty workspace or selected empty repository shows three skippable readiness steps: repository,
 harness/runtime/login, and a first session. Local harness checks are distinct
 from authentication; an available CLI does not prove login. A Terminal remains
-available without agent credentials. Advanced shortcuts live behind Help.
+available without agent credentials or completed harness checks and inherits
+the repository's worktree setting. Setup opens Settings → Providers directly.
+Skipping is an application-level preference; Show setup guide and Start Terminal
+remain available on later empty repositories. Advanced shortcuts live behind Help.
 
 Filtered mode keeps its compact search and adds a popover with all persisted
 controls, result counts, removable filter chips and a single Clear all action.
@@ -42,6 +45,11 @@ installation information, independently of live provider probes. OpenAI routes
 and their saved configurations explain pending verification and remain disabled
 until the live menu validates them. Preferences must load before any picker
 can save. Live probe failures retain Retry and never erase the cheap choices.
+Anthropic routes use the live menu's pure credential/compatibility checks;
+specific configuration errors keep their credential, enablement or model
+remediation. Account, route and Launch Configuration mutations refresh both
+catalogs independently. The cheap catalog uses the already observed default
+WSL distribution without starting discovery on a cold cache.
 
 ## Alternatives
 

@@ -217,10 +217,7 @@ const filterIcon = (
   </svg>
 );
 
-/** "No meshes yet" — the on-board view. Brief explanation of what a
- *  mesh is, then the canonical Mesh Create CTA. The shortcut rows
- *  underneath (the first-launch "things you can do" list) stay so a
- *  brand-new user sees the catalogue even before they add anything. */
+/** Explain meshes and offer repository creation alongside the setup guide. */
 function NoMeshesBranch({ callbacks, harnessReady }: { callbacks: CanvasEmptyStateCallbacks; harnessReady: boolean }) {
   return (
     <EmptyShell
