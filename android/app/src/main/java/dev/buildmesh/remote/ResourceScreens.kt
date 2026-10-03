@@ -49,12 +49,12 @@ private fun LoadNotice(load: RemoteLoad, retry: () -> Unit) {
 
 @Composable
 fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: RemoteState, vm: BuildmeshViewModel, openNode: (Long) -> Unit) {
-    var reload by remember { mutableIntStateOf(0) }
+    var reload by remember(state.draftNamespace, meshId, screen) { mutableIntStateOf(0) }
     val path = "/api/meshes/$meshId/" + if (screen == "issues") "issues" else "agent-nodes/discover"
     val load by rememberRemote(api, path, vm, reload)
     val data = load.data
-    var selected by remember { mutableStateOf<JsonObject?>(null) }
-    var provider by rememberSaveable { mutableStateOf("") }
+    var selected by remember(state.draftNamespace, meshId, screen) { mutableStateOf<JsonObject?>(null) }
+    var provider by rememberSaveable(state.draftNamespace, meshId, screen) { mutableStateOf("") }
     val options = state.providers.filter {
         it.text("unavailable_reason").isEmpty() &&
             if (screen == "archive") it.flag("resumable") else it.objectAt("capabilities")?.flag("supports_prefill") == true
@@ -147,10 +147,10 @@ fun DiffScreen(api: BuildmeshApi, id: Long, file: String, vm: BuildmeshViewModel
 @Composable
 fun CreatePrScreen(meshId: Long, vm: BuildmeshViewModel) {
     val state by vm.state.collectAsState()
-    var title by rememberSaveable(meshId) { mutableStateOf(vm.draft("pr-title-$meshId")) }
-    var body by rememberSaveable(meshId) { mutableStateOf(vm.draft("pr-body-$meshId")) }
-    var base by rememberSaveable(meshId) { mutableStateOf("main") }
-    var result by rememberSaveable(meshId) { mutableStateOf("") }
+    var title by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf(vm.draft("pr-title-$meshId")) }
+    var body by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf(vm.draft("pr-body-$meshId")) }
+    var base by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("main") }
+    var result by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Create a PR from the mesh's current branch. For an agent worktree, ask the agent to open its PR through the terminal.", color = MeshColors.secondary)
         OutlinedTextField(enabled = !state.busy, value = title, onValueChange = { title = it; vm.saveDraft("pr-title-$meshId", it) }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())

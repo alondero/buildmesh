@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import java.security.MessageDigest
+import java.util.Base64
 
 data class RemoteState(
     val restoring: Boolean = true,
@@ -18,6 +21,7 @@ data class RemoteState(
     val error: String = "",
     val notice: String = "",
     val origin: String = "",
+    val draftNamespace: String = "",
     val meshes: List<JsonObject> = emptyList(),
     val nodes: List<JsonObject> = emptyList(),
     val providers: List<JsonObject> = emptyList(),
@@ -57,7 +61,7 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
             if (saved != null) {
                 try {
                     api = BuildmeshApi(saved.origin, saved.root, saved.cookie)
-                    mutableState.update { it.copy(paired = true, origin = saved.origin) }
+                    mutableState.update { it.copy(paired = true, origin = saved.origin, draftNamespace = draftNamespace(saved)) }
                     api!!.restore()
                     store.save(api!!.session())
                 } catch (e: Exception) {
@@ -84,10 +88,11 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
                 candidate = BuildmeshApi(invitation.origin, root)
                 candidate.pair(invitation.ticket)
                 if (owner != generation) return@launch
-                store.save(candidate.session())
+                val session = candidate.session()
+                store.save(session)
                 api?.close()
-                api = BuildmeshApi(invitation.origin, root, candidate.session().cookie)
-                mutableState.value = RemoteState(restoring = false, paired = true, origin = invitation.origin)
+                api = BuildmeshApi(session.origin, session.root, session.cookie)
+                mutableState.value = RemoteState(restoring = false, paired = true, origin = session.origin, draftNamespace = draftNamespace(session))
                 if (foreground) resume()
             } catch (e: CancellationException) { throw e
             } catch (e: Exception) {
@@ -164,8 +169,10 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         else mutableState.update { it.copy(error = friendlyError(e)) }
     }
     fun dismissError() { mutableState.update { it.copy(error = "", notice = "") } }
-    fun draft(key: String) = draftPrefs.getString(key, "").orEmpty()
-    fun saveDraft(key: String, value: String) { draftPrefs.edit { putString(key, value) } }
+    fun draft(key: String) = draftPrefs.getString(scopedDraftKey(key), "").orEmpty()
+    fun saveDraft(key: String, value: String) { draftPrefs.edit { putString(scopedDraftKey(key), value) } }
+
+    private fun scopedDraftKey(key: String) = "${state.value.draftNamespace}:$key"
 
     fun forget() {
         generation++
@@ -173,13 +180,22 @@ class BuildmeshViewModel(application: Application) : AndroidViewModel(applicatio
         pause()
         api?.close(); api = null
         store.clear()
-        mutableState.value = RemoteState(restoring = false)
+        // Keep this VM's private draft scope while disconnected; a newly paired
+        // desktop replaces it before any paired screen becomes visible.
+        mutableState.value = RemoteState(restoring = false, draftNamespace = state.value.draftNamespace)
     }
     fun unauthorized() {
         forget()
         mutableState.update { it.copy(error = "This device is no longer authorized. Scan a fresh invitation from the desktop.") }
     }
     override fun onCleared() { actionJob?.cancel(); pause(); api?.close() }
+}
+
+private fun draftNamespace(session: DeviceSession): String {
+    val origin = session.origin.toHttpUrl()
+    val identity = "${origin.scheme}://${origin.host}:${origin.port}\u0000".toByteArray(Charsets.UTF_8) + (session.root ?: byteArrayOf())
+    val digest = MessageDigest.getInstance("SHA-256").digest(identity)
+    return "desktop:" + Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
 }
 
 fun friendlyError(e: Exception): String = when (e) {

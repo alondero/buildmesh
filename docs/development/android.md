@@ -64,7 +64,9 @@ Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Launch selections come
 from the backend menu, including saved configurations and capability filtering.
-Drafts persist privately on the phone until an acknowledged action succeeds.
+Drafts persist privately on the phone, scoped to the verified desktop endpoint
+and trusted certificate, until an acknowledged action succeeds. Re-pairing the
+same desktop restores its drafts without exposing them to another desktop.
 Issue launch requires a configuration that supports prefill; archive resume
 requires a resumable configuration. Unavailable configurations are excluded.
 Archive HTTP 207 dismisses the launch dialog and reports the imported node and

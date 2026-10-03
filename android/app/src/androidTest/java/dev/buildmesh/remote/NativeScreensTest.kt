@@ -1,6 +1,11 @@
 package dev.buildmesh.remote
 
 import androidx.activity.ComponentActivity
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import kotlinx.serialization.json.Json
@@ -18,6 +23,27 @@ class NativeScreensTest {
         compose.onNodeWithText("Pairing URL").performTextInput("https://desktop:1992/#pair=invitation&ca=pin")
         compose.onNodeWithText("Pair with desktop").performScrollTo().performClick()
         compose.runOnIdle { assertEquals("https://desktop:1992/#pair=invitation&ca=pin", received) }
+    }
+
+    @Test fun savedFormStateIsNotRestoredAcrossDesktopIdentityChanges() {
+        val restoration = StateRestorationTester(compose)
+        var identity = "desktop-a"
+        restoration.setContent {
+            BuildmeshTheme {
+                DesktopStateBoundary(identity) {
+                    val title = rememberSaveable { mutableStateOf("") }
+                    OutlinedTextField(title.value, { title.value = it }, label = { Text("Title") })
+                }
+            }
+        }
+        compose.onNodeWithText("Title").performTextInput("Private title from desktop A")
+
+        // Keep A's Bundle, then simulate startup pairing B before A's slot is restored.
+        identity = "desktop-b"
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.onNodeWithText("Private title from desktop A").assertDoesNotExist()
+        compose.onNodeWithText("Title").assertExists()
     }
 
     @Test fun dashboardOpensNodesAndFiltersAttention() {

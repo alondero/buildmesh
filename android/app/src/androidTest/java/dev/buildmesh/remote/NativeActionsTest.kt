@@ -174,4 +174,51 @@ class NativeActionsTest {
             assertEquals("""{"title":"Native change","body":"Explains the change","base_branch":"main"}""", request.body.readUtf8())
         }
     }
+
+    @Test fun draftsStayWithTheirDesktopWhenIdsRepeatAndReturnAfterRepairingTheSameDesktop() {
+        withDesktop({ MockResponse().setResponseCode(204) }) { desktopA, _ ->
+            val app = ApplicationProvider.getApplicationContext<Application>()
+            val store = SessionStore(app)
+            val sessionA = store.read()!!
+            val key = "pr-title-3"
+            desktopA.saveDraft(key, "Private title from desktop A")
+            MockWebServer().use { serverB ->
+                serverB.dispatcher = object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest) = MockResponse().setResponseCode(204)
+                }
+                serverB.start(java.net.InetAddress.getByName("127.0.0.1"), 0)
+                val sessionB = DeviceSession(serverB.url("/").toString(), null, "bm_session=desktop-b; Path=/; HttpOnly")
+                store.save(sessionB)
+                var desktopB: BuildmeshViewModel? = null
+                var repairedA: BuildmeshViewModel? = null
+                var repairedB: BuildmeshViewModel? = null
+                try {
+                    compose.runOnUiThread { desktopB = BuildmeshViewModel(app) }
+                    val second = desktopB!!
+                    compose.waitUntil(10000) { !second.state.value.restoring }
+                    assertEquals("Desktop B must not show desktop A's draft when mesh IDs match", "", second.draft(key))
+                    second.saveDraft(key, "Private title from desktop B")
+
+                    store.save(sessionA)
+                    compose.runOnUiThread { repairedA = BuildmeshViewModel(app) }
+                    val secondA = repairedA!!
+                    compose.waitUntil(10000) { !secondA.state.value.restoring }
+                    assertEquals("Re-pairing desktop A should restore its own draft", "Private title from desktop A", secondA.draft(key))
+
+                    store.save(sessionB)
+                    compose.runOnUiThread { repairedB = BuildmeshViewModel(app) }
+                    val secondB = repairedB!!
+                    compose.waitUntil(10000) { !secondB.state.value.restoring }
+                    assertEquals("Re-pairing desktop B should restore only its own draft", "Private title from desktop B", secondB.draft(key))
+                } finally {
+                    compose.runOnUiThread {
+                        desktopB?.forget()
+                        repairedA?.forget()
+                        repairedB?.forget()
+                    }
+                    app.getSharedPreferences("drafts", 0).edit().clear().commit()
+                }
+            }
+        }
+    }
 }

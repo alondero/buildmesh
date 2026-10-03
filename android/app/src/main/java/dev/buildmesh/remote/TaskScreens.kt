@@ -15,10 +15,10 @@ import kotlinx.serialization.json.*
 fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, changes: () -> Unit) {
     val state by vm.state.collectAsState()
     val id = node.number("id")
-    var draft by rememberSaveable(id) { mutableStateOf(vm.draft("reply-$id")) }
+    var draft by rememberSaveable(state.draftNamespace, id) { mutableStateOf(vm.draft("reply-$id")) }
     val lifecycle = node.objectAt("lifecycle")?.takeIf { it.text("status") == node.text("status") }
     val requestId = lifecycle?.text("timestamp").orEmpty()
-    var answeredRequest by rememberSaveable(id) { mutableStateOf<String?>(null) }
+    var answeredRequest by rememberSaveable(state.draftNamespace, id) { mutableStateOf<String?>(null) }
     val choices = (lifecycle?.objectAt("request")?.get("choices") as? JsonArray)?.map { (it as JsonPrimitive).content }.orEmpty()
     val canReply = node.text("status") in setOf("idle", "ready", "awaiting_input") && !state.busy && (requestId.isEmpty() || answeredRequest != requestId)
     fun send(sequence: String) {
@@ -52,8 +52,8 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
 
 @Composable
 fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, selectMesh: (Long) -> Unit, openNode: (Long) -> Unit) {
-    var prompt by rememberSaveable { mutableStateOf(vm.draft("capture")) }
-    var provider by rememberSaveable { mutableStateOf("") }
+    var prompt by rememberSaveable(state.draftNamespace) { mutableStateOf(vm.draft("capture")) }
+    var provider by rememberSaveable(state.draftNamespace) { mutableStateOf("") }
     val options = state.providers.filter { it.text("unavailable_reason").isEmpty() && (prompt.isBlank() || it.objectAt("capabilities")?.flag("supports_prefill") == true) }
     val mesh = state.meshes.firstOrNull { it.number("id") == selectedMesh }
     LaunchedEffect(state.meshes) { if (mesh == null && state.meshes.isNotEmpty()) selectMesh(state.meshes.first().number("id")) }

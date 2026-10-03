@@ -69,23 +69,30 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
             if (state.busy || state.refreshing) LinearProgressIndicator(Modifier.fillMaxWidth())
             if (state.restoring) Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             else if (!state.paired) PairScreen(invitation, state.busy, vm::pair)
-            else when (screen) {
-                "home" -> Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
-                    { id, target -> meshId = id; screen = target })
-                "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" })
-                    else EmptyMessage("This node is no longer available.")
-                "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
-                "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
-                "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
-                "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, { id -> nodeId = id; screen = "node" })
-                "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
-                "pr" -> CreatePrScreen(meshId, vm)
-                "connection" -> ConnectionScreen(state.origin, vm, {
-                    meshId = 0; nodeId = 0; screen = "home"
-                })
+            else DesktopStateBoundary(state.draftNamespace) {
+                when (screen) {
+                    "home" -> Dashboard(state, tab, meshId, { meshId = it }, { nodeId = it; screen = "node" },
+                        { id, target -> meshId = id; screen = target })
+                    "node" -> if (selected != null) NodeScreen(selected, vm, { screen = "terminal" }, { screen = "changes" })
+                        else EmptyMessage("This node is no longer available.")
+                    "terminal" -> vm.api?.let { TerminalPane(it, nodeId, vm) }
+                    "changes" -> vm.api?.let { ChangesScreen(it, nodeId, vm, { file = it; screen = "diff" }) }
+                    "diff" -> vm.api?.let { DiffScreen(it, nodeId, file, vm) }
+                    "capture" -> TaskScreen(state, vm, meshId, { meshId = it }, { id -> nodeId = id; screen = "node" })
+                    "issues", "archive" -> vm.api?.let { ResourceScreen(it, meshId, screen, state, vm, { id -> nodeId = id; screen = "node" }) }
+                    "pr" -> CreatePrScreen(meshId, vm)
+                    "connection" -> ConnectionScreen(state.origin, vm, {
+                        meshId = 0; nodeId = 0; screen = "home"
+                    })
+                }
             }
         }
     }
+}
+
+@Composable
+fun DesktopStateBoundary(identity: String, content: @Composable () -> Unit) {
+    key(identity) { content() }
 }
 
 @Composable
