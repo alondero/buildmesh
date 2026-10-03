@@ -435,7 +435,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         id={`node-item-name-${node.id}`}
         value={node.name}
         onCommit={(next) => renameAgentNode(node.id, next)}
-        className="flex-1 truncate text-text-primary font-sans text-left text-sm"
+        className="min-w-0 flex-1 truncate text-text-primary font-sans text-left text-sm"
       />
       {lostConversation && <MissingSessionIdBadge />}
       {showRestart && (
@@ -447,7 +447,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               addToast('Restart failed', formatError(err), 'error');
             });
           }}
-          className="text-text-muted hover:text-status-warning text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-status-warning hover:bg-bg-card-hover text-xs transition-colors"
           title={
             node.cli_session_id != null
               ? 'Retry resume with existing session'
@@ -478,12 +478,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
               addToast('Resume failed', formatError(err), 'error');
             });
           }}
-          // Mirrors the inline Restart button's hover/focus surface so
-          // the two affordances feel like siblings; the violet accent
-          // matches the Suspended status dot so a user hovering a
-          // Suspended-vs-error row gets a colour cue tied to the
-          // status.
-          className="text-text-muted hover:text-accent-violet text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-accent-violet hover:bg-bg-card-hover text-xs transition-colors"
           title="Resume agent"
           aria-label={`Resume ${node.name}`}
           data-testid="resume-button"
@@ -493,7 +488,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
       )}
       {isClosing ? (
         <span
-          className="text-text-muted text-xs px-1 flex items-center"
+          className="h-[24px] w-[24px] shrink-0 text-text-secondary text-xs flex items-center justify-center"
           title="Closing…"
           aria-label="Closing"
         >
@@ -503,7 +498,7 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         <button
           type="button"
           onClick={handleDelete}
-          className="text-text-muted hover:text-status-error text-xs px-1 transition-colors opacity-0 group-hover/node:opacity-100 group-focus-within/node:opacity-100 focus-visible:opacity-100"
+          className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md text-text-secondary hover:text-status-error hover:bg-bg-card-hover text-xs transition-colors"
           title="Delete node"
           aria-label={`Delete ${node.name}`}
         >

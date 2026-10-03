@@ -56,6 +56,16 @@ function contrastRatio(fg: string, bg: string): number {
 
 const APP_CSS = readFileSync(resolve(__dirname, '../../src/App.css'), 'utf8');
 
+it.each(['dark', 'light'])('primary action text clears AA on its selection surface (%s)', theme => {
+  const palette = theme === 'light' ? APP_CSS.slice(APP_CSS.indexOf('[data-theme="light"] {')) : APP_CSS;
+  const token = (name: string) => {
+    const match = new RegExp(`--color-${name}\\s*:\\s*([^;]+);`).exec(palette);
+    if (!match) throw new Error(`Missing ${theme} token ${name}`);
+    return match[1].trim();
+  };
+  expect(contrastRatio(token('text-primary'), token('bg-selection'))).toBeGreaterThanOrEqual(4.5);
+});
+
 function readToken(name: string): string {
   // Matches `--color-text-muted: #7a8492;` (and tolerates surrounding
   // whitespace / comments). Picks the FIRST occurrence — tokens are

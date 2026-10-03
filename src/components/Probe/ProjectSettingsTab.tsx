@@ -883,7 +883,7 @@ export function ProjectSettingsTab() {
                 />
                 <span className="text-text-primary">Sandbox agent processes</span>
               </label>
-              <p className="mt-1 text-xs text-text-muted/70">
+              <p className="mt-1 text-xs text-text-muted">
                 Run this mesh&apos;s agents inside an OS process sandbox, confining
                 filesystem access to the node&apos;s worktree.
               </p>
@@ -944,7 +944,7 @@ export function ProjectSettingsTab() {
                   await saveBuildCommand(e.target.value);
                 }}
                 placeholder="e.g., npm run build — type to override, or pick a preset above"
-                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
             </Field>
 
@@ -959,7 +959,7 @@ export function ProjectSettingsTab() {
                   await saveRunCommand(e.target.value);
                 }}
                 placeholder="e.g., npm run dev — type to override, or pick a preset above"
-                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
             </Field>
 
@@ -981,7 +981,7 @@ export function ProjectSettingsTab() {
                   await saveRootBuildCommand(e.target.value);
                 }}
                 placeholder="e.g., cargo build --workspace — run from the mesh root"
-                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
             </Field>
 
@@ -1000,7 +1000,7 @@ export function ProjectSettingsTab() {
                   await saveRootRunCommand(e.target.value);
                 }}
                 placeholder="e.g., npm run lint --workspaces — run from the mesh root"
-                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted/60 placeholder:italic focus:outline-none focus:border-accent-cyan"
+                className="w-full bg-bg-overlay border border-border-subtle rounded-md px-2 py-1.5 text-sm text-text-primary placeholder:text-text-muted placeholder:italic focus:outline-none focus:border-accent-cyan"
               />
             </Field>
           </ProbeSection>

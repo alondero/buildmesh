@@ -7,7 +7,7 @@
  * `ProbeToolbar` (issue #813), and `SaveIndicator` (issue #729).
  * The `htmlFor`↔`id` association is what lets `getByLabelText`
  * resolve the control in tests and click-to-focus the label work for
- * keyboard users. The hint ships as a dimmed suffix on the label line
+ * keyboard users. The hint ships as a muted suffix on the label line
  * so the rhythm stays single-line — long hints go in a paragraph
  * after the control, not in this wrapper.
  */
@@ -25,7 +25,7 @@ export function Field({ label, htmlFor, hint, children }: FieldProps) {
     <div>
       <label htmlFor={htmlFor} className="block text-xs text-text-muted mb-1">
         {label}
-        {hint && <span className="text-text-muted/60"> ({hint})</span>}
+        {hint && <span className="text-text-muted"> ({hint})</span>}
       </label>
       {children}
     </div>

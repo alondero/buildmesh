@@ -187,7 +187,7 @@ export function ScratchpadTab() {
         />
       </div>
       <textarea
-        className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed focus:outline-none placeholder:text-text-muted/60"
+        className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed focus:outline-none placeholder:text-text-muted"
         value={text}
         onChange={handleChange}
         placeholder="Type whatever you want — notes, half-thoughts, links, todos…"

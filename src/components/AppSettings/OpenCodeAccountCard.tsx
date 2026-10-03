@@ -218,7 +218,7 @@ function SignedOutView({
         type="button"
         onClick={startSignIn}
         data-testid="opencode-sign-in"
-        className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+        className="px-5 py-2.5 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
       >
         Sign in with OpenCode Console
       </button>
@@ -694,7 +694,7 @@ function SignedInExpiredView({
           type="button"
           onClick={startSignIn}
           data-testid="opencode-sign-in-again"
-          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+          className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
         >
           Sign in again
         </button>
@@ -756,7 +756,7 @@ function ErrorView({
         type="button"
         onClick={startSignIn}
         data-testid="opencode-retry"
-        className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+        className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
       >
         Retry sign-in
       </button>

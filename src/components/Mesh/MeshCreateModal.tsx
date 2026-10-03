@@ -27,7 +27,7 @@ type MeshSource = 'open' | 'clone';
 
 const SECTION_LABEL = 'text-2xs uppercase tracking-wide text-text-muted mb-1.5';
 const PICKER_BUTTON =
-  'px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors disabled:opacity-50';
+  'px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary hover:bg-bg-card-hover border border-border-strong rounded-md transition-colors disabled:opacity-50';
 const PATH_PREVIEW =
   'mt-1.5 text-xs font-mono text-text-secondary bg-bg-card border border-border-subtle rounded-md px-2 py-1 break-all';
 
@@ -319,7 +319,7 @@ export function MeshCreateModal({ onClose, defaultColor }: MeshCreateModalProps)
           type="button"
           onClick={source === 'open' ? handleCreate : handleClone}
           disabled={!canSubmit || busy}
-          className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          className="px-3 py-1.5 text-xs font-medium text-text-primary bg-bg-selection hover:bg-bg-card-hover border border-accent-cyan rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {primaryLabel}
         </button>

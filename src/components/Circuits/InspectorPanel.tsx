@@ -320,10 +320,10 @@ function ContextReferenceRow({
       data-reachable={live ? 'true' : 'false'}
       className="flex items-center gap-2 py-0.5"
     >
-      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted/60'}`}>
+      <code className={`font-mono text-2xs ${live ? 'text-text-secondary' : 'text-text-muted'}`}>
         {path}
       </code>
-      <span className={`font-mono text-2xs italic ${live ? 'text-text-muted' : 'text-text-muted/50'}`}>
+      <span className="font-mono text-2xs italic text-text-muted">
         {sampleValueForPath(path)}
       </span>
       {!live && (
@@ -393,7 +393,7 @@ function ContextReferenceDrawer({
           Context variables
         </span>
         {reachable === undefined && (
-          <span className="text-2xs text-text-muted/70" data-testid="context-reference-no-graph">
+          <span className="text-2xs text-text-muted" data-testid="context-reference-no-graph">
             no graph
           </span>
         )}

@@ -60,7 +60,7 @@ export function MeshRecolorModal({ meshId, meshName, currentColor, onClose }: Me
           type="button"
           onClick={handleSave}
           disabled={saving}
-          className="px-3 py-1.5 text-xs font-medium text-accent-cyan bg-accent-cyan/10 hover:bg-accent-cyan/20 border border-accent-cyan/20 rounded-md transition-colors disabled:opacity-50"
+          className="px-3 py-1.5 text-xs font-medium text-text-primary bg-bg-selection hover:bg-bg-card-hover border border-accent-cyan rounded-md transition-colors disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
