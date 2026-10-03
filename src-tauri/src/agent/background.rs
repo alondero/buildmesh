@@ -309,6 +309,11 @@ mod tests {
     #[test]
     fn dropping_background_ownership_closes_descendant_pipes() {
         use std::io::{BufRead, Read};
+        // Sibling tests swap PATH for an empty directory under this lock.
+        // `powershell.exe` is resolved from the process environment, so a
+        // parallel spawn otherwise fails with "program not found" or exits
+        // before the child line is written.
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let directory = tempfile::tempdir().unwrap();
         let mut command = if cfg!(windows) {
             let parent_script = directory.path().join("parent.ps1");

@@ -137,6 +137,28 @@ state cannot be updated until a later callback succeeds. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## Codex refuses to start over a proxied provider
+
+A node opened from a proxied provider (a Codex route) fails immediately with a
+startup error instead of a prompt, for example:
+
+```
+error: the argument '--model <MODEL>' cannot be used multiple times
+```
+
+Codex accepts `--model` only once, so a launch that passes it twice is rejected
+before the session starts. Older builds could do this for any proxied Codex node
+whose launch resolved a model — which is every node spawned from a saved Launch
+Configuration, because a proxied provider's model is the route's. Update to a
+current build and start the node again: the launch command is rebuilt for every
+start, and the CLI session never started, so there is no work to lose.
+
+On a current build the only remaining way to repeat the flag is the verbatim
+extra-argument layer: a Launch Configuration or Circuit step that puts `--model`
+in its extra arguments is forwarded to Codex untouched, alongside the model
+Buildmesh already passes. Remove it from the extra arguments and choose the model
+in the configuration's model field instead.
+
 ## GitHub feeds fail for a WSL mesh
 
 On a Windows host, Buildmesh reads the repository through its WSL network
