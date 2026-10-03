@@ -147,10 +147,24 @@ fn removal_404_is_success_only_when_an_accessible_issue_confirms_absence() {
         ]);
         assert_eq!(
             client
-                .remove_issue_label("acme", "demo", 101, "team/ui")
+                .remove_issue_label_checked("acme", "demo", 101, "team/ui")
                 .is_ok(),
             expected_success
         );
         thread.join().unwrap();
     }
+}
+
+#[test]
+fn worker_removal_keeps_missing_label_idempotent_without_a_verification_read() {
+    let (client, thread) = server(vec![Response {
+        request: "DELETE /repos/acme/demo/issues/101/labels/team%2Fui HTTP/1.1",
+        body: None,
+        status: 404,
+        response: serde_json::json!({"message":"Not Found"}),
+    }]);
+    client
+        .remove_issue_label("acme", "demo", 101, "team/ui")
+        .unwrap();
+    thread.join().unwrap();
 }

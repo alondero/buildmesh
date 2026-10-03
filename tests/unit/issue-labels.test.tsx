@@ -70,6 +70,57 @@ describe('GitHub issue tags', () => {
     expect(screen.getByTitle(/Watched by enabled Autopilot Circuit: Implementation/)).toBeTruthy();
   });
 
+  it('keeps healthy Circuit highlights when another graph is malformed', async () => {
+    issue.labels = ['ready-for-agent'];
+    backend([{ ...circuit('broken'), graph_json: 'not json' }, circuit('ready-for-agent')]);
+    render(<GitIssuesTab />);
+    await waitFor(() => expect(document.querySelector('[data-circuit-trigger-label="ready-for-agent"]')).not.toBeNull());
+    expect(screen.queryByText(/Autopilot label status unavailable/)).toBeNull();
+  });
+
+  it('shares one repository label load across issue editors', async () => {
+    backend();
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    vi.mocked(invoke).mockImplementation((cmd, args, opts) => cmd === 'get_repo_issues'
+      ? Promise.resolve([{ ...issue }, { ...issue, number: 102, title: 'Second issue' }])
+      : original(cmd, args, opts));
+    render(<GitIssuesTab />);
+    const first = await screen.findByRole('button', { name: 'Edit tags for issue #101' });
+    const second = screen.getByRole('button', { name: 'Edit tags for issue #102' });
+    await waitFor(() => expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_repo_labels')).toHaveLength(1));
+    await userEvent.click(first);
+    await screen.findByRole('checkbox', { name: 'team/ui' });
+    await userEvent.click(first);
+    await userEvent.click(second);
+    await screen.findByRole('checkbox', { name: 'team/ui' });
+    expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_repo_labels')).toHaveLength(1);
+  });
+
+  it('keeps an acknowledged edit when an older GitHub search read returns stale labels', async () => {
+    backend();
+    const original = vi.mocked(invoke).getMockImplementation()!;
+    const staleSearch = deferred<GitHubIssue[]>();
+    let issueReads = 0;
+    vi.mocked(invoke).mockImplementation((cmd, args, opts) => {
+      if (cmd === 'get_repo_issues') {
+        issueReads += 1;
+        return issueReads === 1 ? Promise.resolve([{ ...issue, labels: ['bug'] }]) : staleSearch.promise;
+      }
+      return original(cmd, args, opts);
+    });
+    render(<GitIssuesTab />);
+    await screen.findByRole('button', { name: 'Edit tags for issue #101' });
+    await userEvent.click(screen.getByRole('button', { name: 'Refresh issues' }));
+    await waitFor(() => expect(issueReads).toBe(2));
+    await userEvent.click(screen.getByRole('button', { name: 'Edit tags for issue #101' }));
+    await screen.findByRole('checkbox', { name: 'ready-for-agent' });
+    await userEvent.click(screen.getByRole('checkbox', { name: 'ready-for-agent' }));
+    await waitFor(() => expect(document.querySelector('[data-issue-label="ready-for-agent"]')).not.toBeNull());
+    await act(async () => staleSearch.resolve([{ ...issue, labels: ['bug'] }]));
+    expect(document.querySelector('[data-issue-label="ready-for-agent"]')).not.toBeNull();
+    expect(issueReads).toBe(2);
+  });
+
   it('keeps labels unchanged on failure and allows retry', async () => {
     backend();
     const original = vi.mocked(invoke).getMockImplementation()!;
@@ -158,21 +209,27 @@ describe('GitHub issue tags', () => {
     const newIssues = deferred<GitHubIssue[]>();
     const oldCircuits = deferred<AutopilotCircuit[]>();
     const newCircuits = deferred<AutopilotCircuit[]>();
+    const oldLabels = deferred<string[]>();
+    const newLabels = deferred<string[]>();
     vi.mocked(invoke).mockImplementation((cmd, args, opts) => {
       const meshId = (args as { meshId?: number } | undefined)?.meshId;
       if (cmd === 'get_repo_issues') return meshId === 42 ? oldIssues.promise : newIssues.promise;
       if (cmd === 'list_circuits') return meshId === 42 ? oldCircuits.promise : newCircuits.promise;
+      if (cmd === 'get_repo_labels') return meshId === 42 ? oldLabels.promise : newLabels.promise;
       return original(cmd, args, opts);
     });
     render(<GitIssuesTab />);
     act(() => useMeshStore.setState({ selectedMeshId: 99, meshesById: new Map([[99, { ...mesh, id: 99 }]]) }));
-    const old = async () => { oldIssues.resolve([{ ...issue, labels: ['bug'] }]); oldCircuits.resolve([circuit('bug')]); };
-    const fresh = async () => { newIssues.resolve([{ ...issue, title: 'New mesh issue', labels: ['team/ui'] }]); newCircuits.resolve([circuit('team/ui', true, 99)]); };
+    const old = async () => { oldIssues.resolve([{ ...issue, labels: ['bug'] }]); oldCircuits.resolve([circuit('bug')]); oldLabels.resolve(['old-only']); };
+    const fresh = async () => { newIssues.resolve([{ ...issue, title: 'New mesh issue', labels: ['team/ui'] }]); newCircuits.resolve([circuit('team/ui', true, 99)]); newLabels.resolve(['new-only']); };
     await act(order === 'old-first' ? old : fresh);
     await act(order === 'old-first' ? fresh : old);
     expect(await screen.findByText('New mesh issue')).toBeTruthy();
     expect(document.querySelector('[data-circuit-trigger-label="team/ui"]')).not.toBeNull();
     expect(document.querySelector('[data-issue-label="bug"]')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Edit tags for issue #101' }));
+    expect(await screen.findByRole('checkbox', { name: 'new-only' })).toBeTruthy();
+    expect(screen.queryByRole('checkbox', { name: 'old-only' })).toBeNull();
   });
 
   it('removes highlights when the circuit is disabled and reports status lookup errors', async () => {

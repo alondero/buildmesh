@@ -49,6 +49,7 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import {
   getRepoIssues,
+  getRepoLabels,
   listCircuits,
   createIssueNode,
   listProviders,
@@ -135,6 +136,12 @@ export function GitIssuesTab() {
   const [triggerLabels, setTriggerLabels] = useState<Map<string, string[]>>(new Map());
   const [triggerMeshId, setTriggerMeshId] = useState<number | null>(null);
   const [triggerError, setTriggerError] = useState<string | null>(null);
+  const [repoLabels, setRepoLabels] = useState<{ meshId: number | null; names: string[]; loading: boolean; error: string | null }>({
+    meshId: null, names: [], loading: false, error: null,
+  });
+  const [labelsRetry, setLabelsRetry] = useState(0);
+  // A search response started before an acknowledged label write can be stale.
+  const issueWriteRevision = useRef(0);
   const currentMesh = useRef({ id: activeMeshId });
   if (currentMesh.current.id !== activeMeshId) currentMesh.current = { id: activeMeshId };
   const meshOwner = currentMesh.current;
@@ -151,7 +158,7 @@ export function GitIssuesTab() {
   // Per-row expand state for the issue body. Set keyed by issue number
   // (not a single boolean) so cross-referencing two long issues stays
   // possible — the dock is 360px wide, but a user can scroll it freely.
-  // Cleared on mesh change in the load effect below. `useToggleSet`
+  // Cleared on mesh change by the effect below. `useToggleSet`
   // (issue #463) bundles the Set state + toggle closure + clear
   // reset into one hook so the load effect can call `expanded.clear()`
   // instead of `setExpanded(new Set())`.
@@ -173,7 +180,14 @@ export function GitIssuesTab() {
         const labels = new Map<string, string[]>();
         for (const circuit of circuits) {
           if (!circuit.enabled || circuit.mesh_id !== activeMeshId) continue;
-          for (const { type: kind } of parseGraph(circuit.graph_json).nodes) {
+          let nodes;
+          try {
+            nodes = parseGraph(circuit.graph_json).nodes;
+          } catch {
+            // One damaged Circuit must not hide labels watched by other Circuits.
+            continue;
+          }
+          for (const { type: kind } of nodes) {
             if (kind.type !== 'github_issue_label') continue;
             const label = kind.label.toLowerCase();
             labels.set(label, [...new Set([...(labels.get(label) ?? []), circuit.name])]);
@@ -194,6 +208,19 @@ export function GitIssuesTab() {
     void loadTriggers();
     return () => clearTimeout(timer);
   }, [activeMeshId, reloadKey]);
+
+  useAsyncEffect(signal => {
+    if (activeMeshId === null) {
+      setRepoLabels({ meshId: null, names: [], loading: false, error: null });
+      return;
+    }
+    setRepoLabels({ meshId: activeMeshId, names: [], loading: true, error: null });
+    void getRepoLabels(activeMeshId).then(names => {
+      if (!signal.aborted) setRepoLabels({ meshId: activeMeshId, names, loading: false, error: null });
+    }).catch(err => {
+      if (!signal.aborted) setRepoLabels({ meshId: activeMeshId, names: [], loading: false, error: formatError(err) });
+    });
+  }, [activeMeshId, reloadKey, labelsRetry]);
 
   // Cross-reference index for the blocked-by indicator. Built once per
   // render of the loaded open issues list — both as a Set (for fast
@@ -241,12 +268,13 @@ export function GitIssuesTab() {
       return;
     }
     const load = async () => {
+      const writeRevision = issueWriteRevision.current;
       try {
         const result = await getRepoIssues(activeMeshId);
         // The mesh could have changed between opening the modal and the
         // IPC returning — drop the result in that case rather than
         // showing issues for a mesh the user no longer has focused.
-        if (signal.aborted) return;
+        if (signal.aborted || issueWriteRevision.current !== writeRevision) return;
         setIssues(result);
         setLoadedMeshId(activeMeshId);
       } catch (e) {
@@ -482,16 +510,19 @@ export function GitIssuesTab() {
                     // into a second row of noise.
                     chips.push(<IssueLabels key={`${activeMeshId}-${issue.number}`} meshId={activeMeshId} issue={issue}
                       triggers={triggerMeshId === activeMeshId ? triggerLabels : new Map()}
+                      repositoryLabels={repoLabels.meshId === activeMeshId ? repoLabels.names : []}
+                      labelsLoading={repoLabels.meshId === activeMeshId && repoLabels.loading}
+                      labelsError={repoLabels.meshId === activeMeshId ? repoLabels.error : null}
+                      onRetryLabels={() => setLabelsRetry(value => value + 1)}
                       onChange={(label, present) => {
                         if (currentMesh.current !== meshOwner || lifetime.current?.aborted) return;
+                        issueWriteRevision.current += 1;
                         setIssues(previous => previous.map(row => row.number === issue.number ? {
                           ...row,
                           labels: present
                             ? [...row.labels.filter(value => value.toLowerCase() !== label.toLowerCase()), label]
                             : row.labels.filter(value => value.toLowerCase() !== label.toLowerCase()),
                         } : row));
-                        // Supersede reads started before the acknowledged write.
-                        setReloadKey(value => value + 1);
                       }}
                       onError={error => {
                         if (currentMesh.current !== meshOwner || lifetime.current?.aborted) return;

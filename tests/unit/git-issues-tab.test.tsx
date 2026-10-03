@@ -132,7 +132,7 @@ function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDER
       case 'create_issue_node':
         return Promise.resolve(DRAFT);
       default:
-        return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+        return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     }
   });
 }
@@ -202,7 +202,7 @@ describe('GitIssuesTab (#378)', () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_issues') return Promise.reject(new Error('gh: not authenticated'));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
     await screen.findByText('Failed to load issues');
@@ -226,7 +226,7 @@ describe('GitIssuesTab (#378)', () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_issues') return Promise.reject(new Error('gh: not authenticated'));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 
@@ -261,7 +261,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return new Promise((res) => { resolveCreate = res; });
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 
@@ -319,7 +319,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.reject(new Error('boom'));
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     useUIStore.setState({ probeOpen: true, probeTab: 'issues' });
     render(<GitIssuesTab />);
@@ -553,7 +553,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     const { rerender } = render(<GitIssuesTab />);
 
@@ -710,7 +710,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_issue_node') return Promise.resolve(DRAFT);
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 
@@ -763,7 +763,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'get_github_url_for_mesh') {
         return Promise.resolve('https://github.com/acme/demo');
       }
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 
@@ -784,7 +784,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'get_github_url_for_mesh') {
         return Promise.resolve('https://github.com/acme/demo');
       }
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 
@@ -816,7 +816,7 @@ describe('GitIssuesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);
-      return Promise.resolve(cmd === 'list_circuits' ? [] : {});
+      return Promise.resolve(cmd === 'list_circuits' || cmd === 'get_repo_labels' ? [] : {});
     });
     render(<GitIssuesTab />);
 

@@ -3,23 +3,23 @@ import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useEscapeKey } from '../../hooks/useEscapeKey';
 import { formatError } from '../../lib/errorUtils';
-import { getRepoLabels, setIssueLabel, type GitHubIssue } from '../../lib/tauri';
+import { setIssueLabel, type GitHubIssue } from '../../lib/tauri';
 
-export function IssueLabels({ meshId, issue, triggers, onChange, onError }: {
+export function IssueLabels({ meshId, issue, triggers, repositoryLabels, labelsLoading, labelsError, onRetryLabels, onChange, onError }: {
   meshId: number;
   issue: GitHubIssue;
   triggers: Map<string, string[]>;
+  repositoryLabels: string[];
+  labelsLoading: boolean;
+  labelsError: string | null;
+  onRetryLabels: () => void;
   onChange: (label: string, present: boolean) => void;
   onError: (error: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const [labels, setLabels] = useState<string[]>([]);
   const [search, setSearch] = useState('');
-  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [writeError, setWriteError] = useState<string | null>(null);
-  const [retry, setRetry] = useState(0);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const lifetime = useRef<AbortSignal | null>(null);
   const pending = useRef(false);
@@ -31,18 +31,6 @@ export function IssueLabels({ meshId, issue, triggers, onChange, onError }: {
   };
 
   useAsyncEffect(signal => { lifetime.current = signal; }, []);
-  useAsyncEffect(signal => {
-    if (!open) return;
-    setLoading(true);
-    setLoadError(null);
-    void getRepoLabels(meshId).then(result => {
-      if (!signal.aborted) setLabels(result);
-    }).catch(err => {
-      if (!signal.aborted) setLoadError(formatError(err));
-    }).finally(() => {
-      if (!signal.aborted) setLoading(false);
-    });
-  }, [meshId, open, retry]);
   useClickOutside(open ? editorId : null, () => setOpen(false));
   useEscapeKey(() => {
     setOpen(false);
@@ -72,7 +60,7 @@ export function IssueLabels({ meshId, issue, triggers, onChange, onError }: {
   const watchedLabels = issue.labels.filter(label => watched(label));
   const ordered = [...watchedLabels, ...issue.labels.filter(label => !watched(label))];
   const visible = ordered.slice(0, Math.max(3, watchedLabels.length));
-  const choices = [...new Set([...issue.labels, ...labels])]
+  const choices = [...new Set([...issue.labels, ...repositoryLabels])]
     .filter(label => label.toLowerCase().includes(search.trim().toLowerCase()))
     .sort((a, b) => Number(!!watched(b)) - Number(!!watched(a)) || a.localeCompare(b));
 
@@ -86,7 +74,8 @@ export function IssueLabels({ meshId, issue, triggers, onChange, onError }: {
         </span>
       ))}
       {ordered.length > visible.length && (
-        <button type="button" title={ordered.slice(visible.length).join(', ')} onClick={() => setOpen(true)}
+        <button type="button" title={ordered.slice(visible.length).join(', ')}
+          aria-label={`Show ${ordered.length - visible.length} more tags for issue #${issue.number}`} onClick={() => setOpen(true)}
           className="rounded-md px-1.5 py-px text-2xs text-text-secondary hover:text-text-primary">
           +{ordered.length - visible.length}
         </button>
@@ -99,15 +88,15 @@ export function IssueLabels({ meshId, issue, triggers, onChange, onError }: {
         </svg>
       </button>
       {open && (
-        <div id={editorId} role="group" aria-label={`Tags for issue #${issue.number}`} aria-busy={busy || loading}
+        <div id={editorId} role="group" aria-label={`Tags for issue #${issue.number}`} aria-busy={busy || labelsLoading}
           className="basis-full min-w-0 rounded-md border border-border-default bg-bg-input p-2 space-y-2">
           <input type="text" aria-label="Filter tags" placeholder="Filter tags…" value={search} onChange={event => setSearch(event.target.value)}
             className="w-full min-w-0 rounded-sm border border-border-default bg-bg-input px-2 py-1 text-xs text-text-primary focus:outline-none focus:border-accent-cyan" />
-          {loading && <p role="status" className="text-2xs text-text-secondary">Loading tags…</p>}
-          {loadError && <div role="alert" className="text-2xs text-accent-red break-words">
-            {loadError}<button type="button" onClick={() => setRetry(value => value + 1)} className="block text-accent-cyan">Retry loading tags</button>
+          {labelsLoading && <p role="status" className="text-2xs text-text-secondary">Loading tags…</p>}
+          {labelsError && <div role="alert" className="text-2xs text-accent-red break-words">
+            {labelsError}<button type="button" onClick={onRetryLabels} className="block text-accent-cyan">Retry loading tags</button>
           </div>}
-          {!loading && !loadError && <div className="max-h-48 overflow-y-auto overflow-x-hidden space-y-1">
+          {!labelsLoading && !labelsError && <div className="max-h-48 overflow-y-auto overflow-x-hidden space-y-1">
             {choices.map(label => (
               <label key={label} title={tooltip(label)} className={`flex items-start gap-2 text-xs break-all ${watched(label) ? 'text-accent-violet' : 'text-text-secondary'}`}>
                 <input type="checkbox" checked={issue.labels.some(value => value.toLowerCase() === label.toLowerCase())} disabled={busy}

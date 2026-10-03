@@ -524,19 +524,40 @@ impl GitHubClient {
         Ok(())
     }
 
-    /// Remove a label from an issue. A 404 is idempotent only when a read
-    /// confirms the issue is accessible and the label is absent. The endpoint is
+    /// Remove a label from an issue. The Circuit worker treats a 404 as an
+    /// idempotent success, including when the label was already absent. The endpoint is
     /// `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}` and the label
     /// name goes in the URL path, so we percent-encode it for safety
     /// (labels commonly contain `:`, `/`, etc.).
-    ///
-    /// Backs the Issues Probe's trigger-label toggle (issue #979).
     pub fn remove_issue_label(
         &self,
         owner: &str,
         repo: &str,
         issue_number: i64,
         label: &str,
+    ) -> Result<(), GitHubError> {
+        self.remove_issue_label_with_policy(owner, repo, issue_number, label, false)
+    }
+
+    /// The Issues Probe needs a confirmed absence before reporting a 404 as success;
+    /// GitHub can also use 404 to hide an inaccessible issue.
+    pub fn remove_issue_label_checked(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+        label: &str,
+    ) -> Result<(), GitHubError> {
+        self.remove_issue_label_with_policy(owner, repo, issue_number, label, true)
+    }
+
+    fn remove_issue_label_with_policy(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: i64,
+        label: &str,
+        confirm_absence: bool,
     ) -> Result<(), GitHubError> {
         let encoded = Self::percent_encode_path_component(label);
         let url = self.rest_url(&format!(
@@ -553,15 +574,17 @@ impl GitHubClient {
             .send()?;
 
         let status = resp.status();
-        // GitHub also masks inaccessible resources as 404. Verify absence
-        // before acknowledging success so lost access cannot look like a write.
         if status == reqwest::StatusCode::NOT_FOUND {
-            let body = resp.text().unwrap_or_default();
-            let labels = self.list_labels(&format!(
-                "/repos/{owner}/{repo}/issues/{issue_number}/labels"
-            ))?;
-            if labels.iter().any(|name| name.eq_ignore_ascii_case(label)) {
-                return Err(rest_failure(status, body));
+            if confirm_absence {
+                let body = resp.text().unwrap_or_default();
+                let labels = self.list_labels(&format!(
+                    "/repos/{owner}/{repo}/issues/{issue_number}/labels"
+                ))?;
+                if labels.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                    return Err(rest_failure(status, body));
+                }
+            } else {
+                let _ = resp.bytes();
             }
             return Ok(());
         }
@@ -1504,8 +1527,9 @@ This issue is related to #481 in a narrative sense.
     #[test]
     #[ignore]
     fn integration_remove_issue_label_idempotent_on_missing_label() {
-        // Confirms the 404 → Ok(()) collapse on a label that was never
-        // applied. Requires a real fixture issue + token.
+        // Confirms the Circuit worker's idempotent 404 contract on a label
+        // never applied. The Issues Probe uses remove_issue_label_checked.
+        // Requires a real fixture issue + token.
         let client = GitHubClient::new().expect("GITHUB_TOKEN must be set");
         client
             .remove_issue_label(

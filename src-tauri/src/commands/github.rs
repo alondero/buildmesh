@@ -81,7 +81,7 @@ pub async fn set_issue_label(
         if present {
             client.add_issue_label(&owner, &repo, issue_number, &label)
         } else {
-            client.remove_issue_label(&owner, &repo, issue_number, &label)
+            client.remove_issue_label_checked(&owner, &repo, issue_number, &label)
         }
         .map_err(|e| e.to_string())
     })

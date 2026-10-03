@@ -111,9 +111,9 @@ closes the menu. On short windows, scroll the menu to reach every tool.
 
 ## Configure Autopilot Circuits
 
-In **GitHub Issues**, use the tag button beside an issue's labels to edit its
-tags. Search the repository's labels, then check or uncheck a label to add or
-remove it on GitHub. Changes save individually; permission and network errors
+In **GitHub Issues**, use the tag button beside an issue to change its GitHub
+labels. Search the repository's labels, then check or uncheck one to add or
+remove it. Changes save individually; permission and network errors
 leave the displayed tags unchanged so you can retry. Create or rename repository
 label definitions on GitHub.
 
