@@ -164,6 +164,49 @@ mod lifecycle_snapshot_tests {
         assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health, None);
     }
 
+    /// The early-exit promotion is one write: `running` plus the snapshot the
+    /// clients receive. A row that has left `spawning` is not rewritten, and
+    /// the health column is not repaired to `ok`.
+    #[test]
+    fn spawn_promotion_stores_running_and_keeps_the_health_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
+            VALUES (1,1,'node','C:/mesh','spawning','unverified')", []).unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status)
+            VALUES (2,1,'other','C:/mesh','error')", []).unwrap();
+
+        let mut payload = LifecycleChangedPayload::new(
+            1, LifecycleKind::ProcessRunning, SessionStatus::Running,
+            &HookSignalDetail::default(), "agent process is running",
+        );
+        assert!(commit_spawn_promotion_inner(&conn, &mut payload).unwrap());
+        assert_eq!(payload.signal_health, SignalHealth::Unverified);
+        assert!(payload.provider_event.is_none());
+        let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
+        assert_eq!(node.status, SessionStatus::Running);
+        assert_eq!(node.signal_health, Some(SignalHealth::Unverified));
+        let snapshot = node.lifecycle.expect("the promotion snapshot must round-trip");
+        assert_eq!(snapshot.kind, LifecycleKind::ProcessRunning);
+        assert_eq!(snapshot.status, SessionStatus::Running);
+        assert_eq!(snapshot.timestamp, payload.timestamp);
+        assert_eq!(snapshot.signal_health, SignalHealth::Unverified);
+
+        let mut again = LifecycleChangedPayload::new(
+            1, LifecycleKind::ProcessRunning, SessionStatus::Running,
+            &HookSignalDetail::default(), "again",
+        );
+        assert!(!commit_spawn_promotion_inner(&conn, &mut again).unwrap(), "a running row is no longer spawning");
+
+        let mut errored = LifecycleChangedPayload::new(
+            2, LifecycleKind::ProcessRunning, SessionStatus::Running,
+            &HookSignalDetail::default(), "must not revive",
+        );
+        assert!(!commit_spawn_promotion_inner(&conn, &mut errored).unwrap());
+        assert_eq!(get_agent_node_by_id_inner(&conn, 2).unwrap().status, SessionStatus::Error);
+    }
+
     /// An uninterpretable callback (a garbage body reaches the route with no
     /// provider event but an explicit `Degraded` health) is real harness
     /// evidence and must still reach the column — the guard added for the case
@@ -844,6 +887,25 @@ pub(crate) fn commit_agent_lifecycle_inner(
         params![payload.status.to_db_str(), payload.timestamp, snapshot,
             harness_reported_health,
             payload.signal_health.to_db_str(), payload.session_id, forbidden_json],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Promote a `spawning` row and store that envelope in the same write.
+///
+/// The predicate is the early-exit race guard: any other status, including
+/// the reader's `error`, is left untouched. Delivery health is copied onto
+/// the snapshot so the published envelope matches the row, and it is not
+/// written back to the column. Surviving startup is not a harness report.
+pub(crate) fn commit_spawn_promotion_inner(
+    conn: &Connection,
+    payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
+) -> SqlResult<bool> {
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
+    let changed = conn.execute(
+        "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3 \
+         WHERE id=?4 AND status='spawning'",
+        params![payload.status.to_db_str(), payload.timestamp, snapshot, payload.session_id],
     )?;
     Ok(changed > 0)
 }

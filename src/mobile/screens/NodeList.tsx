@@ -26,6 +26,7 @@ import CaptureIdea from "./CaptureIdea";
 import {
   getNodeStatusConfig,
   isSignalHealthProblem,
+  lifecycleNodePatch,
   nodeInputContext,
   nodeInputRequest,
   type NodeInputRequest,
@@ -169,11 +170,7 @@ export default function NodeList({
       setNodes((prev) =>
         prev
           ? prev.map((n) =>
-              n.id === msg.session_id
-                ? msg.kind === 'signal_unavailable'
-                  ? { ...n, signal_health: msg.signal_health }
-                  : { ...n, status: msg.status, signal_health: msg.signal_health, lifecycle: msg }
-                : n,
+              n.id === msg.session_id ? { ...n, ...lifecycleNodePatch(msg) } : n,
             )
           : prev,
       );
