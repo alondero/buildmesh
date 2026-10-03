@@ -147,13 +147,17 @@ Error: the argument '--model <<MODEL>> cannot be used multiple times
 ```
 
 Codex accepts `--model` only once, so a launch that passes it twice is rejected
-before the session starts. Builds before the fix could do this for any proxied
-Codex node whose launch resolved a model — which is every node spawned from a
-saved Launch Configuration, because a proxied provider's model is the route's.
-Update to a current build and spawn a **new** node; the node's CLI session never
-started, so there is no work to lose. If it still fails, check that a saved
-Launch Configuration for that option is not pinning a model of its own — clear
-the model's override so the route's model is used.
+before the session starts. Older builds could do this for any proxied Codex node
+whose launch resolved a model — which is every node spawned from a saved Launch
+Configuration, because a proxied provider's model is the route's. Update to a
+current build and start the node again: the launch command is rebuilt for every
+start, and the CLI session never started, so there is no work to lose.
+
+On a current build the only remaining way to repeat the flag is the verbatim
+extra-argument layer: a Launch Configuration or Circuit step that puts `--model`
+in its extra arguments is forwarded to Codex untouched, alongside the model
+Buildmesh already passes. Remove it from the extra arguments and choose the model
+in the configuration's model field instead.
 
 ## GitHub feeds fail for a WSL mesh
 

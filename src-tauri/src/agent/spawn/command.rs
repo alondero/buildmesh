@@ -68,18 +68,16 @@ pub fn build_spawn_command_prepared(
         Platform::current()
     };
 
-    // The per-pairing model id is routing knowledge, not harness
-    // knowledge, so it is folded into the resolved config *before*
-    // the recipe is composed. `default_prepare` is then the only
-    // owner of `--model`: it knows the flag spelling, honours the
-    // capability mask, and keeps the option ahead of `resume <id>`.
-    // A proxied launch needs the model (the generated
-    // `<profile>.config.toml` carries only `model_provider`), and a
-    // proxy's resolved model is its route's — so the cascade always
-    // supplies one. Appending `--model` again after the recipe made
-    // every such launch die in the terminal with "the argument
-    // '--model <MODEL>' cannot be used multiple times", because
-    // Codex's CLI accepts the flag once.
+    // The per-pairing model id is routing knowledge, so it is folded
+    // into the resolved config rather than appended to the recipe:
+    // `default_prepare` is the only owner of `--model` (it knows the
+    // flag spelling, gates it on the harness's own model-override
+    // capability, and keeps it ahead of `resume <id>`), and a second
+    // occurrence is rejected by the CLI as a repeated argument. The
+    // fold is load-bearing the other way too: the generated
+    // `<profile>.config.toml` carries only `model_provider`, so an
+    // empty cascade model would leave Codex on an OpenAI model against
+    // a foreign endpoint.
     let routed_config = match routing {
         crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { descriptor, .. } => {
             let mut routed = config.clone();

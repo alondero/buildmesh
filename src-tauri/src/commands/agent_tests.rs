@@ -408,16 +408,14 @@ mod tests {
         }
     }
 
-    /// Codex's CLI accepts `--model` once. A proxied Codex launch therefore
-    /// has exactly ONE owner of that flag — the adapter recipe
-    /// (`default_prepare`) — for every cascade shape: no model at all (the
-    /// route's verified model is used), the route model arriving through a
-    /// frozen Launch Configuration, and a per-call explicit override.
-    ///
-    /// A second `--model` made the CLI exit at startup with "the argument
-    /// '--model <MODEL>' cannot be used multiple times", which hit every
-    /// Launch Configuration-backed proxied Codex spawn — a proxy's resolved
-    /// model is its route's, so `config.model` is always populated there.
+    /// `--model` has exactly ONE owner on a proxied launch — the adapter
+    /// recipe (`default_prepare`) — because Codex's CLI rejects the flag
+    /// outright when it appears twice. Each row pins the post-fix argv: the
+    /// route's verified model when the cascade is empty, the route model
+    /// arriving through a frozen Launch Configuration (the shape that used
+    /// to emit two), and a per-call explicit override winning over the
+    /// route. The empty-cascade row guards the fallback itself — drop the
+    /// fold and the launch loses its model altogether.
     #[test]
     fn proxied_codex_emits_exactly_one_model_flag_for_every_cascade_shape() {
         use crate::agent::capabilities::ResolvedAgentConfig;
