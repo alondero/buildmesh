@@ -124,6 +124,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 
 ### Power features
 - **Remote access**: pair a phone over HTTPS with a single-use QR code or pairing code. The browser remembers its device session and reconnects automatically; revoke individual phones in Authorized Devices. Disabling LAN access closes active remote connections. WebSocket PTY relay streams terminals to your phone, with port fallback (1992→1993→1994).
+- **Native Android client**: manage agents, capture tasks, browse issues and archives, inspect diffs, create pull requests and use live terminals. Pair with the desktop QR; device credentials are encrypted on the phone. See [Android build and installation](docs/development/android.md).
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 

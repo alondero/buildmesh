@@ -58,6 +58,15 @@ current behavior.
 
 ## Not covered
 
+The native Android client uses the same invitation/session endpoints. The
+desktop's HTTPS QR now also carries the public root CA SHA-256 fingerprint
+as `ca` in the fragment. The app authenticates its certificate bootstrap
+against that fingerprint, keeps the root as an app-private trust anchor and
+stores its cookie encrypted with Android Keystore. Browser pairing ignores
+the additional fragment field. This preserves the one-use invitation and
+device revocation model without a system certificate installation. See the
+[Android transport contract](../development/android.md#pairing-and-transport).
+
 This decision does not make the coordinator read API a phone API. That surface
 has its own capability-scoped token and remains separately disabled by default.
 It also does not provide public internet exposure; users need an authenticated
