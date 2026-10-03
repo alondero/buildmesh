@@ -124,6 +124,23 @@ impl TranscriptAdapter for ClineAdapter {
         parse_cline_messages(lines, keep, max_text)
     }
 
+    fn last_assistant_message(
+        &self,
+        path: &Path,
+        session_id: &str,
+    ) -> Result<Parsed, super::super::UnavailableReason> {
+        // This store is rewritten as one document, so byte windows cannot parse it.
+        self.read_tail(path, session_id, 1)
+    }
+
+    fn assistant_report(
+        &self,
+        _path: &Path,
+        _session_id: &str,
+    ) -> Option<super::super::AssistantReport> {
+        None
+    }
+
     fn line_has_assistant_text(&self, _line: &str) -> bool {
         // A Cline transcript is a single JSON *document*, not a stream of JSONL
         // records, so "does this line carry assistant text" has no meaning —
@@ -280,7 +297,10 @@ fn unwrap_user_input(raw: &str) -> UserInput {
     let Some(tag_end) = rest.find('>') else {
         return passthrough();
     };
-    let Some(body) = rest[tag_end + 1..].trim_end().strip_suffix(CLINE_USER_INPUT_CLOSE) else {
+    let Some(body) = rest[tag_end + 1..]
+        .trim_end()
+        .strip_suffix(CLINE_USER_INPUT_CLOSE)
+    else {
         return passthrough();
     };
     let mode = rest[..tag_end]
@@ -599,15 +619,26 @@ mod tests {
     fn reconstructs_user_delimited_turns_from_the_document() {
         let parsed = parse(DOCUMENT, 10);
         let roles: Vec<&str> = parsed.turns.iter().map(|turn| turn.role.as_str()).collect();
-        assert_eq!(roles, vec!["user", "assistant", "user"], "turns: {:#?}", parsed.turns);
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user"],
+            "turns: {:#?}",
+            parsed.turns
+        );
         assert_eq!(parsed.turns[0].text, "Fix the failing login test");
         assert!(parsed.turns[0].tool_calls.is_empty());
         // `thinking` and the `tool_result` echo contribute neither text nor a
         // call; the two text entries concatenate.
-        assert_eq!(parsed.turns[1].text, "Reading the auth module.\nThe null check is missing. Fixed it.");
+        assert_eq!(
+            parsed.turns[1].text,
+            "Reading the auth module.\nThe null check is missing. Fixed it."
+        );
         assert_eq!(parsed.turns[1].tool_calls.len(), 1);
         assert_eq!(parsed.turns[1].tool_calls[0].name, "read_file");
-        assert_eq!(parsed.turns[1].tool_calls[0].input, serde_json::json!({"path": "src/auth.ts"}));
+        assert_eq!(
+            parsed.turns[1].tool_calls[0].input,
+            serde_json::json!({"path": "src/auth.ts"})
+        );
         assert_eq!(parsed.turns[2].text, "Open the PR");
         assert_eq!(
             parsed.last_assistant_message.as_deref(),
@@ -623,7 +654,10 @@ mod tests {
     fn system_prompt_never_becomes_a_turn() {
         let parsed = parse(DOCUMENT, 10);
         assert!(
-            !parsed.turns.iter().any(|turn| turn.text.contains("tool_specification")),
+            !parsed
+                .turns
+                .iter()
+                .any(|turn| turn.text.contains("tool_specification")),
             "the embedded system prompt must not surface as dialogue"
         );
     }
@@ -637,7 +671,10 @@ mod tests {
             &serde_json::from_str::<Value>(DOCUMENT).expect("fixture is valid json"),
         )
         .unwrap();
-        assert!(pretty.lines().count() > 1, "the pretty form must really be multi-line");
+        assert!(
+            pretty.lines().count() > 1,
+            "the pretty form must really be multi-line"
+        );
         assert_eq!(parse(&pretty, 10).turns, parse(DOCUMENT, 10).turns);
     }
 
@@ -712,21 +749,42 @@ mod tests {
     #[test]
     fn user_input_envelope_is_stripped_and_its_mode_captured() {
         for (envelope, expected) in [
-            ("<user_input mode=\"act\">do the thing</user_input>", "do the thing"),
+            (
+                "<user_input mode=\"act\">do the thing</user_input>",
+                "do the thing",
+            ),
             ("<user_input mode='plan'>draft it</user_input>", "draft it"),
             ("<user_input>no mode</user_input>", "no mode"),
             // Multi-line bodies and leading/trailing whitespace are normal.
-            ("\n  <user_input mode=\"act\">\n  spaced out\n  </user_input>\n  ", "spaced out"),
+            (
+                "\n  <user_input mode=\"act\">\n  spaced out\n  </user_input>\n  ",
+                "spaced out",
+            ),
         ] {
             let input = unwrap_user_input(envelope);
             assert_eq!(input.text, expected, "envelope: {envelope}");
         }
-        assert_eq!(unwrap_user_input("<user_input mode=\"act\">x</user_input>").mode.as_deref(), Some("act"));
-        assert_eq!(unwrap_user_input("<user_input mode=\"plan\">x</user_input>").mode.as_deref(), Some("plan"));
+        assert_eq!(
+            unwrap_user_input("<user_input mode=\"act\">x</user_input>")
+                .mode
+                .as_deref(),
+            Some("act")
+        );
+        assert_eq!(
+            unwrap_user_input("<user_input mode=\"plan\">x</user_input>")
+                .mode
+                .as_deref(),
+            Some("plan")
+        );
         assert_eq!(unwrap_user_input("<user_input>x</user_input>").mode, None);
         // A malformed or unexpected wrapper degrades to the raw text rather
         // than silently emptying the turn.
-        for passthrough in ["plain text", "<user_input mode=\"act\">never closed", "<user_input", ""] {
+        for passthrough in [
+            "plain text",
+            "<user_input mode=\"act\">never closed",
+            "<user_input",
+            "",
+        ] {
             assert_eq!(unwrap_user_input(passthrough).text, passthrough);
             assert_eq!(unwrap_user_input(passthrough).mode, None);
         }
@@ -767,7 +825,10 @@ mod tests {
         let truncated = &DOCUMENT[..DOCUMENT.len() / 2];
         let parsed = parse(truncated, 10);
         assert!(parsed.turns.is_empty());
-        assert!(parsed.saw_malformed, "a partial document must not parse as a quiet session");
+        assert!(
+            parsed.saw_malformed,
+            "a partial document must not parse as a quiet session"
+        );
         // Same for the empty file a non-atomic truncate-then-write leaves.
         let empty = parse("", 10);
         assert!(empty.turns.is_empty());
@@ -829,7 +890,10 @@ mod tests {
             ],
         });
         let parsed = parse(&document.to_string(), 10);
-        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Which file should I edit?"));
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("Which file should I edit?")
+        );
     }
 
     /// A small `keep` must evict the oldest turns, and the whole-stream
@@ -848,7 +912,10 @@ mod tests {
         let parsed = parse(&document.to_string(), 2);
         assert_eq!(parsed.turns.len(), 2);
         assert_eq!(parsed.turns[0].text, "two");
-        assert_eq!(parsed.last_assistant_message.as_deref(), Some("second answer"));
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("second answer")
+        );
     }
 
     /// Unknown keys are tolerated (Cline's own Zod schema `$strip`s them), and
@@ -872,7 +939,10 @@ mod tests {
         assert_eq!(parsed.turns.len(), 2);
         assert!(!parsed.saw_malformed, "unknown keys must be tolerated");
         for turn in &parsed.turns {
-            assert!(!turn.text.contains("inputTokens"), "telemetry must not surface as dialogue");
+            assert!(
+                !turn.text.contains("inputTokens"),
+                "telemetry must not surface as dialogue"
+            );
         }
     }
 
@@ -913,11 +983,11 @@ mod tests {
         let sibling = root.path().join("session_1790003303999_aaaaa");
         std::fs::create_dir_all(&sibling).unwrap();
 
+        assert_eq!(find_cline_transcript_in(root.path(), id), Some(messages));
         assert_eq!(
-            find_cline_transcript_in(root.path(), id),
-            Some(messages)
+            find_cline_transcript_in(root.path(), "session_1790003303999_aaaaa"),
+            None
         );
-        assert_eq!(find_cline_transcript_in(root.path(), "session_1790003303999_aaaaa"), None);
     }
 
     /// Degradation rungs 1 and 2: a session directory Cline never created, and
@@ -932,7 +1002,10 @@ mod tests {
         std::fs::create_dir_all(root.path().join(id)).unwrap();
         assert_eq!(find_cline_transcript_in(root.path(), id), None);
         // No sessions tree at all.
-        assert_eq!(find_cline_transcript_in(&root.path().join("nope"), id), None);
+        assert_eq!(
+            find_cline_transcript_in(&root.path().join("nope"), id),
+            None
+        );
     }
 
     /// The session id comes off a node row, so it is untrusted input that lands
@@ -974,8 +1047,219 @@ mod tests {
     #[test]
     fn line_predicate_is_false_for_a_document_format() {
         assert!(!ClineAdapter.line_has_assistant_text(DOCUMENT));
-        assert!(!ClineAdapter.line_has_assistant_text(
-            r#"{"role":"assistant","content":"anything"}"#
-        ));
+        assert!(
+            !ClineAdapter.line_has_assistant_text(r#"{"role":"assistant","content":"anything"}"#)
+        );
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::services::transcript_reader::test_support::{fixture, write_fixture};
+    use crate::services::transcript_reader::types::build_tail;
+
+    use crate::services::transcript_reader::{
+        read_last_assistant_message_from_file, read_tail, read_tail_from_file, TranscriptFormat,
+        TranscriptTail, UnavailableReason,
+    };
+
+    #[test]
+    fn document_reader_handles_tail_digest_empty_shape_changed_and_unreadable_files() {
+        let path = fixture("cline", "cline_messages.json");
+        let parsed = ClineAdapter.read_tail(&path, "session", 1).unwrap();
+        assert_eq!(parsed.turns.len(), 1);
+        assert_eq!(parsed.turns[0].text, "Opened the PR against main.");
+        assert_eq!(
+            ClineAdapter
+                .last_assistant_message(&path, "session")
+                .unwrap()
+                .last_assistant_message
+                .as_deref(),
+            Some("Opened the PR against main.")
+        );
+        assert!(ClineAdapter.assistant_report(&path, "session").is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("messages.json");
+        std::fs::write(&path, r#"{"version":1,"messages":[]}"#).unwrap();
+        assert_eq!(
+            build_tail(ClineAdapter.read_tail(&path, "session", 1).unwrap()),
+            TranscriptTail::unavailable(UnavailableReason::Empty)
+        );
+        for path in [dir.path().join("missing.json"), dir.path().to_path_buf()] {
+            assert_eq!(
+                ClineAdapter.read_tail(&path, "session", 1),
+                Err(UnavailableReason::Unreadable)
+            );
+            assert_eq!(
+                ClineAdapter.last_assistant_message(&path, "session"),
+                Err(UnavailableReason::Unreadable)
+            );
+        }
+        for body in [
+            r#"{"version":1,"renamed_messages":[]}"#,
+            r#"{"version":1,"messages":["#,
+        ] {
+            std::fs::write(&path, body).unwrap();
+            assert_eq!(
+                build_tail(ClineAdapter.read_tail(&path, "session", 1).unwrap()),
+                TranscriptTail::unavailable(UnavailableReason::ShapeChanged)
+            );
+            assert_eq!(
+                build_tail(
+                    ClineAdapter
+                        .last_assistant_message(&path, "session")
+                        .unwrap()
+                ),
+                TranscriptTail::unavailable(UnavailableReason::ShapeChanged)
+            );
+        }
+    }
+
+    #[test]
+    fn cline_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("cline", "cline_messages.json"),
+            10,
+            TranscriptFormat::Cline,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("fixture should parse to an available tail, got {tail:?}");
+        };
+        let roles: Vec<&str> = turns.iter().map(|turn| turn.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant"],
+            "turns: {turns:#?}"
+        );
+        assert_eq!(turns[0].text, "Fix the failing login test");
+        assert_eq!(turns[2].text, "Open the PR");
+        // The `thinking` block and the `tool_result` echo contribute neither
+        // text nor a call; the two text entries of the run concatenate.
+        assert_eq!(
+            turns[1].text,
+            "Reading the auth module.\n`login` returns undefined for an unknown user, so the test's truthy assertion fails. I added the null guard."
+        );
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        assert_eq!(turns[1].tool_calls[0].input["path"], "src/auth.ts");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Opened the PR against main.")
+        );
+        // The embedded system prompt is the largest string in the document and
+        // must never surface as a turn.
+        assert!(
+            !turns
+                .iter()
+                .any(|turn| turn.text.contains("tool_specification")),
+            "the embedded system prompt must not surface as dialogue"
+        );
+    }
+
+    #[test]
+    fn cline_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("cline", "cline_messages.json"),
+            TranscriptFormat::Cline,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Opened the PR against main.")
+        );
+    }
+
+    #[test]
+    fn cline_digest_reads_a_document_larger_than_the_bounded_window() {
+        let padding = "x".repeat(300 * 1024);
+        let document = serde_json::json!({
+            "version": 1,
+            "system_prompt": padding,
+            "messages": [
+                {"role": "user", "content": "<user_input mode=\"act\">go</user_input>"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "A long answer that is older than the window."}]},
+                {"role": "user", "content": "<user_input mode=\"act\">still there?</user_input>"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "Yes — the final answer survives the window cut."}]},
+            ],
+        });
+        let path = write_fixture("cline_large", &document.to_string());
+        assert!(std::fs::metadata(&path).unwrap().len() > 256 * 1024);
+
+        let digest = read_last_assistant_message_from_file(&path, TranscriptFormat::Cline);
+        let TranscriptTail::Available {
+            last_assistant_message,
+            ..
+        } = digest
+        else {
+            panic!("a document past the window must fall back to a whole read, got {digest:?}");
+        };
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("Yes — the final answer survives the window cut.")
+        );
+        // The full reader agrees, and keeps every turn.
+        let TranscriptTail::Available { turns, .. } =
+            read_tail_from_file(&path, 10, TranscriptFormat::Cline)
+        else {
+            panic!("the drill-in reader must also parse the whole document");
+        };
+        assert_eq!(turns.len(), 4);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn cline_truncated_document_degrades_to_shape_changed_not_a_quiet_session() {
+        let full = std::fs::read_to_string(fixture("cline", "cline_messages.json")).unwrap();
+        for (name, body) in [
+            ("truncated", &full[..full.len() / 2]),
+            ("empty", ""),
+            ("not_json", "the writer has not published a document yet"),
+        ] {
+            let path = write_fixture(&format!("cline_{name}"), body);
+            let tail = read_tail_from_file(&path, 10, TranscriptFormat::Cline);
+            assert_eq!(
+                tail,
+                TranscriptTail::unavailable(UnavailableReason::ShapeChanged),
+                "{name} must degrade loudly, got {tail:?}"
+            );
+            std::fs::remove_file(&path).ok();
+        }
+    }
+
+    #[test]
+    fn cline_absent_session_and_document_degrade_to_typed_reasons() {
+        // No captured `cli_session_id` — no path lookup is even attempted.
+        for session_id in [None, Some("")] {
+            assert_eq!(
+                read_tail(TranscriptFormat::Cline, session_id, "F:\\src\\repo", 10),
+                TranscriptTail::unavailable(UnavailableReason::NoSession),
+                "a node with no captured Cline session id must be NoSession"
+            );
+        }
+        let root = tempfile::tempdir().unwrap();
+        let id = "session_1790003303940_9ouga";
+        // Directory without a messages document (Cline creates it before the
+        // first rewrite lands) — the locator rung that yields `NoTranscript`.
+        std::fs::create_dir_all(root.path().join(id)).unwrap();
+        assert_eq!(
+            find_cline_transcript_in(root.path(), id),
+            None,
+            "a session with no messages document must not resolve"
+        );
     }
 }

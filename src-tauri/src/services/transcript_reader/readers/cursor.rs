@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
+use crate::services::transcript_reader::readers::claude_code::parse_turns_with_text_limit;
 use crate::services::transcript_reader::types::Parsed;
-use crate::services::transcript_reader::adapters::claude_code::parse_turns_with_text_limit;
 
 use super::claude_code::ClaudeCodeAdapter;
 
@@ -35,7 +35,12 @@ impl TranscriptAdapter for CursorAdapter {
         ))
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+    fn parse(
+        &self,
+        lines: Box<dyn Iterator<Item = String> + '_>,
+        keep: usize,
+        max_text: usize,
+    ) -> Parsed {
         // Cursor's JSONL shape matches Claude Code's — delegate to the
         // Claude Code parser rather than duplicate `parse_turns`.
         parse_turns_with_text_limit(lines, keep, max_text)
@@ -94,4 +99,86 @@ pub(crate) fn cursor_workspace_slug(path: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    use crate::services::transcript_reader::test_support::write_fixture;
+
+    use crate::services::transcript_reader::{
+        read_tail_from_file, TranscriptFormat, TranscriptTail,
+    };
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn cursor_workspace_slug_matches_cursor_storage_names() {
+        assert_eq!(
+            cursor_workspace_slug("/Users/adam/src/buildmesh"),
+            "Users-adam-src-buildmesh"
+        );
+        assert_eq!(
+            cursor_workspace_slug("C:\\Users\\adam\\src\\buildmesh"),
+            "c-Users-adam-src-buildmesh"
+        );
+        assert_eq!(
+            cursor_workspace_slug(
+                "C:\\Users\\adam\\src\\buildmesh\\.claude\\worktrees\\fancy-name"
+            ),
+            "c-Users-adam-src-buildmesh--claude-worktrees-fancy-name"
+        );
+    }
+
+    #[test]
+    fn cursor_transcript_path_uses_workspace_scoped_session_directory() {
+        let path = cursor_transcript_path_in(
+            Path::new("/home/adam/.cursor"),
+            "session-123",
+            "C:\\Users\\adam\\src\\buildmesh",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from(
+                r#"/home/adam/.cursor/projects/c-Users-adam-src-buildmesh/agent-transcripts/session-123/session-123.jsonl"#
+            )
+        );
+    }
+
+    #[test]
+    fn cursor_jsonl_reuses_the_shared_message_parser() {
+        let path = write_fixture(
+            "cursor_transcript",
+            r#"{"type":"user","message":{"role":"user","content":"Inspect the cursor path"}}
+{"type":"assistant","message":{"role":"assistant","id":"msg-1","content":[{"type":"tool_use","name":"Read","input":{"file":"src/main.rs"}}]}}
+{"type":"assistant","message":{"role":"assistant","id":"msg-1","content":[{"type":"text","text":"The path is wired."}]}}
+"#,
+        );
+        let tail = read_tail_from_file(&path, 10, TranscriptFormat::Cursor);
+        std::fs::remove_file(path).ok();
+
+        let TranscriptTail::Available { turns, .. } = tail else {
+            panic!("Cursor's compatible JSONL should be readable");
+        };
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[1].text, "The path is wired.");
+        assert_eq!(turns[1].tool_calls[0].name, "Read");
+    }
+}
+
+#[cfg(test)]
+mod file_contract_tests {
+    use super::*;
+    use crate::services::transcript_reader::test_support::{assert_jsonl_contract, fixture};
+
+    #[test]
+    fn reader_handles_tail_digest_malformed_empty_shape_changed_and_unreadable_files() {
+        assert_jsonl_contract(
+            &CursorAdapter,
+            &fixture("cursor", "transcript.jsonl"),
+            &fixture("cursor", "shape_changed.jsonl"),
+            "Cursor blocking question?",
+        );
+    }
 }

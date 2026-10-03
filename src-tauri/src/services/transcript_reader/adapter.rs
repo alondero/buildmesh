@@ -1,28 +1,17 @@
-//! The `TranscriptAdapter` seam (issue #1661).
+//! Transcript-reader seam and the existing provider-hook registry.
 //!
-//! After the split the reader module keeps envelope types ([`super::types`])
-//! and one dispatch site per concern. One trait sits between the catalog and
-//! per-harness adapters:
-//!
-//! ```text
-//! reader module (envelope + truncation/scrub only, deep: small interface)
-//!              │ seam: TranscriptAdapter { locate, parse, line_has_assistant_text }
-//!    ┌─────────┼──────────┬──────────────┬─── …nth adapter
-//! claude_code agy        codex     cursor  commandcode  grok  opencode
-//! adapter     adapter    adapter   adapter  adapter     adapter adapter
-//! ```
-//!
-//! Catalog dispatch asks the seam — never per-format lore. Adding harness N
-//! means adding one `adapters/<name>.rs` file and one catalog entry (drop-in
-//! adapter to delete), not editing four parallel `match` tables.
+//! Each reader owns location, parsing, tail/digest reads and assistant reports.
+//! JSONL readers share streaming defaults; document and SQLite readers override
+//! the relevant methods. Unknown transcript harnesses never use a default reader.
+//! The Claude default below serves legacy hook classification only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use super::adapters::{
+use super::readers::{
     AgyAdapter, ClaudeCodeAdapter, ClineAdapter, CodexAdapter, CommandCodeAdapter, CursorAdapter,
     GrokAdapter, McodeAdapter, MuseAdapter, OpenCodeAdapter,
 };
-use super::types::Parsed;
+use super::types::{AssistantReport, Parsed, UnavailableReason};
 
 /// Inputs for [`TranscriptAdapter::locate`]: a session id and the node's
 /// working directory. The harness-specific locator decides what (if anything)
@@ -40,24 +29,22 @@ pub struct LocateCtx<'a> {
 /// Implementors are drop-in `&'static` references registered in this module's
 /// static adapter table — the registry returns them by `id()` so the reader
 /// and attention modules have one dispatch site per concern.
-pub(crate) trait TranscriptAdapter: Send + Sync {
+pub(crate) trait TranscriptReader: Send + Sync {
     /// Harness id this adapter handles (`"claude_code"`, `"codex"`, …).
     /// Overlaps the ids `TranscriptFormat::for_harness` resolves (which
     /// returns `None` for unwired harnesses since issue #1817); the
-    /// enum is replaced by a registry lookup in step 1.
+    /// enum remains the public compatibility surface.
     fn id(&self) -> &'static str;
 
     /// Resolve the on-disk transcript path for a session. `None` means "no
     /// transcript exists" (only the Codex walk can conclude that before an
-    /// `exists()` check). OpenCode returns `None` because its data lives in a
-    /// shared SQLite DB rather than per-session files (issue #1296).
+    /// `exists()` check). A database reader locates its shared store.
     fn locate(&self, ctx: LocateCtx<'_>) -> Option<PathBuf>;
 
     /// Parse JSONL lines into the shared [`Parsed`] contract: bounded turn
     /// window, whole-stream last-assistant tracking, malformed flag.
     /// File-based harnesses implement this directly; OpenCode's adapter
-    /// implements a different read entry point and the reader's OpenCode
-    /// path bypasses this method.
+    /// overrides the store read methods instead.
     ///
     /// `Box<dyn Iterator>` (not `impl Iterator`) so the trait stays
     /// object-safe — the catalog dispatches `&'static dyn TranscriptAdapter`.
@@ -65,7 +52,12 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// streaming.
     /// `max_text` caps display previews; circuit reports retain full text
     /// from their bounded input window so a trailing verdict is not lost.
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed;
+    fn parse(
+        &self,
+        lines: Box<dyn Iterator<Item = String> + '_>,
+        keep: usize,
+        max_text: usize,
+    ) -> Parsed;
 
     /// Cheap per-line check: does this JSONL line carry assistant text?
     /// Used by the digest reader to find the latest assistant message in a
@@ -73,6 +65,32 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// #341). OpenCode returns `false` because its per-line JSON doesn't
     /// match the file-based shape.
     fn line_has_assistant_text(&self, line: &str) -> bool;
+
+    /// Read recent turns from the resolved store. File readers stream JSONL;
+    /// database readers receive the session id alongside their shared store.
+    fn read_tail(
+        &self,
+        path: &Path,
+        _session_id: &str,
+        keep: usize,
+    ) -> Result<Parsed, UnavailableReason> {
+        super::file::read_tail(self, path, keep)
+    }
+
+    /// Read a bounded digest window, retaining enough turns to identify availability.
+    /// The dispatcher alone shapes the available/unavailable envelope.
+    fn last_assistant_message(
+        &self,
+        path: &Path,
+        _session_id: &str,
+    ) -> Result<Parsed, UnavailableReason> {
+        super::file::last_assistant_message(self, path)
+    }
+
+    /// Read the current assistant report from this reader's own store.
+    fn assistant_report(&self, path: &Path, _session_id: &str) -> Option<AssistantReport> {
+        super::file::assistant_report(self, path)
+    }
 
     /// Explicit completion of the latest turn, when the harness records it.
     /// Prose and terminal silence are not lifecycle evidence.
@@ -97,11 +115,7 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// avoid false-positives if a sibling harness ever borrowed the
     /// same event names.
     #[cfg(test)]
-    fn classify_hook(
-        &self,
-        body: &[u8],
-        provider: &str,
-    ) -> Option<HookClassification> {
+    fn classify_hook(&self, body: &[u8], provider: &str) -> Option<HookClassification> {
         let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
         self.classify_hook_value(&payload, provider)
     }
@@ -119,14 +133,13 @@ pub(crate) trait TranscriptAdapter: Send + Sync {
     /// Verify the attention-route token gate (issue #1366 round-2 +
     /// round-3). The default accepts every callback; Grok's adapter
     /// implements the strict minted-token check.
-    fn verify_attention_token(
-        &self,
-        _query_string: Option<&str>,
-        _minted: Option<&str>,
-    ) -> bool {
+    fn verify_attention_token(&self, _query_string: Option<&str>, _minted: Option<&str>) -> bool {
         true
     }
 }
+
+// Existing hook consumers keep the original trait name.
+pub(crate) use TranscriptReader as TranscriptAdapter;
 
 /// What an adapter's [`TranscriptAdapter::classify_hook_value`] returns. `Some(_)`
 /// short-circuits the attention route's shared post-processing; `None`
@@ -170,8 +183,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
     // `None` for unwired harness ids since issue #1817. Listed first so a
     // future "explicit claude-code harness id" maps there directly.
     &CLAUDE_CODE_ADAPTER,
-    // Every other adapter is keyed by its harness id; an unknown harness id
-    // falls back to Claude Code.
+    // Every other reader is keyed by its harness id. Unknown ids return None.
     &AGY_ADAPTER,
     &CLINE_ADAPTER,
     &MCODE_ADAPTER,
@@ -185,8 +197,7 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
 
 /// Seam entry point: `catalog.dispatch(id)` proves the seam — not the old
 /// module — is the dispatch and test surface. Returns `None` for unknown
-/// harness ids (the caller is expected to fall back to Claude Code, the
-/// default adapter).
+/// harness ids. Transcript reads never fall back to another harness.
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
 }
@@ -208,8 +219,7 @@ pub(crate) fn classify_hook_value(
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an
-/// explicit registration, matching the legacy `TranscriptFormat::for_harness`
-/// default arm.
+/// explicit hook registration. Transcript dispatch never uses this fallback.
 pub(crate) fn default_adapter() -> &'static dyn TranscriptAdapter {
     &CLAUDE_CODE_ADAPTER
 }
