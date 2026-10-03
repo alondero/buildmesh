@@ -26,11 +26,12 @@ export function useAgentChangedFiles(
   files: GitStatus[];
   loading: boolean;
   error: Error | null;
+  refresh: () => void;
 } {
-  const { data, loading, error } = usePathInvalidatedQuery(
+  const { data, loading, error, refresh } = usePathInvalidatedQuery(
     agentChangedFilesClient,
     nodeId,
     rootPath,
   );
-  return { files: data ?? [], loading, error };
+  return { files: data ?? [], loading, error, refresh };
 }

@@ -256,25 +256,37 @@ export const getWorktreeDirectoryConfig = (meshId: number) =>
 // round-trip. Notes are not cross-mesh shared, so the cache key is
 // `meshId` (no need for a global slot).
 const scratchpadByMesh = new Map<number, Promise<string>>();
+const scratchpadWritesByMesh = new Map<number, Promise<void>>();
 
 export const getMeshScratchpad = (meshId: number): Promise<string> => {
   let p = scratchpadByMesh.get(meshId);
   if (!p) {
     p = _invoke<string>('get_mesh_scratchpad', { meshId });
-    p.catch(() => { scratchpadByMesh.delete(meshId); });
+    const read = p;
+    p.catch(() => {
+      if (scratchpadByMesh.get(meshId) === read) scratchpadByMesh.delete(meshId);
+    });
     scratchpadByMesh.set(meshId, p);
   }
   return p;
 };
 
 export const setMeshScratchpad = (meshId: number, content: string): Promise<void> => {
-  // Optimistic write: seed the cache with the new value so the next
-  // `get` resolves to what the editor just typed, even if the
-  // underlying IPC is in flight. The rejected-promise evicts the
-  // slot so a failed write doesn't poison future reads.
-  const p = _invoke<void>('set_mesh_scratchpad', { meshId, content }).then(() => undefined);
-  scratchpadByMesh.set(meshId, Promise.resolve(content));
-  p.catch(() => { scratchpadByMesh.delete(meshId); });
+  // Keep writes ordered across mesh switches and component remounts. Reads
+  // share the latest acknowledged write, never an unpersisted optimistic value.
+  const write = () => _invoke<void>('set_mesh_scratchpad', { meshId, content }).then(() => undefined);
+  const previous = scratchpadWritesByMesh.get(meshId);
+  const p = previous ? previous.catch(() => {}).then(write) : write();
+  scratchpadWritesByMesh.set(meshId, p);
+  const read = p.then(() => content);
+  scratchpadByMesh.set(meshId, read);
+  read.catch(() => {
+    if (scratchpadByMesh.get(meshId) === read) scratchpadByMesh.delete(meshId);
+  });
+  const clearWrite = () => {
+    if (scratchpadWritesByMesh.get(meshId) === p) scratchpadWritesByMesh.delete(meshId);
+  };
+  p.then(clearWrite, clearWrite);
   return p;
 };
 
@@ -524,6 +536,12 @@ export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
   _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
+
+export const getRepoLabels = (meshId: number) =>
+  _invoke<string[]>('get_repo_labels', { meshId });
+
+export const setIssueLabel = (meshId: number, issueNumber: number, label: string, present: boolean) =>
+  _invoke<void>('set_issue_label', { meshId, issueNumber, label, present });
 
 // GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
 // from the Rust structs (src-tauri/src/commands/pr.rs) into

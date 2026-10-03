@@ -209,67 +209,69 @@ export function ProbeRow({
             doesn't fire when the user navigates to GitHub. The body
             moved OUT of this column (see below) so it can span the
             full row width. */}
-        <div
-          ref={focusRef}
-          role="button"
-          tabIndex={0}
-          aria-expanded={hasBody ? isExpanded : undefined}
-          aria-disabled={!hasBody || undefined}
-          className={`flex-1 min-w-0 rounded-sm focus-visible:outline-none ${
-            hasBody
-              ? 'cursor-pointer focus-visible:ring-1 focus-visible:ring-accent-cyan'
-              : 'cursor-default'
-          }`}
-          onClick={hasBody ? onToggle : undefined}
-          onKeyDown={(e) => {
-            if (!hasBody) return;
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              onToggle();
-            }
-          }}
-        >
-          <div className="flex items-center gap-1.5 min-w-0">
-            {/* Chevron only renders when there IS a body to expand —
-                an empty-body row with a chevron implies expandability
-                that doesn't exist (affordance lie). */}
-            {hasBody && (
-              <span
-                aria-hidden
-                className={
-                  'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform duration-150 ' +
-                  (isExpanded ? 'rotate-90' : '')
-                }
-              >
-                ▸
+        <div className="flex-1 min-w-0">
+          <div
+            ref={focusRef}
+            role="button"
+            tabIndex={0}
+            aria-expanded={hasBody ? isExpanded : undefined}
+            aria-disabled={!hasBody || undefined}
+            className={`flex-1 min-w-0 rounded-sm focus-visible:outline-none ${
+              hasBody
+                ? 'cursor-pointer focus-visible:ring-1 focus-visible:ring-accent-cyan'
+                : 'cursor-default'
+            }`}
+            onClick={hasBody ? onToggle : undefined}
+            onKeyDown={(e) => {
+              if (!hasBody) return;
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                onToggle();
+              }
+            }}
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              {/* Chevron only renders when there IS a body to expand —
+                  an empty-body row with a chevron implies expandability
+                  that doesn't exist (affordance lie). */}
+              {hasBody && (
+                <span
+                  aria-hidden
+                  className={
+                    'text-text-muted text-2xs w-3 text-center shrink-0 transition-transform duration-150 ' +
+                    (isExpanded ? 'rotate-90' : '')
+                  }
+                >
+                  ▸
+                </span>
+              )}
+              <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
+                #{number}
               </span>
-            )}
-            <span className="text-2xs text-accent-cyan font-mono font-medium tabular-nums">
-              #{number}
-            </span>
-            {/* Title link. `min-w-0 flex-1` on the link AND `min-w-0`
-                on the parent flex are required for the `truncate`
-                class to actually take effect — see the
-                `flexbox-truncate-trap` memory and the PR-tab
-                regression test. Without them a long title wraps
-                into the action buttons. */}
-            <SafeLink
-              url={url}
-              className="text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 truncate min-w-0 flex-1 transition-colors"
-              title="Open on GitHub"
-            >
-              {title}
-            </SafeLink>
-            {url !== '' && (
+              {/* Title link. `min-w-0 flex-1` on the link AND `min-w-0`
+                  on the parent flex are required for the `truncate`
+                  class to actually take effect — see the
+                  `flexbox-truncate-trap` memory and the PR-tab
+                  regression test. Without them a long title wraps
+                  into the action buttons. */}
               <SafeLink
                 url={url}
-                ariaLabel={iconAriaLabel}
-                className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0 leading-none"
+                className="text-xs text-text-primary font-medium hover:text-accent-cyan ml-0.5 truncate min-w-0 flex-1 transition-colors"
                 title="Open on GitHub"
               >
-                ↗
+                {title}
               </SafeLink>
-            )}
+              {url !== '' && (
+                <SafeLink
+                  url={url}
+                  ariaLabel={iconAriaLabel}
+                  className="text-text-muted hover:text-accent-cyan transition-colors text-xs shrink-0 leading-none"
+                  title="Open on GitHub"
+                >
+                  ↗
+                </SafeLink>
+              )}
+            </div>
           </div>
           {/* Metadata chips — label badges, branch refs, state flags.
               Rendered identically collapsed/expanded so vertical

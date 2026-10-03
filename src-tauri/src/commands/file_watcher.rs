@@ -2,9 +2,9 @@
 
 use crate::db;
 use crate::env;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, Event};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{command, Emitter};
@@ -25,6 +25,12 @@ pub fn active_watcher_count() -> usize {
 /// pre-existing "at most ~2 refreshes per second while an agent works"
 /// cadence that every `GIT_CHANGED` consumer was tuned against.
 const EMIT_INTERVAL: Duration = Duration::from_millis(500);
+
+fn coalescer_channel() -> (SyncSender<()>, Receiver<()>) {
+    // Signals carry no file data: one queued wake already asks the worker
+    // to refresh the latest state. Never accumulate a build storm's backlog.
+    std::sync::mpsc::sync_channel(1)
+}
 
 /// Coalescing emit loop, run on a dedicated thread per watched node.
 ///
@@ -84,10 +90,7 @@ pub(crate) fn run_coalescer(rx: Receiver<()>, quiet_gap: Duration, mut emit: imp
 
 /// Start watching an agent node's worktree for file changes
 #[command]
-pub fn watch_agent_node(
-    node_id: i64,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
+pub fn watch_agent_node(node_id: i64, app_handle: tauri::AppHandle) -> Result<(), String> {
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     // The directory actually watched: the canonical Node Working Directory
     // (host form), which gates on `use_worktree` and trims the name. Using the
@@ -104,7 +107,7 @@ pub fn watch_agent_node(
     // non-blocking); the thread owns the throttle/trailing-emit logic and the
     // actual Tauri emit. See `run_coalescer` for why this replaced the
     // leading-edge-only throttle that used to live in the callback.
-    let (tx, rx): (Sender<()>, Receiver<()>) = std::sync::mpsc::channel();
+    let (tx, rx) = coalescer_channel();
     {
         let app_handle = app_handle.clone();
         let watch_path = watch_path.clone();
@@ -114,10 +117,13 @@ pub fn watch_agent_node(
             .spawn(move || {
                 run_coalescer(rx, EMIT_INTERVAL, || {
                     crate::diagnostics::record_git_changed_emit();
-                    let _ = app_handle.emit("git-changed", serde_json::json!({
-                        "path": &watch_path,
-                        "internal_path": &internal_path
-                    }));
+                    let _ = app_handle.emit(
+                        "git-changed",
+                        serde_json::json!({
+                            "path": &watch_path,
+                            "internal_path": &internal_path
+                        }),
+                    );
                 });
             })
             .map_err(|e| format!("failed to spawn coalescer thread: {}", e))?;
@@ -126,11 +132,11 @@ pub fn watch_agent_node(
     let mut watcher = RecommendedWatcher::new(
         move |result: Result<Event, notify::Error>| {
             match result {
-                // Unbounded std channel: send never blocks the notify thread.
-                // When the watcher is dropped (unwatch), this closure — and
-                // with it the Sender — is dropped, which ends the coalescer.
+                // A full queue already carries the wake for this change.
+                // Never block notify; dropping the watcher still disconnects
+                // the channel and flushes the pending trailing refresh.
                 Ok(_event) => {
-                    let _ = tx.send(());
+                    let _ = tx.try_send(());
                 }
                 Err(e) => {
                     tracing::warn!("File watcher error for node {}: {:?}", node_id, e);
@@ -138,19 +144,24 @@ pub fn watch_agent_node(
             }
         },
         Config::default().with_poll_interval(std::time::Duration::from_secs(2)),
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
 
     let path = std::path::Path::new(&watch_path);
     if path.exists() {
-        watcher.watch(path, RecursiveMode::Recursive)
+        watcher
+            .watch(path, RecursiveMode::Recursive)
             .map_err(|e| e.to_string())?;
         // Emit an immediate GIT_CHANGED so any pre-existing uncommitted changes
         // are reflected without waiting for the next file write.
         crate::diagnostics::record_git_changed_emit();
-        let _ = app_handle_outer.emit("git-changed", serde_json::json!({
-            "path": &watch_path,
-            "internal_path": &internal_path
-        }));
+        let _ = app_handle_outer.emit(
+            "git-changed",
+            serde_json::json!({
+                "path": &watch_path,
+                "internal_path": &internal_path
+            }),
+        );
     }
 
     let mut watchers = WATCHERS.lock().unwrap();
@@ -262,7 +273,7 @@ mod tests {
     // gap. Sleeps use generous margins relative to the gap — Windows timer
     // resolution makes tight margins flaky (see pool_worker's 20ms lesson).
 
-    use super::run_coalescer;
+    use super::{coalescer_channel, run_coalescer};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
     use std::sync::Arc;
@@ -270,8 +281,48 @@ mod tests {
 
     const TEST_QUIET_GAP: Duration = Duration::from_millis(50);
 
-    fn spawn_coalescer(
-    ) -> (std::sync::mpsc::Sender<()>, Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+    #[test]
+    fn build_storm_keeps_one_wake_and_flushes_the_settled_state_on_disconnect() {
+        let (tx, rx) = coalescer_channel();
+        let (started_tx, started_rx) = channel();
+        let (resume_tx, resume_rx) = channel();
+        let handle = std::thread::spawn(move || {
+            let mut emits = 0;
+            run_coalescer(rx, Duration::from_secs(10), || {
+                emits += 1;
+                if emits == 1 {
+                    started_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                }
+            });
+            emits
+        });
+        tx.try_send(()).unwrap();
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Hold the leading emit while notify publishes a build's events.
+        // All additional changes share one wake, without blocking notify.
+        tx.try_send(()).unwrap();
+        for _ in 0..20_000 {
+            assert_eq!(
+                tx.try_send(()),
+                Err(std::sync::mpsc::TrySendError::Full(()))
+            );
+        }
+        drop(tx);
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            handle.join().unwrap(),
+            2,
+            "leading and settled trailing refresh"
+        );
+    }
+
+    fn spawn_coalescer() -> (
+        std::sync::mpsc::Sender<()>,
+        Arc<AtomicUsize>,
+        std::thread::JoinHandle<()>,
+    ) {
         let (tx, rx) = channel();
         let emits = Arc::new(AtomicUsize::new(0));
         let emits_clone = emits.clone();
@@ -294,7 +345,11 @@ mod tests {
         assert_eq!(emits.load(Ordering::SeqCst), 1);
         drop(tx);
         handle.join().unwrap();
-        assert_eq!(emits.load(Ordering::SeqCst), 1, "drop must not re-emit with nothing pending");
+        assert_eq!(
+            emits.load(Ordering::SeqCst),
+            1,
+            "drop must not re-emit with nothing pending"
+        );
     }
 
     /// A rapid burst emits the leading edge immediately AND a trailing edge
@@ -327,6 +382,10 @@ mod tests {
         tx.send(()).unwrap(); // pending, inside the quiet gap
         drop(tx); // disconnect before the gap elapses
         handle.join().unwrap();
-        assert_eq!(emits.load(Ordering::SeqCst), 2, "pending trailing emit must flush on drop");
+        assert_eq!(
+            emits.load(Ordering::SeqCst),
+            2,
+            "pending trailing emit must flush on drop"
+        );
     }
 }

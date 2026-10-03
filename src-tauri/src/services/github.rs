@@ -13,6 +13,9 @@ pub mod issues;
 pub mod prs;
 pub mod sync;
 
+#[cfg(test)]
+mod label_tests;
+
 pub use issues::{parse_blocked_by, Issue};
 pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest};
 pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};

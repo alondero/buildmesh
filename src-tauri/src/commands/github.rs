@@ -32,7 +32,9 @@ pub async fn check_gh_auth() -> bool {
     match tauri::async_runtime::spawn_blocking(check_gh_auth_blocking).await {
         Ok(authed) => authed,
         Err(e) => {
-            tracing::warn!("check_gh_auth: auth-check task failed ({e}); reporting not-authenticated");
+            tracing::warn!(
+                "check_gh_auth: auth-check task failed ({e}); reporting not-authenticated"
+            );
             false
         }
     }
@@ -46,4 +48,42 @@ pub(crate) fn check_gh_auth_blocking() -> bool {
         Ok(client) => client.check_auth(),
         Err(_) => false,
     }
+}
+
+/// Repository labels for the Issues Probe's tag editor.
+#[command]
+pub async fn get_repo_labels(mesh_id: i64) -> Result<Vec<String>, String> {
+    crate::commands::run_blocking("get_repo_labels", move || {
+        let mesh = crate::db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let (owner, repo) = super::pr::resolve_github_owner_repo(&mesh)?;
+        GitHubClient::new()
+            .and_then(|client| client.list_repo_labels(&owner, &repo))
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
+
+/// Change one label without replacing labels added by collaborators.
+#[command]
+pub async fn set_issue_label(
+    mesh_id: i64,
+    issue_number: i64,
+    label: String,
+    present: bool,
+) -> Result<(), String> {
+    if issue_number <= 0 || label.trim().is_empty() {
+        return Err("A positive issue number and non-empty label are required".to_string());
+    }
+    crate::commands::run_blocking("set_issue_label", move || {
+        let mesh = crate::db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+        let (owner, repo) = super::pr::resolve_github_owner_repo(&mesh)?;
+        let client = GitHubClient::new().map_err(|e| e.to_string())?;
+        if present {
+            client.add_issue_label(&owner, &repo, issue_number, &label)
+        } else {
+            client.remove_issue_label_checked(&owner, &repo, issue_number, &label)
+        }
+        .map_err(|e| e.to_string())
+    })
+    .await
 }

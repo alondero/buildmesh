@@ -1,4 +1,5 @@
 import type { ProbeTab } from './probeContext';
+import { probeGroupId } from './probeGroups';
 
 /**
  * Probe working-set bookkeeping (ADR-0032).
@@ -39,18 +40,20 @@ export interface ProbeWorkingSet {
 export const EMPTY_PROBE_WORKING_SET: ProbeWorkingSet = { tabs: [], mru: [] };
 
 /** Record a visit to `tab`: move it to the front of the recency list and
- *  append it to the display list if new, then evict whatever fell off the
+ *  replace its group's remembered subview in place or append a new group,
+ *  then evict whatever fell off the
  *  recency list. Pure — the uiStore actions own the `set` calls. */
 export function pushProbeWorkingSet(
   set: ProbeWorkingSet,
   tab: ProbeTab,
 ): ProbeWorkingSet {
-  const mru = [tab, ...set.mru.filter((t) => t !== tab)].slice(
+  const group = probeGroupId(tab);
+  const mru = [tab, ...set.mru.filter((t) => probeGroupId(t) !== group)].slice(
     0,
     PROBE_WORKING_SET_CAP,
   );
   // Survivors keep their display positions; only evicted entries drop out.
-  const kept = set.tabs.filter((t) => mru.includes(t));
-  const tabs = set.tabs.includes(tab) ? kept : [...kept, tab];
+  const kept = set.tabs.map(t => probeGroupId(t) === group ? tab : t).filter(t => mru.includes(t));
+  const tabs = kept.includes(tab) ? kept : [...kept, tab];
   return { tabs, mru };
 }

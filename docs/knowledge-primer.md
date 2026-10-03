@@ -293,7 +293,8 @@ lens,
 baseline, selection-following, pinning, and statefulness. The three lenses are
 `Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
 its configuration, GitHub feeds, worktrees, automation, and notes), and
-`Agent` (one Agent Node's changes and node-specific history/actions). Usage is
+`Agent` (one Agent Node's changes and actions). Agent History is a Host finder
+with an explicit repository filter and a separate discovered-session source. Usage is
 Host-lens and must never display or infer a Mesh name. Project Files is
 Mesh-owned but may show a focused Agent Node's working tree; Agent Changes is
 Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
@@ -312,6 +313,24 @@ ADR-0032 added a working-set tab strip *inside* the open inspector
 (`ProbeToolRail`, MRU-capped, ⊞ opens the ADR-0031 tool grid) for fast
 alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
+
+Related Files/Changes and Issues/Pull Requests share a strip slot, with
+per-destination context pins and unchanged command IDs. The working-set reducer
+owns group identity and replaces a group's remembered subview in place;
+recency affects eviction only. The Files subview is persisted independently
+of the session-only working set. Agent History reads all database nodes,
+including archived rows; reopen restores Suspended without spawning and adopts
+the returned row into the live store. See [ADR 0039](adr/0039-desktop-audit-navigation-and-readiness.md).
+
+Routing defaults use `list_routing_options`, a preferences/cached-installation
+catalog that does no subprocess or WSL probing. Unverified OpenAI routes stay
+disabled pending the live provider menu. Settings owns separate preference,
+routing and probe request sequences; account, route and Launch Configuration
+mutations refresh both routing sources. Anthropic routes share the live menu's
+pure launchability predicate, and configuration-specific errors retain their
+remediation. The cheap catalog reads the default WSL distribution only if
+startup has already observed it; it never initializes discovery itself.
+Failed preferences disable writes, and retries/unmount invalidate stale reads.
 
 ### Configuration vs maintenance destinations (issue #1460, ADR-0038)
 Two Mesh-lens destinations are split by job and must never merge again:
@@ -348,7 +367,14 @@ without a GitHub origin produce an empty list. WSL ownership trust is an exact
 authentication (see [troubleshooting](troubleshooting.md#github-feeds-fail-for-a-wsl-mesh)).
 
 ### Probe Panel shell (scroll ownership + narrow width)
-`ProbePanel.tsx` wraps every tab in `flex-1 overflow-y-auto` (`:359`) around an `h-full flex flex-col` keyed div (`:360-365`). A tab root must therefore be **layout-only** (`flex flex-col h-full min-h-0`) with **one** inner `flex-1 min-h-0 overflow-y-auto overflow-x-hidden` body — the shared `<ProbeTabBody>` primitive exists to provide exactly that. Because the root is `h-full`, the panel's outer scroller has content precisely its own height and stays inert, so the inner body is the single *effective* scroll owner; adding `overflow-y-auto` to the root as well stacks two scrollers (the #1468 defect in `CircuitsProbeTab`). Two further traps: `overflow-y-auto` **alone computes `overflow-x: auto`** (CSS forbids one axis being `visible` while the other scrolls), so wide content can scroll the tab sideways unless you state `overflow-x-hidden`; and the dock's **240px minimum** (`PROBE_PANEL_BOUNDS`) means unbounded text (errors, identifiers, node ids) must wrap — `truncate` there hides the tail that carries the diagnosis, and `truncate` combined with `flex-wrap` on one row is self-contradictory. Note `ProbePanel.tsx` also declares a *local* `function ProbeTabBody` that is only the tab router — same name as the shared primitive, different component. Full checklist: `docs/development/probe-ui-checklist.md` (umbrella issue #1464).
+The panel and keyed destination wrapper are layout-only, with `min-h-0`,
+`min-w-0` and `overflow-hidden`. A destination owns one inner
+`flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden` body; the shared
+`ProbeTabBody` supplies this contract. Toolbars and recovery controls are
+`shrink-0` siblings. A bounded error excerpt may scroll separately, but must
+leave Retry visible. At the dock's 240px minimum, unbounded prose wraps and
+unspaced paths/errors use `break-all`. Stating only vertical overflow computes
+horizontal auto overflow. Keep Notes' mesh-aware save/restore ownership.
 
 ### Frameless Window & Bespoke TitleBar
 The window runs with `"decorations": false` (`src-tauri/tauri.conf.json`); `src/components/TitleBar/TitleBar.tsx` is the window chrome (wordmark, ViewModeSwitcher with the Filtered segment, the Filtered view's `GridControls` search bar, the centred "Search or open…" palette field flanked by drag spacers, and the right-hand utility cluster — Usage / Settings / Remote Access pills sharing the `HeaderPillButton` skeleton — plus min/max/close). Traps this recipe has already burned once:
@@ -387,6 +413,20 @@ Use `_inner` helper functions that accept `&Connection` so compound operations k
 A `#[command]` on an `async fn` **and** `#[command(async)]` on a sync `fn` both run on Tauri's bounded tokio worker pool (≈ CPU cores). Only a plain sync `#[command] fn` runs off it. So a command that does a **blocking network call** (`reqwest::blocking`, `git fetch`/`git pull` shell-out), a **SQLite transaction** (`db::*` / `db::write_conn`), a **disk read/write** (`std::fs::*`, `preferences::load`/`save`), or a slow libgit2 walk on the async runtime **parks a worker for the whole duration**; enough of them stuck at once starves the pool and every other async command (agent keystrokes, WebSocket streaming, probes) stops being polled while the UI stays alive — the class of bug behind the overnight-freeze (issue #762 / #1380: see the `run_blocking` wrappers in `commands/pr.rs`, `commands/github.rs`, `commands/agent_node.rs`, `commands/preferences.rs`). Convention: give each such command a **plain-sync core (`*_blocking`)** and a thin `#[command] async fn` wrapper that offloads it via `crate::commands::run_blocking(label, || core(..))` (which threads it through `tauri::async_runtime::spawn_blocking`). Fast in-memory lookups may stay as a plain sync `#[command] fn` (the circuit CRUD commands do this). The mobile HTTP routes (`http/routes/*`) are **not** a separate pool — `http/mod.rs` spawns each connection on the same `tauri::async_runtime`, so a route that calls a `*_blocking` core directly still parks a worker; routes are `async fn`, so they must **`.await` the async command wrapper** (e.g. `get_repo_issues(id).await`) or `run_blocking` themselves, letting it offload. Gated by `tests/unit/async-command-blocking.test.ts` (issue #1380); per-line opt-out: `// allow-blocking-on-async: <reason>`. Only reach for a `*_blocking` core from a genuinely synchronous context (e.g. `check_gh_auth_cached`, itself run inside `run_blocking`). Also give any blocking network client a finite `.timeout(..)` (`GitHubClient` uses `build_http_client`) so a half-open connection can't hang forever.
 
 ### Injectable Caches (avoid process-global statics)
+
+The frontend Git-query caches share one `GIT_CHANGED` bus in
+`src/lib/pathInvalidatedCache.ts`. A dispatch invalidates each client/key once
+before notifying its consumers, so their refreshes share the same request.
+Events during a slow request defer one follow-up refresh rather than repeatedly
+superseding it; the running request can publish while edits continue.
+Only the currently registered pending promise may commit a value/error or clear
+request ownership; superseded callers adopt the current request/value. Trailing
+refreshes retain subscription objects and unsubscribe removes them, cancelling
+the timer when no consumers remain. The native file-watcher coalescer uses a
+single-slot non-blocking wake channel: signals contain no file data and one wake
+is enough to request the latest state. See the
+[performance review](development/performance-audit-2026-10.md) for evidence and
+remaining retention/coverage work.
 
 Process-global `static OnceCell<Mutex<_>>` caches with test-only `#[cfg(test)]` forks (or per-test `GH_AUTH_CACHE_TEST_LOCK`) are flaky — `cargo test -- --test-threads=8` still racy via snapshot-delta tricks and they hide production synchronization bugs (see #1482 preferences, #1483 gh-auth). Prefer an injectable struct (`services::gh_auth_cache::GhAuthCache` — single `Arc<Inner>` with `slot: Mutex<(Instant,bool)>` + `misses: AtomicU64` + injectable `now`/`auth` closures, `Mutex` held across `auth_fn` to coalesce concurrent misses to one HTTPS call). Wire one instance via `tauri::Builder::manage(GhAuthCache::new())` and take `tauri::State<GhAuthCache>` in the `#[command] async fn`; the `*_blocking` core takes `&GhAuthCache` and calls `cache.check()` directly (runs on `spawn_blocking`, so blocking there is the intended coalescing). Tests use `GhAuthCache::for_test_with_auth()` per `#[test]` (isolated counter, stubbed network, controllable `now` via `for_test_with_clock_and_auth` or `expire_for_test()`). See `src-tauri/src/services/gh_auth_cache.rs` and `src-tauri/src/lib.rs:manage`.
 
@@ -520,7 +560,7 @@ See [Agent Node status observation](development/node-status-observation.md) for
 ordering, health, recovery and harness capability limits.
 
 ### False-Yield Suppression (issue #878)
-Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `publish_background` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
+Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
 
 **Safety net:** `attention_autoclear.rs` arms on every mark; if the PTY then produces ≥512 bytes of output more than 3s after the mark with no user keystroke, the node flips back to `running` and `attention-cleared` is broadcast. The 3s grace absorbs the Stop-hook-vs-final-redraw race; the burst threshold ignores idle control-sequence trickle. This self-heals the cases the transcript scan can't see (hook-less providers, format drift, lost notifications). Every path that clears attention or accepts user input must call `attention_autoclear::disarm` (see `write_to_agent_blocking`, `http::ws`, `coordinator::drive`, `circuit::delivery`).
 
@@ -535,6 +575,26 @@ matching resolution; input submission and permission resolution are
 unreadable transcripts are degraded review checkpoints, never successful turn
 completion. Background work is published as `background_running` without
 attention until its terminal callback arrives.
+
+Harness wire validation and mapping live in
+`http::routes::attention::normalizers`, with one module per wired hook harness.
+Dispatch uses the resolved node's harness, never a claimed payload provider or
+another harness's classifier. Each module selects the fields it validates;
+unrelated harness metadata cannot invalidate its callback. Unknown harnesses,
+unsupported events and malformed payloads report `signal_unavailable` with
+degraded health and cannot mutate turn/question/child correlation state.
+Compatible hooks share envelope and tool mechanics, while event vocabulary and
+observation strategy remain harness-owned. Explicit hooks are interpreted first;
+only that harness's completion path may request transcript reconciliation.
+Transcript reads run on the blocking pool after HTTP security checks, without
+holding a database connection.
+
+The route retains node/session ownership checks and delegates per-node callback
+ordering to `attention::ordering`. Normalizers return observations and never
+write node state. `node_turn` publishes the normalized lifecycle kind through
+`SessionLifecycle`, then considers renaming only after an accepted lifecycle
+commit. Replay fixtures and their evidence limits are documented in
+[`tests/fixtures/attention`](../src-tauri/tests/fixtures/attention/README.md).
 
 The route keeps per-node ordering state and fences callbacks by provider turn
 id/session id. Foreground activity is tracked separately from outstanding

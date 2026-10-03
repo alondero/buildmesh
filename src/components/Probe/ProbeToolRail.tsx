@@ -38,6 +38,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, FocusEvent as ReactFocusEvent
 import { useUIStore } from '../../stores/uiStore';
 import type { ProbeTab } from '../../lib/probeContext';
 import { PROBE_TAB_DEFINITIONS } from '../../lib/probeContext';
+import { groupedProbeTabs, probeGroup, probeGroupId } from '../../lib/probeGroups';
 import {
   TOOL_DISCOVERY_GROUPS,
   TOOL_DISCOVERY_TILES,
@@ -51,7 +52,7 @@ import { LayoutGridIcon, PROBE_TAB_ICONS } from './probeIcons';
  *  ProbePanel computes `narrow` from the live body width. */
 export const LABEL_COLLAPSE_WIDTH = 320;
 
-const tabId = (tab: ProbeTab) => `probe-rail-tab-${tab}`;
+const tabId = (tab: ProbeTab) => `probe-rail-tab-${probeGroupId(tab)}`;
 const menuTileId = (tab: ProbeTab) => `probe-rail-menu-${tab}`;
 
 type ArrowDir = 'up' | 'down' | 'left' | 'right';
@@ -69,7 +70,7 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
   const probeTab = useUIStore((s) => s.probeTab);
   const workingSet = useUIStore((s) => s.probeWorkingSet);
   const openProbeTab = useUIStore((s) => s.openProbeTab);
-  const tabs = workingSet.tabs;
+  const tabs = groupedProbeTabs(workingSet.tabs, probeTab, workingSet.mru);
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuFocusTab, setMenuFocusTab] = useState<ProbeTab>(
     TOOL_DISCOVERY_TILES[0].tab,
@@ -234,12 +235,12 @@ export function ProbeToolRail({ narrow }: { narrow: boolean }) {
           onKeyDown={onTablistKeyDown}
         >
           {tabs.map((tab) => {
-            const def = PROBE_TAB_DEFINITIONS[tab];
+            const def = { ...PROBE_TAB_DEFINITIONS[tab], label: probeGroup(tab)?.label ?? PROBE_TAB_DEFINITIONS[tab].label };
             const Icon = PROBE_TAB_ICONS[tab];
             const active = tab === probeTab;
             return (
               <button
-                key={tab}
+                key={probeGroupId(tab)}
                 type="button"
                 id={tabId(tab)}
                 role="tab"

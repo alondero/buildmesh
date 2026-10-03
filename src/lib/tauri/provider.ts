@@ -138,6 +138,8 @@ export const getDefaultProvider = (meshId: number): Promise<string> => {
 };
 
 /** Global provider list. Cached module-scope promise (issue #405). */
+export const listRoutingOptions = (): Promise<ProviderInfo[]> => _invoke('list_routing_options');
+
 export const listProviders = (): Promise<
   ProviderInfo[]
 > => {

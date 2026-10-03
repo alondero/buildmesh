@@ -64,6 +64,10 @@ export function ProjectFilesTab() {
   const openDiff = useUIStore((s) => s.openDiff);
 
   const [fileTreeExpanded, setFileTreeExpanded] = useState(true);
+  const [treeFailure, setTreeFailure] = useState<{ error: string; retry: () => void } | null>(null);
+  const handleTreeError = useCallback((error: string | null, retry: () => void) => {
+    setTreeFailure(error ? { error, retry } : null);
+  }, []);
   const selectionOwner = useRef<AbortController | null>(null);
   const beginFileSelection = useCallback(() => {
     selectionOwner.current?.abort();
@@ -108,8 +112,13 @@ export function ProjectFilesTab() {
   };
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
       <PathHeader path={activePath} />
+      {treeFailure && <div role="alert" className="shrink-0 min-w-0 break-all border-b border-border-subtle px-3 py-2 text-xs text-status-error">
+        <p className="line-clamp-3" title={treeFailure.error}>Files unavailable: {treeFailure.error}</p>
+        <button type="button" onClick={treeFailure.retry} className="mt-2 min-h-[24px] rounded-md border border-border-default px-2 text-text-primary hover:bg-bg-card-hover">Retry files</button>
+      </div>}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden" data-testid="project-files-body">
       <ChangedFilesSection
         rootPath={activePath}
         selectedFile={null}
@@ -118,8 +127,10 @@ export function ProjectFilesTab() {
       />
       <div className="border-b border-border-subtle">
         <button
+          aria-expanded={fileTreeExpanded}
+          aria-controls="project-file-tree"
           onClick={() => setFileTreeExpanded(!fileTreeExpanded)}
-          className="w-full flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-card transition-colors"
+          className="w-full min-h-[24px] flex items-center gap-1 px-2 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-card transition-colors"
         >
           <span
             className={`w-3 h-3 flex items-center justify-center text-text-muted transition-transform ${
@@ -131,9 +142,10 @@ export function ProjectFilesTab() {
           <span className="flex-1 text-left">File Tree</span>
         </button>
         {fileTreeExpanded && (
-          <FileTree
+          <div id="project-file-tree"><FileTree
             key={`${activeMeshId}:${activeNodeId}`}
             rootPath={activePath}
+            onReadError={handleTreeError}
             showGitStatus
             selectedFile={null}
             // Open the overlay only after FileTree has loaded the diff.
@@ -142,8 +154,9 @@ export function ProjectFilesTab() {
             onFileSelectionStart={beginFileSelection}
             onChangedFileSelect={(_path, _diff, relativePath) => handleChangedFileSelect(relativePath)}
             onUnchangedFileSelect={handleUnchangedFileSelect}
-          />
+          /></div>
         )}
+      </div>
       </div>
     </div>
   );

@@ -88,6 +88,22 @@ pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
 
 /// Get agent node by ID
 #[command]
+pub async fn list_agent_history() -> Result<Vec<AgentNode>, String> {
+    crate::commands::run_blocking("list_agent_history", || {
+        db::list_agent_history().map_err(|error| error.to_string())
+    }).await
+}
+
+/// Reopen archived work without starting a process or replacing its session.
+#[command]
+pub async fn reopen_agent_node(node_id: i64) -> Result<AgentNode, String> {
+    crate::commands::run_blocking("reopen_agent_node", move || {
+        db::reopen_agent_node(node_id).map_err(|error| error.to_string())
+    }).await
+}
+
+/// Get agent node by ID
+#[command]
 pub async fn get_agent_node(node_id: i64) -> Result<AgentNode, String> {
     crate::commands::run_blocking("get_agent_node", move || {
         db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())

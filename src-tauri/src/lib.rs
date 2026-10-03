@@ -3,8 +3,8 @@
 
 pub mod agent;
 mod attention_autoclear;
-pub mod circuit;
 mod blocking;
+pub mod circuit;
 mod commands;
 mod coordinator;
 mod db;
@@ -432,6 +432,8 @@ pub fn run() {
             // Agent Node (issue #490: renamed from `*_session` to `*_agent_node`).
             commands::agent_node::create_agent_node,
             commands::agent_node::list_agent_nodes,
+            commands::agent_node::list_agent_history,
+            commands::agent_node::reopen_agent_node,
             commands::agent_node::get_agent_node,
             commands::agent_node::delete_agent_node,
             commands::agent_node::get_worktree_close_safety,
@@ -562,6 +564,7 @@ pub fn run() {
             commands::agent::auto_resume_agent_nodes,
             agent::process::debug_crash_snapshot,
             agent::provider_menu::list_providers,
+            agent::provider_menu::list_routing_options,
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,
@@ -681,6 +684,8 @@ pub fn run() {
             // General GitHub auth (issue #433 — moved out of `commands::pr`:
             // no PR call sites, used by git/mobile/UI auth checks).
             commands::github::check_gh_auth,
+            commands::github::get_repo_labels,
+            commands::github::set_issue_label,
             // App-level metadata (issue #826). The frontend uses
             // `get_app_identifier` to guard the in-app updater: the dev
             // profile (`com.alond.buildmesh.dev`) must not poll the stable

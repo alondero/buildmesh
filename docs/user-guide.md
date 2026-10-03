@@ -53,6 +53,17 @@ its own login; choose the same account or workspace as the meter.
 
 ## Your first session
 
+The empty workspace and each selected empty repository offer three readiness
+steps: add a repository, check your harness and runtime, then open a session.
+**Check runtime and login** opens **Settings → Providers**. **Skip setup guide**
+hides the guide across repositories; **Show setup guide** restores it.
+Detection confirms an installation, so sign
+in using the CLI in that runtime before launching an agent. **Start Terminal**
+lets you start locally without agent credentials or completed runtime checks
+once a repository is selected, using that repository's worktree setting.
+It stays available when the guide is hidden or other repositories have agents.
+Help contains the advanced keyboard shortcuts.
+
 1. Install Buildmesh from the [latest release](https://github.com/alondero/buildmesh/releases/latest),
    or follow the [source-build instructions](../README.md#build-from-source).
 2. Install at least one supported agent CLI on the runtime where it will run.
@@ -109,7 +120,50 @@ Select a tool to open it and close the menu. Use Tab and Enter to choose a tool,
 or Escape to close the menu and return focus to **More**. Clicking outside also
 closes the menu. On short windows, scroll the menu to reach every tool.
 
+The inspector groups **Project Files** and **Agent Changes** under **Files &
+changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
+subviews inside the panel. The header shows the subject and whether it follows
+selection or is pinned; each subview retains its own pin. Files shows the
+working tree, while Agent Changes compares against HEAD or the selected
+repository's base merge point. Commands still open the exact requested view.
+The last Files subview is restored when you restart.
+
+**Agent History** finds lifecycle records across repositories, including
+archived nodes. Search by name, repository, branch or session, and filter by
+repository or lifecycle state. **Reopen** restores an archived node to the
+workspace without starting its process; **Resume** starts it separately using
+its saved session when available. **Discovered sessions** scans CLI history
+for the explicitly selected repository.
+
+## Find agents that need attention
+
+Choose **Attention** in the sidebar to see failed, waiting and suspended nodes
+across repositories. Each row names its repository and offers **Open terminal**
+and, where applicable, **Retry** or **Resume**. Return to **Workspace** to use
+the existing repository and drag order.
+
+In **Filtered** view, use the header's **Filters** button for provider, status,
+sort and direction. The count shows matching nodes out of all loaded nodes.
+Remove an active chip or use **Clear all** to clear search and filters and
+restore the default sort. Your choices survive a restart, including a filter
+with no matches.
+
 ## Configure Autopilot Circuits
+
+In **GitHub Issues**, use the tag button beside an issue to change its GitHub
+labels. Search the repository's labels, then check or uncheck one to add or
+remove it. Changes save individually; permission and network errors
+leave the displayed tags unchanged so you can retry. Create or rename repository
+label definitions on GitHub.
+
+Labels watched by an **enabled Autopilot Circuit on this mesh** appear first,
+highlighted in violet with a lightning indicator. This includes `ready-for-agent`
+when it is the configured issue trigger, and any custom trigger labels. Hover
+for the Circuit name. Disabled Circuits and PR-label triggers do not highlight
+issue tags. The indicator means eligible for pickup on a poll; dependencies,
+existing runs, and capacity still determine when work starts. Removing a trigger
+label does not cancel a run that has already started. Circuit status refreshes
+while the Issues inspector is open and with **Refresh issues**.
 
 Open **Circuits** to configure automated flows and their triggers. **Max concurrent
 circuit runs** controls how many runs the selected mesh can admit at once.
@@ -322,6 +376,10 @@ change you are making:
 Everything here applies to the project root. A focused node's worktree is a
 different path, and these settings never change it retroactively.
 
+Project Settings becomes editable after the selected project's settings load.
+If loading fails, use **Retry**; values from the previous project cannot be
+saved into the newly selected one.
+
 **Repository** covers maintenance, and separates repairing from deleting:
 
 - **Health and recovery** reports drift, a base branch held by a node, and
@@ -333,6 +391,17 @@ different path, and these settings never change it retroactively.
   many branches and worktrees it will remove.
 
 Both views act on the project root, never on a focused node's worktree.
+
+Switching projects clears Repository cleanup selections and any open deletion
+confirmation. Wait for the current project's list to load before selecting
+branches or worktrees to delete.
+
+**Notes** is a separate project tool for scratch text. Its editor becomes
+available after the project's notes load; a failed read offers **Retry**.
+Typing saves after a short pause, and switching projects flushes pending
+typing to its original project. Saves for the same project run in order;
+returning to it waits for the latest save to finish. A save failure keeps the
+current text visible so you can retry editing before leaving the tool.
 
 ## Launch Configurations
 
@@ -406,6 +475,16 @@ the app-wide value when both exist.
 Tab and Shift+Tab stay within the visible pane. If you try to close with
 unsaved edits, focus moves to **Keep editing**; only **Discard changes**
 abandons the edits.
+
+The selected Settings tab is the tablist's single Tab stop. Up/Down wrap
+through tabs, and Home/End choose the first/last tab. Tab then enters the
+selected panel. Switching tabs preserves unsaved edits.
+
+Default, classifier, reviewer and naming choices load independently of live
+CLI and WSL probes. Routes awaiting runtime verification explain that state
+and remain unavailable until verified. Failed checks keep a **Retry** action;
+defaults stay disabled if preferences failed to load, so a failed read cannot
+overwrite saved choices.
 
 | Settings area | Use it for |
 |---|---|

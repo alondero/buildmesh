@@ -46,6 +46,10 @@ export function ScratchpadTab() {
   // fires (or the effect cleans up).
   const [text, setText] = useState('');
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const loadOwnerRef = useRef<AbortSignal | null>(null);
+  const editRevisionRef = useRef(0);
   // Save-state machine (issue #813, formerly inlined). The hook's
   // auto-clearing `saved` window (1500ms by default) and the
   // persists-until-next-start `error` semantics match the inlined
@@ -94,7 +98,9 @@ export function ScratchpadTab() {
   // would never reach the DB.
   useAsyncEffect(
     (signal) => {
+      loadOwnerRef.current = signal;
       flushPending();
+      setLoadedMeshId(null);
       if (activeMeshId === null) {
         setText('');
         saveStatus.reset();
@@ -112,6 +118,7 @@ export function ScratchpadTab() {
         .then((content) => {
           if (signal.aborted) return;
           setText(content);
+          setLoadedMeshId(activeMeshId);
         })
         .catch((err) => {
           if (signal.aborted) return;
@@ -120,13 +127,15 @@ export function ScratchpadTab() {
         });
       return flushPending;
     },
-    [activeMeshId],
+    [activeMeshId, reloadKey],
   );
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (loadedMeshId !== activeMeshId || activeMeshId === null) return;
     const next = e.target.value;
     setText(next);
-    if (activeMeshId === null) return;
+    const owner = loadOwnerRef.current;
+    const revision = ++editRevisionRef.current;
 
     // Record the latest pending write. The timer reads this ref so
     // multiple keystrokes within 500ms collapse to a single IPC.
@@ -151,12 +160,12 @@ export function ScratchpadTab() {
           // save resolves, the indicator update is meaningless for
           // them — skip it so the new mesh's UI isn't clobbered by
           // a status from the previous one.
-          if (pending.meshId === activeMeshId) {
+          if (owner && !owner.aborted && revision === editRevisionRef.current) {
             saveStatus.success();
           }
         })
         .catch((err) => {
-          if (pending.meshId === activeMeshId) {
+          if (owner && !owner.aborted && revision === editRevisionRef.current) {
             console.error('Failed to save scratch pad:', err);
             saveStatus.fail(err);
           } else {
@@ -175,9 +184,12 @@ export function ScratchpadTab() {
           are kept split (issue #657). */}
       <div className="flex items-center justify-between gap-2 px-3 py-1 text-xs text-text-muted h-7 shrink-0">
         {loadError !== null && (
-          <span className="text-status-error" title={loadError}>
-            Load failed
-          </span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-status-error" title={loadError}>Load failed</span>
+            <button type="button" aria-label="Retry loading notes"
+              className="text-text-secondary hover:text-text-primary"
+              onClick={() => setReloadKey(key => key + 1)}>Retry</button>
+          </div>
         )}
         <SaveIndicator
           status={saveStatus.status}
@@ -189,6 +201,7 @@ export function ScratchpadTab() {
       <textarea
         className="flex-1 resize-none p-3 bg-bg-surface text-text-primary text-sm font-mono leading-relaxed focus:outline-none placeholder:text-text-muted"
         value={text}
+        disabled={activeMeshId === null || loadedMeshId !== activeMeshId}
         onChange={handleChange}
         placeholder="Type whatever you want — notes, half-thoughts, links, todos…"
         spellCheck={false}
