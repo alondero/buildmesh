@@ -26,6 +26,9 @@ export function planGates(paths, { full = false } = {}) {
   npm('lint-tests', 'test:lint', { tests: 'node' });
   npm('lint', 'lint');
   npm('lint-fixtures', 'lint:fixtures');
+  if (paths.some(path => path.startsWith('android/') || path === 'scripts/check-android.mjs' || path === '.github/workflows/android.yml')) {
+    node('android', ['scripts/check-android.mjs'], { minutes: 25, tests: 'android' });
+  }
   if (frontend) {
     npm('frontend-build', 'build', { minutes: 10 });
     npm('bundle', 'check:bundle');
@@ -53,6 +56,7 @@ export function isHarnessPath(path) {
 export function executedTests(kind, output) {
   output = stripVTControlCharacters(output);
   if (kind === 'node') return Number(output.match(/(?:#|ℹ)\s+pass (\d+)/)?.[1] ?? 0);
+  if (kind === 'android') return Number(output.match(/Android tests: (\d+) passed/)?.[1] ?? 0);
   if (kind === 'vitest') return Number(output.match(/Tests\s+(\d+) passed/)?.[1] ?? 0);
   if (kind === 'playwright') return Number(output.match(/(\d+) passed(?:\s|\()/)?.[1] ?? 0);
   if (kind === 'rust') return [...output.matchAll(/test result: ok\. (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0);

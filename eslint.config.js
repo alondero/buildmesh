@@ -48,6 +48,8 @@ export default [
     ignores: [
       'dist/**',
       'dist-mobile/**',
+      'android/**/build/**',
+      'android/.gradle/**',
       'node_modules/**',
       'coverage/**',
       'playwright-report/**',
@@ -83,6 +85,7 @@ export default [
 
   // ---------- baseline: JS recommended + TS recommended ----------------------
   js.configs.recommended,
+  { files: ['android/terminal/*.js'], languageOptions: { globals: globals.browser } },
   ...tseslint.configs.recommended,
 
   // ---------- all TS / TSX files (src/ + mobile/ + tests/**) -----------------

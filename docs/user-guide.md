@@ -473,6 +473,22 @@ Do not share QR codes, pairing invitations, cookies, certificates, or logs.
 
 ### Using Buildmesh on your phone
 
+The native Android app supports Android 8.0 and later. Install the APK built
+from this repository, open **Buildmesh**, choose **Scan pairing QR**, and scan
+the desktop's Remote Access Connect QR. Then select **Pair with desktop**.
+The app verifies and stores the desktop certificate privately; it does not
+require the browser's system certificate installation. On older desktops,
+paste the full pairing URL and the **Root CA SHA-256** fingerprint shown in
+the desktop's Certificate section. See [Android build and installation](development/android.md).
+
+Android provides native Overview/Work, agent replies, task capture, issues,
+archive resume, changes and diffs. Its terminal includes keyboard input,
+Esc/Tab/Ctrl+C and arrow keys, and reconnects when the app returns to the
+foreground. **Create PR** on a mesh uses that mesh's current branch; ask an
+agent to open a worktree PR from its terminal. **Connection → Forget this
+desktop** removes this phone's saved session. Revoke the device on the desktop
+to remove its authorization. Certificate resets require fresh pairing.
+
 The phone opens on **Overview**, with counts for agents needing attention,
 running agents, and all active agents. Errors and degraded status reporting
 appear first, followed by agents waiting for input. Each agent card shows its
