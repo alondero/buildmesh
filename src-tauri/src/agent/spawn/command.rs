@@ -5,6 +5,7 @@ use crate::agent::spawn_environment;
 use crate::env;
 use crate::models::{EnvType, Provider};
 use portable_pty::CommandBuilder;
+use std::borrow::Cow;
 
 /// Build the spawn command by composing the provider's recipe with the runtime environment.
 ///
@@ -67,6 +68,30 @@ pub fn build_spawn_command_prepared(
         Platform::current()
     };
 
+    // The per-pairing model id is routing knowledge, not harness
+    // knowledge, so it is folded into the resolved config *before*
+    // the recipe is composed. `default_prepare` is then the only
+    // owner of `--model`: it knows the flag spelling, honours the
+    // capability mask, and keeps the option ahead of `resume <id>`.
+    // A proxied launch needs the model (the generated
+    // `<profile>.config.toml` carries only `model_provider`), and a
+    // proxy's resolved model is its route's — so the cascade always
+    // supplies one. Appending `--model` again after the recipe made
+    // every such launch die in the terminal with "the argument
+    // '--model <MODEL>' cannot be used multiple times", because
+    // Codex's CLI accepts the flag once.
+    let routed_config = match routing {
+        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { descriptor, .. } => {
+            let mut routed = config.clone();
+            if routed.model.is_none() {
+                routed.model = Some(descriptor.model_id.clone());
+            }
+            Cow::Owned(routed)
+        }
+        _ => Cow::Borrowed(config),
+    };
+    let config = routed_config.as_ref();
+
     // Compose the harness's launch contribution: recipe + capability
     // descriptor + env policy, all from the same adapter. The
     // capability-mask guarantee still holds — the resolver ran before
@@ -87,10 +112,9 @@ pub fn build_spawn_command_prepared(
     };
     let prepared = crate::agent::launch::default_prepare(adapter, input);
 
-    // CodexProxy contributes --profile / --model to the recipe. This
-    // belongs at the orchestrator layer (not the harness): the
-    // pairing's verified profile is the orchestrator's knowledge, and
-    // the per-pairing model id is a routing fact, not a harness fact.
+    // CodexProxy contributes --profile to the recipe. The profile name
+    // is the orchestrator's knowledge (the pairing's verified endpoint
+    // identity), so it cannot live in the adapter recipe.
     let mut recipe = prepared.recipe;
     if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
         profile_name,
@@ -98,12 +122,7 @@ pub fn build_spawn_command_prepared(
         ..
     } = routing
     {
-        recipe.base_args.extend([
-            "--profile".into(),
-            profile_name.clone(),
-            "--model".into(),
-            config.model.clone().unwrap_or_else(|| descriptor.model_id.clone()),
-        ]);
+        recipe.base_args.extend(["--profile".into(), profile_name.clone()]);
         if descriptor.reasoning_effort == Some(true) {
             // Unknown model names otherwise suppress Codex's reasoning field entirely.
             recipe.base_args.extend(["-c".into(), "model_supports_reasoning_summaries=true".into(),

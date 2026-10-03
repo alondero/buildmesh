@@ -408,6 +408,65 @@ mod tests {
         }
     }
 
+    /// Codex's CLI accepts `--model` once. A proxied Codex launch therefore
+    /// has exactly ONE owner of that flag — the adapter recipe
+    /// (`default_prepare`) — for every cascade shape: no model at all (the
+    /// route's verified model is used), the route model arriving through a
+    /// frozen Launch Configuration, and a per-call explicit override.
+    ///
+    /// A second `--model` made the CLI exit at startup with "the argument
+    /// '--model <MODEL>' cannot be used multiple times", which hit every
+    /// Launch Configuration-backed proxied Codex spawn — a proxy's resolved
+    /// model is its route's, so `config.model` is always populated there.
+    #[test]
+    fn proxied_codex_emits_exactly_one_model_flag_for_every_cascade_shape() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        for (config, expected_model) in [
+            (ResolvedAgentConfig::default(), "MiniMax-M3"),
+            (
+                ResolvedAgentConfig { model: Some("MiniMax-M3".into()), ..Default::default() },
+                "MiniMax-M3",
+            ),
+            (
+                ResolvedAgentConfig { model: Some("route-override".into()), ..Default::default() },
+                "route-override",
+            ),
+        ] {
+            for (mode_label, mode) in [
+                ("fresh", SessionIdMode::None),
+                ("resume", SessionIdMode::Resume("codex-session".into())),
+            ] {
+                let cmd = build_spawn_command_prepared(
+                    &wsl_resolved(),
+                    Provider::Codex,
+                    &codex_proxy("buildmesh_1234", "sentinel-secret"),
+                    &mode,
+                    SESSION_ID,
+                    &config,
+                    None,
+                    false,
+                );
+                let args = argv(&cmd);
+                let flags: Vec<usize> = args
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, arg)| arg.as_str() == "--model")
+                    .map(|(index, _)| index)
+                    .collect();
+                assert_eq!(
+                    flags.len(),
+                    1,
+                    "Codex rejects a repeated --model; got {args:?} for {mode_label} / {config:?}"
+                );
+                assert_eq!(
+                    args.get(flags[0] + 1).map(String::as_str),
+                    Some(expected_model),
+                    "the single --model must carry the resolved value; got {args:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn native_codex_receives_no_proxy_routing() {
         let cmd = build_spawn_command_prepared(
