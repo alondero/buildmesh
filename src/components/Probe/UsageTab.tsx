@@ -184,7 +184,7 @@ export function RefreshedAgo({ since }: { since: Date }) {
   const absolute = since.toLocaleTimeString();
   return (
     <span
-      className="text-2xs text-text-muted/80 shrink-0"
+      className="text-2xs text-text-muted shrink-0"
       data-testid="usage-last-refreshed"
     >
       <time

@@ -289,7 +289,7 @@ function ProbePanelContent() {
               </div>
               <span
                 data-testid="probe-context-mode"
-                className="text-2xs text-text-muted/80 truncate"
+                className="text-2xs text-text-muted truncate"
               >
                 {contextModeLabel}
               </span>

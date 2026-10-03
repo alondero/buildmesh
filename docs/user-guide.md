@@ -94,6 +94,17 @@ Use **More** at the right of the title bar to open **Project Files**,
 The menu uses the same names, descriptions, and icons as the command palette.
 **Usage** has its own title-bar button, alongside **Settings** and **Mobile**.
 
+Settings opens with focus on **General**. Use Up/Down to select a section
+(wrapping at either end), or Home/End to select the first/last section. Tab
+enters that section; switching sections preserves unsaved drafts. If you try
+to close with unsaved changes, **Keep editing** returns to your previous
+control and **Discard changes** closes Settings.
+
+Sidebar colour and provider-picker controls have enlarged targets around
+their compact icons. Suspended agents show **Resume** and failed agents show
+**Restart** when available, without needing to hover the row. The close icon
+remains visible and identifies the node in its accessible label.
+
 Select a tool to open it and close the menu. Use Tab and Enter to choose a tool,
 or Escape to close the menu and return focus to **More**. Clicking outside also
 closes the menu. On short windows, scroll the menu to reach every tool.

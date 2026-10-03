@@ -757,7 +757,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
               >
                 <div className="text-xs text-text-muted mb-1">
                   Server root CA fingerprint
-                  <span className="ml-2 text-text-muted/70">
+                  <span className="ml-2 text-text-muted">
                     (or re-install manually for iOS / older Android)
                   </span>
                 </div>
@@ -807,7 +807,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                         >
                           {installUrl}
                         </code>
-                        <div className="mt-1 text-text-muted/80">
+                        <div className="mt-1 text-text-muted">
                           Chrome auto-routes the .der download into the
                           system cert installer — same one-tap install as
                           the QR above, but via the browser instead.
@@ -853,7 +853,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
                         <li>Scan the <span className="font-medium text-text-secondary">Install — iOS</span> QR above — Safari installs the signed <code className="font-mono">.mobileconfig</code> profile with a single tap.</li>
                         <li>Settings → General → About → Certificate Trust Settings → enable the new root. (Self-signed roots always need this one tap; signing only removes the "Not Signed" warning, it does not auto-trust.)</li>
                       </ol>
-                      <div className="mt-1 text-text-muted/80">
+                      <div className="mt-1 text-text-muted">
                         If scanning fails (older iOS, custom camera apps), transfer
                         {' '}<code className="font-mono">ca.der</code> to the phone and
                         install via Settings → General → VPN &amp; Device Management.

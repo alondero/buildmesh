@@ -216,6 +216,16 @@ test('behavior gates reject zero tests and preserve executed counts', async t =>
   assert.equal(executed.count, 1);
   assert.equal(executedTests('rust', 'test result: ok. 2 passed;\ntest result: ok. 3 passed;'), 5);
 });
+test('build gates use production while test gates retain the test environment', async t => {
+  const fixture = repo(t);
+  for (const [id, expected] of [['frontend-build', 'production'], ['mobile-build', 'production'], ['frontend-tests', 'test']]) {
+    const result = await runGate(fixture.cwd, {
+      id, minutes: 1,
+      command: ['node', '-e', `if (process.env.NODE_ENV !== '${expected}') throw new Error(process.env.NODE_ENV);`],
+    }, fixture.base);
+    assert.equal(result.outcome, 'PASS', result.log ? readFileSync(result.log, 'utf8') : result.reason);
+  }
+});
 test('missing dependencies preflight BLOCKED without launching tests', async t => {
   const fixture = repo(t);
   const result = await runGate(fixture.cwd, { id: 'frontend', command: ['npm', 'run', 'test'], minutes: 1, tests: 'vitest' }, fixture.base);
