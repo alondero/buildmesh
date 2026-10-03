@@ -3,8 +3,8 @@
 
 pub mod agent;
 mod attention_autoclear;
-pub mod circuit;
 mod blocking;
+pub mod circuit;
 mod commands;
 mod coordinator;
 mod db;
@@ -681,6 +681,8 @@ pub fn run() {
             // General GitHub auth (issue #433 — moved out of `commands::pr`:
             // no PR call sites, used by git/mobile/UI auth checks).
             commands::github::check_gh_auth,
+            commands::github::get_repo_labels,
+            commands::github::set_issue_label,
             // App-level metadata (issue #826). The frontend uses
             // `get_app_identifier` to guard the in-app updater: the dev
             // profile (`com.alond.buildmesh.dev`) must not poll the stable

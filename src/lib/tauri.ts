@@ -525,6 +525,12 @@ export type { GitHubIssue };
 export const getRepoIssues = (meshId: number) =>
   _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
 
+export const getRepoLabels = (meshId: number) =>
+  _invoke<string[]>('get_repo_labels', { meshId });
+
+export const setIssueLabel = (meshId: number, issueNumber: number, label: string, present: boolean) =>
+  _invoke<void>('set_issue_label', { meshId, issueNumber, label, present });
+
 // GitHub Pull Requests — `GitHubPullRequest` / `PrMergeability` are generated
 // from the Rust structs (src-tauri/src/commands/pr.rs) into
 // src/types/generated/; see top import. Re-exported here so the PR probe tab

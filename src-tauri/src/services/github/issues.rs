@@ -334,6 +334,36 @@ pub fn parse_blocked_by(body: &str) -> Vec<i64> {
 }
 
 impl GitHubClient {
+    /// Fetch all repository label names for the issue tag picker.
+    pub fn list_repo_labels(&self, owner: &str, repo: &str) -> Result<Vec<String>, GitHubError> {
+        self.list_labels(&format!("/repos/{owner}/{repo}/labels"))
+    }
+
+    fn list_labels(&self, path: &str) -> Result<Vec<String>, GitHubError> {
+        let mut labels = Vec::new();
+        let mut page = 1;
+        loop {
+            let resp = self
+                .client
+                .get(self.rest_url(&format!("{path}?per_page=100&page={page}")))
+                .header(AUTHORIZATION, format!("Bearer {}", self.token))
+                .header(USER_AGENT, "buildmesh")
+                .header(ACCEPT, "application/vnd.github+json")
+                .send()?;
+            let status = resp.status();
+            if !status.is_success() {
+                return Err(rest_failure(status, resp.text().unwrap_or_default()));
+            }
+            let batch: Vec<RawLabel> = resp.json()?;
+            let last_page = batch.len() < 100;
+            labels.extend(batch.into_iter().map(|label| label.name));
+            if last_page {
+                return Ok(labels);
+            }
+            page += 1;
+        }
+    }
+
     /// List open issues (excluding pull requests) for a repository.
     pub fn list_issues_only(&self, owner: &str, repo: &str) -> Result<Vec<Issue>, GitHubError> {
         // Use the search API which lets us filter to only issues (not PRs)
@@ -494,10 +524,8 @@ impl GitHubClient {
         Ok(())
     }
 
-    /// Remove a label from an issue. Idempotent on a missing label: GitHub
-    /// returns 404 for "label not on this issue", which we collapse to
-    /// `Ok(())` so the toggle can be retried freely without surfacing a
-    /// stale "label wasn't there" error. The endpoint is
+    /// Remove a label from an issue. A 404 is idempotent only when a read
+    /// confirms the issue is accessible and the label is absent. The endpoint is
     /// `DELETE /repos/{o}/{r}/issues/{n}/labels/{name}` and the label
     /// name goes in the URL path, so we percent-encode it for safety
     /// (labels commonly contain `:`, `/`, etc.).
@@ -525,12 +553,16 @@ impl GitHubClient {
             .send()?;
 
         let status = resp.status();
-        // 404 covers two cases — label not on this issue, OR label
-        // doesn't exist on the repo at all. Both are "label isn't
-        // present, which is the state the caller wanted" → idempotent
-        // success.
+        // GitHub also masks inaccessible resources as 404. Verify absence
+        // before acknowledging success so lost access cannot look like a write.
         if status == reqwest::StatusCode::NOT_FOUND {
-            let _ = resp.bytes();
+            let body = resp.text().unwrap_or_default();
+            let labels = self.list_labels(&format!(
+                "/repos/{owner}/{repo}/issues/{issue_number}/labels"
+            ))?;
+            if labels.iter().any(|name| name.eq_ignore_ascii_case(label)) {
+                return Err(rest_failure(status, body));
+            }
             return Ok(());
         }
         if !status.is_success() {
