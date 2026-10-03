@@ -27,6 +27,7 @@ jobs:
           distribution: temurin
           java-version: 17
           cache: gradle
+      - uses: android-actions/setup-android@v4
       - run: npm ci
       - run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
       - run: bash android/gradlew -p android assembleDebug testDebugUnitTest lintDebug assembleDebugAndroidTest --console=plain
