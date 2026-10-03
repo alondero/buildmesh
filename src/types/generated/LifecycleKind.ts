@@ -12,4 +12,4 @@
  *
  * Generated to `src/types/generated/LifecycleKind.ts`.
  */
-export type LifecycleKind = "work_resumed" | "turn_completed" | "input_required" | "permission_requested" | "question_requested" | "background_running" | "process_idle" | "session_exited" | "error" | "signal_unavailable" | "lost";
+export type LifecycleKind = "work_resumed" | "turn_completed" | "input_required" | "permission_requested" | "question_requested" | "background_running" | "process_idle" | "process_running" | "session_exited" | "error" | "signal_unavailable" | "lost";

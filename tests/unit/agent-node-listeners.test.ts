@@ -252,6 +252,37 @@ describe('attachAgentNodeListeners', () => {
     ]);
   });
 
+  it('process_running adopts the stored snapshot and does not copy signal health', async () => {
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
+    mockListen.mockImplementation((eventName: string, handler: (event: { payload: unknown }) => void) => {
+      if (eventName === 'agent-lifecycle') capturedHandler = handler;
+      return Promise.resolve(() => {});
+    });
+
+    const surface = makeSurface();
+    await attachAgentNodeListeners(surface);
+    const payload = {
+      session_id: 4884,
+      provider: null,
+      kind: 'process_running',
+      status: 'running',
+      message: 'agent process is running',
+      provider_event: null,
+      provider_session_id: null,
+      completion_reason: null,
+      transcript_path: null,
+      timestamp: '2026-10-03T14:32:26+00:00',
+      signal_health: 'ok',
+      semantic_turn: null,
+    };
+    capturedHandler!({ payload });
+
+    expect(surface.__calls).toEqual([
+      { method: 'patchAgentNode', args: [4884, { status: 'running', lifecycle: payload }] },
+    ]);
+  });
+
   it('work_resumed clears a stale semantic attention reason', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
