@@ -49,7 +49,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useProbeContext } from '../../hooks/useProbeContext';
 import { useMeshHealth } from '../../hooks/useMeshHealth';
 import { useMeshRecovery } from '../../hooks/useMeshRecovery';
-import { useAsyncEffect } from '../../hooks/useAsyncEffect';
 import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import {
   deleteBranches,
@@ -151,6 +150,13 @@ const isRecommendedBranch = (b: BranchInfo) =>
 const isRecommendedWorktree = (w: WorktreeInfo) => !w.is_active && w.is_stale;
 
 export function RepositoryTab() {
+  const { activeMeshId } = useProbeContext();
+  // Cleanup selections and confirmations belong to one mesh. Remounting the
+  // owner removes those targets synchronously when the probe changes scope.
+  return <RepositoryContents key={activeMeshId ?? 'none'} />;
+}
+
+function RepositoryContents() {
   // This is a project-scoped destination: the health snapshot and the
   // Restore/Free recovery actions walk the project ROOT, not a focused
   // agent's worktree. Use `activeMeshPath` (the mesh row's own path) —
@@ -185,26 +191,30 @@ export function RepositoryTab() {
   const [pruningPaths, setPruningPaths] = useState<Set<string>>(new Set());
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  const loadRevisionRef = useRef(0);
 
   // Single prune-fetch body. Mount, mesh-switch, manual Refresh, and
   // post-recovery all route through `load`. The function returns the
   // promise so callers that need to sequence AFTER the refresh (e.g.
   // `handleDelete` wants the partial-failure error to land on top of
-  // `load`'s own `setError(null)`) can `await load()`. `useAsyncEffect`
-  // wraps the same call to gate the setStates behind `signal.aborted`,
+  // `load`'s own `setError(null)`) can `await load()`. A shared revision
+  // gates mount, manual and post-mutation refreshes,
   // so a rapid Refresh click while the previous fetch is still pending
   // can't clobber state with a stale response.
   const load = useCallback(() => {
-    if (activeMeshId === null) return Promise.resolve();
+    if (activeMeshId === null || !mountedRef.current) return Promise.resolve();
+    const revision = ++loadRevisionRef.current;
+    const current = () => mountedRef.current && revision === loadRevisionRef.current;
     setLoading(true);
     setError(null);
     setSelected(new Set());
     return getGitPruneInfo(activeMeshId)
       .then((data) => {
-        setRepos(data);
+        if (current()) setRepos(data);
       })
-      .catch((e) => setError(formatError(e)))
-      .finally(() => setLoading(false));
+      .catch((e) => { if (current()) setError(formatError(e)); })
+      .finally(() => { if (current()) setLoading(false); });
   }, [activeMeshId]);
 
   // Mesh-switch reset (review findings B1 + B2): clear any in-flight
@@ -221,28 +231,15 @@ export function RepositoryTab() {
     }
   }, [activeMeshId]);
 
-  useAsyncEffect(
-    (signal) => {
-      if (activeMeshId === null) return;
-      setLoading(true);
-      setError(null);
-      setSelected(new Set());
-      getGitPruneInfo(activeMeshId)
-        .then((data) => {
-          if (!signal.aborted) {
-            setRepos(data);
-            setLoading(false);
-          }
-        })
-        .catch((e) => {
-          if (!signal.aborted) {
-            setError(formatError(e));
-            setLoading(false);
-          }
-        });
-    },
-    [activeMeshId, load],
-  );
+  useEffect(() => {
+    const revisions = loadRevisionRef;
+    mountedRef.current = true;
+    void load();
+    return () => {
+      mountedRef.current = false;
+      ++revisions.current;
+    };
+  }, [load]);
 
   // Issue #657 — clear any pending prune-success timer on unmount so a
   // late-firing `setSuccessMessage` can't land on an unmounted tree
@@ -282,6 +279,7 @@ export function RepositoryTab() {
       health.is_dirty);
 
   const toggle = (key: string) => {
+    if (loading || deleting) return;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
@@ -377,13 +375,13 @@ export function RepositoryTab() {
         }
       }
     } finally {
-      setDeleting(false);
-      // Refresh FIRST so load()'s own setError(null) runs, then restore
-      // the partial-failure message on top. Pre-fix the message was wiped
-      // because load() was fire-and-forget and its synchronous
-      // setError(null) immediately clobbered the error we'd just set.
-      await load();
-      if (errors.length > 0) setError(errors.join('; '));
+      if (mountedRef.current) {
+        setDeleting(false);
+        // Refresh first, then restore partial deletion failures after load()
+        // has cleared the previous error.
+        await load();
+        if (mountedRef.current && errors.length > 0) setError(errors.join('; '));
+      }
     }
   };
 
@@ -449,7 +447,7 @@ export function RepositoryTab() {
             <button
               type="button"
               onClick={selectRecommended}
-              disabled={recommendedKeys.length === 0 || deleting}
+              disabled={recommendedKeys.length === 0 || deleting || loading}
               title="Select merged/orphaned clean branches and stale worktrees"
               className="text-xs text-text-secondary hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -460,7 +458,7 @@ export function RepositoryTab() {
           <button
             type="button"
             onClick={() => setConfirming(true)}
-            disabled={selectionEmpty || deleting}
+            disabled={selectionEmpty || deleting || loading}
             className="text-xs text-status-error hover:text-status-error/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {deleting ? 'Deleting…' : 'Delete Selected'}
@@ -487,6 +485,7 @@ export function RepositoryTab() {
                 repo={repo}
                 selected={selected}
                 onToggle={toggle}
+                selectionDisabled={loading || deleting}
                 pruning={pruningPaths.has(repo.path)}
                 onPruneRemote={async () => {
                   // Mark this repo as pruning so the button shows
@@ -506,6 +505,7 @@ export function RepositoryTab() {
                   let pruneError: string | null = null;
                   try {
                     const message = await pruneRemoteTracking(repo.path);
+                    if (!mountedRef.current) return;
                     // git returns its (possibly empty) report on stderr.
                     // The Rust side already trims; empty stderr means
                     // "nothing was pruned" — surface a fallback so the
@@ -515,6 +515,7 @@ export function RepositoryTab() {
                     if (successTimerRef.current) clearTimeout(successTimerRef.current);
                     successTimerRef.current = setTimeout(() => setSuccessMessage(null), 4000);
                   } catch (e) {
+                    if (!mountedRef.current) return;
                     // Prefix distinguishes prune failures from
                     // `deleteBranches`/`deleteWorktrees` failures that
                     // share the same inline-error renderer (AC4). Also
@@ -527,21 +528,17 @@ export function RepositoryTab() {
                     }
                     pruneError = `Prune failed: ${formatError(e)}`;
                   } finally {
-                    setPruningPaths((prev) => {
-                      const next = new Set(prev);
-                      next.delete(repo.path);
-                      return next;
-                    });
-                    // Refresh the prune-info list after the prune settles.
-                    // `load()`'s own catch writes refresh errors to the
-                    // shared `error` channel WITHOUT the "Prune failed:"
-                    // prefix — refresh failures shouldn't be mislabelled
-                    // as prune failures.
-                    await load();
-                    // Restore the prune error AFTER `load()`'s own
-                    // `setError(null)` has run (so the prune message
-                    // doesn't get clobbered by a successful refresh).
-                    if (pruneError) setError(pruneError);
+                    if (mountedRef.current) {
+                      setPruningPaths((prev) => {
+                        const next = new Set(prev);
+                        next.delete(repo.path);
+                        return next;
+                      });
+                      // Refresh failures should not be labelled as prune failures.
+                      await load();
+                      // Restore the prune error after load() clears the old error.
+                      if (mountedRef.current && pruneError) setError(pruneError);
+                    }
                   }
                 }}
               />
@@ -764,6 +761,7 @@ interface RepoBlockProps {
   onToggle: (key: string) => void;
   onPruneRemote: () => void | Promise<void>;
   pruning: boolean;
+  selectionDisabled: boolean;
 }
 
 /**
@@ -772,7 +770,7 @@ interface RepoBlockProps {
  * as a one-line header so a mesh with multiple nested repos stays
  * readable.
  */
-function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlockProps) {
+function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning, selectionDisabled }: RepoBlockProps) {
   return (
     <div className="space-y-3 rounded-md border border-border-subtle p-3">
       {/* Repo path + open-in-explorer. `min-w-0` lets the path truncate
@@ -831,7 +829,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                 <SelectableRow
                   key={key}
                   rowKey={key}
-                  disabled={undeletable}
+                  disabled={undeletable || selectionDisabled}
                   selected={selected.has(key)}
                   onToggle={onToggle}
                   title={
@@ -912,7 +910,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
                 <SelectableRow
                   key={key}
                   rowKey={key}
-                  disabled={undeletable}
+                  disabled={undeletable || selectionDisabled}
                   selected={selected.has(key)}
                   onToggle={onToggle}
                   title={
@@ -986,7 +984,7 @@ function RepoBlock({ repo, selected, onToggle, onPruneRemote, pruning }: RepoBlo
             <button
               type="button"
               onClick={() => void onPruneRemote()}
-              disabled={pruning}
+              disabled={pruning || selectionDisabled}
               className="text-2xs text-text-muted hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {pruning ? 'Pruning…' : 'Prune'}
