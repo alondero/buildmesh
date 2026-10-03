@@ -92,8 +92,10 @@ function timeAgo(isoString: string): string {
 // `SpawnOption` with the resume flag tacked on.
 type ResumableProvider = SpawnOption & { resumable: boolean };
 
-export function ArchivedNodesTab() {
-  const { activeMeshId, activeMeshPath } = useProbeContext();
+export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPath?: string } = {}) {
+  const context = useProbeContext();
+  const activeMeshId = meshId ?? context.activeMeshId;
+  const activeMeshPath = meshPath ?? context.activeMeshPath;
   // `activeMeshPath` is the mesh root, NOT the focused worktree's
   // working directory — `discover_sessions` walks `.claude/projects/...`
   // from the mesh root, and `import_discovered_session` needs to know

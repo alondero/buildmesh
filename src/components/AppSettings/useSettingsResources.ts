@@ -8,7 +8,7 @@
  *
  * Scope: this hook owns the resource load state machine — the
  * `idle | loading | loaded | failed` status + last-error message
- * for each of the seven resources (preferences, providers,
+ * for each of the resources (preferences, routing choices, providers,
  * accounts, pairings, coordinator, devices, network). It does NOT
  * own the derived state the modal reads from each successful
  * load (the `providers` array, the `pairings` array, etc.).
@@ -25,7 +25,7 @@
  * rejection can never overwrite a fast retry's success. This is the
  * request-sequence pattern round-5 review asked for.
  */
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatError } from '../../lib/errorUtils';
 import * as api from '../../lib/tauri';
 
@@ -41,6 +41,7 @@ export interface ResourceState {
 /** Named-resource keys (issue #1534). */
 export type ResourceKey =
   | 'preferences'
+  | 'routing'
   | 'providers'
   | 'accounts'
   | 'pairings'
@@ -50,6 +51,7 @@ export type ResourceKey =
 
 export const INITIAL_RESOURCES: Record<ResourceKey, ResourceState> = {
   preferences: { status: 'loading', error: null },
+  routing: { status: 'loading', error: null },
   providers: { status: 'loading', error: null },
   accounts: { status: 'loading', error: null },
   // Issue #1935 — pairings no longer waits on providers. Its attach-picker map
@@ -72,6 +74,7 @@ export type HostPairingVerificationsFn = () => Promise<api.PairingVerification[]
  *  doesn't care about a particular resource's data can omit it. */
 export interface SettingsResourceCallbacks {
   onPreferencesLoaded?: (prefs: api.AppPreferences) => void;
+  onRoutingLoaded?: (list: api.ProviderInfo[]) => void;
   onProvidersLoaded?: (list: api.ProviderInfo[]) => void;
   onAccountsLoaded?: (data: {
     accountList: api.ProviderAccount[];
@@ -96,6 +99,7 @@ export interface UseSettingsResources extends SettingsResourceCallbacks {
   resources: Record<ResourceKey, ResourceState>;
   setResource: (key: ResourceKey, next: ResourceState) => void;
   loadPreferences: () => Promise<api.AppPreferences | null>;
+  loadRouting: () => Promise<api.ProviderInfo[] | null>;
   loadProviders: () => Promise<api.ProviderInfo[] | null>;
   loadAccounts: () => Promise<{ accountList: api.ProviderAccount[]; catalog: api.ProviderAccount[] } | null>;
   loadPairings: () => Promise<{
@@ -143,6 +147,7 @@ export function useSettingsResources(
   // retry's success.
   const requestIdsRef = useRef<Record<ResourceKey, number>>({
     preferences: 0,
+    routing: 0,
     providers: 0,
     accounts: 0,
     pairings: 0,
@@ -150,6 +155,9 @@ export function useSettingsResources(
     devices: 0,
     network: 0,
   });
+  useEffect(() => () => {
+    for (const key of Object.keys(requestIdsRef.current) as ResourceKey[]) requestIdsRef.current[key]++;
+  }, []);
 
   /** Generic loader that does the bookkeeping: bump request id,
    *  flip to `loading`, run the loader, commit only if our id is
@@ -207,6 +215,13 @@ export function useSettingsResources(
       callbacksRef.current.onPreferencesLoaded?.(prefs);
     }),
     [withResourceLoad, readPreferences],
+  );
+
+  const loadRouting = useCallback(
+    () => withResourceLoad('routing', () => api.listRoutingOptions(), list => {
+      if (!Array.isArray(list)) throw new Error('Invalid routing choices response');
+      callbacksRef.current.onRoutingLoaded?.(list);
+    }), [withResourceLoad],
   );
 
   const loadProviders = useCallback(
@@ -353,7 +368,7 @@ export function useSettingsResources(
    *  renders the providers banner ahead of the pairings one — that ordering is
    *  the affordance the guard stood in for.
    *
-   * Issue #1534 (review round 5) — replaced the 7-case switch with
+   * Issue #1534 (review round 5) — replaced the resource switch with
    * a `Record<ResourceKey, () => void>` lookup so adding a
    * resource is type-checked at the table's construction site, and
    * removed the redundant `void` cast on each invocation. */
@@ -361,6 +376,7 @@ export function useSettingsResources(
     (key: ResourceKey) => {
       const retryFns: Record<ResourceKey, () => void> = {
         preferences: () => void loadPreferences(),
+        routing: () => void loadRouting(),
         providers: () => void loadProviders(),
         accounts: () => void loadAccounts(),
         pairings: () => void loadPairings(),
@@ -372,6 +388,7 @@ export function useSettingsResources(
     },
     [
       loadPreferences,
+      loadRouting,
       loadProviders,
       loadAccounts,
       loadPairings,
@@ -385,6 +402,7 @@ export function useSettingsResources(
     resources,
     setResource,
     loadPreferences,
+    loadRouting,
     loadProviders,
     loadAccounts,
     loadPairings,

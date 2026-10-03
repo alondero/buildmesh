@@ -14,8 +14,8 @@
  *     search field can fill the row and long text truncates instead of
  *     pushing the trailing slot out of the dock.
  *   - right slot (`trailing`): secondary navigation-style actions —
- *     "View on GitHub ↗", the open/closed segmented toggle. `shrink-0`
- *     keeps it visible at the narrowest (240px) panel width.
+ *     "View on GitHub ↗", the open/closed segmented toggle. The row wraps
+ *     at narrow widths so secondary actions cannot cover primary controls.
  *
  * The 37px minimum height matches the pre-convergence rows so tab
  * switches don't visibly resize the strip.
@@ -36,10 +36,10 @@ export function ProbeToolbar({ children, trailing, className = '' }: ProbeToolba
   return (
     <div
       data-testid="probe-toolbar"
-      className={`flex items-center gap-2 px-3 py-2 border-b border-border-subtle min-h-[37px] ${className}`.trim()}
+      className={`flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border-subtle min-h-[37px] ${className}`.trim()}
     >
-      <div className="flex items-center gap-2 min-w-0 flex-1">{children}</div>
-      {trailing && <div className="flex items-center gap-2 shrink-0">{trailing}</div>}
+      <div className="flex flex-wrap items-center gap-2 min-w-0 flex-[1_1_120px]">{children}</div>
+      {trailing && <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">{trailing}</div>}
     </div>
   );
 }

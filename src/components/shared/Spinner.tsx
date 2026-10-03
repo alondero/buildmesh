@@ -86,7 +86,7 @@ export function EmptyState({ label, hint, icon, fill, testId }: EmptyStateProps)
       </div>
       <span className="text-xs text-text-muted">{label}</span>
       {hint && (
-        <span className="text-2xs text-text-muted mt-1 max-w-[280px]">{hint}</span>
+        <span className="text-2xs text-text-secondary mt-1 max-w-[280px]">{hint}</span>
       )}
     </div>
   );

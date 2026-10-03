@@ -144,13 +144,13 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     // resumable agent work.
     label: 'Agent History',
     tooltip: 'Completed, archived, failed, and resumable agent work',
-    lens: 'mesh',
-    followsSelection: true,
-    pinnable: true,
-    baseline: 'mesh',
+    lens: 'host',
+    followsSelection: false,
+    pinnable: false,
+    baseline: 'host',
     stateful: true,
     mixedOwnership:
-      'Mesh-owned Agent Node history index; each listed row is an Agent Node and resume acts on that row.',
+      'Host-wide lifecycle finder. Repository filters and discovery select an explicit Mesh; reopen/resume acts on the listed Agent Node.',
   },
   scratchpad: {
     // Issue #1375 — "Notes" is the user-facing destination name; the body it

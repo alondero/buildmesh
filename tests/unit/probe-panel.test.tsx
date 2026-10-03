@@ -290,6 +290,7 @@ describe('ProbePanel', () => {
     // canary is enough to prove the tab mounted before the mocked
     // `discover_agent_nodes` resolves.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_agent_history') return Promise.resolve([]);
       if (cmd === 'discover_agent_nodes') return Promise.resolve([]);
       if (cmd === 'list_providers') return Promise.resolve([]);
       return Promise.resolve({});
@@ -297,7 +298,7 @@ describe('ProbePanel', () => {
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
     render(<ProbePanel />);
 
-    expect(await screen.findByText('Scanning sessions…')).toBeTruthy();
+    expect(await screen.findByLabelText('Search agent history')).toBeTruthy();
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
 });

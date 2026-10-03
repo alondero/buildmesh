@@ -499,7 +499,7 @@ describe('GitPullRequestsTab', () => {
     expect(clampedBody).toBeTruthy();
     expect(leftColumn.contains(clampedBody)).toBe(false);
     expect(row.contains(clampedBody)).toBe(true);
-    const titleRow = leftColumn.parentElement!;
+    const titleRow = leftColumn.parentElement!.parentElement!;
     expect(clampedBody.parentElement!.parentElement).toBe(titleRow.parentElement);
   });
 

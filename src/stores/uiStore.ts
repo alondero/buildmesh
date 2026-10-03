@@ -3,12 +3,15 @@ import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeContextPin, ProbeTab } from '../lib/probeContext';
+import { rememberProbeSubview, restoredProbeSubview } from '../lib/probeGroups';
 import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } from '../lib/probeWorkingSet';
 
 // The destination vocabulary itself lives in `lib/probeContext.ts` (alongside
 // the ownership lenses) so pure domain modules never import from `stores/`;
 // re-exported here because every store consumer addresses it as a Probe
 // Panel concern.
+export type AppSettingsTab = 'general' | 'providers' | 'harnesses' | 'remote';
+
 export type { ProbeTab };
 
 // The five canvas View Modes (wayfinder #982 — tickets #983 state model,
@@ -372,7 +375,8 @@ interface UIState extends GridControls {
   closeCheatsheet: () => void;
   toggleCheatsheet: () => void;
   appSettingsOpen: boolean;
-  openAppSettings: () => void;
+  appSettingsTab: AppSettingsTab;
+  openAppSettings: (tab?: AppSettingsTab) => void;
   closeAppSettings: () => void;
   remoteAccessOpen: boolean;
   openRemoteAccess: () => void;
@@ -472,12 +476,13 @@ interface UIState extends GridControls {
 export const useUIStore = create<UIState>((set, get) => {
   const initialViewMode = loadViewMode(useMeshStore.getState().selectedMeshId);
   const initialGridControls = loadGridControls();
+  const initialProbeTab = restoredProbeSubview('files');
   return {
     probeOpen: false,
-    probeTab: 'files',
+    probeTab: initialProbeTab,
     // Matches the default `probeTab` so the rail is never empty and the
     // body's aria-labelledby always resolves, from boot onward.
-    probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, 'files'),
+    probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, initialProbeTab),
     probeContextPins: {},
     activeDiffFile: null,
 
@@ -495,6 +500,7 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     setProbeTab: (tab: ProbeTab) => {
+      rememberProbeSubview(tab);
       // Pure tab switch. The Center Workspace Diff Overlay (issue #379) is
       // independent of the active tab — it floats over the terminal grid — so
       // switching tabs no longer clears `activeDiffFile`. The overlay closes
@@ -596,8 +602,9 @@ export const useUIStore = create<UIState>((set, get) => {
     },
 
     appSettingsOpen: false,
-    openAppSettings: () => {
-      set({ appSettingsOpen: true });
+    appSettingsTab: 'general',
+    openAppSettings: (tab = 'general') => {
+      set({ appSettingsOpen: true, appSettingsTab: tab });
     },
     closeAppSettings: () => {
       set({ appSettingsOpen: false });

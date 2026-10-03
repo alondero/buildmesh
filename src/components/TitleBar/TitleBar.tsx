@@ -398,6 +398,7 @@ export function TitleBar() {
   // commands summon the same modals through the same source of truth the
   // header buttons use — no window-event side channel.
   const appSettingsOpen = useUIStore((s) => s.appSettingsOpen);
+  const appSettingsTab = useUIStore((s) => s.appSettingsTab);
   const remoteAccessOpen = useUIStore((s) => s.remoteAccessOpen);
   // #1609 — the Filtered view owns the Search Nodes bar; the mode lives in
   // uiStore so Omnibar view commands ("Switch view: Filtered") slide the
@@ -563,7 +564,7 @@ export function TitleBar() {
         </div>
       </header>
 
-      {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} />}
+      {appSettingsOpen && <AppSettingsModal onClose={() => useUIStore.getState().closeAppSettings()} initialTab={appSettingsTab} />}
       {remoteAccessOpen && <RemoteAccessModal onClose={() => useUIStore.getState().closeRemoteAccess()} />}
     </>
   );
