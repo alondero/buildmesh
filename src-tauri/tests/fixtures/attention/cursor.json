@@ -1,0 +1,57 @@
+[
+  {
+    "name": "stop-0",
+    "payload": {
+      "hook_event_name": "stop",
+      "conversation_id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "stop-1",
+    "payload": {
+      "hook_event_name": "stop",
+      "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+      "transcript_path": "F:\\src\\repo\\session.jsonl"
+    },
+    "pending": 2,
+    "decision": "SuppressPendingBackground",
+    "kind": "background_running",
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

@@ -10,11 +10,10 @@ use std::time::Duration;
 use super::super::types::{effective_tail, TranscriptTail};
 use rusqlite::{Connection, OpenFlags};
 
-use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env;
 use crate::models::EnvType;
 use crate::services::transcript_reader::adapter::{
-    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+    LocateCtx, TranscriptAdapter,
 };
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, Parsed, ToolCall, Turn, UnavailableReason,
@@ -164,50 +163,6 @@ impl TranscriptAdapter for OpenCodeAdapter {
             })
     }
 
-    fn classify_hook_value(
-        &self,
-        payload: &serde_json::Value,
-        provider: &str,
-    ) -> Option<HookClassification> {
-        // OpenCode's plugin events are harness-specific — the
-        // `session.idle` / `session.created` names aren't shared with
-        // Claude Code, Codex, or AGY. Gate on `provider == "opencode"`
-        // (or empty, matching the legacy hook POSTs from
-        // `~/.opencode/plugins/buildmesh-attention.js` that don't set
-        // a `provider` field) so a sibling harness that ever borrowed
-        // the same event names cannot false-positive this adapter's
-        // classification.
-        if provider != "opencode" && !provider.is_empty() {
-            return None;
-        }
-        // OpenCode's plugin fires `session.idle` when the agent finishes
-        // a turn and waits for another prompt — classify as Ready.
-        // Only explicit question/permission requests need human attention.
-        // `session.created` fires once at TUI boot
-        // carrying the freshly minted `ses_…` id; it's lifecycle-neutral
-        // (the id-capture path persists the session id, the attention
-        // route must not flip a fresh spawn into `AwaitingInput`).
-        let event = payload
-            .get("hook_event_name")
-            .or_else(|| payload.get("hookEventName"))
-            .and_then(|n| n.as_str())
-            .map(str::to_ascii_lowercase);
-        match event.as_deref() {
-            Some("session.idle") => Some(HookClassification {
-                decision: HookDecision::Ready,
-                kind: None,
-            }),
-            Some("question.asked") => Some(HookClassification {
-                decision: HookDecision::MarkInput,
-                kind: Some(LifecycleKind::QuestionRequested),
-            }),
-            Some("session.created") => Some(HookClassification {
-                decision: HookDecision::Ignore,
-                kind: None,
-            }),
-            _ => None,
-        }
-    }
 }
 
 /// Read the row tail of an OpenCode session's `message` table. Returns the

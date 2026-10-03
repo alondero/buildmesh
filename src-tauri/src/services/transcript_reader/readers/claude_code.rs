@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::services::transcript_paths::{concat_text_blocks, encode_path, is_synthetic_message};
 use crate::services::transcript_reader::adapter::{
-    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+    LocateCtx, TranscriptAdapter,
 };
 use crate::services::transcript_reader::types::{
     cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings,
@@ -74,36 +74,6 @@ impl TranscriptAdapter for ClaudeCodeAdapter {
             .is_empty()
     }
 
-    fn classify_hook_value(
-        &self,
-        payload: &serde_json::Value,
-        _provider: &str,
-    ) -> Option<HookClassification> {
-        // Claude Code's documented Notification envelope is "… needs
-        // your permission to use X" — anchored to the verb phrase, not
-        // a bare "permission" substring, so prose like "Permission was
-        // already granted for Bash" cannot false-positive. Cursor's
-        // envelope shape matches Claude Code's, so Cursor delegates
-        // here.
-        // The HookPayload struct in routes/attention.rs applies the
-        // `hookEventName` alias; we read raw `serde_json::Value` here.
-        let event = payload
-            .get("hook_event_name")
-            .or_else(|| payload.get("hookEventName"))
-            .and_then(|n| n.as_str())
-            .map(str::to_ascii_lowercase);
-        if event.as_deref() != Some("notification") {
-            return None;
-        }
-        payload
-            .get("message")
-            .and_then(|m| m.as_str())
-            .is_some_and(|m| m.to_ascii_lowercase().contains("needs your permission"))
-            .then_some(HookClassification {
-                decision: HookDecision::MarkInput,
-                kind: None,
-            })
-    }
 }
 
 /// Build the expected on-disk path of a Claude Code session transcript:

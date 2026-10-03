@@ -14,10 +14,9 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
-use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env;
 use crate::services::transcript_reader::adapter::{
-    HookClassification, HookDecision, LocateCtx, TranscriptAdapter,
+    LocateCtx, TranscriptAdapter,
 };
 use crate::services::transcript_reader::types::{
     cap_tool_calls, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall, Turn,
@@ -67,50 +66,6 @@ impl TranscriptAdapter for GrokAdapter {
             })
     }
 
-    fn classify_hook_value(
-        &self,
-        payload: &serde_json::Value,
-        _provider: &str,
-    ) -> Option<HookClassification> {
-        // Grok posts `hookEventName: "notification"` with a structured
-        // `notificationType` (issue #1282): permission_prompt marks
-        // input, task_complete marks ready, question-shaped types
-        // mark input with QuestionRequested. Other notification types
-        // and unrelated events fall through to the shared
-        // post-processing.
-        // The HookPayload struct in routes/attention.rs applies serde
-        // aliases (`hookEventName`, `notificationType`); we read raw
-        // `serde_json::Value` here, so handle both casings explicitly.
-        let event = payload
-            .get("hook_event_name")
-            .or_else(|| payload.get("hookEventName"))
-            .and_then(|n| n.as_str())
-            .map(str::to_ascii_lowercase);
-        if event.as_deref() != Some("notification") {
-            return None;
-        }
-        let nt = payload
-            .get("notification_type")
-            .or_else(|| payload.get("notificationType"))
-            .and_then(|v| v.as_str());
-        match nt {
-            Some("permission_prompt") => Some(HookClassification {
-                decision: HookDecision::MarkInput,
-                kind: None,
-            }),
-            Some("task_complete") => Some(HookClassification {
-                decision: HookDecision::Ready,
-                kind: None,
-            }),
-            Some("question") | Some("question_prompt") | Some("ask_user") => {
-                Some(HookClassification {
-                    decision: HookDecision::MarkInput,
-                    kind: Some(LifecycleKind::QuestionRequested),
-                })
-            }
-            _ => None,
-        }
-    }
 
     fn verify_attention_token(&self, query_string: Option<&str>, minted: Option<&str>) -> bool {
         // Issue #1366 round-2 + round-3: Grok's runner cannot bind

@@ -512,7 +512,7 @@ See [Agent Node status observation](development/node-status-observation.md) for
 ordering, health, recovery and harness capability limits.
 
 ### False-Yield Suppression (issue #878)
-Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `publish_background` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
+Claude Code ends its turn when it launches background work (`run_in_background` Bash, timeout-backgrounded commands) and re-invokes itself when the `<task-notification>` arrives — so a Stop (or 60s-idle Notification) is *not* always "the user is needed". The route reads `transcript_path` from the hook payload and asks `transcript_reader::count_pending_background_tasks` for launched-but-unnotified task IDs (launch = a `tool_result` promising "You will be notified when it completes"; finish = a `<task-id>` notification with a **terminal** status — `running`-status notifications don't count). Pending work → the Node Turn is published via `node_turn::publish_hook` with `background_running` (naming/autopilot still fire; no attention mark). Permission-prompt Notifications always mark, even mid-background-wait. Any unknown (empty/garbage body, unreadable transcript) degrades to marking — never to silence.
 
 **Safety net:** `attention_autoclear.rs` arms on every mark; if the PTY then produces ≥512 bytes of output more than 3s after the mark with no user keystroke, the node flips back to `running` and `attention-cleared` is broadcast. The 3s grace absorbs the Stop-hook-vs-final-redraw race; the burst threshold ignores idle control-sequence trickle. This self-heals the cases the transcript scan can't see (hook-less providers, format drift, lost notifications). Every path that clears attention or accepts user input must call `attention_autoclear::disarm` (see `write_to_agent_blocking`, `http::ws`, `coordinator::drive`, `circuit::delivery`).
 
@@ -527,6 +527,26 @@ matching resolution; input submission and permission resolution are
 unreadable transcripts are degraded review checkpoints, never successful turn
 completion. Background work is published as `background_running` without
 attention until its terminal callback arrives.
+
+Harness wire validation and mapping live in
+`http::routes::attention::normalizers`, with one module per wired hook harness.
+Dispatch uses the resolved node's harness, never a claimed payload provider or
+another harness's classifier. Each module selects the fields it validates;
+unrelated harness metadata cannot invalidate its callback. Unknown harnesses,
+unsupported events and malformed payloads report `signal_unavailable` with
+degraded health and cannot mutate turn/question/child correlation state.
+Compatible hooks share envelope and tool mechanics, while event vocabulary and
+observation strategy remain harness-owned. Explicit hooks are interpreted first;
+only that harness's completion path may request transcript reconciliation.
+Transcript reads run on the blocking pool after HTTP security checks, without
+holding a database connection.
+
+The route retains node/session ownership checks and delegates per-node callback
+ordering to `attention::ordering`. Normalizers return observations and never
+write node state. `node_turn` publishes the normalized lifecycle kind through
+`SessionLifecycle`, then considers renaming only after an accepted lifecycle
+commit. Replay fixtures and their evidence limits are documented in
+[`tests/fixtures/attention`](../src-tauri/tests/fixtures/attention/README.md).
 
 The route keeps per-node ordering state and fences callbacks by provider turn
 id/session id. Foreground activity is tracked separately from outstanding
