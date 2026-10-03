@@ -150,6 +150,21 @@ with no matches.
 
 ## Configure Autopilot Circuits
 
+In **GitHub Issues**, use the tag button beside an issue to change its GitHub
+labels. Search the repository's labels, then check or uncheck one to add or
+remove it. Changes save individually; permission and network errors
+leave the displayed tags unchanged so you can retry. Create or rename repository
+label definitions on GitHub.
+
+Labels watched by an **enabled Autopilot Circuit on this mesh** appear first,
+highlighted in violet with a lightning indicator. This includes `ready-for-agent`
+when it is the configured issue trigger, and any custom trigger labels. Hover
+for the Circuit name. Disabled Circuits and PR-label triggers do not highlight
+issue tags. The indicator means eligible for pickup on a poll; dependencies,
+existing runs, and capacity still determine when work starts. Removing a trigger
+label does not cancel a run that has already started. Circuit status refreshes
+while the Issues inspector is open and with **Refresh issues**.
+
 Open **Circuits** to configure automated flows and their triggers. **Max concurrent
 circuit runs** controls how many runs the selected mesh can admit at once.
 Settings > General > **Circuit agent pool size** adds an optional cap on agents
