@@ -45,6 +45,7 @@ export function buildRemoteAccessUrl(
   status: NetworkStatus,
   fallbackIp: string,
   pairingTicket: string,
+  rootFingerprint?: string,
 ): { url: string; host: string; reachable: boolean } {
   // A realized IPv6 bind renders bracketed (`[::1]:port`); IPv4 never does.
   const isIpv4 = (b: { address: string }) => !b.address.includes('[');
@@ -59,9 +60,10 @@ export function buildRemoteAccessUrl(
     ifaces.find(isIpv4) ??
     ifaces[0];
   if (bind) {
+    const ca = bind.tls && rootFingerprint ? `&ca=${encodeURIComponent(rootFingerprint)}` : '';
     const scheme = bind.tls ? 'https' : 'http';
     return {
-      url: `${scheme}://${bind.address}/#pair=${encodeURIComponent(pairingTicket)}`,
+      url: `${scheme}://${bind.address}/#pair=${encodeURIComponent(pairingTicket)}${ca}`,
       host: bind.address,
       reachable: true,
     };
@@ -185,6 +187,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
           status,
           localIp,
           ticket,
+          cert?.root_fingerprint_sha256,
         );
         setPairingTicket(ticket);
         setExpired(false);

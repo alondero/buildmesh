@@ -514,6 +514,14 @@ Buildmesh exposes an **HTTP surface** for an external **Coordinator** (the user'
 - **Auth is two-tier and header-only (#500, ADR-0015).** Every request resolves to a [Role](../CONTEXT.md) — **Admin** (root token, the mobile `/api/*` surface) or **Coordinator** (read/drive tokens, `/nodes*`) — as **disjoint surfaces**: a token works only on its own surface (wrong-surface valid token → 403, no creds → 401). Role resolution lives in `src-tauri/src/http/auth.rs` (`authorize`); the dispatcher (`http/router.rs`) calls `auth::authorize(.., scope)` per route, and `/admin/*` is reserved Admin-only. Credentials travel only in `Authorization: Bearer` or the `bm_session` cookie — never `?token=`. The mobile shell/assets are public; the client logs in via `POST /api/session` (sets the cookie) and mints a single-use `?ticket=` per WebSocket via `POST /api/ws-ticket` (`src-tauri/src/http/ws_ticket.rs`).
 - **Device Sessions are the per-browser Admin credential.** Desktop IPC `create_pairing_ticket` mints a hashed, single-use five-minute invitation (`http/pairing.rs`). QR URLs put it in `#pair=`, outside the initial request. `POST /api/pair` consumes it and creates a hashed `device_sessions` row. `POST /api/session` refreshes existing devices only, including one-time migration of old localStorage device credentials. Neither endpoint accepts root-token pairing or returns credentials in JSON. Both set a 400-day HttpOnly, SameSite=Strict cookie (Secure over TLS). Mobile boot refreshes automatically. Site-data removal, address changes, cookie expiry/eviction, and desktop revocation can require re-pairing. Authentication never depends on client IP. Authorized Devices and remote admin revocation delete the device row and broadcast to close its WebSockets; WebSockets use per-target single-use tickets.
 
+The native Android client in `android/` consumes the same remote HTTP routes and
+per-device session protocol. Compose owns management screens; a bundled, isolated
+xterm WebView renders only terminal bytes while Kotlin owns transport. Pairing
+authenticates the desktop CA against the QR fingerprint before exchanging an
+invitation. Android Keystore protects the persisted session. Foreground refreshes
+coalesce with owner/revision fences, and forgetting cancels pending actions. See
+[native Android client](development/android.md) for build and boundary details.
+
 ## LAN/VPN Exposure & Self-Signed TLS
 
 The embedded server binds **loopback only by default** (#496). An off-by-default

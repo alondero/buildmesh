@@ -19,9 +19,11 @@ const PASTE_SETTLE_QUIET_MS: u128 = 1_000;
 
 /// Upper bound on waiting for the post-paste redraw to settle.
 const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
-/// Codex on Windows can take several seconds to consume a large bracketed
-/// paste. Its input box renders a collapsed marker only after that work ends.
-const RENDERED_PASTE_READY_DEADLINE: Duration = Duration::from_secs(30);
+/// Give a slow console reader/redraw two extra original 30-second intervals.
+/// Guarded delivery synchronously blocks the shared circuit dispatcher for up
+/// to 90 seconds here. This bounded delay in surfacing Unverified is accepted
+/// to recover an already staged paste without risking a duplicate prompt.
+const RENDERED_PASTE_TOTAL_BUDGET: Duration = Duration::from_secs(90);
 /// Complete visible text is useful for short drafts. Long drafts may be
 /// collapsed or scrolled out of the TUI; they require Codex's paste marker.
 const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
@@ -91,6 +93,9 @@ fn ensure_prompt_target_alive(registry: &AgentProcessRegistry, node_id: i64) -> 
     }
 }
 
+/// With expected_input, delivery blocks the circuit dispatcher for at most
+/// RENDERED_PASTE_TOTAL_BUDGET of rendered-paste readiness, then up to
+/// MAX_ENTER_ATTEMPTS * ENTER_ACK_WINDOW for submission acknowledgement.
 pub(crate) fn write_prompt_to_pty_guarded(
     registry: &Arc<AgentProcessRegistry>,
     node_id: i64,
@@ -164,24 +169,6 @@ fn submit_staged_prompt(registry: &Arc<AgentProcessRegistry>, node_id: i64, app:
     }
 }
 
-/// Wait for the staged paste to land at an idle input box.
-///
-/// A node the turn evaluator **buffers** ([`evaluator::is_circuit_piloted`]) has an
-/// output clock, and the wait is signal-driven off it: the paste's echo first
-/// (so a provider that renders no echo falls through at the deadline), then a
-/// quiet redraw. A node the evaluator never buffers — an ordinary node a human
-/// spawned — has nothing to read, so it waits [`PASTE_SETTLE_QUIET_MS`]
-/// unconditionally: the same window the observable path waits *to see*, which
-/// keeps the decoupled Enter out of the paste burst (#874) without pretending to
-/// a signal that does not exist.
-///
-/// The gate is buffered-vs-not, deliberately NOT "has produced output yet": a
-/// piloted node that has not written its first byte is still observable a moment
-/// later, and the Autopilot prefill path injects into exactly that state
-/// (`node_launch` registers the evaluator before spawning). Reading the clock
-/// instead would quietly demote those callers to the unobservable path.
-/// Codex and Muse multiline pastes use their rendered input-box marker as the gate;
-/// startup output is otherwise indistinguishable from a paste echo here.
 #[derive(Debug)]
 struct PromptReadiness {
     paste: PasteReadiness,
@@ -221,39 +208,77 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
 }
 
 fn rendered_paste_visible(output: &str, chars: usize, normalized_chars: usize, content: &str) -> bool {
-    output.contains(&format!("[Pasted Content {chars} chars]"))
-        || output.contains(&format!("[Pasted Content {normalized_chars} chars]"))
+    // ConPTY inserts padding and line breaks when the composer wraps a marker.
+    // Preserve punctuation and the full count so partial/different pastes fail.
+    let compact: String = output.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains(&format!("[PastedContent{chars}chars]"))
+        || compact.contains(&format!("[PastedContent{normalized_chars}chars]"))
         || (!content.is_empty()
             && crate::circuit::launch::normalize_for_match(output).contains(content))
 }
 
+/// Wait for the staged paste to land at an idle input box without writing input.
+///
+/// Codex/Muse multiline pastes require a complete matching paste echo (a marker,
+/// or full visible text for short drafts) and a quiet redraw within one
+/// RENDERED_PASTE_TOTAL_BUDGET (90 seconds in production).
+/// Polling rechecks liveness and guard every SUBMIT_POLL; progress is logged at
+/// each third of the budget. rendered_paste_budget is injected so tests can
+/// exercise late echoes and exhaustion without spending 90 seconds waiting.
+/// Ok(false) means the guard lost draft ownership: the caller must not Enter.
+/// Exhaustion or process death returns Err, keeping delivery unverified.
+///
+/// Generic buffered targets wait for a paste echo (or PASTE_ECHO_DEADLINE), then
+/// a quiet redraw (bounded by PASTE_SETTLE_DEADLINE). Generic unbuffered targets
+/// wait PASTE_SETTLE_QUIET_MS unconditionally, separating Enter from the paste
+/// burst (#874). Buffer registration, rather than output already being present,
+/// selects the observable path so a newly launched piloted node can still echo.
+/// Those generic branches do not consult guard here; the subsequent
+/// press_enter_until_output_guarded atomically fences every Enter write.
 fn settle_after_paste(
     registry: &AgentProcessRegistry,
     node_id: i64,
     readiness: &PasteReadiness,
-) -> Result<(), String> {
+    guard: Option<&str>,
+    rendered_paste_budget: Duration,
+) -> Result<bool, String> {
     let wrote_at = Instant::now();
     if let PasteReadiness::RenderedMultiline { chars, normalized_chars, content, output_cursor, .. } = readiness {
-        while Instant::now() < wrote_at + RENDERED_PASTE_READY_DEADLINE {
+        let mut paste_seen = false;
+        let deadline = wrote_at + rendered_paste_budget;
+        let progress_interval = rendered_paste_budget / 3;
+        let mut next_progress = wrote_at + progress_interval;
+        while Instant::now() < deadline {
             ensure_prompt_target_alive(registry, node_id)?;
-            if rendered_paste_visible(
-                &evaluator::cleaned_output_since(node_id, *output_cursor),
-                *chars,
-                *normalized_chars,
-                content,
-            )
-                && evaluator::millis_since_last_output(node_id)
-                    .is_some_and(|quiet| quiet >= PASTE_SETTLE_QUIET_MS)
-            {
-                return Ok(());
+            if guard.is_some_and(|expected| !registry.input_is_current(node_id, expected)) {
+                return Ok(false);
             }
-            std::thread::sleep(SUBMIT_POLL);
+            // Latch a complete echo before later redraws evict it from the
+            // bounded tail. Once latched, only the quiet clock is consulted.
+            if !paste_seen {
+                paste_seen = rendered_paste_visible(
+                    &evaluator::cleaned_output_since(node_id, *output_cursor),
+                    *chars,
+                    *normalized_chars,
+                    content,
+                );
+            }
+            if paste_seen && evaluator::millis_since_last_output(node_id)
+                .is_some_and(|quiet| quiet >= PASTE_SETTLE_QUIET_MS)
+            {
+                return Ok(true);
+            }
+            if Instant::now() >= next_progress {
+                tracing::info!("circuit inject({node_id}): paste readiness still pending after {:.1}s of {rendered_paste_budget:?}; rechecking the existing draft", wrote_at.elapsed().as_secs_f64());
+                next_progress += progress_interval;
+            }
+            std::thread::sleep(SUBMIT_POLL.min(deadline.saturating_duration_since(Instant::now())));
         }
-        return Err(format!("The harness did not render the {chars}-character pasted prompt before Enter"));
+        return Err(format!("The harness did not confirm the {chars}-character pasted prompt before Enter after {:.1}s (readiness budget {rendered_paste_budget:?})", wrote_at.elapsed().as_secs_f64()));
     }
     if !evaluator::is_circuit_piloted(node_id) {
         std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
-        return Ok(());
+        return Ok(true);
     }
     while Instant::now() < wrote_at + PASTE_ECHO_DEADLINE {
         if output_seen_within(
@@ -271,11 +296,13 @@ fn settle_after_paste(
             _ => break, // quiet (or no output tracked at all) — settled
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn submit_staged_prompt_result(registry: &Arc<AgentProcessRegistry>, node_id: i64, guard: Option<String>, readiness: &PromptReadiness) -> Result<Option<u32>, String> {
-    settle_after_paste(registry, node_id, &readiness.paste)?;
+    if !settle_after_paste(registry, node_id, &readiness.paste, guard.as_deref(), RENDERED_PASTE_TOTAL_BUDGET)? {
+        return Ok(None);
+    }
     press_enter_until_output_guarded(registry, node_id, guard, ENTER_ACK_WINDOW, readiness.receipt.as_ref())
 }
 
@@ -380,18 +407,27 @@ mod tests {
 
     #[test]
     fn codex_multiline_waits_for_paste_render_before_enter() {
-        let id = -930_024;
+        crate::db::test_support::ensure_db_for_tests();
+        let path = std::env::temp_dir().join("codex-guarded-paste");
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("guarded Codex paste", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id, "source", &path, "main", crate::models::EnvType::Windows,
+            "codex", None, None, None, None, false, None, None, None,
+        ).unwrap();
+        let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
-        let readiness = PromptReadiness { paste: PasteReadiness::RenderedMultiline {
-            chars: 3279,
-            normalized_chars: 3279,
-            content: "reviewthistestwithallremainingcontext".into(),
-            output_cursor: evaluator::output_cursor(id).unwrap(),
-        }, receipt: None };
+        let prompt = format!("feedback\n{}", "x".repeat(9398));
+        evaluator::on_output(id, "old [Pasted Content 9407 chars]");
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected)).unwrap().unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), injection_payload(&prompt).into_bytes());
+        assert!(registry.input_stamp(id).is_none(), "report admission must still reject the staged draft");
+        assert!(registry.input_is_current(id, guard.as_deref().unwrap()), "the post-write stamp must own its nonempty draft");
         let registry_for_submit = Arc::clone(&registry);
         let submit = std::thread::spawn(move || {
-            submit_staged_prompt_result(&registry_for_submit, id, None, &readiness)
+            submit_staged_prompt_result(&registry_for_submit, id, guard, &readiness)
         });
 
         evaluator::on_output(id, "Codex startup redraw; review this test");
@@ -400,13 +436,14 @@ mod tests {
             Err(std::sync::mpsc::RecvTimeoutError::Timeout),
             "startup output must not acknowledge a paste that Codex has not rendered"
         );
-        evaluator::on_output(id, "[Pasted Content 3279 chars]");
+        evaluator::on_output(id, "\x1b[38;5;6m[Pasted Content     \x1b[m  \x1b[38;5;6m9407 chars]\x1b[K\x1b[m");
         assert_eq!(
             writes.recv_timeout(Duration::from_secs(3)).unwrap(),
             b"\r".to_vec(),
         );
         evaluator::on_output(id, "task started");
         assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "exactly one separate Enter is allowed");
         evaluator::unregister(id);
         registry.kill_session(id);
     }
@@ -418,6 +455,78 @@ mod tests {
         assert!(!rendered_paste_visible("Codex startup redraw", 3279, 3279, "reviewthistest"));
         assert!(rendered_paste_visible("[Pasted Content 14 chars]", 15, 14, ""));
         assert!(!rendered_paste_visible("[Pasted Content 13 chars]", 15, 14, ""));
+    }
+
+    #[test]
+    fn codex_paste_readiness_matches_wrapped_terminal_marker() {
+        let id = -930_027;
+        evaluator::register(id);
+        evaluator::on_output(id, "old [Pasted Content 9407 chars]");
+        let cursor = evaluator::output_cursor(id).unwrap();
+        assert!(!rendered_paste_visible(&evaluator::cleaned_output_since(id, cursor), 9407, 9407, ""));
+        for output in [
+            "\x1b[36m[Pasted Content \x1b[0m\r\n  9407 chars]",
+            // Captured from Codex 0.160.0 in a 22-column Windows ConPTY.
+            "\x1b[38;5;6m[Pasted Content     \x1b[m  \x1b[38;5;6m9407 chars]\x1b[K\x1b[m",
+        ] {
+            let cursor = evaluator::output_cursor(id).unwrap();
+            evaluator::on_output(id, output);
+            assert!(rendered_paste_visible(&evaluator::cleaned_output_since(id, cursor), 9407, 9407, ""),
+                "terminal line wrapping must not hide a complete matching paste marker");
+        }
+        assert!(!rendered_paste_visible("[Pasted Content\r\n 940 chars]", 9407, 9407, ""));
+        assert!(!rendered_paste_visible("[Pasted Content 9407 chars", 9407, 9407, ""));
+        evaluator::unregister(id);
+    }
+
+    #[test]
+    fn codex_paste_readiness_rechecks_late_echo_without_repeating_input() {
+        let id = -930_028;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let expected = registry.input_stamp(id).unwrap();
+        let prompt = format!("feedback\n{}", "x".repeat(9398));
+        let guard = registry.write_bytes_if_current(id, injection_payload(&prompt).as_bytes(), &expected).unwrap().unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), injection_payload(&prompt).into_bytes());
+        let readiness = PasteReadiness::RenderedMultiline {
+            chars: 9407, normalized_chars: 9407, content: String::new(),
+            output_cursor: evaluator::output_cursor(id).unwrap(),
+        };
+        let registry_for_wait = Arc::clone(&registry);
+        let wait = std::thread::spawn(move || settle_after_paste(
+            &registry_for_wait, id, &readiness, Some(&guard), Duration::from_secs(5),
+        ));
+        assert_eq!(writes.recv_timeout(Duration::from_secs(2)), Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "an idle draft without a complete echo must receive no input while readiness is rechecked");
+        evaluator::on_output(id, "[Pasted Content\r\n 9407 chars]");
+        assert!(wait.join().unwrap().unwrap(), "a late complete echo within the total budget must be accepted");
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "readiness retries must not paste again or send Enter");
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_paste_readiness_stops_on_changed_input_or_exhaustion() {
+        let id = -930_029;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let expected = registry.input_stamp(id).unwrap();
+        let prompt = format!("feedback\n{}", "x".repeat(9398));
+        let guard = registry.write_bytes_if_current(id, injection_payload(&prompt).as_bytes(), &expected).unwrap().unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), injection_payload(&prompt).into_bytes());
+        let readiness = PasteReadiness::RenderedMultiline {
+            chars: 9407, normalized_chars: 9407, content: String::new(),
+            output_cursor: evaluator::output_cursor(id).unwrap(),
+        };
+        let error = settle_after_paste(&registry, id, &readiness, Some(&guard), Duration::from_millis(1)).unwrap_err();
+        assert!(error.contains("after ") && error.contains("s (readiness budget 1ms)"), "{error}");
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "an idle agent without a complete echo must not receive blind input");
+        registry.write_bytes(id, b"human draft").unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), b"human draft");
+        assert!(!settle_after_paste(&registry, id, &readiness, Some(&guard), Duration::from_secs(1)).unwrap());
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        evaluator::unregister(id);
+        registry.kill_session(id);
     }
 
     #[test]
@@ -541,7 +650,7 @@ mod tests {
         }, receipt: None };
         registry.kill_session(id);
         let started = Instant::now();
-        let error = settle_after_paste(&registry, id, &readiness.paste).unwrap_err();
+        let error = settle_after_paste(&registry, id, &readiness.paste, None, RENDERED_PASTE_TOTAL_BUDGET).unwrap_err();
         assert!(error.contains("no live agent process"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(1));
         evaluator::unregister(id);

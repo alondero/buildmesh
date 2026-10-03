@@ -64,6 +64,19 @@ const POST_RESET_CERT: CertChainStatus = {
 };
 
 describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
+  it('carries the native root pin in the fragment while keeping the request URL credential-free', () => {
+    const result = buildRemoteAccessUrl(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+      '192.168.1.10', 'invitation', SAMPLE_CERT.root_fingerprint_sha256,
+    );
+    const url = new URL(result.url);
+    const fragment = new URLSearchParams(url.hash.slice(1));
+    expect(fragment.get('pair')).toBe('invitation');
+    expect(fragment.get('ca')).toBe(SAMPLE_CERT.root_fingerprint_sha256);
+    expect(url.search).toBe('');
+    expect(`${url.origin}${url.pathname}`).toBe('https://192.168.1.10:1992/');
+  });
+
   it('uses https:// and the realized bind address when a TLS interface is bound', () => {
     const result = buildRemoteAccessUrl(
       status({
@@ -212,7 +225,7 @@ describe('RemoteAccessModal', () => {
 
     await waitFor(() => expect(toDataURL).toHaveBeenCalled());
     expect(toDataURL.mock.calls[0][0]).toBe(
-      'https://192.168.1.10:1992/#pair=pairing-code',
+      `https://192.168.1.10:1992/#pair=pairing-code&ca=${encodeURIComponent(SAMPLE_CERT.root_fingerprint_sha256)}`,
     );
     expect(await screen.findByText(/192\.168\.1\.10:1992/)).toBeTruthy();
   });
@@ -555,7 +568,7 @@ describe('RemoteAccessModal', () => {
     const connectPayload = payloads.find(
       (p): p is string => typeof p === 'string' && p.includes('#pair='),
     );
-    expect(connectPayload).toBe('https://192.168.1.10:1992/#pair=pairing-code');
+    expect(connectPayload).toBe(`https://192.168.1.10:1992/#pair=pairing-code&ca=${encodeURIComponent(SAMPLE_CERT.root_fingerprint_sha256)}`);
   });
 
   it('matches the Android install-QR scheme to the realized bind (http when LAN exposure is plain)', async () => {
