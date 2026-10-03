@@ -1,0 +1,109 @@
+[
+  {
+    "name": "Stop-0",
+    "payload": {
+      "hook_event_name": "Stop",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "Notification-1",
+    "payload": {
+      "hook_event_name": "Notification",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "PermissionRequest-2",
+    "payload": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status"
+      }
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "PreToolUse-3",
+    "payload": {
+      "hook_event_name": "PreToolUse",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000",
+      "tool_name": "AskUserQuestion",
+      "tool_input": {
+        "questions": [
+          {
+            "question": "Which path?",
+            "options": [
+              {
+                "label": "Local"
+              },
+              {
+                "label": "Remote"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "question_requested",
+    "health": "ok"
+  },
+  {
+    "name": "SessionStart-4",
+    "payload": {
+      "hook_event_name": "SessionStart",
+      "session_id": "550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]
