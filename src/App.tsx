@@ -731,7 +731,7 @@ function App() {
                 type="button"
                 onClick={() => dismissToast(toast.id)}
                 aria-label="Dismiss notification"
-                className="shrink-0 -m-1 p-1 rounded-md text-text-secondary hover:text-text-primary hover:bg-white/10 text-base leading-none transition-colors"
+                className="shrink-0 -m-1 p-1 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-card-hover text-base leading-none transition-colors"
               >
                 ×
               </button>

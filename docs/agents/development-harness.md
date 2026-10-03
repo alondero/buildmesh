@@ -98,9 +98,12 @@ reproduce at the recorded base before attributing it to baseline debt.
 
 Checks run under deadlines using the existing process-tree guard. Output goes
 to `.harness/logs/`; agents receive gate names, results, counts and log paths.
-Child environments force `NODE_ENV=test`, clear `BUILDMESH_PREFILL` and
-`FORCE_COLOR`, and use `NO_COLOR`. The outer npm/Node process may still warn if
+Child environments use `NODE_ENV=production` for frontend/mobile build gates
+and `NODE_ENV=test` for test gates, clear `BUILDMESH_PREFILL` and `FORCE_COLOR`,
+and use `NO_COLOR`. The outer npm/Node process may still warn if
 its parent shell exports both color variables; clear `FORCE_COLOR` there too.
+Building under the test environment includes development React code and makes
+the production bundle budget check the wrong artifact.
 
 | Outcome | Meaning and next action | Exit |
 |---|---|---|

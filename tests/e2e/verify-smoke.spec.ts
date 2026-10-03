@@ -54,6 +54,7 @@
  */
 import { test, expect, Page } from '@playwright/test';
 import { buildInitScript } from '../../scripts/ui-mock/tauri-mock.mjs';
+import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
 // One fixture mesh + one agent node with `status: 'running'` so the
 // React app sees a node that's already spawning (mimics the post-spawn
@@ -124,6 +125,120 @@ const SMOKE_FIXTURES = {
   get_open_pr_for_node: null,
   get_mesh_pool_count: 0,
 };
+
+for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, { width: 1920, height: 1080 }]) {
+  for (const theme of ['dark', 'light']) {
+    for (const reducedMotion of ['no-preference', 'reduce'] as const) {
+      test(`desktop polish ${size.width}x${size.height} ${theme} motion=${reducedMotion}`, async ({ page }) => {
+        await page.setViewportSize(size);
+        await page.emulateMedia({ reducedMotion });
+        await page.addInitScript({ content: buildInitScript({
+          ...SMOKE_FIXTURES,
+          list_providers: [{
+            id: 'anthropic', label: 'Claude Code', harness_id: 'anthropic',
+            group_key: 'anthropic', is_proxied: false, provider_id: null,
+            color: '#00d4ff', icon: 'anthropic', resumable: true, runtime: 'windows',
+            capabilities: {
+              harness_id: 'anthropic', background_inference: null,
+              supports_resume: true, auto_resume_on_startup: false,
+              requires_attention_hook: false, attention_capability: { kind: 'none' },
+              supports_passive_turn_watcher: false, produces_readable_transcript: false,
+              supports_model_override: false, supports_effort_override: false,
+              supports_extra_args: false, supports_prefill: false,
+              is_plain_terminal: false, effort_control: { kind: 'none' }, available_on: ['windows'],
+            },
+          } satisfies ProviderInfo],
+          get_keyed_first_class_catalog: [], get_provider_pairings: [],
+          get_pairing_verifications: [], list_device_sessions: [],
+          get_coordinator_status: { enabled: false, has_token: false },
+          list_spawn_configurations: [], get_launch_targets: [],
+          compatible_providers_for_harness: [],
+          list_agent_nodes: [
+            { ...SMOKE_FIXTURES.list_agent_nodes[0], status: 'suspended', cli_session_id: 'captured-session' },
+            { ...SMOKE_FIXTURES.list_agent_nodes[0], id: SMOKE_NODE_ID + 1, name: 'failed-node', status: 'error' },
+          ],
+        }) });
+        await page.addInitScript(theme => localStorage.setItem('buildmesh.theme', theme), theme);
+        await page.goto('/');
+        await page.mouse.move(size.width - 1, size.height - 1);
+        const colour = page.getByRole('button', { name: 'Change mesh colour', exact: true });
+        const resume = page.getByRole('button', { name: `Resume ${SMOKE_NODE_NAME}`, exact: true });
+        const restart = page.getByRole('button', { name: 'Restart failed-node', exact: true });
+        const close = page.getByRole('button', { name: `Delete ${SMOKE_NODE_NAME}`, exact: true });
+        const disclosure = page.getByRole('button', { name: 'Choose provider', exact: true });
+        for (const control of [colour, resume, restart, close, disclosure]) {
+          await expect(control).toBeVisible();
+          const bounds = await control.boundingBox();
+          expect(bounds?.width).toBeGreaterThanOrEqual(24);
+          expect(bounds?.height).toBeGreaterThanOrEqual(24);
+          await expect(control).toHaveAttribute('title', /.+/);
+          expect(await control.evaluate(element => getComputedStyle(element).opacity)).toBe('1');
+        }
+        await disclosure.click();
+        await expect(disclosure).toHaveAttribute('aria-expanded', 'true');
+        await page.keyboard.press('Escape');
+        await expect(disclosure).toHaveAttribute('aria-expanded', 'false');
+        await expect(disclosure).toBeFocused();
+
+        await page.getByRole('button', { name: 'Open settings', exact: true }).click();
+        const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
+        const tabs = dialog.getByRole('tab');
+        await expect(tabs.nth(0)).toBeFocused();
+        for (const [key, index] of [['ArrowUp', 3], ['ArrowDown', 0], ['End', 3], ['Home', 0], ['ArrowDown', 1]] as const) {
+          await page.keyboard.press(key);
+          await expect(tabs.nth(index)).toBeFocused();
+          await expect(tabs.nth(index)).toHaveAttribute('aria-selected', 'true');
+          await expect(dialog.locator('[role="tab"][tabindex="0"]')).toHaveCount(1);
+          await expect(dialog.getByRole('tabpanel')).toHaveAttribute('id', await tabs.nth(index).getAttribute('aria-controls') ?? 'missing');
+          await expect(dialog.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', await tabs.nth(index).getAttribute('id') ?? 'missing');
+        }
+        for (const index of [0, 1, 2, 3]) {
+          await tabs.nth(index).click();
+          await page.keyboard.press('Tab');
+          await expect(dialog.getByRole('tabpanel')).toBeFocused();
+          for (let step = 0; step < 150; step++) {
+            await page.keyboard.press('Tab');
+            const focus = await page.evaluate(() => {
+              const element = document.activeElement;
+              const pane = element?.closest('[role="tabpanel"]');
+              return { role: element?.getAttribute('role'), inside: !!element?.closest('[role="dialog"]'), hidden: !!element?.closest('[hidden], [inert]'), pane: pane?.getAttribute('aria-labelledby') };
+            });
+            expect(focus.inside).toBe(true);
+            expect(focus.hidden).toBe(false);
+            if (focus.pane) expect(focus.pane).toBe(await tabs.nth(index).getAttribute('id'));
+            if (focus.role === 'tab') break;
+            expect(step).toBeLessThan(149);
+          }
+          const dimensions = await dialog.getByRole('tabpanel').evaluate(element => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+          expect(dimensions.scroll).toBeLessThanOrEqual(dimensions.client + 1);
+        }
+        const bounds = await dialog.boundingBox();
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.y).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(size.width);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(size.height);
+
+        await tabs.nth(1).click();
+        await dialog.getByRole('button', { name: /^\+ add provider$/i }).click();
+        await dialog.getByRole('button', { name: /other \/ custom/i }).click();
+        const field = dialog.getByLabel(/custom provider name/i);
+        await field.fill('Unsaved draft');
+        await expect(page.getByTestId('settings-tab-dirty-providers')).toBeVisible();
+        await field.focus();
+        await page.keyboard.press('Escape');
+        const keep = page.getByTestId('modal-discard-cancel');
+        await expect(keep).toBeFocused();
+        await page.keyboard.press('Tab');
+        await expect(page.getByTestId('modal-discard-confirm')).toBeFocused();
+        await page.keyboard.press('Tab');
+        await expect(keep).toBeFocused();
+        await page.keyboard.press('Enter');
+        await expect(field).toBeFocused();
+        await expect(field).toHaveValue('Unsaved draft');
+      });
+    }
+  }
+}
 
 test('Windows Grok clipboard gestures send one native paste command through real xterm', async ({ page }) => {
   const writes: Array<{ sessionId: number; data: string }> = [];

@@ -142,7 +142,7 @@ function marker(type: DiffLine['line_type']): string {
 function markerColor(type: DiffLine['line_type']): string {
   if (type === 'add') return 'text-accent-green';
   if (type === 'remove') return 'text-accent-red';
-  return 'text-text-muted/40';
+  return 'text-text-muted';
 }
 
 /** One row of a diff: line-number gutters, +/- marker, content (optionally
@@ -151,10 +151,10 @@ function markerColor(type: DiffLine['line_type']): string {
 export function DiffLineRow({ line, html }: { line: DiffLine; html?: string }) {
   return (
     <div className={`flex ${lineBg(line.line_type)}`}>
-      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted select-none flex-shrink-0`}>
         {line.old_num ?? ''}
       </span>
-      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted select-none flex-shrink-0`}>
         {line.new_num ?? ''}
       </span>
       <span
@@ -213,7 +213,7 @@ function SplitCell({
         : '';
   return (
     <div className={`flex flex-1 min-w-0 ${bg}`}>
-      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted/50 select-none flex-shrink-0`}>
+      <span className={`${DIFF_GUTTER_WIDTH} px-1 text-right text-text-muted select-none flex-shrink-0`}>
         {/* Left pane shows the old file's line numbers, right pane the
             new file's — matching GitHub's split view (#1374). */}
         {side === 'old' ? line?.old_num ?? '' : line?.new_num ?? ''}

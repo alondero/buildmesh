@@ -24,7 +24,7 @@ export function ObservedSessionTelemetry({
       className="mt-2 border-t border-border-subtle pt-2 text-text-muted"
     >
       <div className="font-medium text-text-secondary">Observed Session Telemetry</div>
-      <p className="mt-0.5 text-2xs text-text-muted/80">
+      <p className="mt-0.5 text-2xs text-text-muted">
         Session observations — not account quota
       </p>
       {telemetry.model_id && (

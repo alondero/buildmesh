@@ -216,7 +216,8 @@ export async function runGate(root, gate, base, paths = []) {
   if (unavailable) result = { outcome: 'BLOCKED', reason: unavailable };
   else {
     const command = commandFor(root, gate, base);
-    const env = { ...process.env, NODE_ENV: 'test', NO_COLOR: '1' };
+    const nodeEnv = gate.id === 'frontend-build' || gate.id === 'mobile-build' ? 'production' : 'test';
+    const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1' };
     delete env.FORCE_COLOR;
     delete env.BUILDMESH_PREFILL;
     delete env.NODE_TEST_CONTEXT;
