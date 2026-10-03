@@ -84,7 +84,7 @@ import {
   type ProjectPreset,
 } from '../../lib/projectPresets';
 import { getEffectiveWorktreeDir } from '../../lib/paths';
-import { LoadingState } from '../shared/Spinner';
+import { ErrorState, LoadingState } from '../shared/Spinner';
 import { ProbeTabBody } from './ProbeTabBody';
 import { ProbeScopeNote, ProbeSection } from './ProbeSection';
 import { Field } from './Field';
@@ -129,6 +129,9 @@ export function ProjectSettingsTab() {
   // resolves.
   const [appWideDefault, setAppWideDefault] = useState<string>('claude');
   const [loading, setLoading] = useState(true);
+  const [loadedMeshId, setLoadedMeshId] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   // `MeshHealth` does not surface `gh auth` status (it's about branch /
   // drift / dirty, not the GitHub CLI login state), but `<AiContextSection>`
   // needs to know whether to render the "Run gh auth login first" prompt
@@ -302,6 +305,9 @@ export function ProjectSettingsTab() {
     (signal) => {
       if (activeMeshId === null || !activeMeshPath) return;
       setLoading(true);
+      setLoadedMeshId(null);
+      setLoadError(null);
+      setShowDeleteConfirm(false);
       Promise.all([
         getMeshProperties(activeMeshId),
         // The two secondary reads are individually best-effort: a failure to
@@ -331,16 +337,19 @@ export function ProjectSettingsTab() {
           // path hydrate in the same pass, so nothing is left showing the
           // previous project's value.
           applyWorktreeDirConfig(config, prefs, dirConfig);
+          setLoadedMeshId(activeMeshId);
           setLoading(false);
         })
-        .catch(() => {
-          if (!signal.aborted) setLoading(false);
+        .catch((error) => {
+          if (signal.aborted) return;
+          setLoadError(formatError(error));
+          setLoading(false);
         });
       // Dep array intentionally excludes `mesh?.name` (see comment above).
       // `mesh` is captured at effect-run time, which is fine for the
       // fallback chain — the user can rename later via the form itself.
     },
-    [activeMeshId, activeMeshPath, applyWorktreeDirConfig],
+    [activeMeshId, activeMeshPath, applyWorktreeDirConfig, reloadKey],
   );
 
   // Keep `mountedRef` ONLY for the blur handlers' "save-after-unmount"
@@ -413,6 +422,7 @@ export function ProjectSettingsTab() {
    */
   const wrappedSave = async (op: () => Promise<void>) => {
     const saveMeshId = activeMeshIdRef.current;
+    if (loadedMeshId !== saveMeshId || loading || loadError !== null) return;
     saveStatus.start();
     try {
       await op();
@@ -783,7 +793,13 @@ export function ProjectSettingsTab() {
         error={saveStatus.error}
         onDismiss={saveStatus.reset}
       />
-      {loading ? (
+      {loadError !== null ? (
+        <div>
+          <ErrorState title="Couldn't load project settings" detail={loadError} />
+          <button type="button" className="text-xs text-text-secondary hover:text-text-primary"
+            onClick={() => setReloadKey(key => key + 1)}>Retry</button>
+        </div>
+      ) : loading || loadedMeshId !== activeMeshId ? (
         <LoadingState />
       ) : (
         <>

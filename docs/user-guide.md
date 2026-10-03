@@ -322,6 +322,10 @@ change you are making:
 Everything here applies to the project root. A focused node's worktree is a
 different path, and these settings never change it retroactively.
 
+Project Settings becomes editable after the selected project's settings load.
+If loading fails, use **Retry**; values from the previous project cannot be
+saved into the newly selected one.
+
 **Repository** covers maintenance, and separates repairing from deleting:
 
 - **Health and recovery** reports drift, a base branch held by a node, and
@@ -333,6 +337,17 @@ different path, and these settings never change it retroactively.
   many branches and worktrees it will remove.
 
 Both views act on the project root, never on a focused node's worktree.
+
+Switching projects clears Repository cleanup selections and any open deletion
+confirmation. Wait for the current project's list to load before selecting
+branches or worktrees to delete.
+
+**Notes** is a separate project tool for scratch text. Its editor becomes
+available after the project's notes load; a failed read offers **Retry**.
+Typing saves after a short pause, and switching projects flushes pending
+typing to its original project. Saves for the same project run in order;
+returning to it waits for the latest save to finish. A save failure keeps the
+current text visible so you can retry editing before leaving the tool.
 
 ## Launch Configurations
 
