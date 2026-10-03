@@ -324,4 +324,14 @@ describe('GroupedProviderMenu — single-caret highlight (issue #1720 follow-up)
     expect(items[0].className.split(/\s+/)).not.toContain('bg-bg-selection');
     expect(items[1].className.split(/\s+/)).toContain('bg-bg-selection');
   });
+
+  it('renders the footer hint when provided, omits it otherwise', () => {
+    const { rerender } = render(
+      <GroupedProviderMenu providers={ROWS} onSelect={() => {}} footer="Alt-click spawns in mesh root" />,
+    );
+    expect(screen.getByText('Alt-click spawns in mesh root')).toBeTruthy();
+
+    rerender(<GroupedProviderMenu providers={ROWS} onSelect={() => {}} />);
+    expect(screen.queryByText('Alt-click spawns in mesh root')).toBeNull();
+  });
 });

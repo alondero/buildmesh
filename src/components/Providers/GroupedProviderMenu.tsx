@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 import type { SpawnOption } from '../../lib/groups';
 import { ProviderIcon } from './ProviderIcon';
 import { groupByHarness } from '../../lib/groups';
@@ -28,12 +28,15 @@ export interface GroupedProviderMenuProps {
    */
   onClose?: () => void;
   configurationsEnabled?: boolean;
+  /** Optional footer rendered below the rows (e.g. a worktree-gated
+   *  modifier hint). Omitted when undefined. */
+  footer?: ReactNode;
 }
 
 /** Harness-grouped Spawn Menu. Parent rows launch defaults; their disclosure
  * opens capability-driven saved configurations. Pointer and keyboard share
  * the same active parent row. */
-export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true }: GroupedProviderMenuProps) {
+export function GroupedProviderMenu({ providers, onSelect, filter, decorate, className, onClose, configurationsEnabled = true, footer }: GroupedProviderMenuProps) {
   const [submenu, setSubmenu] = useState<{ option: SpawnOption; anchor: HTMLElement; keyboard: boolean } | null>(null);
   const editing = useRef(false);
   const configurable = (option: SpawnOption) => Boolean(configurationsEnabled && (
@@ -180,6 +183,7 @@ export function GroupedProviderMenu({ providers, onSelect, filter, decorate, cla
         decorate={decorate}
         configurationRows={configurationRows}
         onEditingChange={(value) => { editing.current = value; }} onSelect={onSelect} onClose={() => setSubmenu(null)} onDismiss={() => { setSubmenu(null); onClose?.(); }} />}
+      {footer !== undefined && <div role="presentation" className="border-t border-border-subtle px-3 py-1.5 text-2xs text-text-muted">{footer}</div>}
     </div>
   );
 }

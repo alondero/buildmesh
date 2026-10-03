@@ -1,5 +1,8 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ProviderDropdown } from './ProviderDropdown';
+import { ProviderIcon } from '../Providers/ProviderIcon';
+import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { clearDefaultProviderPromises } from '../../lib/providerCache';
 import type { SpawnOption } from '../../lib/groups';
 
 /**
@@ -80,6 +83,10 @@ interface SpawnButtonClusterProps {
    *  (the cluster does not auto-close). */
   isSpawning?: boolean;
   configurationsEnabled?: boolean;
+  /** Optional footer rendered at the bottom of the open menu (e.g. the
+   *  worktree-gated "Alt-click spawns in mesh root" hint the sidebar
+   *  passes when `mesh.use_worktree` is true). Omitted everywhere else. */
+  menuFooter?: ReactNode;
 }
 
 export function SpawnButtonCluster({
@@ -96,22 +103,47 @@ export function SpawnButtonCluster({
   disabled,
   isSpawning,
   configurationsEnabled = true,
+  menuFooter,
 }: SpawnButtonClusterProps) {
-  // Cache the default provider id for the tooltip so we don't refetch on
-  // every render. The hover/focus handler triggers the fetch; click is
-  // covered by `onSpawnDefault` which the parent resolves independently.
+  // Cache the default provider id for the tooltip + quick-spawn icon so
+  // we don't refetch on every render. The parent passes a fresh closure
+  // each render, so it is mirrored into a ref and the refresh callback
+  // stays stable (a direct effect dep would refetch on every render).
   const [defaultProviderId, setDefaultProviderId] = useState<string | null>(null);
+  const getDefaultProviderRef = useRef(getDefaultProvider);
+  getDefaultProviderRef.current = getDefaultProvider;
 
-  const refreshDefaultProvider = async () => {
-    if (!getDefaultProvider) return;
+  const refreshDefaultProvider = useCallback(async () => {
+    const fn = getDefaultProviderRef.current;
+    if (!fn) return;
     try {
-      setDefaultProviderId(await getDefaultProvider());
+      setDefaultProviderId(await fn());
     } catch {
       // Tooltip falls back to the generic label below if this fails — the
       // spawn action's own resolution path (in `onSpawnDefault`) is the
       // authoritative one, so a tooltip-only miss is harmless.
     }
-  };
+  }, []);
+
+  // Fetch on mount so the icon shows without hovering first; re-fetch when
+  // the menu opens so a default changed while it was closed is fresh.
+  // Hover/focus still refresh via the handlers below.
+  useEffect(() => {
+    void refreshDefaultProvider();
+  }, [refreshDefaultProvider]);
+  useEffect(() => {
+    if (isOpen) void refreshDefaultProvider();
+  }, [isOpen, refreshDefaultProvider]);
+
+  // Provider mutations anywhere (Settings upsert/remove, per-mesh or
+  // app-wide default writes — all funnel through `provider-list-changed`)
+  // evict the shared cache and re-resolve, so the icon tracks the live
+  // default instead of the mount-time one.
+  const handleProviderListChanged = useCallback(() => {
+    clearDefaultProviderPromises();
+    void refreshDefaultProvider();
+  }, [refreshDefaultProvider]);
+  useProviderListInvalidation(handleProviderListChanged);
 
   // Tooltip + accessible label on the primary action. Defaults to the
   // canonical "+ spawn" wording; surfaces that aren't a spawn (Archive
@@ -125,6 +157,18 @@ export function SpawnButtonCluster({
     : baseLabel;
 
   const isDisabled = disabled || isSpawning;
+
+  // Variant-B treatment: when the primary action is the default `+` spawn
+  // idiom (not an overridden text label like Archive "Resume"), the main
+  // half shows the resolved default harness icon and expands to its name
+  // on hover/focus of the quick-spawn half only — never on menu open.
+  // Before the default resolves it falls back to the bare `+` so the
+  // button never shows a wrong icon.
+  const iconMode = primaryLabel === '+';
+  const defaultOption = defaultProviderId
+    ? providers.find(p => p.id === defaultProviderId) ?? null
+    : null;
+  const defaultOptionLabel = defaultOption?.label ?? defaultProviderId;
 
   // Issue #814 — trigger ref + stable menu id for the WAI-ARIA menu-button
   // disclosure pattern (`aria-haspopup` / `aria-expanded` / `aria-controls`).
@@ -162,8 +206,12 @@ export function SpawnButtonCluster({
   }, [isOpen]);
 
   return (
-    <div className="relative">
-      <div className="flex items-center rounded-md border border-accent-cyan/30 overflow-hidden">
+    // `data-dropdown-for` on the root (not just the menu shell) scopes the
+    // shared `useClickOutside` mousedown handler to the whole cluster: a
+    // second chevron click must toggle via `onToggleDropdown`, not get
+    // pre-closed by mousedown and re-opened by the click that follows it.
+    <div className="relative" data-dropdown-for={dropdownKey}>
+      <div className={`flex items-center rounded-md border overflow-hidden transition-colors ${isOpen ? 'border-accent-cyan shadow-glow-cyan' : 'border-accent-cyan/30'}`}>
         <button
           data-testid="spawn-default"
           onClick={(e) => { e.stopPropagation(); onSpawnDefault(e.altKey); }}
@@ -171,12 +219,22 @@ export function SpawnButtonCluster({
           onFocus={refreshDefaultProvider}
           disabled={isDisabled}
           aria-label={primaryAriaLabel ?? undefined}
-          className="flex items-center justify-center px-1.5 min-w-[24px] h-[24px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
-          {isSpawning ? busyLabel : primaryLabel}
+          {isSpawning ? busyLabel : iconMode && defaultOption ? (
+            <>
+              <ProviderIcon
+                providerId={defaultOption.provider_id ?? defaultOption.harness_id}
+                className="h-3.5 w-3.5 shrink-0"
+              />
+              <span className="max-w-0 overflow-hidden whitespace-nowrap opacity-0 transition-all group-hover:max-w-[120px] group-hover:opacity-100 group-hover:ml-1.5 group-focus-visible:max-w-[120px] group-focus-visible:opacity-100 group-focus-visible:ml-1.5">
+                {defaultOptionLabel}
+              </span>
+            </>
+          ) : primaryLabel}
         </button>
-        <span className="w-px h-3 bg-accent-cyan/30" />
+        <span className="w-px h-5 bg-accent-cyan/30" />
         <button
           ref={triggerRef}
           data-testid="spawn-dropdown-toggle"
@@ -196,10 +254,12 @@ export function SpawnButtonCluster({
           aria-label={primaryAriaLabel
             ? `Choose provider to ${primaryAriaLabel.toLowerCase()} with`
             : 'Choose provider'}
-          className={`flex items-center justify-center w-[24px] h-[24px] text-xs hover:bg-bg-card-hover disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-bg-card' : 'text-text-secondary'}`}
+          className={`flex items-center justify-center w-[30px] h-[28px] hover:bg-bg-card-hover active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${isOpen ? 'text-accent-cyan bg-bg-card' : 'text-text-secondary'}`}
           title="Choose provider"
         >
-          ▾
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className={`transition-transform ${isOpen ? 'rotate-180' : ''}`}>
+            <path d="M2.5 4.5 6 8l3.5-3.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
         </button>
       </div>
       {isOpen && !isSpawning && (
@@ -207,6 +267,7 @@ export function SpawnButtonCluster({
           dropdownKey={dropdownKey}
           providers={providers}
           configurationsEnabled={configurationsEnabled}
+          footer={menuFooter}
           onSelect={onSelectProvider}
           // Issue #814 — Escape closes the dropdown. The cluster re-uses
           // `onToggleDropdown` because toggling an open cluster is

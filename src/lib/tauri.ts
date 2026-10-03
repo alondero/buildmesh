@@ -1,5 +1,12 @@
 import { Channel } from '@tauri-apps/api/core';
 import { _invoke } from './tauri/_invoke';
+import { emit } from '@tauri-apps/api/event';
+import { deleteDefaultProviderPromise, clearDefaultProviderPromises } from './providerCache';
+// The cross-surface invalidation event lives in the hook module (the one
+// grep-able symbol); this facade re-emits it after default-provider writes
+// so open spawn clusters refresh. The hook imports no lib modules, so
+// there is no import cycle.
+import { PROVIDER_LIST_CHANGED_EVENT } from '../hooks/useProviderListInvalidation';
 // Re-export every typed wrapper from the provider/harness facet (issue
 // #1656 Phase 2 — first facet). The new `getResolvedHarnessView` IPC
 // command lives here along with every other harness/provider wrapper.
@@ -185,7 +192,17 @@ export const updateMeshColumn = (
     | 'worktree_mode'
     | 'default_provider',
   value: string,
-) => _invoke<void>('update_mesh_column', { meshId, column, value });
+) => _invoke<void>('update_mesh_column', { meshId, column, value }).then((result) => {
+  // Write-through invalidation: the spawn clusters' quick-spawn icons
+  // resolve via the cached getDefaultProvider. A successful per-mesh
+  // default write must evict that mesh's entry (so the next read re-hits
+  // IPC) and notify open surfaces via the shared invalidation event.
+  if (column === 'default_provider') {
+    deleteDefaultProviderPromise(meshId);
+    void emit(PROVIDER_LIST_CHANGED_EVENT).catch(() => {});
+  }
+  return result;
+});
 
 export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
@@ -871,7 +888,13 @@ export const getAppPreferences = () =>
 /** Pass `null` (or an empty string, which the backend filters out) to clear
  *  the override and fall back to the hardcoded `anthropic` default. */
 export const setAppDefaultProvider = (provider: string | null) =>
-  _invoke('set_app_default_provider', { provider });
+  _invoke('set_app_default_provider', { provider }).then((result) => {
+    // The app-wide default feeds every mesh's resolution — evict all cached
+    // defaults and notify open surfaces, mirroring updateMeshColumn above.
+    clearDefaultProviderPromises();
+    void emit(PROVIDER_LIST_CHANGED_EVENT).catch(() => {});
+    return result;
+  });
 
 /** App-wide reviewer Spawn Option. `null` restores the source-agent fallback;
  * this is separate from the ordinary default provider so adversarial reviews

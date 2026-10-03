@@ -120,7 +120,7 @@ const DRAFT = {
  * to a benign shape so other panes that may be in the same render can
  * keep loading.
  */
-function mockBackend(opts: { issues?: GitHubIssue[]; providers?: typeof PROVIDERS } = {}) {
+function mockBackend(opts: { issues?: GitHubIssue[]; providers?: Array<Record<string, unknown>> } = {}) {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case 'get_repo_issues':
@@ -252,6 +252,25 @@ describe('GitIssuesTab (#378)', () => {
     });
     // No second IPC, no transient prefill hand-off.
     expect(invoke).not.toHaveBeenCalledWith('start_node_background', expect.anything());
+  });
+
+  it('shows the mesh default on the quick-spawn button', async () => {
+    // The row cluster receives the same mesh-default resolver the `+`
+    // click uses, so its icon matches the action without hovering first.
+    // Rows must be wire-shaped (`harness_id` etc.) — the legacy bare
+    // fixtures crash `mapBackendProviders` and leave the list empty.
+    mockBackend({
+      providers: [
+        { id: 'anthropic', label: 'Anthropic', color: '#000', icon: '', harness_id: 'anthropic', provider_id: null, is_proxied: false, group_key: 'anthropic' },
+        { id: 'minimax', label: 'Minimax', color: '#000', icon: '', harness_id: 'minimax', provider_id: null, is_proxied: false, group_key: 'minimax' },
+      ],
+    });
+    render(<GitIssuesTab />);
+
+    const spawns = await screen.findAllByTestId('spawn-default');
+    await waitFor(() => {
+      expect(spawns[0].textContent).toContain('Anthropic');
+    });
   });
 
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {

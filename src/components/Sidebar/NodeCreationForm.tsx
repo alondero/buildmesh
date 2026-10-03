@@ -40,6 +40,13 @@ export function NodeCreationForm({
     onSelectProvider(mesh, defaultProvider, altKey ? false : undefined);
   };
 
+  // Modifier-click spawns in the mesh root, bypassing the per-mesh
+  // `use_worktree` default — but only when the mesh actually uses a
+  // worktree. The key label follows the platform (Option on macOS).
+  const modifierKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '')
+    ? '⌥-click'
+    : 'Alt-click';
+
   return (
     <SpawnButtonCluster
       providers={providers}
@@ -49,6 +56,7 @@ export function NodeCreationForm({
       dropdownKey={dropdownId('mesh', mesh.id)}
       isOpen={isDropdownOpen}
       isSpawning={isSpawning}
+      menuFooter={mesh.use_worktree ? `${modifierKey} spawns in mesh root` : undefined}
       onToggleDropdown={() => onToggleDropdown(mesh)}
       onSpawnDefault={handleSpawnDefault}
       onSelectProvider={(providerId, altKey, configurationId) =>
