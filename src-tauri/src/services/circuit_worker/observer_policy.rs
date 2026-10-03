@@ -87,7 +87,7 @@ pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
         harness: id.into(), foreground: foreground.into(), owned_work: owned_work.into(),
         final_report: final_report.into(),
         reconciliation: format!("{reconciliation}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage."),
-        yielded_budget_ms, active_budget_ms: super::ACTIVE_WAIT_MS as u32,
+        yielded_budget_ms, active_budget_ms: super::observation::ACTIVE_WAIT_MS as u32,
     }
 }
 
@@ -135,7 +135,7 @@ mod tests {
         assert!(policy.owned_work.starts_with("Unavailable:"), "ownership stays unavailable");
         assert!(policy.owned_work.contains("no child/background registry"));
         assert_eq!(policy.yielded_budget_ms, 30_000, "no validated basis to change the default budget");
-        assert_eq!(policy.active_budget_ms, super::super::ACTIVE_WAIT_MS as u32);
+        assert_eq!(policy.active_budget_ms, super::super::observation::ACTIVE_WAIT_MS as u32);
     }
 
     #[test]
