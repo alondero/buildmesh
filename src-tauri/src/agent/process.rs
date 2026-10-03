@@ -398,6 +398,17 @@ impl AgentProcessRegistry {
         self.input_stamp_result(session_id).ok()
     }
 
+    /// Unlike report admission, a delivery watcher owns a nonempty staged draft.
+    pub(crate) fn input_is_current(&self, session_id: i64, expected: &str) -> bool {
+        let Some(agent) = self.get(&session_id) else { return false; };
+        let Some(expected) = InputStamp::decode(expected) else { return false; };
+        let _guard = agent.writer_tx.lock().unwrap();
+        let input = agent.input_decoder.lock().unwrap();
+        !agent.retired.load(Ordering::SeqCst)
+            && expected == (InputStamp { generation: agent.generation, version: agent.input_version.load(Ordering::Relaxed) })
+            && !input.has_pending_sequence()
+    }
+
     pub(crate) fn input_stamp_result(&self, session_id: i64) -> Result<String, InputUnavailable> {
         self.get(&session_id).ok_or(InputUnavailable::MissingProcess)?
             .input_stamp_result().map(InputStamp::encode)
