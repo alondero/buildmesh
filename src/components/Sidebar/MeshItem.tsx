@@ -434,11 +434,13 @@ function MeshItemView({
             onClick={(e) => { e.stopPropagation(); setRecolorOpen(true); }}
             title="Change mesh colour"
             aria-label="Change mesh colour"
-            // Issue #1939 — inactive-band rows mute the swatch (still the
-            // same size and still clickable; only the colour is suppressed).
-            className={`flex h-[24px] w-[24px] shrink-0 items-center justify-center rounded-md hover:bg-bg-card-hover transition-colors ${dimmed ? 'opacity-30' : ''}`}
+            className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md hover:bg-bg-card-hover"
           >
-            <span className="h-3 w-3 rounded-full border border-border-strong" style={{ backgroundColor: meshColor.hex }} />
+            <span
+              aria-hidden="true"
+              className={`h-3 w-3 rounded-full border border-border-strong ${dimmed ? 'opacity-30' : ''}`}
+              style={{ backgroundColor: meshColor.hex }}
+            />
           </button>
           <span
             id={`mesh-item-name-${mesh.id}`}

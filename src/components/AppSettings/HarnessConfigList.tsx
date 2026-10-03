@@ -452,14 +452,14 @@ function HarnessCard({
                     (surface === 'openai' && !tiers.default?.trim()) ||
                     (needsKey && !key.trim())
                   }
-                  className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+                  className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
                 >
                   {busy ? 'Attaching…' : 'Attach'}
                 </button>
                 <button
                   onClick={reset}
                   disabled={busy}
-                  className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+                  className="px-5 py-2 text-base text-text-secondary border border-border-strong rounded-md hover:bg-bg-card-hover hover:text-text-primary disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -697,14 +697,14 @@ function ProxiedChildRow({
             <button
               onClick={saveEdit}
               disabled={saving || !editUrl.trim() || !editTiers.default?.trim()}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save'}
             </button>
             <button
               onClick={onCancelEdit}
               disabled={saving}
-              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+              className="px-5 py-2 text-base text-text-secondary border border-border-strong rounded-md hover:bg-bg-card-hover hover:text-text-primary disabled:opacity-50"
             >
               Cancel
             </button>

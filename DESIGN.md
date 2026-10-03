@@ -191,15 +191,22 @@ floor for micro-labels.
 
 ### Buttons
 
-- **Primary (desktop):** accent-cyan fill (or `accent-cyan/10` tinted variant
-  for in-panel actions), `text-inverse` text on solid fills, `rounded-md`,
-  `hover:brightness-125` for tint variants. Disabled: muted text, no pointer
-  affordance.
+- **Primary (desktop forms/dialogs):** `bg-bg-selection`, `text-text-primary`,
+  `font-medium`, a `border-accent-cyan` hairline and `rounded-md`. Hover uses
+  `bg-bg-card-hover`. The selection surface and accent border distinguish
+  Save/Create/Apply from Cancel without sacrificing text contrast in either
+  theme. Use one primary action per decision; Copy and other supporting
+  actions use the secondary treatment. Existing solid accent fills use
+  `text-inverse`; agent and destructive actions retain their semantic colours.
+  Disabled controls have no pointer affordance.
 - **Ghost/secondary:** transparent fill, `border-border-strong` hairline,
   `text-text-secondary`; hover raises to `bg-bg-card-hover` +
   `text-text-primary`.
 - **Icon buttons:** square hit area, `text-text-secondary` glyph, hover fill
-  `bg-bg-card-hover`; never a bare glyph without an `aria-label`.
+  `bg-bg-card-hover`; never a bare glyph without an `aria-label` and tooltip.
+  Compact desktop targets are at least 24 CSS pixels in each dimension; use
+  explicit pixel bounds because the desktop root type scale is 13px.
+  Resume/Restart stay visible when available; icons may remain compact.
 - **Mobile:** `.btn-primary` (accent fill, `--on-accent` text), `.btn-ghost`,
   `.chip-btn` (hairline chip). Touch targets are ≥ 44×44px — flex-center the
   glyph inside an explicit box, don't pad your way to the size.
@@ -243,6 +250,10 @@ a non-scrolling title/close row, and one explicitly owned body scroller.
 Tab order includes visible, enabled, non-inert controls only; an unsaved-edit
 confirmation owns its own keyboard sequence. Destructive confirmations place
 initial focus on Cancel.
+
+Settings uses a vertical tablist with automatic selection: one tab stop,
+wrapping Up/Down, Home/End boundaries and labelled tab/panel ID relationships.
+Tab enters the selected panel; inactive panels stay mounted to retain drafts.
 
 ### Inputs
 

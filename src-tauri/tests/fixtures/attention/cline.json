@@ -1,0 +1,79 @@
+[
+  {
+    "name": "agent_end-0",
+    "payload": {
+      "hookName": "agent_end",
+      "taskId": "session_1790003303940_9ouga",
+      "turn": {
+        "status": "completed",
+        "outputText": "done"
+      }
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "session_shutdown-1",
+    "payload": {
+      "hookName": "session_shutdown",
+      "taskId": "session_1790003303940_9ouga",
+      "turn": {
+        "status": "completed",
+        "outputText": "done"
+      }
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "pre_tool_use-2",
+    "payload": {
+      "hookName": "pre_tool_use",
+      "taskId": "session_1790003303940_9ouga",
+      "turn": {
+        "status": "completed",
+        "outputText": "done"
+      }
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hookName": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hookName": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

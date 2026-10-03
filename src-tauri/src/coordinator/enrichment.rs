@@ -13,7 +13,9 @@ use crate::agent::provider::muse::telemetry::{self, ObservedMuseSessionTelemetry
 use crate::env;
 use crate::models::AgentNode;
 use crate::secret_scrubber::SecretScrubber;
-use crate::services::transcript_reader::{self, TranscriptFormat, TranscriptTail, UnavailableReason};
+use crate::services::transcript_reader::{
+    self, TranscriptFormat, TranscriptTail, UnavailableReason,
+};
 
 /// The directory the agent's transcript is keyed under — the
 /// [Node Working Directory](../../../CONTEXT.md) in its *spawn* form, because
@@ -26,13 +28,19 @@ fn transcript_dir(node: &AgentNode) -> String {
     env::node_working_path(node).spawn_path
 }
 
-pub(crate) fn native_turn_completion(node: &AgentNode) -> Option<transcript_reader::NativeTurnSnapshot> {
+pub(crate) fn native_turn_completion(
+    node: &AgentNode,
+) -> Option<transcript_reader::NativeTurnSnapshot> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() { return None; }
+    if !adapter.produces_readable_transcript() {
+        return None;
+    }
     // No reader wired (issue #1817) means no native completion to observe.
     let format = TranscriptFormat::for_harness(adapter.id())?;
     transcript_reader::read_native_turn_completion(
-        format, node.cli_session_id.as_deref(), &transcript_dir(node),
+        format,
+        node.cli_session_id.as_deref(),
+        &transcript_dir(node),
     )
 }
 
@@ -98,8 +106,7 @@ fn scrub_tail(tail: TranscriptTail) -> TranscriptTail {
             }
             TranscriptTail::Available {
                 turns,
-                last_assistant_message: last_assistant_message
-                    .map(|m| SecretScrubber::scrub(&m)),
+                last_assistant_message: last_assistant_message.map(|m| SecretScrubber::scrub(&m)),
             }
         }
         other => other,
@@ -145,7 +152,9 @@ pub fn digest_enrichment(node: &AgentNode) -> Option<TranscriptTail> {
 
 pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::AssistantReport> {
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
-    if !adapter.produces_readable_transcript() { return None; }
+    if !adapter.produces_readable_transcript() {
+        return None;
+    }
     // No reader wired (issue #1817): fall back to live per-turn PTY
     // observation like any other transcript-less harness.
     let format = TranscriptFormat::for_harness(adapter.id())?;
@@ -158,11 +167,22 @@ pub(crate) fn assistant_report(node: &AgentNode) -> Option<transcript_reader::As
     Some(report)
 }
 
-pub(crate) fn circuit_report_snapshot(node: &AgentNode) -> Result<transcript_reader::report_snapshot::ReportSnapshot, transcript_reader::report_snapshot::ReportReadError> {
+pub(crate) fn circuit_report_snapshot(
+    node: &AgentNode,
+) -> Result<
+    transcript_reader::report_snapshot::ReportSnapshot,
+    transcript_reader::report_snapshot::ReportReadError,
+> {
     use transcript_reader::report_snapshot::ReportReadError;
     let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
     let format = TranscriptFormat::for_harness(adapter.id()).ok_or(ReportReadError::Unsupported)?;
-    transcript_reader::report_snapshot::read(format, node.cli_session_id.as_deref().ok_or(ReportReadError::NoSession)?, &transcript_dir(node))
+    transcript_reader::report_snapshot::read(
+        format,
+        node.cli_session_id
+            .as_deref()
+            .ok_or(ReportReadError::NoSession)?,
+        &transcript_dir(node),
+    )
 }
 
 #[cfg(test)]
@@ -200,7 +220,10 @@ mod tests {
             dir.contains("worktrees") && dir.contains("gentle-fox"),
             "expected the worktree dir, got: {dir}"
         );
-        assert_ne!(dir, n.path, "must not search the mesh root for a worktree node");
+        assert_ne!(
+            dir, n.path,
+            "must not search the mesh root for a worktree node"
+        );
     }
 
     /// A Root Node's transcript is keyed under the Mesh root itself.
@@ -290,12 +313,58 @@ mod tests {
     #[test]
     fn unwired_harness_report_is_explicitly_unsupported_not_another_parser() {
         use crate::services::transcript_reader::report_snapshot::ReportReadError;
-        for provider in [Provider::Kimi, Provider::Dsh, Provider::Freebuff, Provider::Terminal] {
+        for provider in [
+            Provider::Kimi,
+            Provider::Dsh,
+            Provider::Freebuff,
+            Provider::Terminal,
+        ] {
             let label = format!("{provider:?}");
             assert_eq!(
                 circuit_report_snapshot(&node(provider, Some("sid"), true)).err(),
                 Some(ReportReadError::Unsupported),
                 "{label} has no wired report adapter"
+            );
+        }
+    }
+
+    #[test]
+    fn unwired_harness_dispatch_preserves_the_spine_and_flags_unavailable() {
+        use crate::coordinator::node_digest::{layered, Enrichment, EnrichmentUnavailable};
+        use crate::models::SessionStatus;
+
+        for provider in [
+            Provider::Kimi,
+            Provider::Dsh,
+            Provider::Freebuff,
+            Provider::Terminal,
+        ] {
+            let mut node = node(provider, Some("a-claude-session-id"), true);
+            node.id = 1877;
+            node.name = "Waiting node".into();
+            node.status = SessionStatus::AwaitingInput;
+            assert_eq!(TranscriptFormat::for_harness(&node.provider), None);
+            let rich = digest_enrichment(&node);
+            let changed_at = chrono::DateTime::parse_from_rfc3339("2026-09-23T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let digest = layered(&node, "Transcript mesh", changed_at, rich.as_ref());
+            assert_eq!(digest.id, 1877);
+            assert_eq!(digest.name, "Waiting node");
+            assert_eq!(digest.mesh, "Transcript mesh");
+            assert_eq!(digest.status, "awaiting_input");
+            assert!(digest.needs_feedback);
+            assert_eq!(digest.waiting_since, Some(changed_at));
+            assert_eq!(digest.last_activity, changed_at);
+            assert_eq!(
+                digest.enrichment,
+                Enrichment::Unavailable {
+                    reason: EnrichmentUnavailable::Unsupported,
+                }
+            );
+            assert_eq!(
+                transcript_tail(&node, 1),
+                TranscriptTail::unavailable(UnavailableReason::Unsupported)
             );
         }
     }
@@ -314,7 +383,9 @@ mod tests {
         // `Unsupported` (which would mean "no reader wired" and flag a gap).
         assert_eq!(
             digest_enrichment(&digest_node),
-            Some(TranscriptTail::Unavailable { reason: UnavailableReason::NoSession })
+            Some(TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoSession
+            })
         );
         // The report read stays `Unsupported` even with a session id in hand —
         // the circuit then continues on Cline's `agent_end` hook receipt
@@ -336,7 +407,9 @@ mod tests {
     fn cline_provider_passes_the_capability_gate() {
         assert_eq!(
             transcript_tail(&node(Provider::Cline, None, true), 10),
-            TranscriptTail::Unavailable { reason: UnavailableReason::NoSession }
+            TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoSession
+            }
         );
         // A session id with no matching Cline store degrades as a *missing
         // transcript*, never as an unsupported harness. Deterministic: `sid` is
@@ -344,7 +417,9 @@ mod tests {
         // machine's `~/.cline` happens to hold.
         assert_eq!(
             transcript_tail(&node(Provider::Cline, Some("sid"), true), 10),
-            TranscriptTail::Unavailable { reason: UnavailableReason::NoTranscript }
+            TranscriptTail::Unavailable {
+                reason: UnavailableReason::NoTranscript
+            }
         );
     }
 
@@ -378,7 +453,10 @@ mod tests {
                     turns[0].tool_calls[0].input["command"].as_str().unwrap(),
                     "curl -H 'Authorization: Bearer [REDACTED]'"
                 );
-                assert_eq!(last_assistant_message.unwrap(), "password=[REDACTED] leaked");
+                assert_eq!(
+                    last_assistant_message.unwrap(),
+                    "password=[REDACTED] leaked"
+                );
             }
             other => panic!("expected Available, got {other:?}"),
         }

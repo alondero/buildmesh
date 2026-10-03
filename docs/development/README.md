@@ -36,6 +36,8 @@ For the Circuit side-effect inventory and restart/replay policy, see the
 [Circuit effect recovery contract](circuit-effect-recovery.md).
 For a Codex model-switch report checkpoint, see the
 [run 293 investigation](circuit-run-293-codex-context.md).
+For Settings keyboard behavior, compact sidebar targets and the theme inventory,
+see [desktop interaction and theme polish](desktop-polish-2026-10.md).
 
 ## Local development
 
@@ -126,6 +128,8 @@ in [the release procedure](releasing.md#required-checks-and-branch-protection).
 
 The [October desktop UX audit](desktop-ux-audit-2026-10.md) records ranked
 findings, native evidence and the linked follow-up checklist.
+The [October performance review](performance-audit-2026-10.md) records request
+and watcher fixes, memory/scaling findings, and the linked measurement backlog.
 
 - [Knowledge primer](../knowledge-primer.md) is the detailed AI architecture
   reference; read only the sections relevant to the code you will touch.

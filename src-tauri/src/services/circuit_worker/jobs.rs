@@ -3,7 +3,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{db, CircuitNodeKind, ClassifiedTurn, RunState, RunView, StepStatus, StepView};
+use super::turn_classify::ClassifiedTurn;
+use super::{db, CircuitNodeKind, RunState, RunView, StepStatus, StepView};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct Key {
@@ -126,7 +127,7 @@ impl<T: Send + 'static> Pool<T> {
     }
 }
 
-enum ResultValue { Classification(Option<Box<ClassifiedTurn>>, Option<AgentFence>), Verification(Option<bool>), Watchdog(Vec<super::QuietClassifierFailure>) }
+enum ResultValue { Classification(Option<Box<ClassifiedTurn>>, Option<AgentFence>), Verification(Option<bool>), Watchdog(Vec<super::turn_classify::QuietClassifierFailure>) }
 static JOBS: once_cell::sync::Lazy<Pool<ResultValue>> = once_cell::sync::Lazy::new(|| Pool::new(4));
 
 #[derive(PartialEq, Eq)]
@@ -158,9 +159,9 @@ pub(super) fn cancel_run(run_id: i64) {
     JOBS.retain(|key| key.run != run_id);
 }
 
-pub(super) fn watchdog(app: tauri::AppHandle) -> Vec<super::QuietClassifierFailure> {
+pub(super) fn watchdog(app: tauri::AppHandle) -> Vec<super::turn_classify::QuietClassifierFailure> {
     let key = Key { run: -1, step: "watchdog".into(), attempt: 0, verification: false, argument: String::new() };
-    match JOBS.poll(key, None, move |_| ResultValue::Watchdog(super::lost_turn_watchdog_pass(&app))) {
+    match JOBS.poll(key, None, move |_| ResultValue::Watchdog(super::turn_classify::lost_turn_watchdog_pass(&app))) {
         Some(ResultValue::Watchdog(failures)) => failures,
         _ => Vec::new(),
     }
@@ -191,7 +192,7 @@ impl RecoveryTarget {
         view.run_id == self.run && view.state == RunState::Running
             && view.step(&self.step).is_some_and(|step| step.attempt == self.attempt
                 && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
-                && super::observed_agent_for_step(step, &view.graph, &view.steps, view.context.source_agent_id()) == Some(self.agent))
+                && super::observation::observed_agent_for_step(step, &view.graph, &view.steps, view.context.source_agent_id()) == Some(self.agent))
     }
 
     pub(super) fn publish(
@@ -243,7 +244,7 @@ pub(super) fn classify(active: &db::ActiveCircuitRun, view: &RunView, step: &Ste
             return ResultValue::Classification(None, None);
         }
         let fence = agent.map(AgentFence::read);
-        let result = super::classify_step_turn(&active, &snapshot, &job_key.step);
+        let result = super::turn_classify::classify_step_turn(&active, &snapshot, &job_key.step);
         ResultValue::Classification(result.filter(|_| !permit.is_cancelled()).map(Box::new), fence)
     }) {
         Some(ResultValue::Classification(result, fence)) if fence.as_ref().is_none_or(AgentFence::current) => {

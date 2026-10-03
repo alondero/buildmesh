@@ -1,0 +1,633 @@
+pending
+[
+    Triggered,
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "capacity"]
+
+uncertain spawn
+[
+    EffectUncertain {
+        node_id: "step",
+        attempt: 1,
+        reason: "Agent dispatch has no durable attachment acknowledgement. Inspect retained agents; this attempt will not spawn again automatically.",
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: true,
+        explicit_budget: true,
+        reason: "Waiting for step prerequisites; no agent is attached.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "classify", "capacity"]
+
+missing agent
+[
+    AgentLost {
+        agent_node_id: 42,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "classify", "capacity", "wait"]
+
+lookup failure
+[
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "classify", "capacity", "wait"]
+
+lost agent
+[
+    AgentLost {
+        agent_node_id: 42,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "classify", "capacity", "wait"]
+
+failed agent
+[
+    AgentFinished {
+        agent_node_id: 42,
+        success: false,
+        output: Some(
+            "process failed",
+        ),
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "classify", "capacity", "wait"]
+
+working agent
+[
+    Observed {
+        expected: ObservationIdentity {
+            run_id: 1876,
+            step_id: "step",
+            attempt: 1,
+            agent_node_id: 42,
+            session_incarnation: None,
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        },
+        observation: CircuitObservation {
+            identity: ObservationIdentity {
+                run_id: 1876,
+                step_id: "step",
+                attempt: 1,
+                agent_node_id: 42,
+                session_incarnation: None,
+                session_id: None,
+                turn_id: None,
+                report_revision: None,
+            },
+            source: "agent_status_projection",
+            source_id: Some(
+                "status:1",
+            ),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: Working,
+        },
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "projection", "classify", "capacity", "wait"]
+
+acknowledged prompt
+[
+    Observed {
+        expected: ObservationIdentity {
+            run_id: 1876,
+            step_id: "step",
+            attempt: 1,
+            agent_node_id: 42,
+            session_incarnation: None,
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        },
+        observation: CircuitObservation {
+            identity: ObservationIdentity {
+                run_id: 1876,
+                step_id: "step",
+                attempt: 1,
+                agent_node_id: 42,
+                session_incarnation: None,
+                session_id: None,
+                turn_id: None,
+                report_revision: None,
+            },
+            source: "agent_status_projection",
+            source_id: Some(
+                "status:1",
+            ),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: Yielded,
+        },
+    },
+    PromptDelivered {
+        node_id: "step",
+        attempt: 1,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: Some(
+            "report:1",
+        ),
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for a fresh agent report; retrying observation every 10 seconds.",
+        timeout_ms: 900000,
+    },
+]
+calls: ["native", "agent", "projection", "ack", "capacity", "wait"]
+
+uncertain prompt
+[
+    Observed {
+        expected: ObservationIdentity {
+            run_id: 1876,
+            step_id: "step",
+            attempt: 1,
+            agent_node_id: 42,
+            session_incarnation: None,
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        },
+        observation: CircuitObservation {
+            identity: ObservationIdentity {
+                run_id: 1876,
+                step_id: "step",
+                attempt: 1,
+                agent_node_id: 42,
+                session_incarnation: None,
+                session_id: None,
+                turn_id: None,
+                report_revision: None,
+            },
+            source: "agent_status_projection",
+            source_id: Some(
+                "status:1",
+            ),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: Yielded,
+        },
+    },
+    EffectUncertain {
+        node_id: "step",
+        attempt: 1,
+        reason: "Prompt dispatch has no durable acknowledgement. Inspect the agent before recording an outcome; the prompt will not be replayed.",
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: Some(
+            "report:1",
+        ),
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for a fresh agent report; retrying observation every 10 seconds.",
+        timeout_ms: 900000,
+    },
+]
+calls: ["native", "agent", "projection", "ack", "capacity", "wait"]
+
+ack lookup failure
+[
+    Observed {
+        expected: ObservationIdentity {
+            run_id: 1876,
+            step_id: "step",
+            attempt: 1,
+            agent_node_id: 42,
+            session_incarnation: None,
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        },
+        observation: CircuitObservation {
+            identity: ObservationIdentity {
+                run_id: 1876,
+                step_id: "step",
+                attempt: 1,
+                agent_node_id: 42,
+                session_incarnation: None,
+                session_id: None,
+                turn_id: None,
+                report_revision: None,
+            },
+            source: "agent_status_projection",
+            source_id: Some(
+                "status:1",
+            ),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: Yielded,
+        },
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: Some(
+            "report:1",
+        ),
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for a fresh agent report; retrying observation every 10 seconds.",
+        timeout_ms: 900000,
+    },
+]
+calls: ["native", "agent", "projection", "ack", "capacity", "wait"]
+
+mid-work reviewer
+[
+    TurnParked {
+        node_id: "step",
+        output: "review report",
+        report_revision: None,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: Some(
+            "report:1",
+        ),
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for a fresh agent report; retrying observation every 10 seconds.",
+        timeout_ms: 900000,
+    },
+]
+calls: ["native", "classify", "capacity", "wait"]
+
+needs input
+[
+    TurnClassified {
+        binding: None,
+        node_id: "step",
+        classification: Some(
+            Blocked,
+        ),
+        output: Some(
+            "review report",
+        ),
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "classify", "blocked", "capacity"]
+
+classifier outage
+[
+    ClassifierErrorObserved {
+        node_id: "step",
+        attempt: 1,
+        error: "classifier offline",
+    },
+    TurnClassified {
+        binding: None,
+        node_id: "step",
+        classification: None,
+        output: Some(
+            "review report",
+        ),
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "classify", "capacity"]
+
+uncertain continuation
+[
+    AgentLost {
+        agent_node_id: 42,
+    },
+    ContinuationUncertain {
+        node_id: "step",
+        attempt: 1,
+        error: "Continuation delivery was interrupted after claiming input; waiting for fresh agent progress.",
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "capacity", "wait"]
+
+retry continuation
+[
+    AgentLost {
+        agent_node_id: 42,
+    },
+    ContinuationRetry {
+        node_id: "step",
+        attempt: 1,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: false,
+        explicit_budget: true,
+        reason: "Waiting for session identity and a readable report; retrying discovery every 10 seconds.",
+        timeout_ms: 7000,
+    },
+]
+calls: ["native", "agent", "capacity", "wait"]
+
+approvals
+[
+    CollaboratorApproved {
+        node_id: "step",
+    },
+    CollaboratorApproved {
+        node_id: "queued-approval",
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for your approval. This gate does not expire while you are away.",
+        timeout_ms: 3600000,
+    },
+]
+calls: ["native", "capacity"]
+
+verification
+[
+    VerificationResult {
+        node_id: "step",
+        green: true,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+    WaitObserved {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+        progress: None,
+        observed: true,
+        explicit_budget: false,
+        reason: "Waiting for step prerequisites; no agent is attached.",
+        timeout_ms: 900000,
+    },
+]
+calls: ["native", "verify", "capacity"]
+
+remote recheck
+[
+    GithubRecheckDue {
+        node_id: "step",
+        attempt: 1,
+        now_ms: 500,
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "capacity"]
+
+cleanup failure retry
+[
+    CloseAgentRetry {
+        node_id: "step",
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "capacity"]
+
+cleanup acknowledged
+[
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "capacity"]
+
+paused
+[
+    Observed {
+        expected: ObservationIdentity {
+            run_id: 1876,
+            step_id: "step",
+            attempt: 1,
+            agent_node_id: 42,
+            session_incarnation: None,
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        },
+        observation: CircuitObservation {
+            identity: ObservationIdentity {
+                run_id: 1876,
+                step_id: "step",
+                attempt: 1,
+                agent_node_id: 42,
+                session_incarnation: None,
+                session_id: None,
+                turn_id: None,
+                report_revision: None,
+            },
+            source: "agent_status_projection",
+            source_id: Some(
+                "status:1",
+            ),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: Working,
+        },
+    },
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "agent", "projection", "capacity"]
+
+cancelled
+[
+    Tick(
+        Capacity {
+            circuit_free_slots: 1,
+            agent_free_slots: 2,
+        },
+    ),
+]
+calls: ["native", "capacity"]

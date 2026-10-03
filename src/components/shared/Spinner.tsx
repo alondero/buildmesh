@@ -98,7 +98,7 @@ interface ErrorStateProps {
   title: string;
   /** The raw rejection message from the IPC. Optional — some callers
    *  (e.g. a permission gate) have a structured error that does not
-   *  need to surface verbatim. Truncated visually to a max-width so
+   *  need to surface verbatim. Wrapped within a max-width so
    *  a runaway stack-trace string doesn't blow up the tab body. */
   detail?: string | null;
   /** `data-testid` for tests that want to assert presence. The title text
@@ -135,9 +135,9 @@ export function ErrorState({ title, detail, testId }: ErrorStateProps) {
           <line x1="9" y1="9" x2="15" y2="15" />
         </svg>
       </div>
-      <span className="text-xs text-status-error">{title}</span>
+      <span className="max-w-full text-center text-xs text-status-error [overflow-wrap:anywhere]">{title}</span>
       {detail && (
-        <span className="text-2xs text-text-muted mt-1 max-w-full break-all text-center">
+        <span className="text-2xs text-text-muted mt-1 max-w-full text-center [overflow-wrap:anywhere]">
           {detail}
         </span>
       )}

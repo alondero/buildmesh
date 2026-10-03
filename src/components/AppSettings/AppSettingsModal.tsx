@@ -1,6 +1,6 @@
 import type { AppSettingsTab } from '../../stores/uiStore';
 import { formatError } from '../../lib/errorUtils';
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useId, type KeyboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
@@ -382,7 +382,7 @@ export function AccountCard({
             <button
               onClick={saveDraft}
               disabled={busy}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
               {busy ? 'Saving...' : 'Save'}
             </button>
@@ -496,7 +496,7 @@ export function AddProviderForm({
             <button
               onClick={onCancel}
               disabled={busy}
-              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+              className="px-5 py-2 text-base text-text-secondary border border-border-strong rounded-md hover:bg-bg-card-hover hover:text-text-primary disabled:opacity-50"
             >
               Cancel
             </button>
@@ -528,7 +528,7 @@ export function AddProviderForm({
             <button
               onClick={submitGeneric}
               disabled={busy || !name.trim() || !apiKey.trim()}
-              className="px-5 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+              className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
               {busy ? 'Adding...' : 'Add provider'}
             </button>
@@ -539,14 +539,14 @@ export function AddProviderForm({
                 setApiKey('');
               }}
               disabled={busy}
-              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+              className="px-5 py-2 text-base text-text-secondary border border-border-strong rounded-md hover:bg-bg-card-hover hover:text-text-primary disabled:opacity-50"
             >
               Back
             </button>
             <button
               onClick={onCancel}
               disabled={busy}
-              className="px-5 py-2 text-base text-text-muted hover:text-text-secondary disabled:opacity-50"
+              className="px-5 py-2 text-base text-text-secondary border border-border-strong rounded-md hover:bg-bg-card-hover hover:text-text-primary disabled:opacity-50"
             >
               Cancel
             </button>
@@ -605,7 +605,7 @@ function ResourceLoadStatus({
           <button
             type="button"
             onClick={onRetry}
-            className="px-3 py-1 bg-accent-cyan/20 text-accent-cyan text-sm rounded-md hover:bg-accent-cyan/30"
+            className="px-3 py-1 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-sm rounded-md hover:bg-bg-card-hover"
             data-testid={`resource-load-${resource}-retry`}
             // Scoped aria-label so a screen reader user hears which
             // resource this Retry button belongs to — multiple banners
@@ -820,6 +820,23 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
   const [namingProvider, setNamingProvider] = useState<string | null>(null);
   const [namingSaving, setNamingSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTabId>(initialTab);
+  const tabIdPrefix = useId();
+  const selectedTabRef = useRef<HTMLButtonElement>(null);
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, tab: SettingsTabId) => {
+    const index = SETTINGS_TABS.findIndex(item => item.id === tab);
+    let next: number;
+    switch (event.key) {
+      case 'ArrowUp': next = (index + SETTINGS_TABS.length - 1) % SETTINGS_TABS.length; break;
+      case 'ArrowDown': next = (index + 1) % SETTINGS_TABS.length; break;
+      case 'Home': next = 0; break;
+      case 'End': next = SETTINGS_TABS.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setActiveTab(SETTINGS_TABS[next].id);
+    event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+  };
   // Circuit agent pool size (app-wide cap on concurrent Circuit agents). The
   // draft is a string so the input can hold a cleared/in-progress value;
   // `''` means "no global cap". Committed on blur / Enter rather than per
@@ -1726,6 +1743,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
     <Modal
       onClose={onClose}
       labelledBy="app-settings-title"
+      defaultFocusRef={selectedTabRef}
       maxWidth="max-w-5xl"
       className="p-0 max-h-[85vh] flex flex-col overflow-hidden"
       dirty={dirtySites.size > 0}
@@ -1755,26 +1773,17 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
               key={tab.id}
               type="button"
               role="tab"
-              id={`settings-tab-${tab.id}`}
-              aria-controls={`settings-panel-${tab.id}`}
-              tabIndex={activeTab === tab.id ? 0 : -1}
+              id={`${tabIdPrefix}-tab-${tab.id}`}
+              aria-controls={`${tabIdPrefix}-panel-${tab.id}`}
               aria-selected={activeTab === tab.id}
-              onKeyDown={e => {
-                const index = SETTINGS_TABS.findIndex(t => t.id === tab.id);
-                const next = e.key === 'ArrowDown' ? (index + 1) % SETTINGS_TABS.length
-                  : e.key === 'ArrowUp' ? (index + SETTINGS_TABS.length - 1) % SETTINGS_TABS.length
-                  : e.key === 'Home' ? 0 : e.key === 'End' ? SETTINGS_TABS.length - 1 : null;
-                if (next === null) return;
-                e.preventDefault();
-                e.stopPropagation();
-                setActiveTab(SETTINGS_TABS[next].id);
-                e.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`#settings-tab-${SETTINGS_TABS[next].id}`)?.focus();
-              }}
+              tabIndex={activeTab === tab.id ? 0 : -1}
+              ref={activeTab === tab.id ? selectedTabRef : undefined}
               onClick={() => setActiveTab(tab.id)}
+              onKeyDown={event => handleTabKeyDown(event, tab.id)}
               className={`w-full flex items-center justify-between text-left px-3 py-2 rounded-md text-base ${
                 activeTab === tab.id
                   ? 'bg-bg-card text-accent-cyan font-medium'
-                  : 'text-text-secondary hover:bg-bg-card/60 hover:text-text-primary'
+                  : 'text-text-secondary hover:bg-bg-card-hover hover:text-text-primary'
               }`}
             >
               <span>{tab.label}</span>
@@ -1789,7 +1798,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
           ))}
         </nav>
 
-        <div className="flex-1 overflow-y-auto px-8 pb-10 pt-6">
+        <div className="flex-1 min-w-0 overflow-y-auto px-8 pb-10 pt-6">
         {/* Shared error surface — outside the panes so a failed save is
             visible no matter which pane the user is looking at. */}
         {error && (
@@ -1798,10 +1807,9 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
 
         <section
           role="tabpanel"
-          id="settings-panel-general"
-          aria-labelledby="settings-tab-general"
+          id={`${tabIdPrefix}-panel-general`}
+          aria-labelledby={`${tabIdPrefix}-tab-general`}
           tabIndex={0}
-          aria-label="General"
           hidden={activeTab !== 'general'}
           className="space-y-2"
         >
@@ -2011,10 +2019,9 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
 
         <section
           role="tabpanel"
-          id="settings-panel-harnesses"
-          aria-labelledby="settings-tab-harnesses"
+          id={`${tabIdPrefix}-panel-harnesses`}
+          aria-labelledby={`${tabIdPrefix}-tab-harnesses`}
           tabIndex={0}
-          aria-label="Launch Configurations"
           hidden={activeTab !== 'harnesses'}
           className="space-y-2"
         >
@@ -2114,10 +2121,9 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
 
         <section
           role="tabpanel"
-          id="settings-panel-providers"
-          aria-labelledby="settings-tab-providers"
+          id={`${tabIdPrefix}-panel-providers`}
+          aria-labelledby={`${tabIdPrefix}-tab-providers`}
           tabIndex={0}
-          aria-label="Providers"
           hidden={activeTab !== 'providers'}
           className="space-y-2"
         >
@@ -2338,10 +2344,9 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
 
         <section
           role="tabpanel"
-          id="settings-panel-remote"
-          aria-labelledby="settings-tab-remote"
+          id={`${tabIdPrefix}-panel-remote`}
+          aria-labelledby={`${tabIdPrefix}-tab-remote`}
           tabIndex={0}
-          aria-label="Remote Access"
           hidden={activeTab !== 'remote'}
           className="space-y-2"
         >
@@ -2509,7 +2514,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
                 {coordToken && (
                   <button
                     onClick={handleCopyToken}
-                    className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+                    className="px-5 py-2.5 border border-border-strong text-text-secondary text-base rounded-md hover:bg-bg-card-hover hover:text-text-primary"
                   >
                     {coordCopied ? 'Copied!' : 'Copy'}
                   </button>
@@ -2517,7 +2522,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
                 <button
                   onClick={handleGenerateToken}
                   disabled={coordBusy}
-                  className="px-5 py-2.5 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50 whitespace-nowrap"
+                  className="px-5 py-2.5 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50 whitespace-nowrap"
                 >
                   {coordBusy ? 'Working…' : coordHasToken ? 'Regenerate token' : 'Generate token'}
                 </button>

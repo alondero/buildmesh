@@ -105,7 +105,7 @@ function CheckButton({ state, onCheck }: { state: UpdatePhase; onCheck: () => vo
       type="button"
       onClick={onCheck}
       disabled={busy}
-      className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30 disabled:opacity-50"
+      className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
       data-testid="settings-about-check"
     >
       {label}
@@ -194,7 +194,7 @@ function UpdateStateActions({
         <button
           type="button"
           onClick={onInstall}
-          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+          className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
           data-testid="settings-about-install"
         >
           Install v{state.summary.version} & Restart
@@ -215,7 +215,7 @@ function UpdateStateActions({
         <button
           type="button"
           onClick={onRestart}
-          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+          className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
           data-testid="settings-about-restart"
         >
           Restart now
@@ -236,7 +236,7 @@ function UpdateStateActions({
         <button
           type="button"
           onClick={onRetry}
-          className="px-4 py-2 bg-accent-cyan/20 text-accent-cyan text-base rounded-md hover:bg-accent-cyan/30"
+          className="px-4 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover"
           data-testid="settings-about-retry"
         >
           Retry
