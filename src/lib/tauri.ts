@@ -2,11 +2,10 @@ import { Channel } from '@tauri-apps/api/core';
 import { _invoke } from './tauri/_invoke';
 import { emit } from '@tauri-apps/api/event';
 import { deleteDefaultProviderPromise, clearDefaultProviderPromises } from './providerCache';
-// The cross-surface invalidation event lives in the hook module (the one
-// grep-able symbol); this facade re-emits it after default-provider writes
-// so open spawn clusters refresh. The hook imports no lib modules, so
-// there is no import cycle.
-import { PROVIDER_LIST_CHANGED_EVENT } from '../hooks/useProviderListInvalidation';
+// The cross-surface invalidation event is owned by the provider facet
+// (same layer); this facade re-emits it after default-provider writes
+// so open spawn clusters refresh.
+import { PROVIDER_LIST_CHANGED_EVENT } from './tauri/provider';
 // Re-export every typed wrapper from the provider/harness facet (issue
 // #1656 Phase 2 — first facet). The new `getResolvedHarnessView` IPC
 // command lives here along with every other harness/provider wrapper.

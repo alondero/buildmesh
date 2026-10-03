@@ -375,6 +375,78 @@ describe('SpawnButtonCluster (#575 / ADR-0016)', () => {
     expect(screen.getByTestId('spawn-default').textContent).toContain('Agy');
   });
 
+  it('names the action on the quick-spawn half once the icon shows', async () => {
+    // A11y: the icon is presentational and the name span is hover-only,
+    // so without an explicit label the button would announce as just
+    // "Anthropic". The label carries the action + visible name (WCAG
+    // 2.5.3: the visible "Anthropic" is contained in it).
+    const getDefaultProvider = vi.fn().mockResolvedValue('claude');
+    render(
+      <SpawnButtonCluster
+        providers={PROVIDERS}
+        dropdownKey="mesh-1"
+        isOpen={false}
+        onToggleDropdown={() => {}}
+        onSpawnDefault={() => {}}
+        onSelectProvider={() => {}}
+        getDefaultProvider={getDefaultProvider}
+      />,
+    );
+
+    // Before resolution the bare `+` names itself — no override that
+    // would break the visible-label-in-name contract.
+    expect(screen.getByTestId('spawn-default').getAttribute('aria-label')).toBeNull();
+
+    const button = await screen.findByRole('button', { name: 'Add agent node (Anthropic)' });
+    expect(button.getAttribute('data-testid')).toBe('spawn-default');
+  });
+
+  it('shares one provider-list-changed subscription across mounted clusters', async () => {
+    // The subscription is process-lifetime and the eviction runs once per
+    // event — N mounted rows must not register N backend listeners — but
+    // every mounted cluster still re-resolves its own mesh's default.
+    const { listen } = await import('@tauri-apps/api/event');
+    const registrationsBefore = vi.mocked(listen).mock.calls.filter(([e]) => e === PROVIDER_LIST_CHANGED_EVENT).length;
+    const getClaude = vi.fn().mockResolvedValue('claude');
+    const getAgy = vi.fn().mockResolvedValue('agy');
+    render(
+      <SpawnButtonCluster
+        providers={PROVIDERS}
+        dropdownKey="mesh-1"
+        isOpen={false}
+        onToggleDropdown={() => {}}
+        onSpawnDefault={() => {}}
+        onSelectProvider={() => {}}
+        getDefaultProvider={getClaude}
+      />,
+    );
+    render(
+      <SpawnButtonCluster
+        providers={PROVIDERS}
+        dropdownKey="mesh-2"
+        isOpen={false}
+        onToggleDropdown={() => {}}
+        onSpawnDefault={() => {}}
+        onSelectProvider={() => {}}
+        getDefaultProvider={getAgy}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByTestId('spawn-default')[0].textContent).toContain('Anthropic'));
+    await waitFor(() => expect(screen.getAllByTestId('spawn-default')[1].textContent).toContain('Agy'));
+    expect(
+      vi.mocked(listen).mock.calls.filter(([e]) => e === PROVIDER_LIST_CHANGED_EVENT).length - registrationsBefore,
+    ).toBeLessThanOrEqual(1);
+
+    getClaude.mockResolvedValue('agy');
+    getAgy.mockResolvedValue('claude');
+    await emit(PROVIDER_LIST_CHANGED_EVENT);
+
+    await waitFor(() => {
+      expect(screen.getAllByTestId('spawn-default')[0].textContent).toContain('Agy');
+      expect(screen.getAllByTestId('spawn-default')[1].textContent).toContain('Anthropic');
+    });
+  });
+
   it('refreshes the icon when the menu opens', async () => {
     // Same staleness via a different trigger: opening the menu must
     // re-resolve the default so a change made while it was closed shows

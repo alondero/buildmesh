@@ -1,6 +1,7 @@
 import type { Mesh } from '../../stores/meshStore';
 import { type SpawnOption } from '../../lib/groups';
 import { dropdownId } from '../../lib/dropdownId';
+import { isMac } from '../../lib/platform';
 import { SpawnButtonCluster } from './SpawnButtonCluster';
 
 interface NodeCreationFormProps {
@@ -42,10 +43,8 @@ export function NodeCreationForm({
 
   // Modifier-click spawns in the mesh root, bypassing the per-mesh
   // `use_worktree` default — but only when the mesh actually uses a
-  // worktree. The key label follows the platform (Option on macOS).
-  const modifierKey = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform ?? '')
-    ? '⌥-click'
-    : 'Alt-click';
+  // worktree. The key label follows the platform (Option glyph on macOS).
+  const modifierKey = isMac ? '⌥-click' : 'Alt-click';
 
   return (
     <SpawnButtonCluster

@@ -1,12 +1,11 @@
 import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { PROVIDER_LIST_CHANGED_EVENT } from '../lib/tauri/provider';
 
-/**
- * Event name emitted by `commands::preferences::{upsert,remove}_provider_account`
- * after a successful save. Centralised here so the Rust and TS halves stay in
- * sync (one grep-able symbol beats five stringly-typed listeners).
- */
-export const PROVIDER_LIST_CHANGED_EVENT = 'provider-list-changed';
+// Re-exported so existing importers keep working — the constant itself is
+// owned by `lib/tauri/provider` (one grep-able symbol for the Rust and TS
+// halves; lib-ward import direction, never hooks-ward).
+export { PROVIDER_LIST_CHANGED_EVENT };
 
 /**
  * Subscribes to the `provider-list-changed` Tauri event and calls `refresh`

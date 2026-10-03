@@ -1,15 +1,43 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { ProviderDropdown } from './ProviderDropdown';
 import { ProviderIcon } from '../Providers/ProviderIcon';
-import { useProviderListInvalidation } from '../../hooks/useProviderListInvalidation';
+import { PROVIDER_LIST_CHANGED_EVENT } from '../../lib/tauri/provider';
 import { clearDefaultProviderPromises } from '../../lib/providerCache';
 import type { SpawnOption } from '../../lib/groups';
 
 /**
- * Canonical `+ ▾` Spawn Menu cluster (ADR-0016 §2 — "Sidebar, Issues probe,
- * PRs probe, archived-resume, and mobile all render the same ordered, grouped
- * menu; none re-orders or re-derives it"). The cluster is the shared visual
- * surface for spawning a new agent node from any desktop app entry point:
+ * Process-lifetime fan-out for default-provider changes. The cluster mounts
+ * once per mesh row / issue / PR / archived session, so a per-instance
+ * `listen` would register one backend subscription per row and evict the
+ * shared cache N times per event. Instead there is exactly one
+ * subscription: it evicts once, then each mounted cluster re-resolves its
+ * own mesh's default (that per-mesh IPC is unavoidable — and cached).
+ */
+const defaultChangedSubscribers = new Set<() => void>();
+let defaultChangedListening = false;
+
+function ensureDefaultChangedListening(): void {
+  if (defaultChangedListening) return;
+  defaultChangedListening = true;
+  void listen(PROVIDER_LIST_CHANGED_EVENT, () => {
+    clearDefaultProviderPromises();
+    for (const refresh of defaultChangedSubscribers) refresh();
+  });
+}
+
+/** Test-only: drop the process-lifetime subscription between cases. */
+export function __resetDefaultChangedListeningForTests(): void {
+  defaultChangedListening = false;
+  defaultChangedSubscribers.clear();
+}
+
+/**
+ * Canonical quick-spawn + provider-picker cluster (ADR-0016 §2 — "Sidebar,
+ * Issues probe, PRs probe, archived-resume, and mobile all render the same
+ * ordered, grouped menu; none re-orders or re-derives it"). The cluster is
+ * the shared visual surface for spawning a new agent node from any desktop
+ * app entry point:
  *
  *   - Sidebar mesh row (via NodeCreationForm) → `create_agent_node`
  *   - Issues probe row → `create_issue_node` + `start_node_background`
@@ -19,6 +47,10 @@ import type { SpawnOption } from '../../lib/groups';
  * default-resolution chains); the cluster owns the *visual* and the dropdown
  * wiring, so the three call sites compose the same `ProviderDropdown` →
  * `GroupedProviderMenu` ladder without duplicating the button pair.
+ *
+ * The quick-spawn half shows the resolved default harness icon (falling
+ * back to the bare `+` idiom until it resolves) and expands to its name on
+ * hover/focus; the picker half is a rotating chevron.
  */
 interface SpawnButtonClusterProps {
   /** Provider list — already filtered/sorted by the parent (per ADR-0016 §2
@@ -135,15 +167,17 @@ export function SpawnButtonCluster({
     if (isOpen) void refreshDefaultProvider();
   }, [isOpen, refreshDefaultProvider]);
 
-  // Provider mutations anywhere (Settings upsert/remove, per-mesh or
-  // app-wide default writes — all funnel through `provider-list-changed`)
-  // evict the shared cache and re-resolve, so the icon tracks the live
-  // default instead of the mount-time one.
-  const handleProviderListChanged = useCallback(() => {
-    clearDefaultProviderPromises();
-    void refreshDefaultProvider();
+  // Join the process-lifetime fan-out above: re-resolve this cluster's own
+  // default when providers mutate anywhere, so the icon tracks the live
+  // default instead of the mount-time one. (Eviction happens once in the
+  // shared handler, not once per mounted row.)
+  useEffect(() => {
+    ensureDefaultChangedListening();
+    defaultChangedSubscribers.add(refreshDefaultProvider);
+    return () => {
+      defaultChangedSubscribers.delete(refreshDefaultProvider);
+    };
   }, [refreshDefaultProvider]);
-  useProviderListInvalidation(handleProviderListChanged);
 
   // Tooltip + accessible label on the primary action. Defaults to the
   // canonical "+ spawn" wording; surfaces that aren't a spawn (Archive
@@ -218,7 +252,13 @@ export function SpawnButtonCluster({
           onMouseEnter={refreshDefaultProvider}
           onFocus={refreshDefaultProvider}
           disabled={isDisabled}
-          aria-label={primaryAriaLabel ?? undefined}
+          // Once the icon treatment applies, the visible content is a
+          // presentational brand mark plus a hover-only name span, so the
+          // button would otherwise be announced as just the provider
+          // identity ("Anthropic") with no action. Name the action
+          // explicitly — but only when the icon is actually showing, so
+          // the bare-`+` fallback keeps its visible "+" name (WCAG 2.5.3).
+          aria-label={primaryAriaLabel ?? (iconMode && defaultOption && !isSpawning ? primaryTitle : undefined)}
           className="group flex items-center justify-center px-2 min-w-[34px] h-[28px] text-xs font-medium text-accent-cyan hover:bg-accent-cyan/15 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title={isSpawning ? busyLabel : primaryTitle}
         >
