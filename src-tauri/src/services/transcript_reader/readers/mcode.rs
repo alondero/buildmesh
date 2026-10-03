@@ -45,7 +45,12 @@ impl TranscriptAdapter for McodeAdapter {
         find_mcode_transcript_in(&data_dir.join("v2").join("sessions"), ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+    fn parse(
+        &self,
+        lines: Box<dyn Iterator<Item = String> + '_>,
+        keep: usize,
+        max_text: usize,
+    ) -> Parsed {
         parse_mcode_turns_with_text_limit(lines, keep, max_text)
     }
 
@@ -62,8 +67,7 @@ impl TranscriptAdapter for McodeAdapter {
 /// Resolve the MiniMax data dir in the environment that will execute (or
 /// executed) the CLI for `spawn_path`: `$MINIMAX_DATA_DIR` → `$MAVIS_DATA_DIR`
 /// → `~/.minimax`, translated through the WSL/host boundary the same way the
-/// Muse adapter resolves its session store (never a hand-built `\\wsl$\`
-/// path — `env` owns that composition).
+/// Muse adapter resolves its session store. `env` owns host-path composition.
 pub(crate) fn minimax_data_dir_for_spawn(spawn_path: &str) -> Option<PathBuf> {
     let native = env::minimax_data_dir();
     env::cli_dir_for_spawn(native, ".minimax", spawn_path)
@@ -212,7 +216,11 @@ pub(crate) fn parse_mcode_turns(lines: impl Iterator<Item = String>, keep: usize
     parse_mcode_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
 }
 
-pub(crate) fn parse_mcode_turns_with_text_limit(lines: impl Iterator<Item = String>, keep: usize, max_text: usize) -> Parsed {
+pub(crate) fn parse_mcode_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
+) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -565,5 +573,76 @@ mod tests {
         let user = record("msg-3", "turn-2", user_msg("go on"));
         assert!(!McodeAdapter.line_has_assistant_text(&user));
         assert!(!McodeAdapter.line_has_assistant_text("garbage"));
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+
+    use crate::services::transcript_reader::{assistant_report_from_file, TranscriptFormat};
+
+    #[test]
+    fn mcode_native_transcript_recovers_circuit_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026/09/19/10-00-00-000-session_abc");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(
+            session.join("manifest.json"),
+            r#"{"schemaVersion":1,"sessionId":"ses-123","createdAtMs":1788000000000}"#,
+        )
+        .unwrap();
+        let file = session.join("messages.jsonl");
+        std::fs::write(&file, concat!(
+            "{\"message_id\":\"m1\",\"turn_id\":\"t1\",\"message\":{\"role\":\"user\",\"timestamp\":1788000000000,\"content\":[{\"type\":\"text\",\"text\":\"Fix the parser\"}]}}\n",
+            "{\"message_id\":\"m2\",\"turn_id\":\"t1\",\"message\":{\"role\":\"assistant\",\"timestamp\":1788000001000,\"content\":[{\"type\":\"text\",\"text\":\"Parser fixed. Tests pass.\"}]}}\n",
+        )).unwrap();
+
+        let path = crate::services::transcript_reader::readers::mcode::find_mcode_transcript_in(
+            temp.path(),
+            "ses-123",
+        )
+        .expect("manifest scan must resolve the session transcript");
+        assert_eq!(path, file);
+        let report = assistant_report_from_file(&path, TranscriptFormat::Mcode)
+            .expect("a completed mcode turn must be readable by the circuit");
+        assert_eq!(report.text, "Parser fixed. Tests pass.");
+
+        use std::io::Write;
+        let mut writer = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap();
+        writeln!(writer, "{{\"message_id\":\"m3\",\"turn_id\":\"t1\",\"message\":{{\"role\":\"toolResult\",\"timestamp\":1788000002000,\"content\":[{{\"type\":\"text\",\"text\":\"tool echo\"}}]}}}}").unwrap();
+        assert_eq!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode)
+                .unwrap()
+                .revision,
+            report.revision,
+            "a toolResult echo must not advance the assistant revision"
+        );
+        writeln!(writer, "{{\"message_id\":\"m4\",\"turn_id\":\"t2\",\"message\":{{\"role\":\"assistant\",\"timestamp\":1788000003000,\"content\":[{{\"type\":\"text\",\"text\":\"Next task done.\"}}]}}}}").unwrap();
+        assert_ne!(
+            assistant_report_from_file(&path, TranscriptFormat::Mcode)
+                .unwrap()
+                .revision,
+            report.revision,
+            "a fresh assistant response must advance the revision"
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_contract_tests {
+    use super::*;
+    use crate::services::transcript_reader::test_support::{assert_jsonl_contract, fixture};
+
+    #[test]
+    fn reader_handles_tail_digest_malformed_empty_shape_changed_and_unreadable_files() {
+        assert_jsonl_contract(
+            &McodeAdapter,
+            &fixture("mcode", "transcript.jsonl"),
+            &fixture("mcode", "shape_changed.jsonl"),
+            "MiniMax blocking question?",
+        );
     }
 }

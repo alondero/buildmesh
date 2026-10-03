@@ -1,6 +1,8 @@
 //! A stable report read for Circuit interpretation, not proof of task ownership.
 
 use super::*;
+use std::{fs, io::{BufRead, BufReader, Read, Seek, SeekFrom}};
+use super::readers::opencode::{opencode_resolve, read_opencode_message_rows, parse_opencode_messages, OPENCODE_DIGEST_WINDOW};
 
 #[derive(Debug, Clone, PartialEq)]
 enum ReportSource {
@@ -234,7 +236,7 @@ mod tests {
     ///    `Unsupported`, and never resolves a path.
     #[test]
     fn cline_document_is_never_read_as_a_line_oriented_report() {
-        let path = crate::services::transcript_reader::tests::fixture("cline_messages.json");
+        let path = crate::services::transcript_reader::test_support::fixture("cline", "cline_messages.json");
         // The fixture is a genuinely valid Cline document (a single JSON
         // object), not a malformed stand-in.
         let document = fs::read_to_string(&path).expect("checked-in Cline fixture");
@@ -248,7 +250,7 @@ mod tests {
         // a lie for a complete Cline document. Both trailing-newline shapes
         // matter: Cline's non-atomic `writeFileSync(JSON.stringify(...))` emits
         // none, but a document can be read after a newline-terminated write.
-        let no_newline = crate::services::transcript_reader::tests::write_fixture(
+        let no_newline = crate::services::transcript_reader::test_support::write_fixture(
             "cline_no_trailing_newline",
             document.trim_end(),
         );

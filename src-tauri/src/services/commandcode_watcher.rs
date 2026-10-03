@@ -906,7 +906,7 @@ mod tests {
     #[test]
     fn checked_in_commandcode_fixture_has_one_final_turn_completion() {
         let mut tracker = TurnTracker::default();
-        let transitions: Vec<_> = include_str!("../../tests/fixtures/commandcode_transcript.jsonl")
+        let transitions: Vec<_> = include_str!("../../tests/fixtures/transcripts/commandcode/commandcode_transcript.jsonl")
             .lines()
             .filter_map(|line| tracker.observe_transcript_line(line))
             .collect();

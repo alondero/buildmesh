@@ -65,8 +65,8 @@ use std::path::{Path, PathBuf};
 use crate::env;
 use crate::services::transcript_reader::adapter::{LocateCtx, TranscriptAdapter};
 use crate::services::transcript_reader::types::{
-    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings, Parsed, ToolCall,
-    Turn, MAX_TOOL_STRING,
+    cap_tool_calls, merge_into_with_text_limit, push_bounded, truncate, truncate_json_strings,
+    Parsed, ToolCall, Turn, MAX_TOOL_STRING,
 };
 
 /// Drop-in [`TranscriptAdapter`] for Muse Code.
@@ -82,7 +82,12 @@ impl TranscriptAdapter for MuseAdapter {
         muse_locator_in(&index, ctx.session_id)
     }
 
-    fn parse(&self, lines: Box<dyn Iterator<Item = String> + '_>, keep: usize, max_text: usize) -> Parsed {
+    fn parse(
+        &self,
+        lines: Box<dyn Iterator<Item = String> + '_>,
+        keep: usize,
+        max_text: usize,
+    ) -> Parsed {
         parse_muse_turns_with_text_limit(lines, keep, max_text)
     }
 
@@ -169,8 +174,9 @@ fn extract_muse_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
             let input = obj
                 .get("args")
                 .map(|value| match value {
-                    serde_json::Value::String(text) => serde_json::from_str(text)
-                        .unwrap_or_else(|_| value.clone()),
+                    serde_json::Value::String(text) => {
+                        serde_json::from_str(text).unwrap_or_else(|_| value.clone())
+                    }
                     _ => value.clone(),
                 })
                 .unwrap_or(serde_json::Value::Null);
@@ -197,7 +203,11 @@ pub(crate) fn parse_muse_turns(lines: impl Iterator<Item = String>, keep: usize)
     parse_muse_turns_with_text_limit(lines, keep, super::super::types::MAX_TURN_TEXT)
 }
 
-pub(crate) fn parse_muse_turns_with_text_limit(lines: impl Iterator<Item = String>, keep: usize, max_text: usize) -> Parsed {
+pub(crate) fn parse_muse_turns_with_text_limit(
+    lines: impl Iterator<Item = String>,
+    keep: usize,
+    max_text: usize,
+) -> Parsed {
     let keep = keep.max(1);
     let mut turns: VecDeque<Turn> = VecDeque::new();
     let mut last_assistant_message: Option<String> = None;
@@ -402,7 +412,10 @@ mod tests {
     fn line(payload_type: &str, kind: &str, mut event: serde_json::Value) -> String {
         // Inject the `kind` discriminator alongside the caller's fields.
         if let serde_json::Value::Object(map) = &mut event {
-            map.insert("kind".to_string(), serde_json::Value::String(kind.to_string()));
+            map.insert(
+                "kind".to_string(),
+                serde_json::Value::String(kind.to_string()),
+            );
         }
         serde_json::json!({
             "schema_version": 1,
@@ -441,7 +454,10 @@ mod tests {
         assert_eq!(parsed.turns[0].text, "Inspect the file.");
         assert_eq!(parsed.turns[1].role, "assistant");
         assert_eq!(parsed.turns[1].text, "Reading now.");
-        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Reading now."));
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("Reading now.")
+        );
         assert!(!parsed.saw_malformed);
     }
 
@@ -501,7 +517,10 @@ mod tests {
         assert_eq!(parsed.turns.len(), 1);
         assert_eq!(parsed.turns[0].text, "Reading the file.");
         assert_eq!(parsed.turns[0].tool_calls.len(), 1);
-        assert_eq!(parsed.last_assistant_message.as_deref(), Some("Reading the file."));
+        assert_eq!(
+            parsed.last_assistant_message.as_deref(),
+            Some("Reading the file.")
+        );
     }
 
     #[test]
@@ -535,7 +554,10 @@ mod tests {
         assert_eq!(parsed.turns[1].role, "assistant");
         assert_eq!(parsed.turns[1].text, "Hi there.");
         // Critical: no text from reasoning_committed surfaces anywhere.
-        assert!(parsed.turns.iter().all(|t| !t.text.contains("REDACTED-BLOB")));
+        assert!(parsed
+            .turns
+            .iter()
+            .all(|t| !t.text.contains("REDACTED-BLOB")));
         assert_eq!(parsed.last_assistant_message.as_deref(), Some("Hi there."));
     }
 
@@ -562,11 +584,7 @@ mod tests {
                 "future_event_kind",
                 serde_json::json!({"future_field": true}),
             ),
-            line(
-                "unknown.payload_type",
-                "irrelevant",
-                serde_json::json!({}),
-            ),
+            line("unknown.payload_type", "irrelevant", serde_json::json!({})),
             line(
                 "runtime.session",
                 "assistant_message_committed",
@@ -589,7 +607,11 @@ mod tests {
             // structural break — must flag the shape rather than
             // silently dropping the entire session (mirrors Claude's
             // `saw_malformed` discipline at `types.rs:95`).
-            line("runtime.session", "user_prompt_display", serde_json::json!({})),
+            line(
+                "runtime.session",
+                "user_prompt_display",
+                serde_json::json!({}),
+            ),
         ];
         let parsed = parse_muse_turns(lines.into_iter(), 10);
         assert!(parsed.saw_malformed);
@@ -685,13 +707,12 @@ mod tests {
             )
             .unwrap();
 
-        let expected_raw =
-            "/home/test/.local/share/muse/sessions/2026/09/12/<id>/session.jsonl";
+        let expected_raw = "/home/test/.local/share/muse/sessions/2026/09/12/<id>/session.jsonl";
         assert_eq!(
             muse_locator_in(&database, "01a0a000-0000-7000-8000-000000000001"),
             Some(std::path::PathBuf::from(env::to_host_path(expected_raw))),
             r#"host-translated path matches the index row: identity on \
-             Linux/macOS, \\wsl$\(distro)\... on Windows+WSL"#,
+             Linux/macOS, the host UNC form on Windows+WSL"#,
         );
         assert!(muse_locator_in(&database, "01a0a000-0000-7000-8000-000000000002").is_none());
         assert!(muse_locator_in(&database, "unknown-id").is_none());
@@ -732,7 +753,7 @@ mod tests {
         // real paths. Mirror that audit's discipline so the checked-in
         // fixture stays safe to publish.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/muse_transcript.jsonl");
+            .join("tests/fixtures/transcripts/muse/muse_transcript.jsonl");
         let body = std::fs::read_to_string(&path).expect("fixture readable");
         assert_fixture_redacted(&path, &body);
     }
@@ -779,8 +800,12 @@ mod tests {
                         !matches!(
                             key_l.as_str(),
                             "command"
-                            | "arguments" | "input"
-                            | "auth" | "token" | "apikey" | "api_key"
+                                | "arguments"
+                                | "input"
+                                | "auth"
+                                | "token"
+                                | "apikey"
+                                | "api_key"
                         ),
                         "{} must not carry key `{key}`",
                         path.display()
@@ -803,8 +828,9 @@ mod tests {
                 // layout). Any string longer than the redaction markers
                 // looks suspicious — fail closed so a future fixture
                 // edit that pastes a real prompt trips here.
-                let looks_like_prose =
-                    !text.starts_with('<') && !text.starts_with('/') && text.split_whitespace().count() > 4;
+                let looks_like_prose = !text.starts_with('<')
+                    && !text.starts_with('/')
+                    && text.split_whitespace().count() > 4;
                 assert!(
                     !looks_like_prose,
                     "{} string value looks like prose: {text}",
@@ -813,5 +839,103 @@ mod tests {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+
+    use crate::services::transcript_reader::test_support::fixture;
+
+    use crate::services::transcript_reader::{
+        read_last_assistant_message_from_file, read_tail_from_file, TranscriptFormat,
+        TranscriptTail,
+    };
+
+    #[test]
+    fn muse_contract_parses_tail_and_last_assistant_message() {
+        let tail = read_tail_from_file(
+            &fixture("muse", "muse_transcript.jsonl"),
+            10,
+            TranscriptFormat::Muse,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = tail
+        else {
+            panic!("muse fixture should parse to an available tail, got {tail:?}");
+        };
+        // Fixture carries: user_prompt_display → task_started →
+        // reasoning_committed → assistant_tool_calls_committed (msg X)
+        // → output → tool_result_batch_committed → assistant_message_committed
+        // (msg X, coalesces into the same turn as the tool calls) →
+        // task_completed → user_prompt_display → unknown payload_type.
+        // Surviving turns:
+        //   1. user_prompt_display ("<REDACTED>")
+        //   2. assistant_message_committed ("<REDACTED>") — coalesced
+        //      with the tool_calls_committed that shares its message_id,
+        //      so the tool call lands on this turn.
+        //   3. user_prompt_display ("<REDACTED>")
+        let roles: Vec<&str> = turns.iter().map(|t| t.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user"],
+            "turns: {turns:#?}"
+        );
+        // All real content is `<REDACTED>` (the fixture's privacy
+        // posture — the prose check in
+        // `adapters::muse::tests::redacted_fixture_carries_no_prompts_or_secrets`
+        // is the authoritative audit).
+        assert_eq!(turns[0].text, "<REDACTED>");
+        assert_eq!(turns[1].text, "<REDACTED>");
+        assert_eq!(turns[1].tool_calls.len(), 1);
+        assert_eq!(turns[1].tool_calls[0].name, "read_file");
+        // The `args` JSON string parses onto the shared `input` wire shape.
+        assert_eq!(
+            turns[1].tool_calls[0].input["file_path"],
+            "src/<REDACTED>.ts"
+        );
+        assert_eq!(turns[2].text, "<REDACTED>");
+        // `last_assistant_message` is the FULL final text regardless of
+        // the bounded turn window.
+        assert_eq!(last_assistant_message.as_deref(), Some("<REDACTED>"));
+    }
+
+    #[test]
+    fn muse_cheap_digest_reader_matches_full_reader() {
+        let cheap = read_last_assistant_message_from_file(
+            &fixture("muse", "muse_transcript.jsonl"),
+            TranscriptFormat::Muse,
+        );
+        let TranscriptTail::Available {
+            turns,
+            last_assistant_message,
+        } = cheap
+        else {
+            panic!("expected available, got {cheap:?}");
+        };
+        assert!(turns.is_empty(), "cheap reader must not return turns");
+        assert_eq!(
+            last_assistant_message.as_deref(),
+            Some("<REDACTED>"),
+            "cheap digest must surface the same last assistant text as the full reader",
+        );
+    }
+}
+
+#[cfg(test)]
+mod file_contract_tests {
+    use super::*;
+    use crate::services::transcript_reader::test_support::{assert_jsonl_contract, fixture};
+
+    #[test]
+    fn reader_handles_tail_digest_malformed_empty_shape_changed_and_unreadable_files() {
+        assert_jsonl_contract(
+            &MuseAdapter,
+            &fixture("muse", "muse_transcript.jsonl"),
+            &fixture("muse", "shape_changed.jsonl"),
+            "<REDACTED>",
+        );
     }
 }

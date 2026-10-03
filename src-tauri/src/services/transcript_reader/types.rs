@@ -8,8 +8,8 @@
 // `agent_node_discovery`) cannot drift on the truncation rule the way they
 // did before it was centralised.
 
-use std::collections::VecDeque;
 use serde::Serialize;
+use std::collections::VecDeque;
 
 // --- Caps and constants ---
 /// Per-turn text cap. Generous (this is the deep drill-in, not the scan) but
@@ -139,7 +139,12 @@ pub(crate) fn cap_tool_calls(tool_calls: &mut Vec<ToolCall>) {
 /// append any text (re-truncating the combined result) and add its tool calls
 /// (re-capping the combined list so a turn split across many lines still honours
 /// [`MAX_TURN_TOOL_CALLS`]).
-pub(crate) fn merge_into_with_text_limit(turn: &mut Turn, more_text: &str, mut more_tools: Vec<ToolCall>, max_text: usize) {
+pub(crate) fn merge_into_with_text_limit(
+    turn: &mut Turn,
+    more_text: &str,
+    mut more_tools: Vec<ToolCall>,
+    max_text: usize,
+) {
     if !more_text.trim().is_empty() {
         let combined = if turn.text.is_empty() {
             more_text.to_string()
@@ -262,4 +267,49 @@ pub(crate) fn extract_query_value<'a>(query: &'a str, key: &str) -> Option<&'a s
             None
         }
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn truncate_json_strings_bounds_leaves_but_keeps_shape() {
+        let big = "x".repeat(MAX_TOOL_STRING + 50);
+        let v = serde_json::json!({"file_path": "/a", "content": big, "n": 7});
+        let out = truncate_json_strings(v, MAX_TOOL_STRING);
+        assert_eq!(out["file_path"], "/a");
+        assert_eq!(out["n"], 7);
+        // Truncated leaf gains the ellipsis and is bounded.
+        let content = out["content"].as_str().unwrap();
+        assert!(content.ends_with('…'));
+        assert!(content.chars().count() <= MAX_TOOL_STRING + 1);
+    }
+
+    #[test]
+    fn available_serializes_with_status_envelope() {
+        let tail = TranscriptTail::Available {
+            turns: vec![Turn {
+                role: "assistant".to_string(),
+                text: "hi".to_string(),
+                tool_calls: vec![ToolCall {
+                    name: "Read".to_string(),
+                    input: serde_json::json!({"file_path": "a"}),
+                }],
+            }],
+            last_assistant_message: Some("hi".to_string()),
+        };
+        let json: serde_json::Value = serde_json::to_value(&tail).unwrap();
+        assert_eq!(json["status"], "available");
+        assert_eq!(json["turns"][0]["role"], "assistant");
+        assert_eq!(json["turns"][0]["tool_calls"][0]["name"], "Read");
+        assert_eq!(json["last_assistant_message"], "hi");
+    }
+
+    #[test]
+    fn unavailable_serializes_reason_in_snake_case() {
+        let json: serde_json::Value =
+            serde_json::to_value(TranscriptTail::unavailable(UnavailableReason::NoTranscript))
+                .unwrap();
+        assert_eq!(json["status"], "unavailable");
+        assert_eq!(json["reason"], "no_transcript");
+    }
 }
