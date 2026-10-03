@@ -202,8 +202,10 @@ impl ProfileIdentity {
             // one directory stay two claims here as well — the file name is the
             // claim, and the directory alone would not say which identity it
             // belongs to.
+            // `CLAIM_FILE_SUFFIX`, not `super::…`: this is a method on a type in
+            // this module, so `super` would mean the crate root.
             self.profile_dir
-                .join(format!("instance-{digest}{}", super::CLAIM_FILE_SUFFIX))
+                .join(format!("instance-{digest}{CLAIM_FILE_SUFFIX}"))
                 .display()
                 .to_string()
         }
@@ -213,7 +215,8 @@ impl ProfileIdentity {
 /// Reduce an identifier to characters Win32 accepts in an object name. The
 /// digest carries the uniqueness, so this only exists to keep a hostile or
 /// merely unusual identifier (`com.acme/buildmesh`) from producing an invalid
-/// object name.
+/// object name. Windows-only: no other platform has an object-name syntax.
+#[cfg(target_os = "windows")]
 fn sanitize_object_name(identifier: &str) -> String {
     identifier
         .chars()
@@ -444,6 +447,9 @@ fn forward_activation(profile_dir: &Path) -> ForwardReport {
 
 /// Parse a published owner pid. Pid 0 is never a real process, so neither "0"
 /// nor a half-written value left by a crash mid-publish is treated as one.
+/// Windows-only, like the publish itself's only consumer: the pid exists to be
+/// looked up among top-level windows.
+#[cfg(target_os = "windows")]
 fn parse_owner_pid(text: &str) -> Option<u32> {
     match text.trim().parse::<u32>() {
         Ok(pid) if pid > 0 => Some(pid),
@@ -452,7 +458,10 @@ fn parse_owner_pid(text: &str) -> Option<u32> {
 }
 
 /// Whether a window title belongs to Buildmesh's main window. Kept separate
-/// from the Win32 calls so the rule is testable off Windows.
+/// from the Win32 calls so the rule is testable on its own. Windows-only: this
+/// exists solely for the activation lookup, and an uncalled private function
+/// elsewhere in the tree is a warning the repo does not tolerate.
+#[cfg(target_os = "windows")]
 fn title_is_main_window(title: &str) -> bool {
     title.starts_with(MAIN_WINDOW_TITLE_PREFIX)
 }
@@ -631,20 +640,27 @@ mod platform {
         let path = profile_dir.join(super::OWNER_PID_FILE);
         let mut owner_pid = None;
         for attempt in 0..attempts.max(1) {
-            // A missing file is the "owner hasn't published yet" case and is
-            // worth another look; any other read error is not.
+            let last = attempt + 1 >= attempts;
+            // A missing file means the owner has not published yet, and an
+            // unparseable one means it is mid-write. Any other read error is
+            // usually transient too — a virus scanner or indexer can hold the
+            // file open for a moment and surface as PermissionDenied — so all
+            // three are retried inside the same bounded window rather than
+            // being treated as "there is no owner" on the first stumble.
             let pid = match std::fs::read_to_string(&path) {
                 Ok(text) => match super::parse_owner_pid(&text) {
                     Some(pid) => pid,
-                    // A half-written file is the owner mid-publish.
-                    None if attempt + 1 < attempts => {
+                    None if !last => {
                         std::thread::sleep(retry);
                         continue;
                     }
                     None => return ForwardReport::default(),
                 },
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    if attempt + 1 < attempts {
+                Err(e)
+                    if e.kind() == io::ErrorKind::NotFound
+                        || e.kind() == io::ErrorKind::PermissionDenied =>
+                {
+                    if !last {
                         std::thread::sleep(retry);
                         continue;
                     }
@@ -814,7 +830,10 @@ mod platform {
         Secondary,
     }
 
-    pub struct PlatformGuard(std::fs::File);
+    /// Holds the locked file open for as long as the claim lives. The contents
+    /// are never read — being open *is* the claim — so the field is deliberately
+    /// unread rather than accidentally so.
+    pub struct PlatformGuard(#[allow(dead_code)] std::fs::File);
 
     pub fn acquire(path: &str) -> io::Result<Acquired> {
         let file = std::fs::OpenOptions::new()
@@ -1019,6 +1038,7 @@ mod tests {
 
     /// The claim name must survive an identifier that is not a valid Win32
     /// object name, and must stay inside the namespace prefix.
+    #[cfg(target_os = "windows")]
     #[test]
     fn claim_targets_stay_inside_the_object_name_syntax() {
         assert_eq!(sanitize_object_name("com.alond.buildmesh"), "com.alond.buildmesh");
@@ -1114,6 +1134,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn owner_pids_are_parsed_not_guessed() {
         assert_eq!(parse_owner_pid("517204\n"), Some(517_204));
@@ -1131,6 +1152,7 @@ mod tests {
 
     /// The gate publishes this process's pid when it wins the claim, so a
     /// second launch has something to look up before the window exists.
+    #[cfg(target_os = "windows")]
     #[test]
     fn winning_the_claim_publishes_this_process() {
         let dir = temp_profile();
@@ -1146,6 +1168,10 @@ mod tests {
     /// A pid left behind by a crashed owner must not produce a focus: the
     /// process is gone, so no window of ours can match it. Deterministic
     /// because `u32::MAX` is not a live process on any sane machine.
+    ///
+    /// Windows-only: these three tests pin the behaviour of the Win32 window
+    /// lookup, which is a no-op stub elsewhere.
+    #[cfg(target_os = "windows")]
     #[test]
     fn a_stale_owner_pid_is_reported_not_focused() {
         let dir = temp_profile();
@@ -1161,6 +1187,7 @@ mod tests {
     }
 
     /// The pid round-trips: a second launch reads exactly what the owner wrote.
+    #[cfg(target_os = "windows")]
     #[test]
     fn a_published_owner_pid_is_read_back() {
         let dir = temp_profile();
@@ -1188,6 +1215,7 @@ mod tests {
     /// The window lookup only accepts a window carrying Buildmesh's own title,
     /// so a pid cannot make us foreground one of the owner's unrelated windows
     /// (a splash screen, a devtools popup).
+    #[cfg(target_os = "windows")]
     #[test]
     fn only_a_titled_window_counts_as_the_main_window() {
         assert!(title_is_main_window("Buildmesh - abc1234"));

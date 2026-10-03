@@ -312,9 +312,17 @@ If Buildmesh instead reports that it cannot confirm it owns its profile, it
 starts nothing at all. Read that log line for the underlying error — in
 practice the app-data directory could not be read or written. Fix the
 directory's permissions (or free some disk space, which can also make a
-directory unwritable), then launch again. If the message persists and no
-other Buildmesh is running, move the two files `instance-owner.pid` and
-`instance.lock` in the profile directory aside and retry.
+directory unwritable), then launch again.
+
+There is no lock file to delete if the message persists. The claim itself is
+held by an operating-system object — a named mutex on Windows, a locked file on
+macOS and Linux — and the operating system releases it the moment the owning
+process ends, including a crash or a forced kill. So if Buildmesh cannot start
+and no other Buildmesh is running, the cause is the directory, not a stale
+claim: check that the profile directory still exists and is writable, and that
+free disk space is available. (`instance-owner.pid` in the profile directory is
+only a breadcrumb recording which process owns the profile; deleting it has no
+effect on whether the profile can be claimed.)
 
 For a release install, check the stable profile; for a development build, use
 the dev profile. The usual Windows locations are:
