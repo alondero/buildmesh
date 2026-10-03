@@ -84,6 +84,8 @@ interface FileTreeSelectionProps {
   onFileSelect: (path: string | null) => void;
   /** Optional destination owner shared with other file-selection entrypoints. */
   onFileSelectionStart?: () => AbortSignal;
+  /** A containing panel can keep recovery outside its body scroller. */
+  onReadError?: (error: string | null, retry: () => void) => void;
 }
 
 // A badged changed file must have a diff action; it cannot fall through to
@@ -108,10 +110,15 @@ export function FileTree({
   selectedFile,
   onFileSelect,
   onFileSelectionStart,
+  onReadError,
 }: FileTreeProps) {
   const [treeState, setTreeState] = useState<FileNode | null>(null);
   const [loadingState, setLoadingState] = useState(true);
   const [errorState, setErrorState] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  const retryRead = useCallback(() => setReloadKey(value => value + 1), []);
+  useEffect(() => { onReadError?.(errorState, retryRead); }, [errorState, retryRead, onReadError]);
+  useEffect(() => () => { onReadError?.(null, retryRead); }, [onReadError, retryRead]);
   // Lifted from per-TreeNode state (issue #728) so the keyboard handler
   // can compute a stable visible-order index space without walking the DOM.
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set());
@@ -122,7 +129,7 @@ export function FileTree({
     const owner = selectionVersion;
     owner.current++;
     return () => { owner.current++; };
-  }, [rootPath]);
+  }, [rootPath, reloadKey]);
 
   useAsyncEffect((signal) => {
     if (!rootPath) return;
@@ -141,7 +148,7 @@ export function FileTree({
         setErrorState(formatError(e));
         setLoadingState(false);
       });
-  }, [rootPath]);
+  }, [rootPath, reloadKey]);
 
   // Git status badges come from the shared cache (dedupes with
   // ChangedFilesSection + useMeshGitStatus, and refreshes on GIT_CHANGED — the
@@ -380,9 +387,11 @@ export function FileTree({
   }
 
   if (errorState) {
+    if (onReadError) return null;
     return (
-      <div className="flex items-center justify-center h-20 text-accent-red text-xs">
-        Error: {errorState}
+      <div role="alert" className="min-w-0 break-all px-3 py-4 text-status-error text-xs">
+        <p className="line-clamp-3" title={errorState}>Error: {errorState}</p>
+        <button type="button" onClick={retryRead} className="mt-2 block min-h-[24px] rounded-md border border-border-default px-2 text-text-primary hover:bg-bg-card-hover">Retry files</button>
       </div>
     );
   }
@@ -481,7 +490,7 @@ function TreeRow({
       aria-expanded={node.is_dir ? expanded : undefined}
       tabIndex={isActive ? 0 : -1}
       className={`
-        flex items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
+        flex min-h-[24px] min-w-0 items-center gap-1 px-2 py-0.5 rounded-md cursor-pointer
         hover:bg-bg-card transition-colors outline-none
         focus-visible:ring-2 focus-visible:ring-accent-blue/60
         ${isSelected ? 'bg-bg-overlay' : ''}
@@ -518,7 +527,8 @@ function TreeRow({
         )}
       </span>
       <span
-        className={`flex-1 truncate ${
+        title={node.name}
+        className={`flex-1 min-w-0 truncate ${
           node.is_dir ? 'text-text-secondary' : 'text-text-muted'
         }`}
       >

@@ -432,6 +432,8 @@ pub fn run() {
             // Agent Node (issue #490: renamed from `*_session` to `*_agent_node`).
             commands::agent_node::create_agent_node,
             commands::agent_node::list_agent_nodes,
+            commands::agent_node::list_agent_history,
+            commands::agent_node::reopen_agent_node,
             commands::agent_node::get_agent_node,
             commands::agent_node::delete_agent_node,
             commands::agent_node::get_worktree_close_safety,
@@ -562,6 +564,7 @@ pub fn run() {
             commands::agent::auto_resume_agent_nodes,
             agent::process::debug_crash_snapshot,
             agent::provider_menu::list_providers,
+            agent::provider_menu::list_routing_options,
             commands::agent::spawn_issue_agent,
             commands::agent::spawn_handover_agent,
             commands::agent::create_issue_node,

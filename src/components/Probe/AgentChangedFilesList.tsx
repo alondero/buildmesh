@@ -22,20 +22,12 @@ export function AgentChangedFilesList({
   selectedFile,
   onOpenFile,
 }: AgentChangedFilesListProps) {
-  const { files, loading, error } = useAgentChangedFiles(nodeId, rootPath);
+  const { files, loading, error, refresh } = useAgentChangedFiles(nodeId, rootPath);
 
   if (loading && files.length === 0) {
     return (
-      <div className="flex-1 flex items-center justify-center">
+      <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
         <LoadingState label="Loading changed files…" />
-      </div>
-    );
-  }
-
-  if (error && files.length === 0) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-accent-red text-xs px-3 text-center">
-        {formatError(error)}
       </div>
     );
   }
@@ -44,7 +36,14 @@ export function AgentChangedFilesList({
   const deletions = files.reduce((total, file) => total + file.deletions, 0);
 
   return (
-    <div className="flex-1 min-h-0 overflow-auto">
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      {error && <div className="shrink-0 border-b border-border-subtle p-3">
+        <div role="alert" className="max-h-24 overflow-y-auto overflow-x-hidden break-all text-xs text-status-error">
+          {formatError(error)}{files.length > 0 && ' — Showing last known changes.'}
+        </div>
+        <button type="button" disabled={loading} onClick={refresh} className="mt-2 min-h-[24px] rounded-md border border-border-default px-2 text-xs text-text-primary hover:bg-bg-card-hover">Retry changes</button>
+      </div>}
+      <div className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden">
       {files.length > 0 && (
         <div className="sticky top-0 z-10 flex items-center gap-2 px-3 py-1.5 bg-bg-overlay border-b border-border-subtle text-xs">
           <span className="text-text-secondary font-medium">
@@ -65,19 +64,9 @@ export function AgentChangedFilesList({
         </div>
       )}
 
-      {error && files.length > 0 && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="px-3 py-1.5 bg-status-warning/10 border-b border-status-warning/30 text-2xs text-status-warning"
-        >
-          Refresh failed — showing last known changes
-        </div>
-      )}
-
       {files.length === 0 ? (
         <div className="flex items-center justify-center h-40 text-text-muted text-xs">
-          No changes vs Base Ref
+          {error ? 'Changes unavailable' : 'No changes vs Base Ref'}
         </div>
       ) : (
         <div>
@@ -91,6 +80,7 @@ export function AgentChangedFilesList({
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

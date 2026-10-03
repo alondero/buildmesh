@@ -193,7 +193,9 @@ describe('AgentChangesTab (#376)', () => {
     });
 
     expect(screen.getByText('src/app.ts')).toBeTruthy();
-    expect(screen.getByText('Refresh failed — showing last known changes')).toBeTruthy();
+    expect(screen.getByRole('alert').textContent).toContain('temporary git failure');
+    expect(screen.getByRole('alert').textContent).toContain('Showing last known changes');
+    expect(screen.getByRole('button', { name: 'Retry changes' })).toBeTruthy();
   });
 
   it('throttles GIT_CHANGED refetches during an agent edit burst (#1165)', async () => {

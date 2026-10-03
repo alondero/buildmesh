@@ -1,7 +1,7 @@
 /**
  * ProbeTabBody — the standard padding wrapper for every probe tab body
  * (issue #842, predecessor #813). Replaces the per-tab hand-rolled
- * `flex-1 overflow-y-auto p-{2|3|4}` divs that drifted apart over the
+ * `flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden p-{2|3|4}` divs that drifted apart over the
  * first half of the probe consolidation. Tabs that need a different
  * rhythm (none today) override via `padding`; the standard `p-3` puts
  * the body in lockstep with the header's `px-3 py-2` so a tab switch
@@ -34,7 +34,7 @@ export function ProbeTabBody({
   return (
     <div
       {...rest}
-      className={`flex-1 overflow-y-auto ${padding} ${className}`.trim()}
+      className={`flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden ${padding} ${className}`.trim()}
     >
       {children}
     </div>

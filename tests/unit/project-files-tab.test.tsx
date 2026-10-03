@@ -108,6 +108,25 @@ describe('ProjectFilesTab (#376)', () => {
     expect(screen.getByText('Changed Files')).toBeTruthy();
   });
 
+  it('keeps long directory-read recovery outside the body scroller and retries the actual read', async () => {
+    let directoryReads = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'list_directory') return ++directoryReads === 1
+        ? Promise.reject(new Error('unspaced-directory/'.repeat(100)))
+        : Promise.resolve(TREE);
+      if (cmd === 'get_git_status') return Promise.resolve(FILES);
+      return Promise.resolve(null);
+    });
+    render(<ProjectFilesTab />);
+    const alert = await screen.findByRole('alert');
+    const retry = screen.getByRole('button', { name: 'Retry files' });
+    expect(screen.getByTestId('project-files-body').contains(alert)).toBe(false);
+    expect(alert.contains(retry)).toBe(true);
+    fireEvent.click(retry);
+    expect(await screen.findByRole('treeitem', { name: /app.ts/ })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+
   it('opens changed tree files in the diff and unchanged files in the editor', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_git_status') return Promise.resolve([{ path: 'app.ts', status: 'modified', additions: 3, deletions: 1 }]);

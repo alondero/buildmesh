@@ -19,22 +19,13 @@ applies to you.
 
 ## 1. Scroll ownership
 
-The panel shell is, from `ProbePanel.tsx`:
-
-```
-:220  flex flex-col h-full w-full overflow-hidden   <- clips the dock
-:282  flex-1 overflow-y-auto                        <- INERT, see below
-:283  animate-fade-in h-full flex flex-col          <- per-tab keyed wrapper
-:284  <the tab>
-```
+The panel shell and keyed destination wrapper clip overflow and provide a
+`min-h-0 min-w-0` flex chain. They do not scroll.
 
 - [ ] **Exactly one element scrolls.** The tab root is layout-only
-      (`flex flex-col h-full min-h-0`) and one inner body owns
-      `flex-1 min-h-0 overflow-y-auto`. Because the root is `h-full`, the
-      panel's own `overflow-y-auto` at `:282` has content exactly its own
-      height and never gains a scrollbar — so the inner body is the single
-      *effective* scroll owner. Put `overflow-y-auto` on the tab root as
-      well and you get two stacked scrollers, which is what #1468 fixed.
+      (`flex flex-col h-full min-h-0 min-w-0`) and one inner body owns
+      `flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden`.
+      An additional unbounded scroller creates stacked scrolling.
 - [ ] **Prefer the shared primitive.** `<ProbeTabBody>` already provides that
       body region with the standard padding. Reach for it unless the tab needs
       a pinned toolbar as a sibling (Circuits, Agent Changes).
