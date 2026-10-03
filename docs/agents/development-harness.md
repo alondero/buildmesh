@@ -81,6 +81,7 @@ keeps infrastructure scope; dependency/build/rule changes retain product gates.
 |---|---|
 | Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
 | Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
+| Android | APK and instrumentation compilation, executed JVM tests, strict Android lint through `scripts/check-android.mjs`; device instrumentation runs separately |
 | Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, serial locked Rust tests, generated-binding drift |
 
 Cargo runs inside `src-tauri` so its binding-export configuration applies.

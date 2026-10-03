@@ -51,6 +51,8 @@ export function categorisePath(rawPath) {
   // them as frontend alone would let a hand-edited binding through while
   // every Rust check reports green-by-skip (review of PR #1991).
   if (path.startsWith('src/types/generated/')) return 'both';
+  // Native checks run in the Android workflow/harness; bundled terminal assets use the frontend dependencies.
+  if (path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml') return 'frontend';
   if (FRONTEND_PREFIXES.some((prefix) => path.startsWith(prefix)) || FRONTEND_FILES.test(path)) return 'frontend';
   // .github/, scripts/, and anything unknown: gate-relevant, run everything.
   return 'both';

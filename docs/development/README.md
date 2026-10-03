@@ -20,6 +20,7 @@ Linux and platform smoke builds.
 | Area | Responsibility |
 |---|---|
 | `src/` | React UI, Zustand state, Tauri IPC wrapper, mobile SPA, and generated TS wire types |
+| `android/` | Native Kotlin/Compose remote client; [build, pairing and verification](android.md) |
 | `src-tauri/src/commands/` | Tauri command boundary and command-level tests |
 | `src-tauri/src/agent/` | Harness adapters, detection, launch recipes, lifecycle, and provider routing |
 | `src-tauri/src/db/` | SQLite schema, migrations, and persistence tests |
