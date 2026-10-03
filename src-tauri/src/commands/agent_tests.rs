@@ -461,6 +461,12 @@ mod tests {
                     Some(expected_model),
                     "the single --model must carry the resolved value; got {args:?}"
                 );
+                // The fold must not disturb the orchestrator's own
+                // contribution, in any cascade shape.
+                assert!(
+                    args.windows(2).any(|pair| pair == ["--profile", "buildmesh_1234"]),
+                    "the route profile must survive the model fold; got {args:?}"
+                );
             }
         }
     }

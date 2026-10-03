@@ -79,11 +79,14 @@ pub fn build_spawn_command_prepared(
     // empty cascade model would leave Codex on an OpenAI model against
     // a foreign endpoint.
     let routed_config = match routing {
-        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { descriptor, .. } => {
+        // Guarded so the populated case borrows: a proxy launch whose
+        // cascade already resolved a model is the common shape, and it
+        // needs no new config at all.
+        crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy { descriptor, .. }
+            if config.model.is_none() =>
+        {
             let mut routed = config.clone();
-            if routed.model.is_none() {
-                routed.model = Some(descriptor.model_id.clone());
-            }
+            routed.model = Some(descriptor.model_id.clone());
             Cow::Owned(routed)
         }
         _ => Cow::Borrowed(config),

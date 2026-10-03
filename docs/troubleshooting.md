@@ -143,7 +143,7 @@ A node opened from a proxied provider (a Codex route) fails immediately with a
 startup error instead of a prompt, for example:
 
 ```
-Error: the argument '--model <<MODEL>> cannot be used multiple times
+error: the argument '--model <MODEL>' cannot be used multiple times
 ```
 
 Codex accepts `--model` only once, so a launch that passes it twice is rejected
