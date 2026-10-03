@@ -96,6 +96,11 @@ function mockBackend() {
 }
 
 beforeEach(() => {
+  // The production IPC cache is per mesh and survives tab mounts. Each test
+  // needs its own mesh identity to exercise its configured backend outcome.
+  MESH_A.id += 1000;
+  MESH_B.id += 1000;
+  scratchpadByMesh.clear();
   useMeshStore.setState({
     meshes: [MESH_A, MESH_B],
     meshesById: new Map([
@@ -157,6 +162,7 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     vi.useFakeTimers();
     try {
       renderWithScratchpadOpen();
+      await act(async () => {});
       const textarea = screen.getByLabelText('Scratch pad') as HTMLTextAreaElement;
       // Replace the preloaded value in a single change event so the
       // fake-timer advance below deterministically controls the
@@ -185,6 +191,7 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     vi.useFakeTimers();
     try {
       renderWithScratchpadOpen();
+      await act(async () => {});
       const textarea = screen.getByLabelText('Scratch pad') as HTMLTextAreaElement;
       fireEvent.change(textarea, { target: { value: 'x' } });
 
@@ -208,6 +215,7 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     vi.useFakeTimers();
     try {
       renderWithScratchpadOpen();
+      await act(async () => {});
       const textarea = screen.getByLabelText('Scratch pad') as HTMLTextAreaElement;
 
       // Type into mesh A and switch meshes within the debounce window
@@ -258,6 +266,7 @@ describe('ScratchpadTab (issue / scratch-pad-probe)', () => {
     try {
       saveError = true;
       renderWithScratchpadOpen();
+      await act(async () => {});
       const textarea = screen.getByLabelText('Scratch pad') as HTMLTextAreaElement;
       fireEvent.change(textarea, { target: { value: 'will fail' } });
 

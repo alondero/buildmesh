@@ -39,6 +39,9 @@ import { useMemo } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import type { NonSingleViewMode, ViewMode } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
+import { useNodeActivityStore } from '../../stores/nodeActivityStore';
+import { ReadinessSteps } from './ReadinessSteps';
+import { useAgentNodeStore } from '../../stores/agentNodeStore';
 import { useUIStore } from '../../stores/uiStore';
 import { scopeNodesForMode } from '../../lib/viewModes';
 import { useProviderList } from '../../hooks/useProviderList';
@@ -131,11 +134,27 @@ export function CanvasEmptyStateContainer({
         if (target !== null) openCanvasSpawnMenu(target);
       },
       onClearFilters: resetGridControls,
-      onOpenSetup: openAppSettings,
+      onOpenSetup: () => openAppSettings('providers'),
       onViewAll: () => setViewMode('all'),
+      onOpenHelp: () => useUIStore.getState().toggleCheatsheet(),
+      onOpenTerminal: () => {
+        const mesh = useMeshStore.getState().meshes.find(m => m.id === selectedMeshId) ?? useMeshStore.getState().meshes[0];
+        if (!mesh) return;
+        return useAgentNodeStore.getState().selectProviderForMesh(mesh.id, mesh.name, mesh.path, 'terminal')
+          .then(node => useNodeActivityStore.getState().activateNode(node.id))
+          // The store reports creation failures through App's error toast.
+          .catch(() => {});
+      },
     }),
     [openCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId],
   );
 
+  if (meshesCount > 0 && scopedCount === 0 && viewMode !== 'pinned') {
+    return <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-4">
+      <div className="m-auto w-full max-w-sm"><CanvasEmptyState input={input} callbacks={callbacks} />
+        <ReadinessSteps repositoryReady harnessReady={harnessReady} callbacks={callbacks} />
+      </div>
+    </div>;
+  }
   return <CanvasEmptyState input={input} callbacks={callbacks} />;
 }

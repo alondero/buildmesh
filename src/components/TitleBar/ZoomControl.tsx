@@ -143,7 +143,7 @@ export function ZoomControl() {
               onClick={() => setTerminalFontSize(TERMINAL_FONT_SIZE_DEFAULT)}
               disabled={size === TERMINAL_FONT_SIZE_DEFAULT}
               data-testid="zoom-reset"
-              className="rounded-md px-1 text-[11px] text-text-muted transition-colors hover:text-accent-cyan disabled:cursor-default disabled:text-text-muted/60 disabled:hover:text-text-muted/60"
+              className="rounded-md px-1 text-[11px] text-text-muted transition-colors hover:text-accent-cyan disabled:cursor-default disabled:text-text-muted disabled:hover:text-text-muted"
             >
               Reset
             </button>

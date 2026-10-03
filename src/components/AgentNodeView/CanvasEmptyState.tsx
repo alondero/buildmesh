@@ -22,7 +22,7 @@
  * owning UI control which modal mounts (issue #1536 prefers callbacks
  * over the legacy `meshStore.addMesh()` direct call).
  */
-import { SHORTCUT_CATALOG, shortcutLabel } from '../../lib/shortcutCatalog';
+import { ReadinessSteps } from './ReadinessSteps';
 import type { ViewMode } from '../../stores/uiStore';
 
 /** The shape the empty state needs to pick a branch. Each field is
@@ -86,6 +86,8 @@ export interface CanvasEmptyStateCallbacks {
   onClearFilters: () => void;
   onOpenSetup: () => void;
   onViewAll: () => void;
+  onOpenTerminal?: () => void | Promise<void>;
+  onOpenHelp?: () => void;
 }
 
 interface CanvasEmptyStateProps {
@@ -158,8 +160,8 @@ function EmptyShell({
   cta: React.ReactNode;
 }) {
   return (
-    <div className="flex-1 flex items-center justify-center text-text-muted">
-      <div className="text-center max-w-sm" data-testid="canvas-empty-state">
+    <div className="flex-1 flex min-h-0 overflow-y-auto p-4 text-text-muted">
+      <div className="m-auto w-full text-center max-w-sm" data-testid="canvas-empty-state">
         {icon}
         <p className="text-xl mb-2 text-text-primary font-sans font-semibold">{heading}</p>
         <p className="text-sm text-text-secondary mb-6 font-sans">{body}</p>
@@ -215,11 +217,8 @@ const filterIcon = (
   </svg>
 );
 
-/** "No meshes yet" — the on-board view. Brief explanation of what a
- *  mesh is, then the canonical Mesh Create CTA. The shortcut rows
- *  underneath (the first-launch "things you can do" list) stay so a
- *  brand-new user sees the catalogue even before they add anything. */
-function NoMeshesBranch({ onCreateMesh }: { onCreateMesh: () => void }) {
+/** Explain meshes and offer repository creation alongside the setup guide. */
+function NoMeshesBranch({ callbacks, harnessReady }: { callbacks: CanvasEmptyStateCallbacks; harnessReady: boolean }) {
   return (
     <EmptyShell
       icon={folderIcon}
@@ -230,24 +229,15 @@ function NoMeshesBranch({ onCreateMesh }: { onCreateMesh: () => void }) {
           <button
             type="button"
             data-testid="canvas-empty-create-mesh"
-            onClick={onCreateMesh}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+            onClick={callbacks.onCreateMesh}
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
             New mesh
           </button>
-          <div className="mt-8 text-xs text-text-muted font-mono space-y-1">
-            {SHORTCUT_CATALOG.filter((entry) => entry.splash).map((entry) => (
-              <p key={entry.action}>
-                <kbd className="px-1 py-0.5 rounded-md bg-bg-card border border-border-default">
-                  {shortcutLabel(entry)}
-                </kbd>
-                {' '}{entry.description}
-              </p>
-            ))}
-          </div>
+          <ReadinessSteps repositoryReady={false} harnessReady={harnessReady} callbacks={callbacks} />
         </>
       }
     />
@@ -293,7 +283,7 @@ function SelectedEmptyBranch({
             type="button"
             data-testid="canvas-empty-spawn-agent"
             onClick={() => callbacks.onOpenSpawnMenu(selectedMeshId)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
           >
             {addAgentIcon}
             Spawn agent
@@ -303,7 +293,7 @@ function SelectedEmptyBranch({
             type="button"
             data-testid="canvas-empty-open-setup"
             onClick={callbacks.onOpenSetup}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
           >
             Open Settings
           </button>
@@ -336,7 +326,7 @@ function AllEmptyBranch({
             type="button"
             data-testid="canvas-empty-spawn-agent"
             onClick={() => callbacks.onOpenSpawnMenu(null)}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
           >
             {addAgentIcon}
             Spawn agent
@@ -346,7 +336,7 @@ function AllEmptyBranch({
             type="button"
             data-testid="canvas-empty-open-setup"
             onClick={callbacks.onOpenSetup}
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+            className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
           >
             Open Settings
           </button>
@@ -373,7 +363,7 @@ function FiltersExcludeAllBranch({ onClearFilters }: { onClearFilters: () => voi
           type="button"
           data-testid="canvas-empty-clear-filters"
           onClick={onClearFilters}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
         >
           {clearFiltersIcon}
           Clear search & filters
@@ -398,7 +388,7 @@ function PinnedEmptyBranch({ onViewAll }: { onViewAll: () => void }) {
           type="button"
           data-testid="canvas-empty-view-all"
           onClick={onViewAll}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan/10 text-accent-cyan font-sans font-medium text-sm hover:bg-accent-cyan/20 transition-colors border border-accent-cyan/20"
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <rect width="7" height="9" x="3" y="3" rx="1" />
@@ -420,7 +410,7 @@ export function CanvasEmptyState({
   const decision = classifyCanvasEmpty(input);
   switch (decision.branch) {
     case 'no-meshes':
-      return <NoMeshesBranch onCreateMesh={callbacks.onCreateMesh} />;
+      return <NoMeshesBranch callbacks={callbacks} harnessReady={input.harnessReady} />;
     case 'selected-empty':
       // The classifier's discriminated union returns `meshId: number`
       // (non-nullable) on this branch — TypeScript narrows the type

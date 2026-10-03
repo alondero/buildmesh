@@ -85,7 +85,7 @@ import { pathMatchesGitEvent } from './paths';
 const NOOP_CLIENT_ID = Symbol('subscribeGitPathInvalidation');
 // Per-subscriber freshness-window bookkeeping for the callback-only
 // path (issue #1165). The keyed cache path stores `lastFetchedAt` +
-// `trailingTimers` + `trailingNotifies` on the per-key state inside
+// `trailingTimers` + `trailingSubscribers` on the per-key state inside
 // `createInternalClient`; the callback path has no per-key state
 // (no cache, no key), so the freshness stamp is per-subscriber instead.
 // Keyed on the subscriber object — when the subscriber is GC'd, the
@@ -131,7 +131,7 @@ const NOOP_HANDLER: CallbackBusHandler = (sub) => {
     // Inside the freshness window — suppress this event and arm ONE
     // trailing fire at the window's expiry so the settled state still
     // lands. Mirrors the keyed branch (`createInternalClient`'s
-    // `trailingTimers`/`trailingNotifies`); the only difference is the
+    // `trailingTimers`/`trailingSubscribers`); the only difference is the
     // freshness stamp is per-subscriber here (no cache value to
     // compare against). If a trailing is already armed, leave it —
     // resetting it would push the fire further out and potentially
@@ -286,6 +286,7 @@ interface KeyedPathSubscriber<K> {
   kind: 'keyed';
   clientId: symbol;
   key: K;
+  active: boolean;
   notify: () => void;
 }
 
@@ -309,7 +310,7 @@ function isCallbackSubscriber(sub: PathSubscriber): sub is CallbackPathSubscribe
 // NOOP_HANDLER), so it's typed as `KeyedBusHandler<K>`. NOOP_HANDLER is
 // typed as `CallbackBusHandler` for symmetry. Splitting them is what
 // kills the `as K` cast in the factory — issue #355.
-type KeyedBusHandler<K> = (sub: KeyedPathSubscriber<K>) => void;
+type KeyedBusHandler<K> = (sub: KeyedPathSubscriber<K>, invalidatedKeys: Set<K>, force?: boolean) => void;
 type CallbackBusHandler = (sub: CallbackPathSubscriber) => void;
 
 // ------------------------------------------------------------------
@@ -358,6 +359,7 @@ function installListener(): void {
   // for the whole process. Mirrors the pattern in the four original hooks.
   void listen(GIT_CHANGED, (event) => {
     const payload = event.payload as { path: string; internal_path?: string };
+    const invalidatedKeysByClient = new Map<symbol, Set<unknown>>();
     for (const [path, subs] of pathSubscribers) {
       // Invalidate the owning client's cache for this key, then notify the
       // subscriber. The first notify for a given (client, key) starts a
@@ -371,7 +373,14 @@ function installListener(): void {
           if (handler) handler(sub);
         } else {
           const handler = keyedBusHandlers.get(sub.clientId);
-          if (handler) handler(sub);
+          if (handler) {
+            let invalidatedKeys = invalidatedKeysByClient.get(sub.clientId);
+            if (!invalidatedKeys) {
+              invalidatedKeys = new Set();
+              invalidatedKeysByClient.set(sub.clientId, invalidatedKeys);
+            }
+            handler(sub, invalidatedKeys);
+          }
         }
       }
     }
@@ -525,19 +534,19 @@ function createInternalClient<K, V>(
   // refetch (the pre-existing behaviour left panels stale until the next
   // unrelated event).
   const trailingTimers = new Map<K, ReturnType<typeof setTimeout>>();
-  const trailingNotifies = new Map<K, Set<() => void>>();
+  const trailingSubscribers = new Map<K, Set<KeyedPathSubscriber<K>>>();
 
   const cancelTrailing = (key: K) => {
     const timer = trailingTimers.get(key);
     if (timer !== undefined) clearTimeout(timer);
     trailingTimers.delete(key);
-    trailingNotifies.delete(key);
+    trailingSubscribers.delete(key);
   };
 
   const fireTrailing = (key: K) => {
     trailingTimers.delete(key);
-    const notifies = trailingNotifies.get(key);
-    trailingNotifies.delete(key);
+    const subscribers = trailingSubscribers.get(key);
+    trailingSubscribers.delete(key);
     known.delete(key);
     values.delete(key);
     pending.delete(key);
@@ -545,7 +554,22 @@ function createInternalClient<K, V>(
     // next bus event (or this notify's refetch) must not be re-suppressed
     // off the stale timestamp.
     lastFetchedAt.delete(key);
-    notifies?.forEach((notify) => notify());
+    subscribers?.forEach((sub) => { if (sub.active) sub.notify(); });
+  };
+
+  const deferSubscriber = (sub: KeyedPathSubscriber<K>) => {
+    let subscribers = trailingSubscribers.get(sub.key);
+    if (!subscribers) {
+      subscribers = new Set();
+      trailingSubscribers.set(sub.key, subscribers);
+    }
+    subscribers.add(sub);
+  };
+
+  const scheduleTrailing = (key: K, delay: number) => {
+    if (trailingSubscribers.has(key) && !trailingTimers.has(key)) {
+      trailingTimers.set(key, setTimeout(() => fireTrailing(key), delay));
+    }
   };
 
   // Let `resetPathInvalidatedCacheForTests` wipe this client's state too.
@@ -557,43 +581,43 @@ function createInternalClient<K, V>(
     lastFetchedAt.clear();
     trailingTimers.forEach((timer) => clearTimeout(timer));
     trailingTimers.clear();
-    trailingNotifies.clear();
+    trailingSubscribers.clear();
   });
 
-  // The bus calls this for every matched KEYED subscriber of THIS client. It
-  // evicts the cache (so the next read returns `undefined`) and clears the
-  // in-flight (so the next refresh starts fresh instead of resolving to a
-  // stale value), then calls the subscriber's notify. Typed as
-  // `KeyedBusHandler<K>` so the `sub.key` reads/writes are checked
-  // against `K` — no `as K` cast (issue #355).
-  const handler: KeyedBusHandler<K> = (sub) => {
+  // Matching subscribers share one eviction per dispatch. Events during a
+  // request or its freshness window defer a settled refresh; manual writes
+  // can supersede the running request via the force path.
+  const handler: KeyedBusHandler<K> = (sub, invalidatedKeys, force = false) => {
+    if (invalidatedKeys.has(sub.key)) {
+      sub.notify();
+      return;
+    }
+    // An edit cannot starve a slow request by superseding it every 500ms.
+    // Let it publish, then refresh once for edits that arrived during it.
+    if (!force && pending.has(sub.key)) {
+      deferSubscriber(sub);
+      return;
+    }
     // Freshness window (see `minRefetchIntervalMs` docs): a value fetched
     // recently enough is authoritative — skip the immediate eviction and
     // notify, but arm the trailing refetch so the settled state still
     // lands once the window expires.
-    if (minRefetchIntervalMs > 0) {
+    if (!force && minRefetchIntervalMs > 0) {
       const fetchedAt = lastFetchedAt.get(sub.key);
       if (fetchedAt !== undefined && Date.now() - fetchedAt < minRefetchIntervalMs) {
-        let notifies = trailingNotifies.get(sub.key);
-        if (!notifies) {
-          notifies = new Set();
-          trailingNotifies.set(sub.key, notifies);
-        }
-        notifies.add(sub.notify);
-        if (!trailingTimers.has(sub.key)) {
-          const delay = minRefetchIntervalMs - (Date.now() - fetchedAt);
-          trailingTimers.set(
-            sub.key,
-            setTimeout(() => fireTrailing(sub.key), delay),
-          );
-        }
+        deferSubscriber(sub);
+        scheduleTrailing(sub.key, minRefetchIntervalMs - (Date.now() - fetchedAt));
         return;
       }
     }
+    // Evict once per client/key in this dispatch. Later subscribers must
+    // retain the request started by the first notification so they share it.
+    invalidatedKeys.add(sub.key);
     cancelTrailing(sub.key);
     known.delete(sub.key);
     values.delete(sub.key);
     pending.delete(sub.key);
+    lastFetchedAt.delete(sub.key);
     sub.notify();
   };
 
@@ -606,9 +630,16 @@ function createInternalClient<K, V>(
     refresh(key) {
       const inFlight = pending.get(key);
       if (inFlight) return inFlight;
+      // This request covers earlier deferred edits. Edits arriving while it
+      // runs are recorded separately and must still get a trailing refresh.
+      cancelTrailing(key);
 
-      const p = fetcher(key)
+      // Superseded callers adopt the current request/value too, so hook
+      // continuations cannot publish obsolete data after an invalidation.
+      const currentResult = () => pending.get(key) ?? values.get(key) ?? null;
+      const p: Promise<V | null> = fetcher(key)
         .then((result) => {
+          if (pending.get(key) !== p) return currentResult();
           known.set(key, true);
           // `values` only holds non-null results — a `null` result leaves
           // (or clears) no entry there, so `read`'s `values.get(key) ?? null`
@@ -624,13 +655,11 @@ function createInternalClient<K, V>(
           // A success erases the previous failure for this key — the hook
           // layer's `error` field will read `null` on the next state read.
           errors.delete(key);
-          // A fresh fetch already reflects any changes the suppressed
-          // events described — the pending trailing refetch would just
-          // duplicate this result one window later. Cancel it.
-          cancelTrailing(key);
+          scheduleTrailing(key, minRefetchIntervalMs);
           return result;
         })
         .catch((err) => {
+          if (pending.get(key) !== p) return currentResult();
           pending.delete(key);
           // Record the error for `lastError(key)`. The cache itself is
           // left untouched (the success branch owns writes), so a
@@ -643,6 +672,7 @@ function createInternalClient<K, V>(
           // `console.warn` is in the eslint allow-list (see eslint.config.js);
           // the no-console rule only flags `console.log` / `console.info`.
           console.warn(`${name}: fetch failed for key`, key, err);
+          scheduleTrailing(key, 0);
           return null;
         });
       pending.set(key, p);
@@ -672,8 +702,15 @@ function createInternalClient<K, V>(
       // shared helper. Issue #356.
       registerKeyedBusHandler(clientId, handler);
       installListener();
-      const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, notify: onInvalidate };
-      return addPathSubscriber(sub, path, extraPaths);
+      const sub: KeyedPathSubscriber<K> = { kind: 'keyed', clientId, key, active: true, notify: onInvalidate };
+      const unsubscribe = addPathSubscriber(sub, path, extraPaths);
+      return () => {
+        sub.active = false;
+        unsubscribe();
+        const subscribers = trailingSubscribers.get(key);
+        subscribers?.delete(sub);
+        if (subscribers?.size === 0) cancelTrailing(key);
+      };
     },
 
     notifyByPath(path) {
@@ -696,6 +733,7 @@ function createInternalClient<K, V>(
       //     second eviction would race it.
       const subs = pathSubscribers.get(path);
       if (!subs) return;
+      const invalidatedKeys = new Set<K>();
       for (const sub of subs) {
         if (isCallbackSubscriber(sub)) {
           sub.notify();
@@ -707,12 +745,7 @@ function createInternalClient<K, V>(
         // OUR client, so `sub.key` is in fact a `K`. The cast mirrors
         // the per-client handler's typing (see `KeyedBusHandler<K>`).
         const keyed = sub as KeyedPathSubscriber<K>;
-        cancelTrailing(keyed.key);
-        known.delete(keyed.key);
-        values.delete(keyed.key);
-        pending.delete(keyed.key);
-        lastFetchedAt.delete(keyed.key);
-        keyed.notify();
+        handler(keyed, invalidatedKeys, true);
       }
     },
   };

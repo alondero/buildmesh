@@ -146,7 +146,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('lists discovered sessions for the active mesh', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     expect(await screen.findByText('Add a /v2 endpoint')).toBeTruthy();
     expect(screen.getByText('Fix the wobble')).toBeTruthy();
@@ -157,7 +157,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('filters by first_message text', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'wobble');
@@ -170,7 +170,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('filters by branch name', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'feat/v2');
@@ -183,7 +183,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('filters by worktree name', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'agent-v2');
@@ -196,14 +196,14 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('shows a "No previous sessions found" empty state when discovery is empty', async () => {
     mockBackend({ sessions: [] });
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     expect(await screen.findByText('No previous sessions found')).toBeTruthy();
   });
 
   it('shows "No matches" when a search filters everything out', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const search = await screen.findByPlaceholderText('Filter by message, branch, or worktree…');
     await userEvent.type(search, 'definitely-not-a-match');
@@ -214,7 +214,7 @@ describe('ArchivedNodesTab (#378)', () => {
   it('does the import â†’ spawn sequence on the primary Resume button and hides the probe', async () => {
     mockBackend();
     useUIStore.setState({ probeOpen: true, probeTab: 'sessions' });
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     // `findAllByText` — each session row renders its own "Resume" button.
     // This test wants the first row's primary action.
@@ -254,7 +254,7 @@ describe('ArchivedNodesTab (#378)', () => {
     // The session without a branch (`s-abc-2`) exercises the
     // `session.branch || 'main'` fallback at the import call site.
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     // `s-abc-1` is the first item; click the second Resume to hit the
     // fallback path.
@@ -272,7 +272,7 @@ describe('ArchivedNodesTab (#378)', () => {
 
   it('uses the explicit provider from the `â–¾` picker for the resume', async () => {
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     // Open the picker for the first session via the "Choose provider"
     // title (stable selector on the caret half of the split button).
@@ -296,7 +296,7 @@ describe('ArchivedNodesTab (#378)', () => {
     // can't parse, so the backend reports `resumable: false` and the
     // picker hides them.
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -322,7 +322,7 @@ describe('ArchivedNodesTab (#378)', () => {
     // freshly-installed mock.
     __resetProviderCachesForTests();
     mockBackend({ providers: CUSTOM_PROVIDERS });
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -353,7 +353,7 @@ describe('ArchivedNodesTab (#378)', () => {
     // a picker option, the option button is still in the document when
     // the click handler runs.
     mockBackend();
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     const carets = await screen.findAllByTitle('Choose provider');
     fireEvent.click(carets[0]);
@@ -379,7 +379,7 @@ describe('ArchivedNodesTab (#378)', () => {
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       return Promise.resolve({});
     });
-    render(<ArchivedNodesTab />);
+    render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
 
     expect(await screen.findByText('Failed to discover sessions')).toBeTruthy();
     expect(screen.getByText('claude dir not found')).toBeTruthy();

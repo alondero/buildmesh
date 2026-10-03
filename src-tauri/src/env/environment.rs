@@ -109,6 +109,29 @@ pub(crate) fn get_default_wsl_distro() -> Option<String> {
     DETECTED_DISTRO.clone()
 }
 
+/// Read startup's observation without triggering a cold WSL subprocess.
+pub(crate) fn cached_default_wsl_distro() -> Option<String> {
+    cached_distro(&DETECTED_DISTRO)
+}
+
+fn cached_distro(cache: &Lazy<Option<String>>) -> Option<String> {
+    Lazy::get(cache).cloned().flatten()
+}
+
+#[cfg(test)]
+mod cached_distro_tests {
+    use super::*;
+
+    #[test]
+    fn cheap_distro_read_never_initializes_a_cold_probe() {
+        let cache: Lazy<Option<String>> = Lazy::new(|| Some("Ubuntu".to_string()));
+        assert_eq!(cached_distro(&cache), None);
+        assert!(Lazy::get(&cache).is_none());
+        Lazy::force(&cache);
+        assert_eq!(cached_distro(&cache).as_deref(), Some("Ubuntu"));
+    }
+}
+
 // ── WSL login-shell lookup ─────────────────────────────────────────────────
 
 /// Parse the login shell (field 7) out of a `getent passwd <user>` line.

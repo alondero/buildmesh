@@ -774,6 +774,27 @@ pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     rows.collect()
 }
 
+pub fn list_agent_history() -> SqlResult<Vec<AgentNode>> {
+    list_agent_history_inner(&read_conn())
+}
+
+pub(crate) fn list_agent_history_inner(conn: &Connection) -> SqlResult<Vec<AgentNode>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM agent_nodes ORDER BY created_at DESC, id DESC", AGENT_NODE_COLUMNS
+    ))?;
+    let rows = stmt.query_map([], map_agent_node_row)?;
+    rows.collect()
+}
+
+pub fn reopen_agent_node(id: i64) -> SqlResult<AgentNode> {
+    reopen_agent_node_inner(&write_conn(), id)
+}
+
+pub(crate) fn reopen_agent_node_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
+    update_agent_node_status_if_inner(conn, id, SessionStatus::Suspended, SessionStatus::Archived)?;
+    get_agent_node_by_id_inner(conn, id)
+}
+
 pub fn update_agent_node_status(id: i64, status: SessionStatus) -> SqlResult<()> {
     let db = write_conn();
     // Single choke point for status transitions; the coordinator digest
