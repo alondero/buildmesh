@@ -13,6 +13,7 @@ mod env;
 mod git;
 mod http;
 mod http_server;
+mod instance_guard;
 pub mod models;
 mod node_turn;
 mod preferences;
@@ -152,281 +153,40 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
-            // Initialize database
+            // One Buildmesh process per app-data profile (issue #1521). The
+            // claim is taken before `db::init` and before any worker starts,
+            // and the startup body runs only for the winner — see
+            // `instance_guard` for why a second process must reach neither.
+            // The `.dev` profile is a different profile, so a dev build still
+            // runs alongside a stable install.
             let app_dir = app.path().app_data_dir().unwrap();
             std::fs::create_dir_all(&app_dir)?;
-            let db_path = app_dir.join("buildmesh.db");
-            db::init(&db_path)?;
+            let identifier = app.config().identifier.clone();
+            let identity = match instance_guard::ProfileIdentity::new(&identifier, &app_dir) {
+                Ok(identity) => identity,
+                Err(error) => return Err(ownership_failure(&identifier, &app_dir, error)),
+            };
 
-            // Wire the preferences module to the same on-disk location as the DB.
-            // This MUST run before the v19 custom-account migration below —
-            // `db::init`'s first-class migration block is preferences-independent
-            // (it only rewrites the hardcoded 'minimax'/'kimi' ids), but the
-            // custom-account block reads the user's stored `ProviderAccount`
-            // list, which requires `APP_DATA_DIR` to be set. See
-            // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
-            preferences::init(app_dir.clone());
-            for pairing in preferences::provider_pairings()
-                .into_iter()
-                .filter(|pairing| pairing.surface == preferences::ApiSurface::OpenAI)
-            {
-                commands::preferences::schedule_pairing_verification(
-                    app.handle().clone(),
-                    pairing.harness_id,
-                    pairing.provider_id,
-                );
-            }
-
-            // v19 Spawn Option composite-id migration, custom-account block
-            // (issue #575). The first-class block ('minimax'/'kimi') already
-            // ran inside `db::init`; this call only handles user-stored
-            // custom accounts (e.g. a user-typed "deepseek" account).
-            // Idempotent — the underlying UPDATE has a `provider NOT LIKE
-            // '%:%'` guard, so re-running on a v19+ DB is a no-op.
-            if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
-                &db::write_conn(),
-                &preferences::provider_accounts(),
+            match instance_guard::with_profile_ownership(
+                &identity,
+                |report| {
+                    if let Err(e) =
+                        instance_guard::record_forwarded(&app_dir, &identifier, report)
+                    {
+                        eprintln!("could not record the forwarded launch: {e}");
+                    }
+                },
+                || run_profile_startup(app, &identity),
             ) {
-                tracing::warn!(
-                    "v19 custom-account migration failed (non-fatal, archived nodes \
-                     will keep legacy bare ids until the next launch): {}",
-                    e
-                );
-            }
-
-            // Mesh-default Spawn Option composite-id safety net (v19 follow-up).
-            // The v19 first-class block in `db::init` rewrote `agent_nodes.provider`
-            // from bare → composite but never touched `meshes.default_provider` —
-            // a pre-#575 mesh whose default was set to "minimax" or "kimi" kept
-            // the legacy bare form after upgrade. Without this safety net, the
-            // bare form routes through `resolve_provider_env` to the keyed
-            // **account** instead of the post-#575 proxied pairing, silently
-            // spawning Claude-CLI sessions against the wrong endpoint.
-            // Idempotent — the `WHERE default_provider IN (...)` guard is a
-            // no-op on already-migrated rows.
-            if let Err(e) = db::ensure_mesh_default_provider_normalized(&db::write_conn()) {
-                tracing::warn!(
-                    "mesh-default provider normalization failed (non-fatal, meshes \
-                     will keep legacy bare ids until the next launch): {}",
-                    e
-                );
-            }
-
-            // App-wide default-provider Spawn Option composite-id safety net.
-            // Companion to `ensure_mesh_default_provider_normalized` for the
-            // `preferences.json::default_provider` field — the v19 migration
-            // never rewrote that either. Without this, a user whose app-wide
-            // default was set before #575 keeps the legacy bare form in
-            // preferences.json, and `resolve_default_provider` returns it
-            // verbatim to `+`-click spawns on meshes without a per-mesh
-            // override. Idempotent — already-normalized values are a no-op.
-            if let Err(e) = preferences::ensure_default_provider_normalized() {
-                tracing::warn!(
-                    "app-wide default provider normalization failed (non-fatal, spawns \
-                     without a per-mesh override will keep the legacy bare id until \
-                     the next launch): {}",
-                    e
-                );
-            }
-
-            // Auto-detect installed agent harnesses and populate dynamic profiles
-            // Native PATH/config scan plus a bounded probe of the default WSL
-            // distribution. Additive merge preserves existing profile identities.
-            // Failure is non-fatal; legacy provider entries remain available.
-            let scan_start = std::time::Instant::now();
-            let detected = agent::detection::detect_installed_profiles();
-            match preferences::merge_detected_profiles(detected) {
-                Ok(added) => tracing::info!(
-                    "Harness detection: {} new profile(s) added in {:?}",
-                    added,
-                    scan_start.elapsed()
-                ),
-                Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
-            }
-
-            if let Err(error) = services::agent_node::migrate_launch_history() {
-                tracing::warn!("Launch history migration failed: {error}");
-            }
-
-            // Set up file-based logging with tracing.
-            //
-            // Size-bounded, NOT `rolling::never`: a long multi-node session at
-            // `debug` level (esp. during a build storm) would otherwise grow a
-            // single `buildmesh.log` without bound — a disk-fill risk, and a
-            // log that eventually eats the disk is the opposite of a
-            // diagnostic. `diagnostics::main_log_writer` rotates by BYTES at a
-            // fixed cap while keeping the file's name `buildmesh.log`: the
-            // `/use`, `/verify`, `/verify-ui` skills and `scripts/*log*.ps1`
-            // tail that exact path, so a time-based appender (which renames to
-            // `buildmesh.YYYY-MM-DD-HH.log`) would break them AND fail to bound
-            // a single hour's size. Wrapped in `non_blocking` so log writes
-            // never block the async runtime.
-            let log_dir = app_dir.join("logs");
-            std::fs::create_dir_all(&log_dir)?;
-            let file_appender = diagnostics::main_log_writer(&log_dir)
-                .expect("failed to open rotating buildmesh.log");
-            let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-            tracing_subscriber::fmt()
-                .with_writer(non_blocking)
-                .with_ansi(false)
-                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-                    .add_directive("buildmesh_lib=debug".parse().unwrap())
-                    .add_directive("buildmesh=debug".parse().unwrap())
-                    .add_directive("info".parse().unwrap()))
-                .init();
-
-            // Keep guard alive for app lifetime
-            Box::leak(Box::new(_guard));
-
-            tracing::info!("Buildmesh started — db at {:?}", db_path);
-
-            if let Err(error) = diagnostics::start_crash_watchdog(&log_dir) {
-                tracing::error!("failed to start external crash watchdog: {error}");
-            }
-
-            // Commit legacy cancellation before crash recovery can offer auto-resume.
-            services::legacy_retirement::retire_legacy_automation()?;
-
-            // Crash recovery: any sessions still marked 'running' from a previous
-            // crash have no live process. Mark them suspended for auto-resume.
-            // Lives inside SessionLifecycle (issue #132) — the lifecycle
-            // module is the single owner of every state transition, including
-            // the startup sweep.
-            match crate::agent::session_lifecycle::recover_from_crash() {
-                Ok(count) if count > 0 => {
-                    tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
+                Ok(instance_guard::Startup::Owned) => Ok(()),
+                // The profile belongs to a live process: its window was asked
+                // to come forward, and the startup continuation never ran.
+                Ok(instance_guard::Startup::Forwarded(_)) => std::process::exit(0),
+                Err(instance_guard::StartupError::Ownership(error)) => {
+                    Err(ownership_failure(&identifier, &app_dir, error))
                 }
-                Ok(_) => {}
-                Err(e) => tracing::error!("Crash recovery failed: {}", e),
+                Err(instance_guard::StartupError::Body(error)) => Err(error),
             }
-
-            // Reconcile worktree removals that didn't finish before a previous
-            // exit. A close records the intent durably, so a mid-cleanup quit is
-            // resumed here rather than orphaning the directory forever (#243).
-            commands::agent_node::drain_pending_removals(app.handle().clone());
-
-            // Log window creation and set title with git commit
-            let git_sha = env!("GIT_SHA");
-            if let Some(window) = app.get_webview_window("main") {
-                let title = format!("Buildmesh - {}", git_sha);
-                window.set_title(&title).ok();
-                tracing::info!("Main window found, ready to load content: {}", title);
-            } else {
-                tracing::warn!("Main window not found during setup");
-            }
-
-            // Dev builds (identifier `*.dev`) run alongside the stable hub.
-            // Offset every server port by 1000 so the two instances never
-            // contend on 1991/1992. Derived from the bundle identifier so a
-            // single config overlay flips binary, data dir, and ports together.
-            let port_offset = http::port_offset(&app.config().identifier);
-
-            crate::agent::provider::muse::telemetry::bind_app(app.handle().clone());
-
-            // Start HTTP test server (1991, or 2991 for the dev profile) for Playwright E2E tests
-            commands::test::start_test_server(app.handle().clone(), port_offset);
-
-            // Start embedded HTTP/WebSocket server for mobile remote access
-            http_server::start_http_server(app.handle().clone(), port_offset);
-
-            // Pre-spawn Worktree Pool reconcile (issue #609, PRD #608). Runs
-            // once per startup AFTER the HTTP server has bound, so a
-            // Playwright run hitting `/api/...` immediately after launch
-            // doesn't compete with the reconcile's per-mesh `git worktree add`
-            // for the DB mutex (the reconcile would otherwise hold the mutex
-            // across N+1 sequential round-trips while the HTTP server tries
-            // to accept requests). Prunes stale rows, then ensures one warm
-            // detached-HEAD worktree per worktree-enabled mesh. Best-effort —
-            // failures are logged and the spawn path falls back to cold
-            // checkout when the pool is empty.
-            //
-            // The handle is captured so `reconcile_on_startup` can emit
-            // `pool-count-changed` at end-of-pass (settles the
-            // 0 → target transition for any probe opened during boot).
-            let reconcile_handle = app.handle().clone();
-            std::thread::spawn(move || {
-                services::warm_pool::reconcile_on_startup(reconcile_handle);
-            });
-
-            // Background pool maintenance worker (issue #613). A long-lived
-            // thread that, once the app has been idle (no terminal output /
-            // keypresses) for `IDLE_SILENCE`, tops every worktree-enabled
-            // mesh's pool back up to its `pre_spawn_pool_size` target — so the
-            // pool self-heals after spawns/closes without waiting for the next
-            // claim or app restart. Debounced (never competes with active
-            // agent I/O) and serialized behind the same fill lock as
-            // `refill_after_claim`, so concurrent spawns can't trigger
-            // overlapping `git worktree add` fills.
-            //
-            // The handle is captured so `drain_and_fill_for_mesh` (called per-mesh
-            // by the worker, not the legacy `maintain_all_pools` aggregator)
-            // can emit `pool-count-changed` from its inner drain/fill calls.
-            services::pool_worker::start_background_worker(app.handle().clone());
-
-            // Retry one-way retirement of historical legacy runs; never launch new agents.
-            services::legacy_retirement::start_retirement_worker();
-
-            // Autopilot Circuits worker (spec #1205 / walking skeleton
-            // #1206). Dedicated OS thread with a fast tick + condvar
-            // wake; drives the pure circuit stepper's decisions through
-            // the effect executor (spawn agent nodes, PTY injection,
-            // node status, notifications).
-            services::circuit_worker::start_circuit_worker(app.handle().clone());
-
-            // Coordinator drive ledger GC (issue #750, item 3). One prune
-            // pass every 30 minutes keeps the `coordinator_drive_prompts`
-            // table bounded by the 7-day retention window so the ledger's
-            // size stays proportional to "unique drives per week" rather
-            // than "unique drives ever". Independent of the autopilot
-            // worker because the prune isn't mesh-scoped (it's a single
-            // bounded DELETE on `created_at`).
-            services::coordinator_ledger_maintenance::start_worker();
-
-            // Always-on resource diagnostics (issue: background-refresh grind).
-            // A low-frequency sampler writes process vitals (memory, handles,
-            // threads, live child processes) + per-subsystem counters to a
-            // dedicated, size-bounded `logs/diagnostics.log` the user can hand
-            // back after a session degrades. Off the hot path; opt out with
-            // `BUILDMESH_DIAG=0`, retune with `BUILDMESH_DIAG_INTERVAL_MS`.
-            diagnostics::start_sampler(log_dir.clone());
-
-            // Install panic hook that logs thread ID + backtrace on every panic
-            let app_dir = app.path().app_data_dir().unwrap();
-            let crash_log_path = app_dir.join("logs").join("panic.log");
-            std::panic::set_hook(Box::new(move |info| {
-                let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = info.payload().downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "Unknown panic".to_string()
-                };
-                let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
-                let thread_info = std::thread::current();
-                let thread = thread_info.name().unwrap_or("unnamed");
-                let thread_id = thread_info.id();
-                let timestamp = chrono::Utc::now().to_rfc3339();
-                let backtrace = std::backtrace::Backtrace::capture();
-                let panic_msg = format!(
-                    "[{}] PANIC in thread '{}' ({:?}): {} at {}\nBacktrace:\n{}",
-                    timestamp, thread, thread_id, msg, location, backtrace
-                );
-                eprintln!("{}", panic_msg);
-                if let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&crash_log_path)
-                {
-                    use std::io::Write;
-                    let _ = writeln!(file, "{}", panic_msg);
-                    // panic = "abort" kills the process via __fastfail; the OS
-                    // file buffer would otherwise discard this write.
-                    let _ = file.flush();
-                    let _ = file.sync_all();
-                }
-            }));
-
-            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             // Agent Node (issue #490: renamed from `*_session` to `*_agent_node`).
@@ -823,6 +583,335 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+/// Everything that touches the app-data profile, and only ever on behalf of
+/// the process that owns it (issue #1521).
+///
+/// Called exclusively from inside the ownership gate in `setup`, so a losing
+/// launch cannot reach `db::init`, the crash-recovery sweep, or any of the
+/// background workers. Takes the identity rather than a raw path so the
+/// canonicalised profile dir has exactly one owner and the claim target can be
+/// logged with the rest of the startup line.
+fn run_profile_startup(
+    app: &mut tauri::App,
+    identity: &instance_guard::ProfileIdentity,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app_dir = identity.profile_dir().to_path_buf();
+    // Initialize database
+    let db_path = app_dir.join("buildmesh.db");
+    db::init(&db_path)?;
+
+    // Wire the preferences module to the same on-disk location as the DB.
+    // This MUST run before the v19 custom-account migration below —
+    // `db::init`'s first-class migration block is preferences-independent
+    // (it only rewrites the hardcoded 'minimax'/'kimi' ids), but the
+    // custom-account block reads the user's stored `ProviderAccount`
+    // list, which requires `APP_DATA_DIR` to be set. See
+    // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
+    preferences::init(app_dir.clone());
+    for pairing in preferences::provider_pairings()
+        .into_iter()
+        .filter(|pairing| pairing.surface == preferences::ApiSurface::OpenAI)
+    {
+        commands::preferences::schedule_pairing_verification(
+            app.handle().clone(),
+            pairing.harness_id,
+            pairing.provider_id,
+        );
+    }
+
+    // v19 Spawn Option composite-id migration, custom-account block
+    // (issue #575). The first-class block ('minimax'/'kimi') already
+    // ran inside `db::init`; this call only handles user-stored
+    // custom accounts (e.g. a user-typed "deepseek" account).
+    // Idempotent — the underlying UPDATE has a `provider NOT LIKE
+    // '%:%'` guard, so re-running on a v19+ DB is a no-op.
+    if let Err(e) = db::ensure_agent_node_provider_id_custom_accounts_migrated(
+        &db::write_conn(),
+        &preferences::provider_accounts(),
+    ) {
+        tracing::warn!(
+            "v19 custom-account migration failed (non-fatal, archived nodes \
+             will keep legacy bare ids until the next launch): {}",
+            e
+        );
+    }
+
+    // Mesh-default Spawn Option composite-id safety net (v19 follow-up).
+    // The v19 first-class block in `db::init` rewrote `agent_nodes.provider`
+    // from bare → composite but never touched `meshes.default_provider` —
+    // a pre-#575 mesh whose default was set to "minimax" or "kimi" kept
+    // the legacy bare form after upgrade. Without this safety net, the
+    // bare form routes through `resolve_provider_env` to the keyed
+    // **account** instead of the post-#575 proxied pairing, silently
+    // spawning Claude-CLI sessions against the wrong endpoint.
+    // Idempotent — the `WHERE default_provider IN (...)` guard is a
+    // no-op on already-migrated rows.
+    if let Err(e) = db::ensure_mesh_default_provider_normalized(&db::write_conn()) {
+        tracing::warn!(
+            "mesh-default provider normalization failed (non-fatal, meshes \
+             will keep legacy bare ids until the next launch): {}",
+            e
+        );
+    }
+
+    // App-wide default-provider Spawn Option composite-id safety net.
+    // Companion to `ensure_mesh_default_provider_normalized` for the
+    // `preferences.json::default_provider` field — the v19 migration
+    // never rewrote that either. Without this, a user whose app-wide
+    // default was set before #575 keeps the legacy bare form in
+    // preferences.json, and `resolve_default_provider` returns it
+    // verbatim to `+`-click spawns on meshes without a per-mesh
+    // override. Idempotent — already-normalized values are a no-op.
+    if let Err(e) = preferences::ensure_default_provider_normalized() {
+        tracing::warn!(
+            "app-wide default provider normalization failed (non-fatal, spawns \
+             without a per-mesh override will keep the legacy bare id until \
+             the next launch): {}",
+            e
+        );
+    }
+
+    // Auto-detect installed agent harnesses and populate dynamic profiles
+    // Native PATH/config scan plus a bounded probe of the default WSL
+    // distribution. Additive merge preserves existing profile identities.
+    // Failure is non-fatal; legacy provider entries remain available.
+    let scan_start = std::time::Instant::now();
+    let detected = agent::detection::detect_installed_profiles();
+    match preferences::merge_detected_profiles(detected) {
+        Ok(added) => tracing::info!(
+            "Harness detection: {} new profile(s) added in {:?}",
+            added,
+            scan_start.elapsed()
+        ),
+        Err(e) => tracing::warn!("Harness detection merge failed: {}", e),
+    }
+
+    if let Err(error) = services::agent_node::migrate_launch_history() {
+        tracing::warn!("Launch history migration failed: {error}");
+    }
+
+    // Set up file-based logging with tracing.
+    //
+    // Size-bounded, NOT `rolling::never`: a long multi-node session at
+    // `debug` level (esp. during a build storm) would otherwise grow a
+    // single `buildmesh.log` without bound — a disk-fill risk, and a
+    // log that eventually eats the disk is the opposite of a
+    // diagnostic. `diagnostics::main_log_writer` rotates by BYTES at a
+    // fixed cap while keeping the file's name `buildmesh.log`: the
+    // `/use`, `/verify`, `/verify-ui` skills and `scripts/*log*.ps1`
+    // tail that exact path, so a time-based appender (which renames to
+    // `buildmesh.YYYY-MM-DD-HH.log`) would break them AND fail to bound
+    // a single hour's size. Wrapped in `non_blocking` so log writes
+    // never block the async runtime.
+    let log_dir = app_dir.join("logs");
+    std::fs::create_dir_all(&log_dir)?;
+    let file_appender = diagnostics::main_log_writer(&log_dir)
+        .expect("failed to open rotating buildmesh.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("buildmesh_lib=debug".parse().unwrap())
+            .add_directive("buildmesh=debug".parse().unwrap())
+            .add_directive("info".parse().unwrap()))
+        .init();
+
+    // Keep guard alive for app lifetime
+    Box::leak(Box::new(_guard));
+
+    // The claim target is in the startup line on purpose (issue #1521): when
+    // a user reports that Buildmesh "did not start", the first question is
+    // which process owns the profile, and this is the answer.
+    tracing::info!(
+        "Buildmesh started — db at {:?}, profile claim {:?}",
+        db_path,
+        identity.claim_target()
+    );
+
+    if let Err(error) = diagnostics::start_crash_watchdog(&log_dir) {
+        tracing::error!("failed to start external crash watchdog: {error}");
+    }
+
+    // Commit legacy cancellation before crash recovery can offer auto-resume.
+    services::legacy_retirement::retire_legacy_automation()?;
+
+    // Crash recovery: any sessions still marked 'running' from a previous
+    // crash have no live process. Mark them suspended for auto-resume.
+    // Lives inside SessionLifecycle (issue #132) — the lifecycle
+    // module is the single owner of every state transition, including
+    // the startup sweep.
+    match crate::agent::session_lifecycle::recover_from_crash() {
+        Ok(count) if count > 0 => {
+            tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("Crash recovery failed: {}", e),
+    }
+
+    // Reconcile worktree removals that didn't finish before a previous
+    // exit. A close records the intent durably, so a mid-cleanup quit is
+    // resumed here rather than orphaning the directory forever (#243).
+    commands::agent_node::drain_pending_removals(app.handle().clone());
+
+    // Log window creation and set title with git commit
+    let git_sha = env!("GIT_SHA");
+    if let Some(window) = app.get_webview_window("main") {
+        // The prefix is shared with `instance_guard`, which matches on it to
+        // find this window when a second launch is forwarded here (issue #1521).
+        let title = format!(
+            "{}{}",
+            instance_guard::MAIN_WINDOW_TITLE_PREFIX,
+            git_sha
+        );
+        window.set_title(&title).ok();
+        tracing::info!("Main window found, ready to load content: {}", title);
+    } else {
+        tracing::warn!("Main window not found during setup");
+    }
+
+    // Dev builds (identifier `*.dev`) run alongside the stable hub.
+    // Offset every server port by 1000 so the two instances never
+    // contend on 1991/1992. Derived from the bundle identifier so a
+    // single config overlay flips binary, data dir, and ports together.
+    let port_offset = http::port_offset(&app.config().identifier);
+
+    crate::agent::provider::muse::telemetry::bind_app(app.handle().clone());
+
+    // Start HTTP test server (1991, or 2991 for the dev profile) for Playwright E2E tests
+    commands::test::start_test_server(app.handle().clone(), port_offset);
+
+    // Start embedded HTTP/WebSocket server for mobile remote access
+    http_server::start_http_server(app.handle().clone(), port_offset);
+
+    // Pre-spawn Worktree Pool reconcile (issue #609, PRD #608). Runs
+    // once per startup AFTER the HTTP server has bound, so a
+    // Playwright run hitting `/api/...` immediately after launch
+    // doesn't compete with the reconcile's per-mesh `git worktree add`
+    // for the DB mutex (the reconcile would otherwise hold the mutex
+    // across N+1 sequential round-trips while the HTTP server tries
+    // to accept requests). Prunes stale rows, then ensures one warm
+    // detached-HEAD worktree per worktree-enabled mesh. Best-effort —
+    // failures are logged and the spawn path falls back to cold
+    // checkout when the pool is empty.
+    //
+    // The handle is captured so `reconcile_on_startup` can emit
+    // `pool-count-changed` at end-of-pass (settles the
+    // 0 → target transition for any probe opened during boot).
+    let reconcile_handle = app.handle().clone();
+    std::thread::spawn(move || {
+        services::warm_pool::reconcile_on_startup(reconcile_handle);
+    });
+
+    // Background pool maintenance worker (issue #613). A long-lived
+    // thread that, once the app has been idle (no terminal output /
+    // keypresses) for `IDLE_SILENCE`, tops every worktree-enabled
+    // mesh's pool back up to its `pre_spawn_pool_size` target — so the
+    // pool self-heals after spawns/closes without waiting for the next
+    // claim or app restart. Debounced (never competes with active
+    // agent I/O) and serialized behind the same fill lock as
+    // `refill_after_claim`, so concurrent spawns can't trigger
+    // overlapping `git worktree add` fills.
+    //
+    // The handle is captured so `drain_and_fill_for_mesh` (called per-mesh
+    // by the worker, not the legacy `maintain_all_pools` aggregator)
+    // can emit `pool-count-changed` from its inner drain/fill calls.
+    services::pool_worker::start_background_worker(app.handle().clone());
+
+    // Retry one-way retirement of historical legacy runs; never launch new agents.
+    services::legacy_retirement::start_retirement_worker();
+
+    // Autopilot Circuits worker (spec #1205 / walking skeleton
+    // #1206). Dedicated OS thread with a fast tick + condvar
+    // wake; drives the pure circuit stepper's decisions through
+    // the effect executor (spawn agent nodes, PTY injection,
+    // node status, notifications).
+    services::circuit_worker::start_circuit_worker(app.handle().clone());
+
+    // Coordinator drive ledger GC (issue #750, item 3). One prune
+    // pass every 30 minutes keeps the `coordinator_drive_prompts`
+    // table bounded by the 7-day retention window so the ledger's
+    // size stays proportional to "unique drives per week" rather
+    // than "unique drives ever". Independent of the autopilot
+    // worker because the prune isn't mesh-scoped (it's a single
+    // bounded DELETE on `created_at`).
+    services::coordinator_ledger_maintenance::start_worker();
+
+    // Always-on resource diagnostics (issue: background-refresh grind).
+    // A low-frequency sampler writes process vitals (memory, handles,
+    // threads, live child processes) + per-subsystem counters to a
+    // dedicated, size-bounded `logs/diagnostics.log` the user can hand
+    // back after a session degrades. Off the hot path; opt out with
+    // `BUILDMESH_DIAG=0`, retune with `BUILDMESH_DIAG_INTERVAL_MS`.
+    diagnostics::start_sampler(log_dir.clone());
+
+    // Install panic hook that logs thread ID + backtrace on every panic
+    let crash_log_path = app_dir.join("logs").join("panic.log");
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "Unknown panic".to_string()
+        };
+        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
+        let thread_info = std::thread::current();
+        let thread = thread_info.name().unwrap_or("unnamed");
+        let thread_id = thread_info.id();
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let backtrace = std::backtrace::Backtrace::capture();
+        let panic_msg = format!(
+            "[{}] PANIC in thread '{}' ({:?}): {} at {}\nBacktrace:\n{}",
+            timestamp, thread, thread_id, msg, location, backtrace
+        );
+        eprintln!("{}", panic_msg);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&crash_log_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{}", panic_msg);
+            // panic = "abort" kills the process via __fastfail; the OS
+            // file buffer would otherwise discard this write.
+            let _ = file.flush();
+            let _ = file.sync_all();
+        }
+    }));
+
+    Ok(())
+}
+
+/// Report a profile-ownership failure and produce the fatal startup error.
+///
+/// Issue #1521 requires that failing to establish ownership is a *visible*
+/// startup error rather than permission to carry on: an app that cannot tell
+/// which profile it owns must not open that profile's database, because the
+/// next process to do the same would sweep the live instance's Agent Nodes.
+///
+/// A native message box rather than the dialog plugin, because this runs
+/// inside `setup` on the main thread where the plugin's `blocking_show`
+/// deadlocks. Tracing is not installed this early either, so the reason is
+/// recorded in the profile's ownership log.
+fn ownership_failure(
+    identifier: &str,
+    app_dir: &std::path::Path,
+    error: instance_guard::OwnershipError,
+) -> Box<dyn std::error::Error> {
+    let reason = format!(
+        "Buildmesh cannot confirm that it owns its app-data profile, so it \
+         will not start.\n\nCarrying on would risk a second Buildmesh rewriting \
+         the running instance's Agent Nodes.\n\n{error}"
+    );
+    eprintln!("{reason}");
+    if let Err(e) = instance_guard::record_claim_failure(app_dir, identifier, &error) {
+        eprintln!("could not record the ownership failure: {e}");
+    }
+    instance_guard::show_fatal_startup_error(&reason);
+    Box::new(error)
 }
 
 /// Set when the user (or frontend) closes a window through the normal
