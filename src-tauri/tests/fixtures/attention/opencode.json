@@ -1,0 +1,103 @@
+[
+  {
+    "name": "session.created-0",
+    "payload": {
+      "hook_event_name": "session.created",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "session.idle-1",
+    "payload": {
+      "hook_event_name": "session.idle",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "session.busy-2",
+    "payload": {
+      "hook_event_name": "session.busy",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7"
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "permission.asked-3",
+    "payload": {
+      "hook_event_name": "permission.asked",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+      "request_id": "request-1"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "question.asked-4",
+    "payload": {
+      "hook_event_name": "question.asked",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+      "request_id": "request-1"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "question_requested",
+    "health": "ok"
+  },
+  {
+    "name": "question.replied-5",
+    "payload": {
+      "hook_event_name": "question.replied",
+      "sessionID": "ses_fc52ccfb9ffek1jl23ZwpRuSP7",
+      "request_id": "request-1"
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

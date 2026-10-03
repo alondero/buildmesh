@@ -1,0 +1,73 @@
+[
+  {
+    "name": "Stop-0",
+    "payload": {
+      "hookEventName": "Stop",
+      "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+      "fullyIdle": true,
+      "terminationReason": "model_stop"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "Stop-1",
+    "payload": {
+      "hookEventName": "Stop",
+      "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+      "fullyIdle": false,
+      "terminationReason": "model_stop"
+    },
+    "pending": 0,
+    "decision": "SuppressPendingBackground",
+    "kind": "background_running",
+    "health": "ok"
+  },
+  {
+    "name": "PreToolUse-2",
+    "payload": {
+      "hookEventName": "PreToolUse",
+      "conversationId": "550e8400-e29b-41d4-a716-446655440000",
+      "fullyIdle": true,
+      "terminationReason": "model_stop"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

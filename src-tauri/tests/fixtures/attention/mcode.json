@@ -1,0 +1,74 @@
+[
+  {
+    "name": "Stop-0",
+    "payload": {
+      "hook_event_name": "Stop",
+      "session_id": "mvs_abcdef0123456789",
+      "cwd": "F:\\src\\repo"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "SessionStart-1",
+    "payload": {
+      "hook_event_name": "SessionStart",
+      "session_id": "mvs_abcdef0123456789",
+      "cwd": "F:\\src\\repo"
+    },
+    "pending": 0,
+    "decision": "Ignore",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "PermissionRequest-2",
+    "payload": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "mvs_abcdef0123456789",
+      "cwd": "F:\\src\\repo",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status"
+      }
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

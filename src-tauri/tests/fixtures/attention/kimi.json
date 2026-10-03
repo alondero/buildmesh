@@ -1,0 +1,123 @@
+[
+  {
+    "name": "Stop-0",
+    "payload": {
+      "hook_event_name": "Stop",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Ready",
+    "kind": "turn_completed",
+    "health": "ok"
+  },
+  {
+    "name": "PermissionRequest-1",
+    "payload": {
+      "hook_event_name": "PermissionRequest",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000",
+      "tool_name": "Bash",
+      "tool_input": {
+        "command": "git status"
+      }
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "permission_requested",
+    "health": "ok"
+  },
+  {
+    "name": "PreToolUse-2",
+    "payload": {
+      "hook_event_name": "PreToolUse",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000",
+      "tool_name": "AskUserQuestion",
+      "tool_input": {
+        "questions": [
+          {
+            "question": "Which path?",
+            "options": [
+              {
+                "label": "Local"
+              },
+              {
+                "label": "Remote"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "question_requested",
+    "health": "ok"
+  },
+  {
+    "name": "PermissionResult-3",
+    "payload": {
+      "hook_event_name": "PermissionResult",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "Running",
+    "kind": "work_resumed",
+    "health": "ok"
+  },
+  {
+    "name": "StopFailure-4",
+    "payload": {
+      "hook_event_name": "StopFailure",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000"
+    },
+    "pending": 0,
+    "decision": "MarkInput",
+    "kind": "error",
+    "health": "degraded"
+  },
+  {
+    "name": "Notification-5",
+    "payload": {
+      "hook_event_name": "Notification",
+      "session_id": "session_550e8400-e29b-41d4-a716-446655440000",
+      "source_kind": "background_task",
+      "source_id": "task-1",
+      "notification_type": "task.completed"
+    },
+    "pending": 0,
+    "decision": "BackgroundTaskCompleted",
+    "kind": null,
+    "health": "ok"
+  },
+  {
+    "name": "malformed-envelope",
+    "body": "not json",
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "malformed-event",
+    "payload": {
+      "hook_event_name": 17
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "non-object",
+    "payload": [],
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  },
+  {
+    "name": "unknown-event",
+    "payload": {
+      "hook_event_name": "future-unvalidated-event"
+    },
+    "decision": "MarkInput",
+    "kind": "signal_unavailable",
+    "health": "degraded"
+  }
+]

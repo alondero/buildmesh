@@ -3,7 +3,7 @@
 //! Each reader owns location, parsing, tail/digest reads and assistant reports.
 //! JSONL readers share streaming defaults; document and SQLite readers override
 //! the relevant methods. Unknown transcript harnesses never use a default reader.
-//! The Claude default below serves legacy hook classification only.
+//! The Claude default below supplies token verification for legacy callbacks.
 
 use std::path::{Path, PathBuf};
 
@@ -98,38 +98,6 @@ pub(crate) trait TranscriptReader: Send + Sync {
         None
     }
 
-    /// Test-only byte-based adapter for provider hook classifiers. The
-    /// attention route calls `classify_hook_value` with the shared envelope.
-    /// `Some(classified)` short-circuits to that decision, while `None`
-    /// falls through to the shared post-processing gates (transcript scan,
-    /// AGY's `fullyIdle == false` shape gate). Most adapters return
-    /// `None` for every payload; OpenCode (session.idle / session.created),
-    /// Grok (notification_type), and Claude Code (the "needs your
-    /// permission" prose substring) carry their own logic here.
-    ///
-    /// `provider` is the harness id from the hook payload (often empty
-    /// for legacy Claude Code hooks). Adapters whose classifier keys
-    /// on body content alone (Grok, Claude Code) ignore it; OpenCode's
-    /// `session.idle` / `session.created` event names are
-    /// OpenCode-specific, so OpenCodeAdapter gates on `provider` to
-    /// avoid false-positives if a sibling harness ever borrowed the
-    /// same event names.
-    #[cfg(test)]
-    fn classify_hook(&self, body: &[u8], provider: &str) -> Option<HookClassification> {
-        let payload: serde_json::Value = serde_json::from_slice(body).ok()?;
-        self.classify_hook_value(&payload, provider)
-    }
-
-    /// Classify an already parsed hook envelope. The attention route shares
-    /// one parsed JSON value across all provider adapters.
-    fn classify_hook_value(
-        &self,
-        _payload: &serde_json::Value,
-        _provider: &str,
-    ) -> Option<HookClassification> {
-        None
-    }
-
     /// Verify the attention-route token gate (issue #1366 round-2 +
     /// round-3). The default accepts every callback; Grok's adapter
     /// implements the strict minted-token check.
@@ -140,30 +108,6 @@ pub(crate) trait TranscriptReader: Send + Sync {
 
 // Existing hook consumers keep the original trait name.
 pub(crate) use TranscriptReader as TranscriptAdapter;
-
-/// What an adapter's [`TranscriptAdapter::classify_hook_value`] returns. `Some(_)`
-/// short-circuits the attention route's shared post-processing; `None`
-/// falls through to the transcript-scan fallback and the AGY `fullyIdle`
-/// shape gate.
-#[derive(Debug, Clone)]
-pub(crate) struct HookClassification {
-    pub decision: HookDecision,
-    pub kind: Option<crate::agent::session_lifecycle::LifecycleKind>,
-}
-
-/// Decision an adapter's hook classifier returns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HookDecision {
-    /// User input needed — land the node in `AwaitingInput`.
-    MarkInput,
-    /// Turn finished cleanly — land in `Ready` (never the autopilot-only
-    /// `Completed`).
-    Ready,
-    /// Capture-only event (e.g. OpenCode's `session.created` carrying
-    /// the freshly minted `ses_…` id) — publish the Node Turn
-    /// without attention marking.
-    Ignore,
-}
 
 static CLAUDE_CODE_ADAPTER: ClaudeCodeAdapter = ClaudeCodeAdapter;
 static AGY_ADAPTER: AgyAdapter = AgyAdapter;
@@ -177,8 +121,8 @@ static MUSE_ADAPTER: MuseAdapter = MuseAdapter;
 static OPENCODE_ADAPTER: OpenCodeAdapter = OpenCodeAdapter;
 
 static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
-    // Claude Code is the registry default for hook classification when no
-    // adapter claims the payload (`default_adapter`). This is NOT the
+    // The default adapter supplies token verification for compatible hooks.
+    // This is NOT the
     // transcript-format resolver: `TranscriptFormat::for_harness` returns
     // `None` for unwired harness ids since issue #1817. Listed first so a
     // future "explicit claude-code harness id" maps there directly.
@@ -200,22 +144,6 @@ static ADAPTERS: [&'static dyn TranscriptAdapter; 10] = [
 /// harness ids. Transcript reads never fall back to another harness.
 pub(crate) fn dispatch(harness_id: &str) -> Option<&'static dyn TranscriptAdapter> {
     ADAPTERS.iter().copied().find(|a| a.id() == harness_id)
-}
-
-/// Iterate every registered adapter's parsed-envelope classifier in
-/// registration order, returning the first non-`None` decision. Most adapters
-/// return `None` for every payload, so this costs one function call per
-/// harness id. Used because the route cannot rely on the `provider` field
-/// alone (legacy hooks may send an empty string) and per-harness classifiers
-/// inspect provider-specific fields.
-pub(crate) fn classify_hook_value(
-    payload: &serde_json::Value,
-    provider: &str,
-) -> Option<HookClassification> {
-    ADAPTERS
-        .iter()
-        .copied()
-        .find_map(|adapter| adapter.classify_hook_value(payload, provider))
 }
 
 /// Default adapter (Claude Code). Returned for any harness id without an
