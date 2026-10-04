@@ -19,6 +19,7 @@ import { CommandOmnibar } from './components/CommandOmnibar/CommandOmnibar';
 import { UpdatePrompt } from './components/UpdatePrompt/UpdatePrompt';
 import { BootErrorPanel } from './components/BootErrorPanel/BootErrorPanel';
 import { formatError } from './lib/errorUtils';
+import { runBoot } from './lib/bootSequence';
 import { useMeshStore } from './stores/meshStore';
 import { useAgentNodeStore } from './stores/agentNodeStore';
 import { useNodeActivityStore } from './stores/nodeActivityStore';
@@ -73,7 +74,12 @@ function App() {
   // selectors short-circuit change detection and App stays quiet during
   // high-frequency agent events. `storeError` is the one state field we
   // actually render on, so it stays as a direct selector.
-  const fetchMeshes = useMeshStore((s) => s.fetchMeshes);
+  //
+  // Issue #1524 — boot uses `refreshMeshes`, the rejecting variant of the
+  // mesh loader: a snapshot that never loaded must fail the boot, not
+  // paint an empty workspace. `fetchMeshes` stays the fire-and-forget
+  // loader for background refreshes.
+  const refreshMeshes = useMeshStore((s) => s.refreshMeshes);
   const fetchAgentNodes = useAgentNodeStore((s) => s.fetchAgentNodes);
   const initAttentionListeners = useAgentNodeStore((s) => s.initAttentionListeners);
   const storeError = useAgentNodeStore(state => state.error);
@@ -452,35 +458,37 @@ function App() {
 
   // Issue #1250 — extract init into a callback so the BootErrorPanel's
   // Retry button can re-run it without unmounting the whole App.
-  // Promise.allSettled (not Promise.all) so a single rejection doesn't
-  // mask the other two outcomes — we need to know exactly which call
-  // failed so the error message is meaningful. If one succeeds and
-  // another fails, the partial state in the stores is fine: a retry
-  // re-runs all three and overwrites whatever was loaded.
+  // Issue #1524 — the verdict comes from `runBoot`, which owns the
+  // failure contract: it treats a rejected loader AND a stored store
+  // error as a failure, so a Mesh or Agent Node snapshot that never
+  // loaded can't be mistaken for an empty workspace. `isReady` is set
+  // only on a fully clean run. `initBusy` gates the Retry button so a
+  // panicking backend can't be hit with overlapping inits.
   const init = useCallback(async () => {
     setInitError(null);
     setInitBusy(true);
     // Issue #1501: hydrate the exit-confirm prompt preference. Deliberately
-    // NOT in the `allSettled` gate below — a prefs-read failure must neither
-    // block boot nor flip the guard off; the store keeps its fail-closed
-    // `true` default and the guard decides synchronously from it.
+    // NOT in the boot gate — a prefs-read failure must neither block boot
+    // nor flip the guard off; the store keeps its fail-closed `true`
+    // default and the guard decides synchronously from it.
     void useExitPromptStore.getState().initConfirmBeforeQuit();
     try {
-      // No data dependency between these — run the IPC round-trips
-      // concurrently so first paint isn't gated on three serial calls.
-      const results = await Promise.allSettled([
-        initAttentionListeners(),
-        fetchMeshes(),
-        fetchAgentNodes(),
-      ]);
-      const failures = results.filter(
-        (r): r is PromiseRejectedResult => r.status === 'rejected',
-      );
-      if (failures.length > 0) {
-        // Surface the first rejection. formatError strips the
-        // "Error: " prefix that String(e) would otherwise prepend
-        // (issue #663).
-        setInitError(formatError(failures[0].reason));
+      // No data dependency between the loaders — they run concurrently so
+      // first paint isn't gated on three serial calls.
+      const outcome = await runBoot({
+        attachListeners: initAttentionListeners,
+        // `refreshMeshes` (not `fetchMeshes`): the boot loader must reject
+        // so a Mesh failure is caught by the rejection channel too, not
+        // only by the stored error `runBoot` cross-checks.
+        loadMeshes: refreshMeshes,
+        loadAgentNodes: fetchAgentNodes,
+        readSnapshotErrors: () => ({
+          meshes: useMeshStore.getState().error,
+          agentNodes: useAgentNodeStore.getState().error,
+        }),
+      });
+      if (!outcome.ok) {
+        setInitError(outcome.errors.join('\n'));
         return;
       }
       setIsReady(true);
@@ -500,16 +508,15 @@ function App() {
         }
       }, 1000);
     } catch (e) {
-      // Defense in depth: Promise.allSettled never rejects, but if a
-      // future refactor swaps it back to Promise.all or any of these
-      // calls throw synchronously, we still surface the error instead
-      // of leaving the splash up forever.
+      // Defense in depth: `runBoot` never rejects for a loader failure, but
+      // if the failure contract itself breaks (e.g. a store read throws), we
+      // still surface the error instead of leaving the splash up forever.
       console.error('[App] Init failed:', e);
       setInitError(formatError(e));
     } finally {
       setInitBusy(false);
     }
-  }, [initAttentionListeners, fetchMeshes, fetchAgentNodes]);
+  }, [initAttentionListeners, refreshMeshes, fetchAgentNodes]);
 
   useEffect(() => {
     init();

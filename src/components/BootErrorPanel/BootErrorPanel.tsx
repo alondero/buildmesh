@@ -1,15 +1,20 @@
 /**
- * `<BootErrorPanel>` — full-panel error UI shown when one of the IPC
- * calls in `App.init()` rejects (issue #1250).
+ * `<BootErrorPanel>` — full-panel error UI shown when the boot sequence
+ * in `App.init()` does not produce an authoritative workspace (issue #1250).
  *
  * Why this exists
  * ---------------
  * Before this panel existed, an init failure left the pulsing splash on
  * screen forever with no user-facing signal — the error went to
- * `console.error` and was otherwise discarded. A single rejected invoke
- * among `initAttentionListeners` / `fetchMeshes` / `fetchAgentNodes`
+ * `console.error` and was otherwise discarded. A single failed loader
+ * among `initAttentionListeners` / `refreshMeshes` / `fetchAgentNodes`
  * (e.g. corrupted DB) made the app look hung. Now the user gets an
  * honest error message with a Retry button.
+ *
+ * Issue #1524 widened the trigger: a loader that *absorbed* its IPC
+ * failure and resolved used to reach this panel never, so the app showed
+ * an empty workspace instead. The panel now renders the multi-line
+ * `runBoot` verdict, one `Source: message` line per failed loader.
  *
  * Visual vocabulary matches the existing `<ErrorBoundary>` (the canonical
  * full-panel error UI in this codebase): centered `bg-bg-base` wrapper,
@@ -26,7 +31,10 @@
  * retry now."
  */
 interface Props {
-  /** Pre-formatted error string (`formatError(e)` from `lib/errorUtils`). */
+  /**
+   * Pre-formatted error text (`runBoot`'s newline-joined
+   * `Source: message` lines). The `<pre>` below preserves the newlines.
+   */
   error: string;
   /** Re-runs `App.init()`. Bound to the Retry button. */
   onRetry: () => void;

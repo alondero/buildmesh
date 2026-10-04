@@ -357,6 +357,33 @@ Record the Buildmesh version from **Settings → General → About**, the OS
 version, and the last action before the failure. Do not upload the whole log if
 it contains prompts, paths, credentials, or tokens.
 
+## Buildmesh reports “Couldn't initialize Buildmesh”
+
+Buildmesh only finishes starting once it has loaded both authoritative
+snapshots — your Meshes and your Agent Nodes. If either one fails, the
+window says so instead of showing a workspace, with one line per failed
+part of startup:
+
+- `Meshes: …` — the Mesh list could not be read.
+- `Agent Nodes: …` — the Agent Node list could not be read.
+- `Event listeners: …` — startup could not subscribe to lifecycle events.
+
+**Nothing is lost when this appears.** A snapshot that failed to load is
+reported as a failure rather than drawn as an empty workspace, and no Mesh
+or Agent Node is deleted, archived, or rewritten. Copy the raw text from
+the panel, then press **Retry**.
+
+Retry re-runs the whole startup load. A listener failure is fully
+repairable: the listeners registered before the failure are removed, so the
+next attempt starts from a clean event bus and the grid receives exactly one
+update per lifecycle event. In practice the underlying cause is a database
+that is locked, full, or not writable, or a backend that was still starting —
+fix that, and the real workspace appears on the next Retry.
+
+If Retry keeps reporting the same error, keep the matching
+`logs\buildmesh.log` (see the section above) and report it with the version
+from **Settings → General → About**.
+
 ## What to include in a report
 
 Use the [bug report template](../.github/ISSUE_TEMPLATE/bug.md) and include:

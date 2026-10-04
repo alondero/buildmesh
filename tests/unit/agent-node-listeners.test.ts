@@ -127,6 +127,127 @@ describe('attachAgentNodeListeners', () => {
     expect(unlistenFns).toHaveLength(10);
   });
 
+  // Issue #1524 — `listen` is awaited sequentially, so a rejection
+  // part-way through used to leave the earlier handlers live on the event
+  // bus and the later ones missing, while the store recorded success.
+  // These two tests pin the all-or-nothing contract that makes a boot
+  // Retry able to repair the wiring.
+  it('rolls back every handler registered before a mid-sequence failure', async () => {
+    const unlistenFns: string[] = [];
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let call = 0;
+    mockListen.mockImplementation((name: string) => {
+      call += 1;
+      // Third registration is `attention-cleared`.
+      if (call === 3) return Promise.reject(new Error(`listen failed: ${name}`));
+      const fn = () => unlistenFns.push(name);
+      return Promise.resolve(fn);
+    });
+
+    const surface = makeSurface();
+    await expect(attachAgentNodeListeners(surface)).rejects.toThrow(
+      'listen failed: attention-cleared',
+    );
+
+    // Registration stops at the failure — the four events after it are
+    // never attempted, so they are silently absent rather than half-live.
+    expect(mockListen).toHaveBeenCalledTimes(3);
+    // ...and the two that did register are torn down, so a retry cannot
+    // double-fire them.
+    expect(unlistenFns).toEqual(['circuit-run-updated', 'circuit-pr-ready']);
+  });
+
+  it('registers one handler per event when a retry follows a failed attach', async () => {
+    // Track LIVE handlers, not `listen` calls: the two events that
+    // registered before the failure are legitimately attempted twice
+    // (once per attach) but must end up subscribed once.
+    const live = new Map<string, Set<unknown>>();
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let call = 0;
+    let failNext = true;
+    mockListen.mockImplementation((name: string, handler: unknown) => {
+      call += 1;
+      if (failNext && call === 3) return Promise.reject(new Error('listen failed'));
+      const set = live.get(name) ?? new Set();
+      set.add(handler);
+      live.set(name, set);
+      return Promise.resolve(() => set.delete(handler));
+    });
+
+    await expect(attachAgentNodeListeners(makeSurface())).rejects.toThrow();
+    // The rollback emptied the bus: no event is subscribed by the
+    // attempt that failed.
+    expect([...live.values()].reduce((n, s) => n + s.size, 0)).toBe(0);
+
+    failNext = false;
+    await attachAgentNodeListeners(makeSurface());
+
+    // Every event the store cares about is subscribed exactly once.
+    expect(live.size).toBe(10);
+    for (const set of live.values()) expect(set.size).toBe(1);
+  });
+
+  it('unregisters the remaining handlers when one unlisten throws', async () => {
+    // A cleanup handle that throws must not strand the rest of the bus,
+    // and must not replace the registration error the caller needs to see.
+    const unlistenLog: string[] = [];
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let call = 0;
+    mockListen.mockImplementation((name: string) => {
+      const ordinal = (call += 1);
+      if (ordinal === 3) return Promise.reject(new Error(`listen failed: ${name}`));
+      return Promise.resolve(() => {
+        // The first unlisten explodes; `circuit-pr-ready` must still run.
+        if (ordinal === 1) throw new Error(`unlisten exploded: ${name}`);
+        unlistenLog.push(name);
+      });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(attachAgentNodeListeners(makeSurface())).rejects.toThrow(
+        'listen failed: attention-cleared',
+      );
+
+      // The second handler was still unregistered...
+      expect(unlistenLog).toEqual(['circuit-pr-ready']);
+      // ...the broken handle was reported rather than silently dropped...
+      expect(warn).toHaveBeenCalledWith(
+        '[agentNodeListeners] unlisten failed:',
+        expect.any(Error),
+      );
+    } finally {
+      // Assert before restoring: `mockRestore` discards the recorded calls.
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps unregistering the remaining handlers when the cleanup handle throws', async () => {
+    // Same contract on the success path: the returned handle unregisters
+    // every event, and one broken handle neither escapes nor skips the rest.
+    const unlistenLog: string[] = [];
+    const mockListen = listen as ReturnType<typeof vi.fn>;
+    let call = 0;
+    mockListen.mockImplementation((name: string) => {
+      const ordinal = (call += 1);
+      return Promise.resolve(() => {
+        if (ordinal === 1) throw new Error(`unlisten exploded: ${name}`);
+        unlistenLog.push(name);
+      });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const detach = await attachAgentNodeListeners(makeSurface());
+      expect(() => detach()).not.toThrow();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(unlistenLog).toHaveLength(9);
+    expect(unlistenLog).not.toContain('circuit-run-updated');
+  });
+
   it('reconciles Circuit ownership for every live and terminal run transition', async () => {
     const mockListen = listen as ReturnType<typeof vi.fn>;
     let capturedHandler: ((event: { payload: unknown }) => void) | undefined;
