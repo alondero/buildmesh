@@ -247,6 +247,24 @@ export function setWorktreeCloseActionResolverForTests(resolver?: WorktreeCloseA
   worktreeCloseActionResolver = resolver ?? defaultWorktreeCloseActionResolver;
 }
 
+// Issue #1524 — test seam for the listener attachment state machine
+// (`idle -> attaching -> attached`) that `initAttentionListeners` closes
+// over. The state lives in the store's `create()` callback, so it is one
+// instance per test file: without a reset, the first test to attach would
+// quietly become every later test's precondition, and a test run on its
+// own would exercise a different path than the same test in a full file.
+//
+// This does NOT detach listeners that are already registered — production
+// has no teardown point (the store outlives the webview's components), and
+// in tests the `listen` mock belongs to the test that installed it. It only
+// clears the bookkeeping so the next `initAttentionListeners()` starts a
+// fresh attempt.
+let resetAgentNodeListenerAttachment: (() => void) | null = null;
+
+export function resetAgentNodeListenersForTests(): void {
+  resetAgentNodeListenerAttachment?.();
+}
+
 // A pending "send input at time T" schedule (issue #785), e.g. the
 // SchedulingPopover's "remind me in 5m" / "at usage reset" actions. Keyed by
 // node ID in `schedules` — one active schedule per node.
@@ -441,6 +459,12 @@ interface AgentNodeState {
   refreshCircuitOwnerships: () => Promise<void>;
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
+  /// Issue #1054 — attach the store's Tauri event listeners; a one-line
+  /// delegate to `agentNodeListeners.attachAgentNodeListeners`.
+  /// Issue #1524 — the returned promise REJECTS if any listener fails to
+  /// register, and the store returns to `idle` so a later call retries.
+  /// The promise is shared by concurrent callers, so exactly one
+  /// attachment is ever in flight.
   initAttentionListeners: () => Promise<void>;
   /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
   /// after `delayMs`. Replaces any existing schedule for the node — only one
@@ -728,22 +752,44 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   findAgentNode: (id) => get().nodesById[id],
 
   ...(() => {
-    let listenersAttached = false;
-    return {
-      initAttentionListeners: async () => {
-        if (listenersAttached) return;
-        listenersAttached = true;
+    // Issue #1524 — attachment is a three-state machine, not a boolean.
+    // The old `listenersAttached = true` was set BEFORE the await, so a
+    // registration that failed part-way through left the store believing
+    // it was wired: the Boot Error Panel's Retry short-circuited on the
+    // flag and the store stayed permanently deaf to lifecycle events.
+    //   idle      — nothing attached; the next call attaches.
+    //   attaching — a registration is in flight; concurrent callers share
+    //                that one attempt through `attachPromise`, so React
+    //                StrictMode's double-mount cannot register an event
+    //                twice.
+    //   attached  — every listener registered; later calls are no-ops.
+    //
+    // `attachAgentNodeListeners` returns a cleanup handle for the complete
+    // set. It is deliberately not held here: the store belongs to the
+    // webview and outlives every component, so no caller has a teardown
+    // point to pass it to, and an unconsumed handle is dead weight. The
+    // rollback that *is* needed — undoing a partial registration so a
+    // retry starts from a clean bus — is owned by the listener module,
+    // which is why a failed attempt can safely return to `idle`.
+    let attachment: 'idle' | 'attaching' | 'attached' = 'idle';
+    let attachPromise: Promise<void> | null = null;
 
-        // Issue #1054 — the event-listener body moved to
-        // `agentNodeListeners.ts`. The module owns the event-name →
-        // action map; this site is now a one-line delegate. The
-        // listener's returned unlisten handle is intentionally not
-        // stored — the closure-guarded `listenersAttached` flag mirrors
-        // the pre-refactor behaviour (React StrictMode's double-mount
-        // short-circuits at the guard) and there is no component that
-        // needs to detach the listeners (the store lives for the
-        // lifetime of the webview).
-        await attachAgentNodeListeners({
+    // Issue #1524 — hand the reset to the module-level test seam below, the
+    // same shape as `setWorktreeCloseActionResolverForTests`. The state is a
+    // `create()` closure, so it is per test *file*; without a reset a test
+    // that attaches first would silently become another test's setup.
+    resetAgentNodeListenerAttachment = () => {
+      attachment = 'idle';
+      attachPromise = null;
+    };
+
+    return {
+      initAttentionListeners: () => {
+        if (attachment === 'attached') return Promise.resolve();
+        if (attachPromise) return attachPromise;
+
+        attachment = 'attaching';
+        const attempt = attachAgentNodeListeners({
           fetchAgentNodes: get().fetchAgentNodes,
           refreshIfStale: get().refreshIfStale,
           setActiveNode: get().setActiveNode,
@@ -753,7 +799,24 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
           setSemanticTurn: get().setSemanticTurn,
           findAgentNode: get().findAgentNode,
           removeAgentNode: get().removeAgentNode,
-        });
+        })
+          .then(
+            () => {
+              // Only a complete registration counts as attached.
+              attachment = 'attached';
+            },
+            (e) => {
+              // `attachAgentNodeListeners` already rolled back the
+              // partial set; drop to idle so the next call retries.
+              attachment = 'idle';
+              throw e;
+            },
+          )
+          .finally(() => {
+            if (attachPromise === attempt) attachPromise = null;
+          });
+        attachPromise = attempt;
+        return attempt;
       },
     };
   })(),

@@ -132,7 +132,8 @@ interface UpdaterState {
   seq: number;
   /** Boot-time quiet check, idempotent across React StrictMode double-
    *  mount and across both surfaces mounting their own copies. Mirrors
-   *  the `listenersAttached` flag in `agentNodeStore` (issue #1054). */
+   *  the `idle -> attaching -> attached` listener state in
+   *  `agentNodeStore` (issue #1054, reworked in #1524). */
   quietCheckStarted: boolean;
   enabledCheckStarted: boolean;
   startEnabledCheck: () => Promise<void>;

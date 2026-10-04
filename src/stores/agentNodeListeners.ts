@@ -123,11 +123,42 @@ const KNOWN_CIRCUIT_RUN_STATES = new Set([
 ]);
 
 /**
+ * Run every accumulated unlisten handle, isolating individual failures.
+ *
+ * A throwing handle must not strand the rest of the bus: the rollback path
+ * rethrows its own registration error afterwards (that error is what Retry
+ * reports), so letting a cleanup failure escape would both skip the
+ * remaining unlistens and replace the error the caller needs to see. The
+ * same holds for the returned cleanup handle — one broken event must not
+ * leave the other nine subscribed. The failed handle is reported rather
+ * than silently dropped: a listener that could not be unregistered is a
+ * real leak, and the log is the only place that shows it.
+ */
+function runUnlistens(unlistens: ReadonlyArray<() => void>): void {
+  for (const unlisten of unlistens) {
+    try {
+      unlisten();
+    } catch (error) {
+      console.warn('[agentNodeListeners] unlisten failed:', error);
+    }
+  }
+}
+
+/**
  * Subscribe every agent-node Tauri event the store cares about.
  * Returns a single async-aggregated unlisten handle (issue #547-style
- * aggregation). The store calls this from `initAttentionListeners`
- * once, gated by a closure flag so React StrictMode's double-mount
- * doesn't double-register.
+ * aggregation). The store calls this from `initAttentionListeners`,
+ * which gates it to one attachment at a time so React StrictMode's
+ * double-mount doesn't double-register.
+ *
+ * Registration is all-or-nothing (issue #1524). `listen` is awaited
+ * sequentially, so a rejection part-way through used to leave the
+ * earlier handlers live on the Tauri event bus, the later ones
+ * missing, and the caller recording success anyway — the symptom was a
+ * half-wired store that a Retry could not repair. On failure the
+ * accumulated handles are run and the rejection is rethrown, so the
+ * next attempt starts from a clean bus and exactly one store update
+ * lands per event.
  *
  * Each handler is a one-liner that dispatches to a store action, so
  * adding a new event means (1) a generated payload type, (2) a small
@@ -138,6 +169,30 @@ export async function attachAgentNodeListeners(
 ): Promise<() => void> {
   const unlistens: Array<() => void> = [];
 
+  try {
+    await registerAgentNodeListeners(surface, unlistens);
+  } catch (e) {
+    // Roll back every handler registered before the failure. Without
+    // this the bus keeps a partial subscription set: the events that
+    // did register would double-fire on a later retry, and the ones
+    // that never registered stay silent.
+    runUnlistens(unlistens);
+    throw e;
+  }
+
+  return () => runUnlistens(unlistens);
+}
+
+/**
+ * Await each `listen` in turn, appending its unlisten handle to
+ * `unlistens`. The handles are handed in (rather than built here) so
+ * the caller owns the single list that both the rollback path and the
+ * returned cleanup handle read.
+ */
+async function registerAgentNodeListeners(
+  surface: AgentNodeActionSurface,
+  unlistens: Array<() => void>,
+): Promise<void> {
   unlistens.push(
     await listen<CircuitRunUpdatedPayload>('circuit-run-updated', ({ payload }) => {
       if (KNOWN_CIRCUIT_RUN_STATES.has(payload.state)) {
@@ -272,8 +327,4 @@ export async function attachAgentNodeListeners(
       surface.patchAgentNode(event.payload.node_id, { status: 'error' });
     }),
   );
-
-  return () => {
-    for (const fn of unlistens) fn();
-  };
 }
