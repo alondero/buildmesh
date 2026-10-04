@@ -176,6 +176,17 @@ describe('CompactMeshItem (prototype L)', () => {
     expect(screen.queryByText('Colour for my-mesh')).toBeNull();
   });
 
+  it('does not open the picker after a real drag sequence ending on the bar', () => {
+    // pointerup always precedes click in a browser: the press record must
+    // survive it, or the distance check below can never run.
+    renderCompact();
+    const bar = screen.getByRole('button', { name: /Change mesh colour/ });
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+    fireEvent.pointerUp(bar, { clientX: 60, clientY: 10 });
+    fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
+    expect(screen.queryByText('Colour for my-mesh')).toBeNull();
+  });
+
   it('does not select the mesh on the trailing click of a travelled press', () => {
     const { props } = renderCompact();
     const bar = screen.getByRole('button', { name: /Change mesh colour/ });

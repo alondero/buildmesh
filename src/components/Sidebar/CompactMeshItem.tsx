@@ -94,23 +94,20 @@ function CompactMeshItemView({
     attributes,
     listeners,
   } = useSortable({ id: mesh.id });
-  // Click-vs-drag on the bar: keyboard/AT activation (`detail === 0`, no
-  // pointer sequence) always opens the picker; a mouse release within 5px of
-  // the recorded press is a picker click; anything further travelled means a
-  // drag just ran and the trailing click is swallowed. The press record is
-  // cleared on pointer-up/cancel so a travelled press released off-target can
-  // never poison a later activation. Every branch stops propagation — the
-  // swallowed branch must not bubble up and select the mesh.
+  // Click-vs-drag on the bar: AT-style activation (`detail === 0`, no pointer
+  // sequence) always opens the picker, so a stale press record can never
+  // affect it; a mouse release within 5px of the recorded press is a picker
+  // click; anything further travelled means a drag just ran and the trailing
+  // click is swallowed. The record needs no clearing: the next pointerdown
+  // always overwrites it, and a bar click with no recorded press cannot be a
+  // drag remnant (a real press always precedes it). Every branch stops
+  // propagation — the swallowed branch must not bubble up and select the mesh.
   // (jsdom + userEvent cannot drive clicks through attached dnd-kit
   // activators, so the click path is covered by fireEvent-sequence tests here
-  // and by a real CDP click in the dev-view steps. Keyboard Enter/Space on
-  // the bar starts a drag, matching handle semantics elsewhere; keyboard
-  // picker access returns at fold-in.)
+  // and by a real CDP click in the dev-view steps. Physical Enter/Space on
+  // the bar engages the drag sensor, matching handle semantics elsewhere;
+  // full keyboard picker parity waits for fold-in.)
   const pressPos = useRef<{ x: number; y: number } | null>(null);
-
-  const clearPress = useCallback(() => {
-    pressPos.current = null;
-  }, []);
 
   const handleBarClick = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -257,8 +254,6 @@ function CompactMeshItemView({
               listeners?.onPointerDown?.(e);
               pressPos.current = { x: e.clientX, y: e.clientY };
             }}
-            onPointerUp={clearPress}
-            onPointerCancel={clearPress}
             onClick={handleBarClick}
             title={`Drag to reorder ${mesh.name} · click to change mesh colour`}
             aria-label={`Change mesh colour for ${mesh.name} — drag to reorder`}
