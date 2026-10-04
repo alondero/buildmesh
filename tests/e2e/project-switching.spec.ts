@@ -9,7 +9,7 @@
  */
 import { test, expect, Page } from '@playwright/test';
 import { waitForTauriReady, createTestSessionViaHttp, cleanupTestProjects, invokeViaHttp } from './utils/tauri-http';
-import { waitForAppBoot } from './utils/state-waits';
+import { waitForAppBoot, expandMeshCards } from './utils/state-waits';
 
 async function clickProjectByName(page: Page, projectName: string) {
   await page.locator(`text="${projectName}"`).first().click();
@@ -38,9 +38,11 @@ test.describe('project switching terminal visibility', () => {
 
   test('terminal remains visible after switching between projects', async ({ page }) => {
     await createTestSessionViaHttp(1);
+    await expandMeshCards(page);
     await expect(page.locator('[data-session-item]'), 'session 1 row should appear after WS push').toHaveCount(1, { timeout: 10000 });
 
     await createTestSessionViaHttp(2);
+    await expandMeshCards(page);
     await expect(page.locator('[data-session-item]'), 'session 2 row should appear after WS push').toHaveCount(2, { timeout: 10000 });
 
     const sessions = await invokeViaHttp<any[]>('list_agent_nodes', {});
@@ -95,6 +97,7 @@ test.describe('project switching terminal visibility', () => {
   test('xterm canvas exists and has non-zero dimensions after project switch', async ({ page }) => {
     await createTestSessionViaHttp(1);
     await createTestSessionViaHttp(3);
+    await expandMeshCards(page);
     await expect(page.locator('[data-session-item]'), 'sidebar should hold 2 session rows').toHaveCount(2, { timeout: 10000 });
 
     const initialXterm = page.locator('.xterm').first();
@@ -130,6 +133,7 @@ test.describe('project switching terminal visibility', () => {
 
     await createTestSessionViaHttp(1);
     await createTestSessionViaHttp(3);
+    await expandMeshCards(page);
     await expect(page.locator('[data-session-item]'), 'sidebar should hold 2 session rows').toHaveCount(2, { timeout: 10000 });
 
     await clickProjectByName(page, 'Test Project 1');

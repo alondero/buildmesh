@@ -10,6 +10,26 @@ export async function waitForAppBoot(page: Page, timeoutMs = 15000): Promise<voi
 }
 
 /**
+ * Expand every collapsed mesh card in the sidebar.
+ *
+ * The mesh row is a self-contained card whose agent-node list starts
+ * COLLAPSED: only a mesh with a node needing attention (or in error) starts
+ * expanded, and the status-dots subtitle line toggles the rest. A spec that
+ * drives a node row must therefore make that click first — the same gesture
+ * a user makes. Already-expanded cards carry the `Hide agents for …` label,
+ * so they never match and are left alone; safe to call again after new
+ * nodes arrive.
+ */
+export async function expandMeshCards(page: Page): Promise<void> {
+  const collapsed = page.getByRole('button', { name: /^Show agents for / });
+  // Each click flips one card's label Show -> Hide, so the match list
+  // shrinks. Bounded to keep a detached/stale locator from spinning.
+  for (let guard = 0; guard < 50 && (await collapsed.count()) > 0; guard++) {
+    await collapsed.first().click();
+  }
+}
+
+/**
  * Wait until the supplied xterm `Locator` finishes its post-click layout
  * pass. Polls the bounding box until two consecutive identical snapshots
  * land, which is the real "fit done" signal that the previous

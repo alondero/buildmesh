@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
 import { emit } from '@tauri-apps/api/event';
+import type { ComponentProps } from 'react';
 import {
   DndContext,
   KeyboardSensor,
@@ -34,6 +35,24 @@ const { openUrlMock } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/plugin-opener', () => ({
   openUrl: openUrlMock,
 }));
+
+// Row-body execution counter for the #1748 memo tests below, mirroring
+// the CountingNodeItem seam in sidebar-render-count.test.tsx: the mocked
+// spawn form renders exactly once per MeshItem body execution, so a
+// skipped memo re-render reads as a flat counter across a rerender with
+// fresh-but-equal props. The wrapper renders the real form, so every
+// other test in this file still sees the real spawn affordance.
+const rowBodyRenders = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../src/components/Sidebar/NodeCreationForm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/components/Sidebar/NodeCreationForm')>();
+  const RealForm = actual.NodeCreationForm;
+  function CountingForm(props: ComponentProps<typeof RealForm>) {
+    rowBodyRenders.count += 1;
+    return <RealForm {...props} />;
+  }
+  return { ...actual, NodeCreationForm: CountingForm };
+});
 
 const MESH: Mesh = {
   id: 3,
@@ -74,6 +93,35 @@ function loneCluster(node: AgentNode): NodeActivityCluster {
 
 type Props = React.ComponentProps<typeof MeshItem>;
 
+// Stable across renders: a fresh items array would churn SortableContext
+// and re-render the row underneath the memo boundary (issue #1748), which
+// is not what the isolation test measures.
+const SORTABLE_IDS = [MESH.id];
+
+/**
+ * The clickable header inside this mesh's card — the card root's single
+ * direct child div (colour bar + text column + spawn form), and the
+ * element the context menu is anchored to and returns focus to. Reached
+ * through the mesh-name span so it stays unambiguous; the pre-fold-in
+ * row carried a `border-l-3` left accent to hook onto and this one has
+ * the `data-mesh-card` seam instead.
+ */
+function headerEl(): HTMLElement {
+  const header = screen.getByText('my-mesh').closest('div[data-mesh-card] > div');
+  if (!header) throw new Error('mesh header div not found');
+  return header as HTMLElement;
+}
+
+/**
+ * The colour bar — BOTH the recolour picker and the dnd-kit reorder
+ * handle (the separate `⋮⋮` glyph and the round swatch were folded into
+ * it). Looked up by regex prefix everywhere the name is only a locator;
+ * the exact accessible name is pinned by its own test below.
+ */
+function colourBar(name = 'my-mesh') {
+  return screen.getByRole('button', { name: new RegExp(`^Change mesh colour for ${name} `) });
+}
+
 function renderMeshItem(overrides: Partial<Props> = {}) {
   const props: Props = {
     mesh: MESH,
@@ -103,14 +151,20 @@ function renderMeshItem(overrides: Partial<Props> = {}) {
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
     ...overrides,
   };
-  const result = render(
+  // `useSortable` needs the dnd-kit context Sidebar provides in production.
+  const renderEl = (p: Props) => (
     <DndContext>
-      <SortableContext items={[MESH.id]}>
-        <MeshItem {...props} />
+      <SortableContext items={SORTABLE_IDS}>
+        <MeshItem {...p} />
       </SortableContext>
-    </DndContext>,
+    </DndContext>
   );
-  return { ...result, props };
+  const result = render(renderEl(props));
+  return {
+    ...result,
+    props,
+    rerenderWith: (o: Partial<Props>) => result.rerender(renderEl({ ...props, ...o })),
+  };
 }
 
 describe('MeshItem', () => {
@@ -147,23 +201,19 @@ describe('MeshItem', () => {
   it('renders the mesh name and a drag handle', () => {
     renderMeshItem();
     expect(screen.getByText('my-mesh')).toBeTruthy();
-    expect(screen.getByTitle('Drag to reorder')).toBeTruthy();
+    // The colour bar is the reorder handle — the separate `⋮⋮` glyph is
+    // gone, so the handle is found through the bar's title.
+    expect(screen.getByTitle('Drag to reorder my-mesh · click or Enter to change mesh colour')).toBeTruthy();
   });
 
-  it('applies the selected styling only when selected', () => {
-    const { rerender, props } = renderMeshItem({ isSelected: false });
-    const header = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-    expect(header.className).not.toContain('bg-bg-card ');
+  it('applies the selected styling only when selected', async () => {
+    const { rerenderWith } = renderMeshItem({ isSelected: false });
+    expect(headerEl().className.split(/\s+/)).not.toContain('bg-bg-card');
 
-    rerender(
-      <DndContext>
-        <SortableContext items={[MESH.id]}>
-          <MeshItem {...props} isSelected />
-        </SortableContext>
-      </DndContext>,
-    );
-    const selectedHeader = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-    expect(selectedHeader.className).toContain('bg-bg-card');
+    rerenderWith({ isSelected: true });
+    // Polled, not raced: the commit that follows a `rerender` can land a
+    // tick late when a sibling's async hook resolves at the same moment.
+    await waitFor(() => expect(headerEl().className.split(/\s+/)).toContain('bg-bg-card'));
   });
 
   it('calls onSelectMesh when the header is clicked', async () => {
@@ -174,6 +224,11 @@ describe('MeshItem', () => {
 
   it('renders a NodeItem per mesh node and selects it on click', async () => {
     const { props } = renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
+    // The seeded node is `running`, which is not "hot", so the card
+    // starts collapsed and the cluster is not in the DOM yet. Open the
+    // dots line first so the assertion is about the row, not the toggle.
+    expect(screen.queryByText('node-a')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Show agents for my-mesh' }));
     await userEvent.click(screen.getByText('node-a'));
     expect(props.onActivateNode).toHaveBeenCalledWith(10);
     expect(props.selectMesh).toHaveBeenCalledWith(3);
@@ -262,7 +317,7 @@ describe('MeshItem', () => {
         : Promise.resolve({}),
     );
     const { props } = renderMeshItem();
-    const badge = await screen.findByLabelText('Mesh health issue');
+    const badge = await screen.findByLabelText(/^Mesh health issue/);
     await userEvent.click(badge);
     expect(props.onOpenWorktreesProbe).toHaveBeenCalledWith(3);
   });
@@ -289,28 +344,28 @@ describe('MeshItem', () => {
         : Promise.resolve({}),
     );
     const { props } = renderMeshItem();
-    const badge = await screen.findByLabelText('Mesh health issue');
+    const badge = await screen.findByLabelText(/^Mesh health issue/);
     await userEvent.click(badge);
     expect(props.onOpenWorktreesProbe).toHaveBeenCalledWith(3);
   });
 
-  // The header no longer carries a sync button — syncs are automatic
-  // (background sync + spawn-time auto-sync) and the button duplicated the
-  // Regenerate icon. The header shows a failure-only icon instead; the
-  // manual action moved into the context menu as "Force sync from upstream".
-  it('renders no sync button in the header', () => {
-    renderMeshItem();
-    expect(screen.queryByTitle('Sync from upstream')).toBeNull();
-    expect(screen.queryByText(/Force sync from upstream/)).toBeNull();
-  });
+  // The header carries no *always-on* sync button — syncs are automatic
+  // (background sync + spawn-time auto-sync) and a permanent button
+  // duplicated the Regenerate icon for an action the user rarely needs
+  // (ADR 0020). The card has no textual status line either, so the
+  // failure-only badge IS the retry affordance — it must appear only
+  // once the backend has actually reported a failed sync for this mesh.
+  it('renders no always-on sync control in the header — the retry badge appears only after a failed sync', async () => {
+    /** Header buttons that read as a sync control (matched on the visible
+     *  label, so a future rename of the badge's copy can't silently make
+     *  this pass again). */
+    const syncControls = () => Array.from(headerEl().querySelectorAll('button')).filter(
+      (b) => /sync/i.test(`${b.title} ${b.getAttribute('aria-label') ?? ''}`),
+    );
 
-  it('lights the failure-only sync icon when the backend reports a failed sync for this mesh', async () => {
-    // Spawn-time auto-sync failures (fetch failed, diverged history, …)
-    // arrive as a `mesh-sync-warning` Tauri event carrying the mesh path
-    // that failed. The icon must NOT be a button — it is a status light,
-    // not an action.
     renderMeshItem();
-    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
+    expect(syncControls()).toHaveLength(0);
+    expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull();
 
     await act(async () => {
       await emit('mesh-sync-warning', {
@@ -329,8 +384,41 @@ describe('MeshItem', () => {
       });
     });
 
-    const icon = await screen.findByLabelText('Sync from upstream failed — mesh may be stale');
-    expect(icon.tagName).toBe('SPAN');
+    const retry = await screen.findByLabelText(/^Sync failed for /);
+    // It is the same element the header grew — not a card-level banner.
+    expect(headerEl().contains(retry)).toBe(true);
+    expect(syncControls()).toHaveLength(1);
+  });
+
+  it('lights the sync-failure badge when the backend reports a failed sync for this mesh', async () => {
+    // Spawn-time auto-sync failures (fetch failed, diverged history, …)
+    // arrive as a `mesh-sync-warning` Tauri event carrying the mesh path
+    // that failed. The card has no textual status, so the badge is a
+    // button: click it to retry the same `git_sync` the context menu's
+    // "Force sync from upstream" runs.
+    renderMeshItem();
+    expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull();
+
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+
+    const badge = await screen.findByLabelText('Sync failed for my-mesh — click to retry');
+    expect(badge.tagName).toBe('BUTTON');
+    expect(badge.getAttribute('title')).toBe('Last sync from upstream failed — click to retry.');
   });
 
   it('ignores mesh-sync-warning events for other meshes', async () => {
@@ -355,7 +443,93 @@ describe('MeshItem', () => {
     // Give any (incorrect) state update a tick to flush, then assert the
     // icon never lit.
     await waitFor(() => {});
-    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
+    expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull();
+
+    // Positive control in the same test: the label exists in the DOM once
+    // an event for THIS mesh's path arrives. Without it, the assertion
+    // above would still pass if the listener were dead or the label had
+    // been renamed out from under the test — i.e. vacuously.
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'diverged',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'diverged from upstream',
+      });
+    });
+    expect(await screen.findByLabelText(/^Sync failed for /)).toBeTruthy();
+  });
+
+  it('retries the sync when the failure badge is clicked', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'git_sync' ? Promise.resolve({ fetched: true, pulled: true, new_commits: 0, message: 'Already up to date' }) : Promise.resolve({}),
+    );
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+
+    const badge = await screen.findByLabelText(/^Sync failed for /);
+    await userEvent.click(badge);
+
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
+    await waitFor(() => expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull());
+  });
+
+  it('keeps the failure badge lit when a retry fails', async () => {
+    // A failed retry is the only feedback the card gives (no textual
+    // status line), so the badge must survive it — clearing it here would
+    // leave a possibly-stale mesh looking fresh.
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === 'git_sync' ? Promise.reject(new Error('fetch failed: network down')) : Promise.resolve({}),
+    );
+    renderMeshItem();
+    await act(async () => {
+      await emit('mesh-sync-warning', {
+        node_id: 10,
+        mesh_path: MESH.path,
+        outcome: 'fetch_failed',
+        new_commits: null,
+        pr_number: null,
+        head_ref: null,
+        expected_sha: null,
+        actual_sha: null,
+        fallback_base_ref: null,
+        head_repo_owner: null,
+        head_repo_clone_url: null,
+        message: 'fetch failed: network down',
+      });
+    });
+
+    const badge = await screen.findByLabelText(/^Sync failed for /);
+    await userEvent.click(badge);
+
+    // The rejected sync logs through `console.error`; the badge is the
+    // assertion. Re-enable the button (`disabled` while syncing) too, so
+    // the retry affordance is usable again.
+    await waitFor(() => expect(badge.hasAttribute('disabled')).toBe(false));
+    expect(screen.getByLabelText(/^Sync failed for /)).toBe(badge);
   });
 
   it('shows a behind-count badge when the branch is behind upstream', async () => {
@@ -391,20 +565,20 @@ describe('MeshItem', () => {
     await userEvent.click(screen.getByText('Force sync from upstream'));
 
     // The menu closes on click (the sync runs in the sidebar row, not the
-    // menu — unlike the old header button there is no persistent spin
-    // surface to observe; the result message below is the feedback).
+    // menu). The card carries no textual status line any more, so the
+    // feedback surface after a force sync is the failure badge clearing —
+    // pinned in the test below.
     expect(screen.queryByText('Force sync from upstream')).toBeNull();
+    expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
 
     resolveSync({ fetched: true, pulled: true, new_commits: 3, message: 'Pulled 3 commits' });
-
-    expect(await screen.findByText('Pulled 3 commits')).toBeTruthy();
-    expect(vi.mocked(invoke)).toHaveBeenCalledWith('git_sync', { path: '/tmp/my-mesh' });
+    await act(async () => {});
   });
 
-  it('clears the failure icon after a successful force sync', async () => {
-    // The stale indicator must be a status light that a successful manual
-    // sync resets — otherwise the user stays alarmed after the mesh is
-    // demonstrably fresh again.
+  it('clears the failure badge after a successful force sync', async () => {
+    // The stale indicator must be reset by a successful manual sync —
+    // otherwise the user stays alarmed after the mesh is demonstrably
+    // fresh again.
     vi.mocked(invoke).mockImplementation((cmd: string) =>
       cmd === 'git_sync' ? Promise.resolve({ fetched: true, pulled: true, new_commits: 0, message: 'Already up to date' }) : Promise.resolve({}),
     );
@@ -425,74 +599,207 @@ describe('MeshItem', () => {
         message: 'fetch failed: network down',
       });
     });
-    await screen.findByLabelText('Sync from upstream failed — mesh may be stale');
+    await screen.findByLabelText(/^Sync failed for /);
 
     fireEvent.contextMenu(screen.getByText('my-mesh'));
     await userEvent.click(screen.getByText('Force sync from upstream'));
 
-    await screen.findByText('Already up to date');
-    expect(screen.queryByLabelText('Sync from upstream failed — mesh may be stale')).toBeNull();
+    await waitFor(() => expect(screen.queryByLabelText(/^Sync failed for /)).toBeNull());
   });
 
-  // Issue #1264 — the sync result's 4-second auto-clear timeout was
-  // previously leaked past unmount: if the user deleted the mesh (or
-  // switched views) before the timer fired, the timer would call
-  // setSyncMessage(null) on an unmounted component. Pin the contract:
-  // MeshItem arms a 4000 ms timer after a successful sync, and the
-  // unmount cleanup calls clearTimeout on the captured handle so the
-  // timer can't fire against a torn-down component.
-  //
-  // Strategy: spy on `globalThis.setTimeout` and `globalThis.clearTimeout`
-  // (the spies wrap the originals — they don't replace them, so the
-  // rest of the test suite's timer-driven code keeps working). Capture
-  // every armed handle + delay, and prove the unmount cleanup cleared
-  // the 4000 ms one specifically.
-  it('clears the pending sync-result timer on unmount (issue #1264)', async () => {
-    let resolveSync!: (v: unknown) => void;
-    vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'git_sync') return new Promise((res) => { resolveSync = res; });
-      return Promise.resolve({});
+  // The card's header: dots + count (no textual status), the colour bar
+  // that is both picker and reorder handle, and the expand/collapse
+  // contract.
+  describe('card header, dots line and colour bar', () => {
+    it('renders the mesh name with dots and a count, and no textual status labels', () => {
+      renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
+      expect(screen.getByText('my-mesh')).toBeTruthy();
+      // Dots carry status without words: none of the status vocabulary
+      // appears as text…
+      for (const word of ['Running', 'Idle', 'Needs attention', 'Starting…', 'Ready', 'Suspended', 'Error', 'Lost', 'PR opened', 'Archived']) {
+        expect(screen.queryByText(word)).toBeNull();
+      }
+      // …but it is all still exposed to assistive tech on the dots span,
+      // so the check above is a real "dots, not words" assertion and not
+      // a missing-status one.
+      expect(screen.getByRole('img', { name: '1 agent: Running' })).toBeTruthy();
+      expect(screen.getByText('1')).toBeTruthy();
     });
 
-    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-    const clearTimeoutSpy = vi.spyOn(globalThis, 'clearTimeout');
+    it('starts collapsed for quiet meshes and expands via the dots line', async () => {
+      renderMeshItem({ nodeClusters: [loneCluster(makeNode({ status: 'idle' }))] });
+      expect(screen.queryByText('node-a')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: 'Show agents for my-mesh' }));
+      expect(screen.getByText('node-a')).toBeTruthy();
+      await userEvent.click(screen.getByRole('button', { name: 'Hide agents for my-mesh' }));
+      expect(screen.queryByText('node-a')).toBeNull();
+    });
 
-    const { unmount } = renderMeshItem();
+    it('starts expanded for meshes with a node needing attention', () => {
+      renderMeshItem({ nodeClusters: [loneCluster(makeNode({ id: 11, name: 'node-b', status: 'awaiting_input' }))] });
+      expect(screen.getByText('node-b')).toBeTruthy();
+    });
 
-    // Kick off the sync via the context-menu "Force sync from upstream"
-    // item — the 4000 ms timer is armed in the `finally` block AFTER the
-    // IPC resolves.
-    fireEvent.contextMenu(screen.getByText('my-mesh'));
-    await userEvent.click(screen.getByText('Force sync from upstream'));
-    resolveSync({ fetched: true, pulled: true, new_commits: 1, message: 'Pulled 1 commit' });
-    await vi.waitFor(() => screen.getByText('Pulled 1 commit'));
+    it('makes the colour bar both picker and reorder handle', () => {
+      renderMeshItem();
+      // One element, two gestures: the accessible name and the tooltip
+      // both carry the merge, so neither gesture is undiscoverable.
+      const bar = screen.getByRole('button', { name: 'Change mesh colour for my-mesh — Enter to open, Space to pick up for reordering' });
+      expect(bar.title).toBe('Drag to reorder my-mesh · click or Enter to change mesh colour');
+    });
 
-    // Find the 4000 ms timer MeshItem armed. Spies track the call args
-    // in `mock.calls` and the resolved handle in `mock.results`.
-    const syncTimerIndex = setTimeoutSpy.mock.calls.findIndex(
-      (c) => c[1] === 4000 && typeof c[0] === 'function',
-    );
-    expect(syncTimerIndex, 'expected MeshItem to arm a 4000 ms timer').toBeGreaterThanOrEqual(0);
-    const syncHandle = setTimeoutSpy.mock.results[syncTimerIndex]?.value;
+    it('keeps the header out of the tab order and announces the bar as sortable', () => {
+      renderMeshItem({ nodeClusters: [loneCluster(makeNode())] });
+      const bar = colourBar();
+      expect(bar.getAttribute('aria-roledescription')).toBe('sortable');
+      // The header is a plain clickable div, not a widget: no role would
+      // make the buttons nested inside it invalid descendants, and
+      // tabindex -1 keeps it out of the natural Tab order while still
+      // giving the context menu a focus target to return to.
+      const header = bar.closest('[data-mesh-card]')?.firstElementChild;
+      expect(header?.getAttribute('tabindex')).toBe('-1');
+      expect(header?.getAttribute('role')).toBeNull();
+    });
 
-    // Snapshot cleared-handle count, then unmount. The cleanup must
-    // call clearTimeout on the captured timer (vs. letting it fire
-    // post-unmount).
-    const clearsBefore = clearTimeoutSpy.mock.calls.length;
-    unmount();
-    const clearsAfter = clearTimeoutSpy.mock.calls.length;
+    it('opens the picker on a mouse press-and-release in place', () => {
+      renderMeshItem();
+      const bar = colourBar();
+      fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+      fireEvent.click(bar, { clientX: 10, clientY: 10, detail: 1 });
+      expect(screen.getByText('Colour for my-mesh')).toBeTruthy();
+    });
 
-    // The contract: at least one new clearTimeout call was issued
-    // during unmount, AND it targeted the 4000 ms handle MeshItem
-    // armed. A regression that drops the unmount cleanup would leave
-    // the timer to fire post-unmount — the assertion below would
-    // still pass for React's own internal timers, so we also check
-    // the captured handle appears in the cleared list.
-    expect(clearsAfter).toBeGreaterThan(clearsBefore);
-    if (syncHandle !== undefined) {
-      const clearedHandles = clearTimeoutSpy.mock.calls.map((c) => c[0]);
-      expect(clearedHandles).toContain(syncHandle);
-    }
+    it('swallows the trailing click after the pointer travelled (a drag ran)', () => {
+      renderMeshItem();
+      const bar = colourBar();
+      fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+      // A real mouse click carries detail >= 1 (fireEvent defaults to 0, which
+      // is the keyboard/AT path and must open).
+      fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
+      expect(screen.queryByText('Colour for my-mesh')).toBeNull();
+    });
+
+    it('does not open the picker after a real drag sequence ending on the bar', () => {
+      // pointerup always precedes click in a browser: the press record must
+      // survive it, or the distance check can never run.
+      renderMeshItem();
+      const bar = colourBar();
+      fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+      fireEvent.pointerUp(bar, { clientX: 60, clientY: 10 });
+      fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
+      expect(screen.queryByText('Colour for my-mesh')).toBeNull();
+    });
+
+    it('does not select the mesh on the trailing click of a travelled press', () => {
+      const { props } = renderMeshItem();
+      const bar = colourBar();
+      fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+      fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
+      expect(props.onSelectMesh).not.toHaveBeenCalled();
+    });
+
+    it('opens the picker on AT activation even after an off-target travelled press', () => {
+      renderMeshItem();
+      const bar = colourBar();
+      fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
+      fireEvent.pointerUp(document.body, { clientX: 400, clientY: 100 });
+      expect(screen.queryByText('Colour for my-mesh')).toBeNull();
+      fireEvent.click(bar, { detail: 0 });
+      expect(screen.getByText('Colour for my-mesh')).toBeTruthy();
+    });
+
+    it('splits Enter (open the picker) from Space (dnd-kit pickup) on the bar', () => {
+      // dnd-kit's KeyboardSensor claims BOTH Space and Enter as pickup
+      // keys, so the row intercepts Enter to open the colour picker (what
+      // the pre-merge round swatch button did) and chains every other key
+      // — Space included — straight to the sensor activator.
+      renderMeshItem();
+      const bar = colourBar();
+
+      fireEvent.keyDown(bar, { key: 'Enter', code: 'Enter' });
+      expect(screen.getByText('Colour for my-mesh')).toBeTruthy();
+      // Enter is NOT a drag pickup: the sensor never saw the key.
+      expect(bar.getAttribute('aria-pressed')).not.toBe('true');
+    });
+
+    it('leaves Space to the reorder sensor and does not open the picker', async () => {
+      // The keyboard-drag sequence itself (pickup → ArrowDown → drop) is
+      // covered in the `keyboard drag handle a11y` suite below, which
+      // mounts the multi-row harness the sensor needs an `over` target
+      // for. Here we only pin the negative half: Space must not double as
+      // "open the picker", otherwise a keyboard user reordering a mesh
+      // gets a modal in the face.
+      const { props } = renderMeshItem();
+      const bar = colourBar();
+
+      fireEvent.keyDown(bar, { key: ' ', code: 'Space' });
+      expect(bar.getAttribute('aria-pressed')).toBe('true');
+      await waitFor(() => expect(screen.queryByText('Colour for my-mesh')).toBeNull());
+      // A pickup must not select the mesh either.
+      expect(props.onSelectMesh).not.toHaveBeenCalled();
+    });
+
+    it('expands when heat arrives after mount, but yields to a manual collapse', async () => {
+      const hot = makeNode({ id: 11, name: 'node-hot', status: 'awaiting_input' });
+      const { rerenderWith } = renderMeshItem({ nodeClusters: [] });
+      expect(screen.queryByText('node-hot')).toBeNull();
+
+      rerenderWith({ nodeClusters: [loneCluster(hot)] });
+      // `findByText` because the "heat arrived" expansion is an effect on
+      // the incoming cluster list, so the node is not guaranteed to be in
+      // the DOM the instant `rerender` returns.
+      expect(await screen.findByText('node-hot')).toBeTruthy();
+
+      await userEvent.click(screen.getByRole('button', { name: 'Hide agents for my-mesh' }));
+      expect(screen.queryByText('node-hot')).toBeNull();
+      rerenderWith({ nodeClusters: [loneCluster({ ...hot, id: 12, name: 'node-hotter' })] });
+      expect(screen.queryByText('node-hotter')).toBeNull();
+    });
+  });
+
+  // Issue #1748 — the memo boundary on the row. The counting
+  // `NodeCreationForm` wrapper at the top of this file provides the
+  // render seam; the per-mesh async hooks are held still by the
+  // never-resolving `invoke` below (the same isolation the prototype
+  // file got from mocking `useMeshHealth` / `useGitBranchStatus` at module
+  // scope) so no background fetch can self-render the row inside the
+  // measurement window.
+  describe('row memoization (issue #1748)', () => {
+    beforeEach(() => {
+      vi.mocked(invoke).mockImplementation((cmd: string) =>
+        ['get_mesh_health', 'get_git_branch_status', 'get_github_url_for_mesh'].includes(cmd)
+          ? new Promise<never>(() => {})
+          : Promise.resolve({}),
+      );
+    });
+
+    it('skips re-render when clusters are fresh arrays with identical members (#1748)', async () => {
+      const node = makeNode({ status: 'idle' });
+      const { rerenderWith } = renderMeshItem({ nodeClusters: [loneCluster(node)] });
+      await act(async () => {});
+      rowBodyRenders.count = 0;
+
+      // Fresh cluster wrappers, identical member references — what
+      // Sidebar's grouped map produces on every unrelated store update.
+      rerenderWith({ nodeClusters: [loneCluster(node)] });
+      await act(async () => {});
+      expect(rowBodyRenders.count).toBe(0);
+      // (The sibling test changes a member and watches the same counter
+      // move, so a dead counter can't make this pass vacuously.)
+    });
+
+    it('still re-renders when a member actually changes', async () => {
+      const node = makeNode({ status: 'idle' });
+      const { rerenderWith } = renderMeshItem({ nodeClusters: [loneCluster(node)] });
+      await act(async () => {});
+      rowBodyRenders.count = 0;
+
+      rerenderWith({ nodeClusters: [loneCluster({ ...node, status: 'running' })] });
+      // Polled for the same reason as the sibling test's "stays at 0":
+      // the counter is the observation, and a commit that lands a tick
+      // late must not read as "the row skipped its re-render".
+      await vi.waitFor(() => expect(rowBodyRenders.count).toBeGreaterThan(0));
+    });
   });
 
   // Issue #735 — viewport clamping + WAI-ARIA menu keyboard nav.
@@ -509,8 +816,7 @@ describe('MeshItem', () => {
      * `clientX`/`clientY` and the trigger's `e.preventDefault()` path.
      */
     function openContextMenu(clientX = 100, clientY = 200) {
-      const header = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-      fireEvent.contextMenu(header, { clientX, clientY });
+      fireEvent.contextMenu(headerEl(), { clientX, clientY });
     }
 
     // The MeshItem's keydown handler is attached to `document` (not window).
@@ -722,7 +1028,7 @@ describe('MeshItem', () => {
       // div carries `tabIndex={-1}` precisely for this purpose. The
       // component defers the focus call via requestAnimationFrame, so we
       // poll until the trigger gains focus (within a generous window).
-      const trigger = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
+      const trigger = headerEl();
       await waitFor(() => expect(document.activeElement).toBe(trigger));
     });
 
@@ -734,7 +1040,7 @@ describe('MeshItem', () => {
       renderMeshItem();
       openContextMenu();
       expect(document.querySelector('[role="menu"]')).toBeTruthy();
-      const trigger = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
+      const trigger = headerEl();
 
       // Mouse down somewhere outside both the menu and the trigger row.
       // The menu div uses onMouseDown={e => e.stopPropagation()}, so a
@@ -772,8 +1078,8 @@ describe('MeshItem', () => {
       openContextMenu();
       const items = Array.from(document.querySelectorAll('[role="menuitem"]')) as HTMLButtonElement[];
       // Force focus elsewhere to simulate the user having left the menu.
-      const trigger = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-      (trigger as HTMLElement).focus();
+      const trigger = headerEl();
+      trigger.focus();
 
       fireEvent.keyDown(document, { key: 'ArrowDown' });
 
@@ -783,18 +1089,17 @@ describe('MeshItem', () => {
       expect(document.activeElement).not.toBe(items[1]);
     });
 
-    it('renders the menu on document.body, not inside the sortable mesh row', () => {
+    it('renders the menu on document.body, not inside the sortable mesh card', () => {
       // Same containing-block trap as NodeItem: MeshItem is a dnd-kit
       // sortable, so `style.transform` (during/after drag) retargets
       // `position:fixed` onto the row. Portaling to `document.body`
       // keeps the click-point `top`/`left` in viewport coordinates.
       renderMeshItem();
       openContextMenu();
-      const header = screen.getByText('my-mesh').closest('div[class*="border-l-3"]')!;
-      const sortableRoot = header.parentElement!;
+      const card = headerEl().closest('div[data-mesh-card]')!;
       const menu = document.querySelector('[role="menu"]') as HTMLElement;
       expect(menu).toBeTruthy();
-      expect(sortableRoot.contains(menu)).toBe(false);
+      expect(card.contains(menu)).toBe(false);
       expect(menu.parentElement).toBe(document.body);
     });
 
@@ -851,18 +1156,27 @@ describe('MeshItem', () => {
 });
 
 // Issue #727 — keyboard a11y for the mesh-reorder drag handle. The
-// dnd-kit `KeyboardSensor` is wired in via `useSensors` in Sidebar.tsx;
-// here we mount a minimal sibling-rows harness so the tests can fire
-// Space/ArrowDown/Escape against a real sortable list (the
-// single-row `<DndContext>` above would otherwise have no `over`
-// target). The harness emits `onDragEnd` like the real Sidebar so the
-// reorder contract stays honest.
+// handle is the colour bar, which the row folds together with the
+// recolour picker: dnd-kit's `KeyboardSensor` is wired in via
+// `useSensors` in Sidebar.tsx, but the row intercepts Enter for the
+// picker, so Space is the pickup key. Here we mount a minimal
+// sibling-rows harness so the tests can fire Space/ArrowDown/Escape
+// against a real sortable list (the single-row `<DndContext>` above
+// would otherwise have no `over` target). The harness emits
+// `onDragEnd` like the real Sidebar so the reorder contract stays
+// honest.
 describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
   afterEach(() => cleanup());
 
   const MESH_A: Mesh = { ...MESH, id: 1, name: 'mesh-a' };
   const MESH_B: Mesh = { ...MESH, id: 2, name: 'mesh-b' };
   const MESH_C: Mesh = { ...MESH, id: 3, name: 'mesh-c' };
+
+  /** The merged colour-bar handle of the named row — the element the
+   *  sensor's `onKeyDown` activator is attached to. */
+  function handleFor(name: string) {
+    return screen.getByRole('button', { name: new RegExp(`^Change mesh colour for ${name} `) });
+  }
 
   /**
    * Sidebar-equivalent: a DndContext with KeyboardSensor +
@@ -922,7 +1236,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
 
   it('renders the drag handle as a focusable button with aria-roledescription="sortable"', () => {
     render(<SidebarHarness onReorder={() => {}} />);
-    const handle = screen.getByLabelText('Reorder mesh-a');
+    const handle = handleFor('mesh-a');
     // tabIndex=0 — required for the KeyboardSensor to find the activator.
     expect(handle.getAttribute('tabindex')).toBe('0');
     // role=button is dnd-kit's default; our explicit override is idempotent.
@@ -934,7 +1248,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
 
   it('focuses the handle when keyboard tab order lands on it', () => {
     render(<SidebarHarness onReorder={() => {}} />);
-    const handle = screen.getByLabelText('Reorder mesh-b') as HTMLElement;
+    const handle = handleFor('mesh-b');
     handle.focus();
     expect(document.activeElement).toBe(handle);
   });
@@ -947,6 +1261,10 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
     // finalises the move via `onDragEnd`. The reorder is committed
     // through the same `onReorder` callback Sidebar wires to
     // `reorderMeshes` in production.
+    //
+    // Space, not Enter: the merged bar spends Enter on the colour
+    // picker (see the Enter/Space split tests in the suite above), so
+    // the sensor's other pickup key is the one left for reordering.
     //
     // Activation fires on the handle's React `onKeyDown` listener.
     // After activation, dnd-kit attaches the document-level listener
@@ -962,11 +1280,10 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
     const handles = container.querySelectorAll('[aria-roledescription="sortable"]');
     expect(handles.length).toBe(3);
     handles.forEach((h, i) => {
-      // Walk up from the handle to the row that owns `setNodeRef` —
-      // MeshItem nests the handle inside `<div className="group/mesh">`
-      // (the dnd-kit droppable target), so `parentElement` isn't
-      // enough — go to the closest ancestor with the `mb-1` class
-      // (the row container, the setNodeRef target).
+      // Walk up from the handle to the row that owns `setNodeRef` — the
+      // card root carries the `data-mesh-card` seam and the `mb-1.5`
+      // class, and the handle is nested two levels down inside it, so
+      // `parentElement` isn't enough.
       let row: HTMLElement | null = h as HTMLElement;
       while (row && !row.className.includes('mb-1')) {
         row = row.parentElement;
@@ -988,7 +1305,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
       };
     });
 
-    const handle = screen.getByLabelText('Reorder mesh-a') as HTMLElement;
+    const handle = handleFor('mesh-a');
     handle.focus();
     expect(document.activeElement).toBe(handle);
 
@@ -1004,6 +1321,21 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
     expect(onReorder).toHaveBeenCalledWith([2, 1, 3]);
   });
 
+  it('opens the colour picker on Enter instead of picking the row up', () => {
+    // The same key the sensor would claim as a pickup is spent on the
+    // picker: this is the regression guard for the merge, not a duplicate
+    // of the picker test above — here it runs in the full 3-row harness
+    // where a pickup WOULD have an `over` target to move to.
+    render(<SidebarHarness onReorder={() => {}} />);
+    const handle = handleFor('mesh-a');
+    handle.focus();
+
+    fireEvent.keyDown(handle, { key: 'Enter', code: 'Enter' });
+
+    expect(screen.getByText('Colour for mesh-a')).toBeTruthy();
+    expect(handle.getAttribute('aria-pressed')).not.toBe('true');
+  });
+
   it('Escape cancels the drag and does not commit a reorder', async () => {
     // Escape drops the active item back to its original slot —
     // dnd-kit dispatches `onDragCancel`, which (like Sidebar) does
@@ -1011,7 +1343,7 @@ describe('MeshItem — keyboard drag handle a11y (issue #727)', () => {
     // "no" from the user, not a commit.
     const onReorder = vi.fn();
     render(<SidebarHarness onReorder={onReorder} />);
-    const handle = screen.getByLabelText('Reorder mesh-a') as HTMLElement;
+    const handle = handleFor('mesh-a');
     handle.focus();
 
     fireEvent.keyDown(handle, { key: ' ', code: 'Space' });

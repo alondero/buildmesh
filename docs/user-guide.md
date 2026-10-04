@@ -258,6 +258,25 @@ deletable; grouping is a view, not a merged node.
 
 ## Find open work in the sidebar
 
+Each mesh is a card. The card's left edge is a full-height colour bar that does
+two jobs: click it to change the mesh colour, drag it to reorder the mesh. From
+the keyboard, <kbd>Enter</kbd> opens the colour picker and <kbd>Space</kbd> picks
+the card up for reordering, so both jobs stay reachable without a mouse.
+
+Under the mesh name, a row of status dots summarises the mesh's agents — one dot
+per agent, coloured by that agent's status, with the count beside it. There are
+no text status labels. Click that line to expand or collapse the mesh's agents;
+a mesh holding an agent that needs your attention or has errored starts
+expanded, so a mesh asking for you is never buried behind a click.
+
+The rest of the header carries the badges: `!` when the mesh has drifted or its
+base branch is held hostage (click it to open the Worktree Manager), `↓N` when
+the branch is that many commits behind upstream, and a sync icon only when a
+sync from upstream has failed — click it to retry. The `+` button spawns an
+agent. Right-click the card for Properties, File Explorer, Force sync from
+upstream, Archive, GitHub Issues, and — for a mesh with a GitHub origin — View
+on GitHub.
+
 Meshes that currently have at least one open agent node sit at the top of
 the sidebar under an **Active** label, in your own drag order; every other
 mesh follows below, dimmed, in the same manual order. Nothing is hidden — all

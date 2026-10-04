@@ -22,21 +22,6 @@ import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivit
 import { AttentionList } from './AttentionList';
 import { needsAgentAttention } from '../../lib/status';
 import { MeshItem } from './MeshItem';
-import { CompactMeshItem } from './CompactMeshItem';
-
-// PROTOTYPE (variant L, "bordered compact") — dev-only preview of the winning
-// sidebar direction. Enabled via `?sidebar=compact` or
-// `localStorage["bm.sidebar"] === "compact"`; default path is untouched.
-// MUST NOT SHIP: the flag has no UI escape hatch (remove the key + reload to
-// exit) and exists only until the fold-in replaces MeshItem outright.
-const COMPACT_SIDEBAR =
-  typeof window !== 'undefined' &&
-  (new URLSearchParams(window.location.search).get('sidebar') === 'compact' ||
-    window.localStorage.getItem('bm.sidebar') === 'compact');
-
-if (COMPACT_SIDEBAR && typeof console !== 'undefined') {
-  console.warn('[prototype] compact sidebar active — dev preview only, must not ship.');
-}
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -56,12 +41,10 @@ const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates 
 // so the band-empty initial state shares one reference like `EMPTY_CLUSTERS`.
 const EMPTY_SORTABLE_IDS: number[] = [];
 
-// PROTOTYPE (compact rows) — the colour bar doubles as the reorder handle
-// (click = picker, drag = reorder), so a press must travel 5px before a drag
-// activates and clicks pass through. Module-level for the same referential
-// stability `KEYBOARD_SENSOR_OPTIONS` above needs (issue #1748). Side effect
-// on the default rows: their ⋮⋮ handle also gains the 5px grace, which only
-// filters out accidental micro-drags.
+// The mesh row's colour bar doubles as the reorder handle (click = colour
+// picker, drag = reorder), so a press must travel 5px before a drag activates
+// and the click passes through to the picker. Module-level for the same
+// referential stability `KEYBOARD_SENSOR_OPTIONS` above needs (issue #1748).
 const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 5 } };
 
 export function Sidebar() {
@@ -278,13 +261,12 @@ export function Sidebar() {
   // keyboard. `sortableKeyboardCoordinates` (from `@dnd-kit/sortable`)
   // walks the active row across siblings on ArrowUp/Down — the generic
   // defaultCoordinateGetter would translate freely, which doesn't fit a
-  // vertical list. Space picks up the focused handle, Enter picks it
-  // up too, Arrow keys move, Escape drops the item back where it
-  // started. PointerSensor carries a 5px activation distance (PROTOTYPE:
-  // the compact colour bar is both picker and handle, so clicks must pass
-  // through) — the only change to existing behaviour is that a handle drag
-  // starts after 5px of travel instead of on pointerdown, which filters out
-  // accidental micro-drags; clicks elsewhere on the row still select.
+  // vertical list. Space picks up the focused bar, Arrow keys move, Escape
+  // drops the item back where it started (Enter opens the colour picker
+  // instead, per `MeshItem`'s keydown split). PointerSensor carries a 5px
+  // activation distance so a click on the same bar reaches the picker; a
+  // drag starts after 5px of travel, and clicks elsewhere on the row still
+  // select the mesh.
   const sensors = useSensors(
     useSensor(PointerSensor, POINTER_SENSOR_OPTIONS),
     useSensor(KeyboardSensor, KEYBOARD_SENSOR_OPTIONS),
@@ -319,10 +301,8 @@ export function Sidebar() {
 
   // Issue #1939 — one row renderer for both bands. Inactive rows render
   // `dimmed` (presentational only: same structure, same spawn affordance).
-  const renderMeshRow = (mesh: Mesh, dimmed: boolean) => {
-    const Row = COMPACT_SIDEBAR ? CompactMeshItem : MeshItem;
-    return (
-    <Row
+  const renderMeshRow = (mesh: Mesh, dimmed: boolean) => (
+    <MeshItem
       key={mesh.id}
       mesh={mesh}
       isSelected={selectedMeshId === mesh.id}
@@ -344,8 +324,7 @@ export function Sidebar() {
       onDeleteNode={handleDeleteNode}
       getDefaultProvider={getDefaultProvider}
     />
-    );
-  };
+  );
 
   return (
     <div className="relative flex h-full" style={{ width }}>

@@ -25,7 +25,7 @@
  * tests settle it before baselining.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ComponentProps } from 'react';
@@ -183,13 +183,21 @@ function stableMeshCallbacks() {
 const SORTABLE_ITEMS = [MESH_ONE.id];
 
 function renderMeshItem(props: MeshItemProps) {
-  return render(
+  const result = render(
     <DndContext>
       <SortableContext items={SORTABLE_ITEMS}>
         <MeshItem {...props} />
       </SortableContext>
     </DndContext>,
   );
+  // Issue #2042 — the mesh card renders its node rows only while expanded, and
+  // only a hot mesh auto-expands. These two tests count `NodeItem` body
+  // executions, so the card has to be open or a collapsed row would report a
+  // trivial zero. Open it through the same dots-line toggle a user clicks,
+  // before any counting baseline is taken.
+  const toggle = screen.queryByLabelText(`Show agents for ${MESH_ONE.name}`);
+  if (toggle) fireEvent.click(toggle);
+  return result;
 }
 
 function meshProps(overrides: Partial<MeshItemProps> = {}): MeshItemProps {
@@ -212,6 +220,14 @@ function clustersOf(...nodes: AgentNode[]): NodeActivityCluster[] {
 
 /** Settle the async provider-list snapshot, then baseline both counters. */
 async function settleSidebar() {
+  // Issue #2042 — mesh cards collapse by default (only a hot mesh auto-expands),
+  // so the seeded `idle` rows are not in the DOM until the card is opened. Open
+  // each one through its dots-line toggle BEFORE baselining: the tests below
+  // read "this row did not re-render" off a zero count, and a collapsed card
+  // would report that zero for the wrong reason.
+  for (const toggle of screen.queryAllByLabelText(/^Show agents for /)) {
+    fireEvent.click(toggle);
+  }
   await waitFor(() => expect(screen.getByText('alpha-one')).toBeTruthy());
   expect(screen.getByText('beta-two')).toBeTruthy();
   let last = -1;
