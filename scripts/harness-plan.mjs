@@ -39,14 +39,27 @@ export function planGates(paths, { full = false } = {}) {
   }
   if (rust) {
     const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, ...options });
-    cargo('rust-format', ['fmt', '--all', '--check']);
+    // The crate has a formatting backlog (#2022); like Clippy, only diffs in
+    // touched files fail, and the remaining count stays visible.
+    cargo('rust-format', ['fmt', '--all', '--check'], { touchedFormat: true });
     cargo('rust-clippy', ['clippy', '--locked', '--all-targets', '--message-format=json'], { warnings: true });
-    // All targets include the desktop binary (compile smoke); serialized tests
-    // avoid the process-global DB races documented in CLAUDE.md.
-    gates.push({ id: 'rust-tests', command: ['cargo', 'test', '--locked', '--', '--test-threads=1'], cwd: 'src-tauri', minutes: 30, rust: true, tests: 'rust' });
+    // All targets include the desktop binary (compile smoke). Tests stay
+    // serial within a process (process-global DB, see CLAUDE.md), but the CI
+    // shards run as concurrent processes so the suite is not single-core.
+    gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust' });
     node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings']);
   }
   return gates;
+}
+
+// `cargo fmt --check` prints `Diff in <absolute path>:<line>:` per hunk, with a
+// `\\?\` prefix on Windows. Returns the touched paths that have a diff and the
+// total hunk count; a total of 0 means rustfmt failed for another reason.
+export function touchedFormatDiffs(output, paths) {
+  const files = [...stripVTControlCharacters(output).matchAll(/^Diff in (.+?):\d+:\s*$/gm)]
+    .map(match => match[1].replace(/^\\\\\?\\/, '').replaceAll('\\', '/').toLowerCase());
+  const touched = paths.filter(path => files.some(file => file.endsWith(`/${path.toLowerCase()}`)));
+  return { touched, total: files.length };
 }
 
 export function isHarnessPath(path) {

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths } from '../../scripts/harness.mjs';
-import { executedTests, planGates } from '../../scripts/harness-plan.mjs';
+import { executedTests, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -63,6 +63,29 @@ test('scope preserves generated-binding Rust gates and conservative unknowns', (
   assert.ok(ids(['src/owner.ts']).includes('browser-smoke'));
   assert.ok(!ids(['src/owner.ts']).includes('rust-tests'));
   assert.ok(ids(['docs/page.md']).includes('lint'));
+});
+test('Rust tests run as the CI shards in concurrent processes and still count executed tests', () => {
+  const rust = planGates(['src-tauri/src/lib.rs']).find(row => row.id === 'rust-tests');
+  assert.deepEqual(rust.command, ['node', 'scripts/rust-test-shards.mjs']);
+  assert.equal(rust.tests, 'rust');
+  // The runner prints each passing process's summary lines; they still sum.
+  assert.equal(executedTests('rust', '[db] passed in 27s\ntest result: ok. 300 passed; 0 failed;\n[agent] passed in 47s\ntest result: ok. 764 passed; 0 failed;'), 1064);
+});
+test('rustfmt baseline debt fails only touched files, like the Clippy gate', () => {
+  const output = [
+    'Diff in \\\\?\\F:\\repo\\src-tauri\\src\\agent\\background.rs:104:',
+    ' fn untouched() {}',
+    'Diff in /home/runner/work/repo/src-tauri/src/db/mod.rs:12:',
+    'Diff in F:\\repo\\src-tauri\\src\\db\\mod.rs:40:',
+  ].join('\n');
+  assert.deepEqual(touchedFormatDiffs(output, ['src-tauri/src/lib.rs']), { touched: [], total: 3 });
+  assert.deepEqual(touchedFormatDiffs(output, ['src-tauri/src/db/mod.rs', 'docs/page.md']), { touched: ['src-tauri/src/db/mod.rs'], total: 3 });
+  // A path that merely ends with a touched file name is a different file.
+  assert.deepEqual(touchedFormatDiffs('Diff in /r/src-tauri/src/xmod.rs:1:', ['src-tauri/src/mod.rs']).touched, []);
+  // No recognisable diff means rustfmt failed some other way: never a pass.
+  assert.equal(touchedFormatDiffs('error: expected item, found `}`', ['src-tauri/src/lib.rs']).total, 0);
+  const format = planGates(['src-tauri/src/lib.rs']).find(row => row.id === 'rust-format');
+  assert.equal(format.touchedFormat, true);
 });
 test('opposite staged and working edits cannot disappear or reuse prior evidence', t => {
   const fixture = repo(t);
@@ -204,6 +227,18 @@ test('real gate execution separates assertion failure, unavailable tool and time
   assert.equal((await gate('fail', ['node', '-e', 'process.exit(3)'])).outcome, 'FAIL');
   assert.equal((await gate('missing', ['buildmesh-tool-does-not-exist'])).outcome, 'BLOCKED');
   assert.equal((await gate('timeout', ['node', '-e', 'setInterval(() => {}, 1000)'], 0.01)).outcome, 'TIMEOUT');
+});
+test('the format gate passes baseline rustfmt debt and fails touched or unexplained failures', async t => {
+  const fixture = repo(t);
+  const formatter = output => ['node', '-e', `console.log(${JSON.stringify(output)}); process.exit(1)`];
+  const gate = (output, paths) => runGate(fixture.cwd, { id: 'rust-format', command: formatter(output), minutes: 1, touchedFormat: true }, fixture.base, paths);
+  const debt = await gate('Diff in /r/src-tauri/src/old.rs:3:', ['src-tauri/src/new.rs']);
+  assert.equal(debt.outcome, 'PASS');
+  assert.equal(debt.formatDiffCount, 1);
+  const touched = await gate('Diff in /r/src-tauri/src/new.rs:3:', ['src-tauri/src/new.rs']);
+  assert.equal(touched.outcome, 'FAIL');
+  assert.match(touched.reason, /src-tauri\/src\/new\.rs/);
+  assert.equal((await gate('error: unexpected token', ['src-tauri/src/new.rs'])).outcome, 'FAIL');
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
   const fixture = repo(t);

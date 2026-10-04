@@ -82,9 +82,14 @@ keeps infrastructure scope; dependency/build/rule changes retain product gates.
 | Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
 | Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
 | Android | APK and instrumentation compilation, executed JVM tests, strict Android lint through `scripts/check-android.mjs`; device instrumentation runs separately |
-| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, serial locked Rust tests, generated-binding drift |
+| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent single-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
 
 Cargo runs inside `src-tauri` so its binding-export configuration applies.
+The Rust test gate compiles once, then runs the CI shards, integration
+binaries and doctests up to four processes at a time; each process keeps
+`--test-threads=1` and its own database. Some tests assert wall-clock budgets
+and can fail under CPU contention (#2049), so set `BUILDMESH_RUST_TEST_JOBS=1`
+to run one process at a time before attributing such a failure.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
@@ -94,8 +99,16 @@ There is no established frontend formatter, so this harness uses ESLint and
 Git whitespace checks rather than imposing a new formatting policy. Clippy's
 existing warning backlog remains visible as `warningCount`; any warning in a
 touched file fails. This is not a repository-wide zero-warning certificate.
-Rust formatting checks the entire Rust crate. An existing failure stays red:
-reproduce at the recorded base before attributing it to baseline debt.
+Rust formatting follows the same rule: `cargo fmt --all --check` runs over
+the crate, a diff in a touched file fails, and the crate's existing
+formatting backlog (#2022) is reported as `formatDiffCount` instead of
+blocking every Rust change. Format touched files with
+`rustfmt --edition 2021 <file>`; `cargo fmt` rewrites the whole crate, and
+rustfmt on a module root (`lib.rs`, `mod.rs`) also formats its child modules,
+so revert hunks outside your change. A
+rustfmt failure that reports no diff (for example a parse error) stays red.
+Any other existing failure stays red too: reproduce at the recorded base
+before attributing it to baseline debt.
 
 Checks run under deadlines using the existing process-tree guard. Output goes
 to `.harness/logs/`; agents receive gate names, results, counts and log paths.
