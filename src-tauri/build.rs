@@ -1,11 +1,36 @@
 fn main() {
     // Without these Cargo only re-runs build.rs when this file itself
     // changes, so a `git pull` between builds leaves the embedded SHA
-    // stale. .git/packed-refs covers fresh clones; .git/refs/heads/<b>
-    // covers the common dev case; .git/HEAD covers detached HEAD.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/packed-refs");
-    println!("cargo:rerun-if-changed=.git/refs");
+    // stale. packed-refs covers fresh clones; the current branch's ref
+    // covers the common dev case; HEAD covers detached HEAD. The paths come
+    // from git because `.git` is not under this crate (and is a file in a
+    // worktree, whose HEAD lives in the per-worktree git dir). Only existing
+    // paths are watched: Cargo re-runs a build script on every build while a
+    // watched path is missing, which rebuilt the whole crate on every cargo
+    // invocation. Only this branch's ref is watched, not all of `refs/`, so
+    // commits in other worktrees do not rebuild this one.
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| std::path::PathBuf::from(s.trim()))
+    };
+    let mut watched = Vec::new();
+    if let Some(git_dir) = git(&["rev-parse", "--git-dir"]) {
+        watched.push(git_dir.join("HEAD"));
+    }
+    if let Some(common_dir) = git(&["rev-parse", "--git-common-dir"]) {
+        watched.push(common_dir.join("packed-refs"));
+        if let Some(branch_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            watched.push(common_dir.join(branch_ref));
+        }
+    }
+    for path in watched.iter().filter(|path| path.exists()) {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 
     let git_sha = std::process::Command::new("git")
         .args(["describe", "--always", "--dirty"])
@@ -45,7 +70,10 @@ fn main() {
             .arg(profile_dir)
             .status()
             .expect("Node.js is required to stage the Windows ConPTY runtime");
-        assert!(status.success(), "failed to prepare the pinned Microsoft ConPTY runtime");
+        assert!(
+            status.success(),
+            "failed to prepare the pinned Microsoft ConPTY runtime"
+        );
         println!("cargo:rustc-link-search=native={}", profile_dir.display());
     }
 
