@@ -20,8 +20,13 @@ describe('Settings keyboard navigation', () => {
     const user = userEvent.setup();
     render(<AppSettingsModal onClose={vi.fn()} />);
     const tabs = within(screen.getByRole('tablist')).getAllByRole('tab');
+    // Derived from the tab count rather than hard-coded: this asserts that
+    // `End` lands on the *last* tab, which is the property that matters.
+    // Pinning an index instead re-breaks on every tab the Settings modal
+    // gains (issue #1537 added "Data & Diagnostics").
+    const last = tabs.length - 1;
     expect(document.activeElement).toBe(tabs[0]);
-    for (const [key, index] of [['ArrowUp', 3], ['ArrowDown', 0], ['End', 3], ['Home', 0], ['ArrowDown', 1]] as const) {
+    for (const [key, index] of [['ArrowUp', last], ['ArrowDown', 0], ['End', last], ['Home', 0], ['ArrowDown', 1]] as const) {
       await user.keyboard(`{${key}}`);
       expect(document.activeElement).toBe(tabs[index]);
       expect(tabs[index].getAttribute('aria-selected')).toBe('true');

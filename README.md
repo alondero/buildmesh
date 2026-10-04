@@ -76,15 +76,24 @@ Inside:
 | Path | Contents |
 |---|---|
 | `buildmesh.db` | SQLite database (meshes, Agent Nodes, settings). |
+| `snapshots\` | Automatic state snapshots (newest 3 kept). One is taken before each schema upgrade. |
+| `preferences.json` | Provider accounts, launch configurations, worktree directory. |
+| `tls\` | LAN HTTPS certificate chain, including the root CA private key. |
 | `logs\buildmesh.log` | Rotating Rust + frontend log, size-bounded and name-stable. The `/use`, `/verify`, and `scripts\tail-dev-log.ps1` helpers tail this exact file. |
 | `logs\panic.log` | External crash-watchdog dump (Windows only). |
 | `circuits\finish.md` | Shared Circuit wrap-up template. |
 
 OAuth secrets for each provider are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory).
 
-To **uninstall** Buildmesh and **remove all user data**: uninstall from *Windows Settings → Apps → Installed apps → Buildmesh → Uninstall*, **then** delete the profile directory above. The MSI/NSIS uninstaller removes the binary and registry entries but does **not** delete the data dir, so the two-step matters if you want a clean slate.
+**Back up and restore from inside the app.** **Settings → Data & Diagnostics**
+checks your stored state, takes snapshots, and exports a portable copy with
+credentials left out by default — see the
+[user guide](docs/user-guide.md#data-backup-and-restore). A pre-upgrade snapshot
+is taken automatically, so a schema upgrade is always reversible. A folder copy
+of this directory is *not* a substitute: it includes `tls\ca.key.der`, the
+private key for the HTTPS identity your paired devices trust.
 
-There is **no automatic cloud backup** — your meshes, prompts, and Provider configuration live only in the local directory above. Back it up the way you would any other project folder.
+To **uninstall** Buildmesh and **remove all user data**: uninstall from *Windows Settings → Apps → Installed apps → Buildmesh → Uninstall*, **then** delete the profile directory above. The MSI/NSIS uninstaller removes the binary and registry entries but does **not** delete the data dir, so the two-step matters if you want a clean slate. Export first if you want to keep anything.
 
 ### Upgrade
 

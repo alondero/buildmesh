@@ -628,10 +628,74 @@ context with other supported agent tools through `AGENTS.md` and
 committing and never put secrets in them. The project-level context for this
 repository is described in [CONTEXT.md](../CONTEXT.md).
 
-## Data, backup, and uninstall
+## Data, backup, and restore
 
-Buildmesh stores meshes, prompts, and settings locally. See the README's
+Buildmesh stores Meshes, Agent Nodes, Circuits, and preferences locally. See the
+README's
 [data-location table](../README.md#data-location-logs-backup-uninstall) for
-profile paths and logs. There is no automatic cloud backup. Back up the data
-directory before removing an install, and redact credentials or tokens before
-sharing diagnostic material.
+profile paths and logs. There is no automatic cloud backup.
+
+**Settings → Data & Diagnostics** is the supported way to back up, check, and
+restore that state. It has three parts.
+
+### Check your stored state
+
+**Run quick check** is a fast structural check. **Run full check** is the
+thorough version, for when the quick one is not enough. Both only report — a
+failed check never repairs or deletes anything. If a check fails, your data is
+still on disk and a restore is still available.
+
+### Back up
+
+Buildmesh keeps the **newest 3 snapshots** in the `snapshots\` folder inside
+your data directory, and takes one **automatically before it upgrades your
+stored data**. So a schema upgrade is always reversible, without you doing
+anything.
+
+**Create snapshot** takes one on demand. Snapshots contain everything,
+including your credentials, and are readable only by your Windows account.
+
+**Export a copy…** writes a single `.bmsnap` file somewhere you choose — for
+moving to another machine, or for attaching to a bug report. Leave
+*Leave credentials out of the export* ticked (the default) and the file
+contains no:
+
+- provider API keys or account credentials
+- the remote-access root token, coordinator tokens, or paired-device sessions
+- the LAN HTTPS certificate or its private key
+- terminal scrollback and agent transcripts (never part of stored state)
+- Windows Credential Manager entries
+
+Untick it only when you are moving to a machine you control and want your keys
+to come with you. There is deliberately **no** option to export the LAN
+certificate's private key — a file containing it would let its holder
+impersonate the HTTPS identity your paired devices already trust.
+
+### Restore
+
+1. **Choose a file…** and read what Buildmesh found in it. Nothing changes yet.
+2. **Restore this state** stages it. Buildmesh first saves your current state
+   as a snapshot, so the restore is undoable.
+3. **Restart Buildmesh.** The restore is applied during startup, before any
+   database connection or background worker exists.
+
+If a file is corrupt, truncated, edited, or from a newer Buildmesh than the one
+you are running, it is rejected outright and your current data is left exactly
+as it was. If a restore is staged and you change your mind, **Cancel the
+staged restore** in the same pane.
+
+**Restoring a redacted export** brings back your Meshes, Agent Nodes, Circuits,
+and preferences — but no credentials. After the restart you re-enter your
+provider API keys, Buildmesh mints a **new** remote-access token, and paired
+devices need to sign in again.
+
+**Where this data lives** shows your data directory, and **Open data folder**
+opens it in Explorer or Finder.
+
+### Uninstall
+
+To remove the app *and* all its data, uninstall from
+*Windows Settings → Apps → Installed apps → Buildmesh → Uninstall*, **then**
+delete the profile directory. The uninstaller removes the binary and registry
+entries but not the data dir, so the two steps matter if you want a clean
+slate. Export first if you want to keep anything.

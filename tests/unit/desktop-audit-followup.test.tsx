@@ -164,19 +164,24 @@ describe('October desktop audit follow-up', () => {
   it('Settings has one tabbable tab, wraps vertical keys and wires panels', async () => {
     mockSettings(Promise.resolve([route]));
     render(<AppSettingsModal onClose={vi.fn()} />);
+    // Derived, not hard-coded to a named tab: this asserts that `ArrowUp`
+    // from the first tab wraps to the *last* one, which is the behaviour.
+    // Pinning "Remote Access" re-breaks every time the Settings modal gains a
+    // tab (issue #1537 added "Data & Diagnostics").
+    const tabs = screen.getAllByRole('tab');
+    const last = tabs[tabs.length - 1];
     const general = screen.getByRole('tab', { name: 'General' });
     general.focus(); fireEvent.keyDown(general, { key: 'ArrowUp' });
-    const remote = screen.getByRole('tab', { name: 'Remote Access' });
-    expect(document.activeElement).toBe(remote);
-    expect(remote.getAttribute('aria-selected')).toBe('true');
-    expect(screen.getAllByRole('tab').filter(t => t.tabIndex === 0)).toEqual([remote]);
-    const panel = document.getElementById(remote.getAttribute('aria-controls')!);
-    expect(panel?.getAttribute('aria-labelledby')).toBe(remote.id);
+    expect(document.activeElement).toBe(last);
+    expect(last.getAttribute('aria-selected')).toBe('true');
+    expect(screen.getAllByRole('tab').filter(t => t.tabIndex === 0)).toEqual([last]);
+    const panel = document.getElementById(last.getAttribute('aria-controls')!);
+    expect(panel?.getAttribute('aria-labelledby')).toBe(last.id);
     expect(panel?.hidden).toBe(false);
-    fireEvent.keyDown(remote, { key: 'ArrowDown' });
+    fireEvent.keyDown(last, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(general);
-    fireEvent.keyDown(general, { key: 'End' }); expect(document.activeElement).toBe(remote);
-    fireEvent.keyDown(remote, { key: 'Home' }); expect(document.activeElement).toBe(general);
+    fireEvent.keyDown(general, { key: 'End' }); expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: 'Home' }); expect(document.activeElement).toBe(general);
     await act(async () => {});
   });
 

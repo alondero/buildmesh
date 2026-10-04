@@ -13,6 +13,7 @@ import { ProbeSpawnPromptsSection, type ProbePromptDefaults, type ProbePromptKin
 import { LaunchConfigurations } from '../Providers/LaunchConfigurations';
 import { listSpawnConfigurations, getLaunchTargets, saveSpawnConfiguration, deleteSpawnConfiguration, verifyLaunchConfiguration } from '../../lib/tauri/provider';
 import { UpdateAboutSection } from './UpdateAboutSection';
+import { DataRecoverySection } from './DataRecoverySection';
 import * as api from '../../lib/tauri';
 import type {
   ProviderInfo,
@@ -52,15 +53,18 @@ async function getHostPairingVerifications(): Promise<PairingVerification[]> {
  *  settings that belong to it: General = app behaviour + appearance + runtime
  *  defaults; Providers = provider routing defaults + credentials; Harnesses =
  *  spawn-menu composition + per-harness defaults; Remote Access = network
- *  reachability. All panes stay MOUNTED (inactive ones get the `hidden`
- *  attribute) — the modal's dirty tracking (issue #730) lives in child
- *  component state, so unmounting a pane on tab-switch would destroy
- *  half-typed credentials while the modal still reports itself dirty. */
+ *  reachability; Data & Diagnostics = the profile's durable state (snapshot,
+ *  integrity check, export, restore — issue #1537). All panes stay MOUNTED
+ *  (inactive ones get the `hidden` attribute) — the modal's dirty tracking
+ *  (issue #730) lives in child component state, so unmounting a pane on
+ *  tab-switch would destroy half-typed credentials while the modal still
+ *  reports itself dirty. */
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
   { id: 'harnesses', label: 'Launch Configurations' },
   { id: 'remote', label: 'Remote Access' },
+  { id: 'data', label: 'Data & Diagnostics' },
 ] as const;
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
 
@@ -2597,6 +2601,22 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
             </ul>
           )}
         </SettingsSection>
+        </section>
+
+        {/* Data & Diagnostics (issue #1537). Its own pane rather than a
+            section on General because a staged restore and the "a copy was
+            kept" notice are consequential enough to deserve full space, and
+            because the pane is a self-contained async island with no dirty
+            state to preserve across tab switches. */}
+        <section
+          role="tabpanel"
+          id={`${tabIdPrefix}-panel-data`}
+          aria-labelledby={`${tabIdPrefix}-tab-data`}
+          tabIndex={0}
+          hidden={activeTab !== 'data'}
+          className="space-y-2"
+        >
+        <DataRecoverySection />
         </section>
         </div>
       </div>

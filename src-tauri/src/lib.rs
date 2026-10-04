@@ -340,6 +340,21 @@ pub fn run() {
             // exposes this as a Settings "Reset trusted certificates"
             // affordance; never auto-invoked from bind paths.
             commands::network::reset_trusted_certificates,
+            // State recovery (issue #1537) — Settings > Data & Diagnostics.
+            // Snapshot, integrity check, redacted export, and staged restore
+            // of the profile's durable state. `stage_state_restore` only
+            // verifies + stages; `run_profile_startup` applies it on the next
+            // launch, before any connection or worker exists.
+            commands::state_recovery::get_state_recovery_info,
+            commands::state_recovery::list_state_snapshots,
+            commands::state_recovery::create_state_snapshot,
+            commands::state_recovery::check_state_integrity,
+            commands::state_recovery::export_state,
+            commands::state_recovery::export_state_to,
+            commands::state_recovery::inspect_state_bundle,
+            commands::state_recovery::stage_state_restore,
+            commands::state_recovery::cancel_state_restore,
+            commands::state_recovery::get_state_data_folder,
             // Agent
             // Process-lifecycle Tauri commands (issue #1052) live in
             // `agent::process`; the rest are spawn orchestration owned by
@@ -649,14 +664,61 @@ fn run_profile_startup(
     bootstrap: &'static startup::Bootstrap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_dir = identity.profile_dir().to_path_buf();
-    // Initialize database
     let db_path = app_dir.join("buildmesh.db");
+    // State recovery (issue #1537), in the only order that is safe:
+    //
+    // 1. A restore staged by the user in the *previous* session is applied
+    //    first, and specifically before `db::init` — at this point there is no
+    //    connection, no reader pool, no circuit worker, and no PTY, so
+    //    "close workers/connections safely" is satisfied structurally instead
+    //    of by a shutdown race. The hook also drops the stale `-wal`/`-shm`
+    //    sidecars, which SQLite would otherwise replay onto the restored file.
+    // 2. A snapshot of the pre-upgrade state is taken when the database is
+    //    about to be evolved, so an upgrade is always reversible.
+    //
+    // Both are non-fatal by design: a recovery failure must not stop the app
+    // from starting, because the user needs the UI to reach Restore. Anything
+    // they could not do is logged and surfaced in Settings > Data &
+    // Diagnostics as a `RecoveryNotice`.
+    match services::state_recovery::apply_pending_restore(&app_dir) {
+        Ok(Some(applied)) => tracing::info!(
+            source = %applied.source,
+            ?applied.applied,
+            "state recovery: applied a restore staged in a previous session"
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::error!(
+            %error,
+            "state recovery: could not apply a staged restore; continuing with current state"
+        ),
+    }
+    match services::state_recovery::snapshot_before_migration(&app_dir, &db_path) {
+        Ok(Some(snapshot)) => tracing::info!(
+            path = %snapshot.path,
+            from_version = snapshot.schema_version,
+            kind = %snapshot.kind,
+            "state recovery: preserved the pre-migration state"
+        ),
+        Ok(None) => {}
+        Err(error) => tracing::error!(
+            %error,
+            "state recovery: could not snapshot the pre-migration state; \
+             proceeding with the upgrade without a rollback point"
+        ),
+    }
+
+    // Initialize database.
+    //
     // The one failure that most often stops Buildmesh opening, and the reason
     // `buildmesh.log` now exists before it: a corrupt or unreadable database
     // used to return here as an opaque error with no log behind it. The
     // failure is typed, so a corrupt image is reported as damage with
     // instructions and an unopenable one as a permissions problem — and
     // neither ever touches the file.
+    //
+    // Runs *after* the recovery hooks above so that a user who staged a
+    // restore is applying it to the database that then gets opened and
+    // migrated, rather than migrating the one they are replacing.
     db::init(&db_path).map_err(|error| {
         startup::report(
             startup::StartupFailure::database(&db_path, &error)
