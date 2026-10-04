@@ -178,6 +178,45 @@ describe('tauri.ts provider memoisation (#405)', () => {
     expect(callsTo('list_providers')).toBe(2);
   });
 
+  it('updateMeshColumn(default_provider) busts that mesh cached default', async () => {
+    // The spawn clusters' quick-spawn icons resolve via the cached
+    // getDefaultProvider — a successful per-mesh default write must evict
+    // that mesh's entry so the next read re-hits IPC instead of serving
+    // the pre-change id (the stale-icon report).
+    mockProviderIpc();
+    expect(await api.getDefaultProvider(1)).toBe('minimax');
+    expect(callsTo('get_default_provider')).toBe(1);
+
+    await api.updateMeshColumn(1, 'default_provider', 'agy');
+
+    expect(await api.getDefaultProvider(1)).toBe('minimax');
+    expect(callsTo('get_default_provider')).toBe(2);
+  });
+
+  it('updateMeshColumn() leaves the default cache alone for other columns', async () => {
+    mockProviderIpc();
+    await api.getDefaultProvider(1);
+    expect(callsTo('get_default_provider')).toBe(1);
+
+    await api.updateMeshColumn(1, 'model', 'sonnet');
+
+    await api.getDefaultProvider(1);
+    expect(callsTo('get_default_provider')).toBe(1);
+  });
+
+  it('setAppDefaultProvider() busts every mesh cached default', async () => {
+    mockProviderIpc();
+    await api.getDefaultProvider(1);
+    await api.getDefaultProvider(2);
+    expect(callsTo('get_default_provider')).toBe(2);
+
+    await api.setAppDefaultProvider('agy');
+
+    await api.getDefaultProvider(1);
+    await api.getDefaultProvider(2);
+    expect(callsTo('get_default_provider')).toBe(4);
+  });
+
   it('saving or deleting a spawn configuration invalidates the cached provider list', async () => {
     mockProviderIpc();
     await api.listProviders();

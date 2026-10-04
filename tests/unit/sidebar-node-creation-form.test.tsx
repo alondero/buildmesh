@@ -117,4 +117,21 @@ describe('NodeCreationForm', () => {
 
     await waitFor(() => expect(screen.getByTitle('Add agent node (Anthropic)')).toBeTruthy());
   });
+
+  it('shows the mesh-root modifier hint in the open menu for worktree meshes', async () => {
+    // The hint is gated on `mesh.use_worktree` — only meshes that spawn
+    // into worktrees have a mesh-root override worth advertising.
+    setup({ mesh: { ...MESH, use_worktree: true }, isDropdownOpen: true });
+
+    // This file runs unmocked (Windows) `lib/platform`, so the modifier
+    // reads `Alt-click`; the macOS `⌥-click` label is pinned in
+    // `sidebar-node-creation-form.macos.test.tsx`.
+    expect(await screen.findByText('Alt-click spawns in mesh root')).toBeTruthy();
+  });
+
+  it('omits the modifier hint for meshes without a worktree', () => {
+    setup({ mesh: { ...MESH, use_worktree: false }, isDropdownOpen: true });
+
+    expect(screen.queryByText(/spawns in mesh root/)).toBeNull();
+  });
 });

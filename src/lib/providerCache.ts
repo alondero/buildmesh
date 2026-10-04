@@ -23,6 +23,12 @@ export function deleteDefaultProviderPromise(meshId: number): void {
   defaultProviderByMesh.delete(meshId);
 }
 
+/** Evict every mesh's cached default (e.g. after the app-wide default or
+ *  a provider account changes, which can shift resolution for all meshes). */
+export function clearDefaultProviderPromises(): void {
+  defaultProviderByMesh.clear();
+}
+
 export function resetProviderCachesForTests(): void {
   providerListPromise = null;
   defaultProviderByMesh.clear();

@@ -569,6 +569,11 @@ export function GitIssuesTab() {
                         // with a mesh-, node-, or PR-keyed menu on
                         // the same numeric id.
                         dropdownKey={dropdownId('issue', issue.number)}
+                        // The `+` click resolves the same mesh default
+                        // via `handleDefaultSpawn` — hand the cluster the
+                        // same resolver so its quick-spawn icon matches
+                        // the action (mirrors ArchivedNodesTab).
+                        getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
                         isOpen={openDropdown === issue.number}
                         onToggleDropdown={() =>
                           setOpenDropdown(openDropdown === issue.number ? null : issue.number)
