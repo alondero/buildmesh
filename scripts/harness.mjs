@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
-import { executedTests, planGates } from './harness-plan.mjs';
+import { executedTests, planGates, touchedFormatDiffs } from './harness-plan.mjs';
 
 const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
 const EXIT = { PASS: 0, FAIL: 1, BLOCKED: 2, TIMEOUT: 124 };
@@ -229,6 +229,12 @@ export async function runGate(root, gate, base, paths = []) {
 function classify(gate, code, output, paths) {
   if (code === 124) return { outcome: 'TIMEOUT', reason: 'Deadline exceeded; investigate a hang or resource contention before retrying.' };
   if (code === 127) return { outcome: 'BLOCKED', reason: 'The command could not be started.' };
+  if (gate.touchedFormat && code !== 0) {
+    const { touched, total } = touchedFormatDiffs(output, paths);
+    if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
+    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format only those files with "rustfmt --edition 2021 <file>"; "cargo fmt" would rewrite the whole crate (#2022).`, formatDiffCount: total };
+    return { outcome: 'PASS', count: null, formatDiffCount: total };
+  }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
   const count = gate.tests ? executedTests(gate.tests, output) : null;
   if (gate.tests && !count) return { outcome: 'FAIL', count: 0, reason: 'No passing tests were executed (or the reporter format is unrecognised).' };

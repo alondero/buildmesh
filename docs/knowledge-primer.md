@@ -1,5 +1,7 @@
 # Buildmesh — AI Context
 
+> **Reading this file:** it is ~150 KB. Do not read it whole. List the sections with `rg -n "^#{2,3} " docs/knowledge-primer.md`, then read only the sections for the code you will change, and verify each against its owning module (the code wins on any disagreement).
+
 ## Tech Stack
 - **Frontend:** React 19, Zustand 5, xterm.js 6.x, Tailwind 4, TypeScript ~5.8, Vite 7
 - **Backend:** Tauri 2, Rust, portable-pty, rusqlite 0.32, git2, tokio
@@ -404,7 +406,7 @@ Cross-runtime linked worktrees retain a host administrative backpointer and a re
 
 
 ### Agent Spawning on Windows
-Anthropic and Minimax use `cwrap` spawned via `cmd.exe /c` — **not** direct. Antigravity and OpenCode are spawned **directly** (no cwrap). See `src-tauri/src/commands/agent.rs`.
+Each adapter's `spawn_recipe` (`src-tauri/src/agent/provider/adapters/<id>.rs`) declares a `WindowsShell`: `PowerShell` where ANSI output must propagate (Codex, the plain terminal), `Cmd` for npm `.cmd` shims (e.g. OpenCode, MiniMax Code, DeepSeek Harness, Cline on Windows), or `Direct` for native binaries (e.g. Claude Code, Kimi, Antigravity, Grok). `spawn_environment::wrap` consumes it; macOS/Linux always spawn `Direct`. The adapter is the source of truth — read it rather than trusting this list.
 
 ### Database Pattern
 Use `_inner` helper functions that accept `&Connection` so compound operations keep one connection and writer transactions never re-lock. Public read functions check out `read_conn()` from the eight-connection read-only pool; public mutations lock the dedicated `write_conn()`. SQLite WAL lets those readers run concurrently with the serialized writer. Async request paths use `try_read_conn()` so pool contention has a bounded wait and an error result. See `src-tauri/src/db/mod.rs`.

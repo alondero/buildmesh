@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PreToolUse(Bash) guard: stop an empty/aspirational `git commit`.
+// PreToolUse(Bash|PowerShell) guard: stop an empty/aspirational `git commit`.
 // The #491->#504 incident shipped a commit with nothing meaningfully staged; the PR
 // body described 19 files, the commit held ~0. This denies a *plain* commit (one that
 // does not stage inline) when the staged set is empty, and shows the working tree so
@@ -39,15 +39,19 @@ const SEGMENT_SEP = /&&|\|\||[;&|\n]/;
 const GIT_COMMIT_RE = /^\s*git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*commit\b/;
 const GIT_ADD_RE = /^\s*git\s+(?:-[Cc]\s+\S+\s+|-\S+\s+)*(?:add|stage)\b/;
 
+// PowerShell here-strings (`@'` / `@"` then a newline, closed by `'@` / `"@` at the start
+// of a line) carry multi-line commit messages on Windows.
+const POWERSHELL_HERE_STRING = /@(['"])\r?\n[\s\S]*?\r?\n\1@/g;
+
 export function stripHeredocs(cmd) {
-  // Remove heredoc BODIES (<<EOF / <<'EOF' / <<"EOF" / <<-EOF) before analysis. Their
-  // prose can contain the words "git commit"/"git add" and shell separators (a PR body
-  // or commit message passed to `gh ... <<EOF` or `git commit -F - <<EOF`), which must
-  // never be mistaken for real commands. The leading `git commit -F -` (if any) survives.
-  return String(cmd ?? "").replace(
-    /<<-?\s*(["']?)([A-Za-z_]\w*)\1[\s\S]*?(?:\n|^)[ \t]*\2(?=\s|$)/g,
-    " <<heredoc ",
-  );
+  // Remove heredoc BODIES (<<EOF / <<'EOF' / <<"EOF" / <<-EOF) and PowerShell
+  // here-string bodies before analysis. Their prose can contain the words
+  // "git commit"/"git add" and shell separators (a PR body or commit message passed to
+  // `gh ... <<EOF` or `git commit -F - <<EOF`), which must never be mistaken for real
+  // commands. The leading `git commit -F -` (if any) survives.
+  return String(cmd ?? "")
+    .replace(/<<-?\s*(["']?)([A-Za-z_]\w*)\1[\s\S]*?(?:\n|^)[ \t]*\2(?=\s|$)/g, " <<heredoc ")
+    .replace(POWERSHELL_HERE_STRING, " @here-string@ ");
 }
 
 export function classifyCommand(cmd) {
@@ -122,7 +126,8 @@ function main() {
     process.exit(0);
   }
 
-  if (payload?.tool_name !== "Bash") process.exit(0);
+  // PowerShell is the primary shell on Windows; a Bash-only guard is silently bypassed there.
+  if (payload?.tool_name !== "Bash" && payload?.tool_name !== "PowerShell") process.exit(0);
   const cmd = payload?.tool_input?.command ?? "";
   const cwd = payload?.cwd || process.cwd();
 

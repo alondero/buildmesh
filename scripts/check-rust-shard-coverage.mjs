@@ -9,10 +9,9 @@
 // worse failure than the runner loss the sharding was added to diagnose, so it
 // gets its own gate.
 //
-// Dependency-free on purpose, like the other `scripts/check-*.mjs`: no YAML
-// parser is available in this repo, and adding one to read a block we
-// generate ourselves is not worth it. The matrix format is fixed, so parse it
-// strictly and fail loudly if it ever changes shape.
+// The matrix is parsed strictly by scripts/ci/rust-shards.mjs, which the local
+// shard runner (scripts/rust-test-shards.mjs) shares, so CI and local runs
+// split the suite identically.
 //
 // Usage:
 //   node scripts/check-rust-shard-coverage.mjs              # lists the tests itself
@@ -23,10 +22,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const workflowPath = path.join(repoRoot, '.github', 'workflows', 'verify.yml');
+import { readShards, repoRoot } from './ci/rust-shards.mjs';
 
 const argv = process.argv.slice(2);
 const listFileIndex = argv.indexOf('--list-file');
@@ -37,53 +33,13 @@ function fail(message) {
   process.exit(1);
 }
 
-// --- the shard matrix, read out of the workflow -----------------------------
-function readShards() {
-  const source = fs.readFileSync(workflowPath, 'utf8');
-  const start = source.indexOf('  rust-tests:');
-  if (start === -1) fail('verify.yml has no `rust-tests` job. Sharding was removed; drop this gate or restore the job.');
-  const matrixStart = source.indexOf('shard:', start);
-  if (matrixStart === -1) fail('verify.yml has no `shard:` matrix under `rust-tests`.');
-  // The block ends at the next job-level key (`steps:`, `timeout-minutes:`),
-  // which sits at a shallower indent than the matrix items.
-  const rest = source.slice(matrixStart);
-  const endMatch = rest.search(/\n {4}[a-z][\w-]*:/);
-  const block = endMatch === -1 ? rest : rest.slice(0, endMatch + 1);
-
-  const shards = [];
-  // Deliberately strict about shape, tolerant about indentation width: each
-  // entry must be a `- label: X` line followed by an `args: "Y"` line, and
-  // anything else in the block is a hard error rather than a silent skip.
-  let pending = null;
-  const labelOf = (line) => line.match(/^\s*- label: (\S+)$/);
-  const argsOfLine = (line) => line.match(/^\s*args: "(.*)"$/);
-  for (const line of block.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed === 'shard:') continue;
-    if (trimmed.startsWith('#')) continue;
-    const label = labelOf(line);
-    if (label) {
-      if (pending) fail(`Shard "${pending.label}" has no args line:\n  ${line}`);
-      pending = { label: label[1] };
-      continue;
-    }
-    const args = argsOfLine(line);
-    if (args) {
-      if (!pending) fail(`An args line has no preceding - label line:\n  ${line}`);
-      shards.push({ label: pending.label, args: args[1] });
-      pending = null;
-      continue;
-    }
-    if (/^\s*(fail-fast|matrix):/.test(line)) continue;
-    fail(
-      `The \`rust-tests\` matrix has a line this gate does not understand:\n  ${line}\n` +
-        'It parses that block directly, so keep each shard entry as exactly two lines: ' +
-        '`- label: <name>` then `args: "<libtest arguments>"`.',
-    );
+// --- the shard matrix, read out of the workflow (shared with the local runner)
+function readWorkflowShards() {
+  try {
+    return readShards();
+  } catch (error) {
+    fail(error.message);
   }
-  if (pending) fail(`Shard "${pending.label}" has no args line.`);
-  if (shards.length === 0) fail('No shards found under the `rust-tests` matrix.');
-  return shards;
 }
 
 // libtest: positive filters are OR'd substrings; `--skip X` takes X as the
@@ -121,7 +77,7 @@ function readTests() {
     .map((line) => line.replace(/^test\s+/, '').replace(/: test$/, ''));
 }
 
-const shards = readShards();
+const shards = readWorkflowShards();
 const tests = readTests();
 if (tests.length === 0) fail('`cargo test --lib -- --list` returned no tests; cannot verify coverage.');
 
