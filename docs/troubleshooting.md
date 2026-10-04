@@ -357,12 +357,68 @@ Record the Buildmesh version from **Settings → General → About**, the OS
 version, and the last action before the failure. Do not upload the whole log if
 it contains prompts, paths, credentials, or tokens.
 
+## Buildmesh shows a startup error and never opens
+
+Some failures happen before Buildmesh's database is open, which means before
+the app window can show anything at all. When that happens you get a native
+error dialog instead of a window, naming the stage that failed and the absolute
+path of the log it wrote to.
+
+The dialog's buttons depend on the failure:
+
+- **Copy these details** puts the stage, the message, the technical error, the
+  log path, the build, and a timestamp on your clipboard. Paste that straight
+  into a bug report.
+- **Open the log folder** opens the profile's `logs` directory in your file
+  manager. Offered whenever that folder actually holds the record of the
+  failure.
+- **Try again** re-runs the step that failed, and appears only for failures
+  that happen before Buildmesh has installed anything — an app-data or log
+  directory it could not create or open, for example. It is deliberately not
+  offered for a database failure: Buildmesh has already latched its database
+  connection at that point, so a retry would report success for a database that
+  is still broken. Fix the cause and launch again instead.
+- **Quit** closes the dialog and ends the process.
+
+The stages you will see, and what each means:
+
+- **the app data directory** — Buildmesh could not create or write the folder
+  it keeps its data in. Check permissions and free disk space, then try again.
+- **the log directory** — Buildmesh could not create or open its `logs` folder.
+  Ant-virus and backup tools sometimes hold it. This is the one failure with
+  no log behind it, so the dialog says so and the details are on screen only.
+- **the app data profile** — another Buildmesh process owns this profile and
+  the claim could not be established. See the section above.
+- **the local database** — `buildmesh.db` could not be opened. See below.
+- **startup services** — a post-migration step failed. Restarting usually
+  clears it; if it persists, attach the log.
+
+### If the database is reported as damaged
+
+When Buildmesh says the database "is not a valid database", the file is
+unreadable as SQLite. **Nothing has been deleted or changed** — Buildmesh never
+renames, moves, or replaces a database it did not create, and it will not do so
+for you.
+
+To start with an empty Buildmesh, move the file aside yourself and launch
+again:
+
+```
+move "%APPDATA%\com.alond.buildmesh\buildmesh.db" "%APPDATA%\com.alond.buildmesh\buildmesh.db.corrupt"
+```
+
+If the database matters — your Meshes and Agent Nodes live in it — copy it
+somewhere safe before moving it, and mention the file in your report. Starting
+empty loses the Meshes and Agent Nodes it contained, so it is your call, not
+Buildmesh's.
+
 ## Buildmesh reports “Couldn't initialize Buildmesh”
 
-Buildmesh only finishes starting once it has loaded both authoritative
-snapshots — your Meshes and your Agent Nodes. If either one fails, the
-window says so instead of showing a workspace, with one line per failed
-part of startup:
+This is the other half of the above, and it looks different: the window *did*
+open. Buildmesh only finishes starting once it has loaded both authoritative
+snapshots — your Meshes and your Agent Nodes. If either one fails, the window
+says so instead of showing a workspace, with one line per failed part of
+startup:
 
 - `Meshes: …` — the Mesh list could not be read.
 - `Agent Nodes: …` — the Agent Node list could not be read.
@@ -380,9 +436,11 @@ update per lifecycle event. In practice the underlying cause is a database
 that is locked, full, or not writable, or a backend that was still starting —
 fix that, and the real workspace appears on the next Retry.
 
-If Retry keeps reporting the same error, keep the matching
-`logs\buildmesh.log` (see the section above) and report it with the version
-from **Settings → General → About**.
+The panel names the absolute path of the log it wrote to, so you can go
+straight to it. If Retry keeps reporting the same error, keep that file and
+report it with the version from **Settings → General → About**. If Buildmesh
+never gets far enough to show this panel at all, you get a native dialog
+instead — see the section above.
 
 ## What to include in a report
 

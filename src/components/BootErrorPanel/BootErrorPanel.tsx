@@ -29,7 +29,23 @@
  * failure without the user having to discover the missing UI. The
  * default aria-live="assertive" is the right tone for "boot failed,
  * retry now."
+ *
+ * The absolute log path (issue #1525)
+ * -----------------------------------
+ * This panel used to promise that details were written to "buildmesh.log" —
+ * a bare filename in a sentence with no path, so a user reporting a boot
+ * failure still had no way to find the file without already knowing where
+ * Buildmesh keeps its data. It now asks the backend where the log actually
+ * is (`get_diagnostic_paths`, resolved during the startup bootstrap that runs
+ * before the database) and prints the absolute path. The path is fetched
+ * rather than passed in because this panel is rendered for failures that
+ * happen *after* boot, where the backend is alive and can answer; the
+ * failures that happen before the backend is usable get a native error
+ * surface instead, which shows the same resolved path.
  */
+import { useEffect, useState } from 'react';
+import { getDiagnosticPaths } from '../../lib/tauri';
+
 interface Props {
   /**
    * Pre-formatted error text (`runBoot`'s newline-joined
@@ -47,6 +63,25 @@ interface Props {
 }
 
 export function BootErrorPanel({ error, onRetry, busy = false }: Props) {
+  const [logPath, setLogPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    // The backend may itself be the thing that failed, in which case this
+    // rejects. That is not worth a second error surface: the raw error is
+    // already on screen and copyable, so the path line is simply omitted.
+    let cancelled = false;
+    getDiagnosticPaths()
+      .then((paths) => {
+        if (!cancelled) setLogPath(paths.main_log);
+      })
+      .catch(() => {
+        if (!cancelled) setLogPath(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div
       role="alert"
@@ -64,9 +99,22 @@ export function BootErrorPanel({ error, onRetry, busy = false }: Props) {
         </div>
         <div className="text-sm text-text-secondary">
           Buildmesh failed to load its initial state. The raw error is
-          below — you can copy it for a bug report. Details have also been
-          written to <code className="text-text-primary font-medium">buildmesh.log</code>.
+          below — you can copy it for a bug report.
         </div>
+        {/* The resolved absolute log path (issue #1525). `select-all` +
+            `break-all` so a long `%APPDATA%` path can be copied and wraps
+            rather than overflowing the card. */}
+        {logPath && (
+          <div className="text-sm text-text-secondary">
+            Details have also been written to{' '}
+            <code
+              data-testid="boot-log-path"
+              className="text-text-primary font-medium select-all break-all"
+            >
+              {logPath}
+            </code>
+          </div>
+        )}
         {/* Raw error in a copyable <pre> block, same pattern as
             ErrorBoundary: a fixed-height scrollable surface so a long
             stack trace can't blow up the layout, and the user can

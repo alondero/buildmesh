@@ -432,8 +432,13 @@ jobs:
           # module lands in one place instead of going untested. The
           # `--skip agent::sandbox::` is the same nested-path problem the other
           # shards solve: `sandbox::` would otherwise also claim it.
+          # `--skip commands::diagnostics::` is that same problem again: this
+          # shard's `diagnostics::` filter is a substring of the `commands::`
+          # command module added in #1525, so without the skip both this shard
+          # and `commands-http` would claim those tests and the coverage gate
+          # would fail. `commands::` (commands-http) keeps them.
           - label: remaining
-            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: windowing:: --skip agent::sandbox::"
+            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: --skip agent::sandbox:: --skip commands::diagnostics::"
 
     steps:
       - name: Checkout

@@ -25,6 +25,7 @@ pub mod secret_scrubber;
 mod services;
 mod session_capture;
 mod session_naming;
+mod startup;
 mod windowing;
 
 use tauri::Manager;
@@ -153,14 +154,48 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Issue #1525 — diagnostics come *before* the database. Resolving
+            // the app-data profile and opening the bounded `buildmesh.log`
+            // used to happen inside `run_profile_startup` alongside (and
+            // therefore after) `db::init`, so every failure most likely to
+            // stop the app opening left no window, no message, and no log.
+            //
+            // `AppHandle` rather than `&App` so the retry closure below can
+            // call back in without holding a borrow of the whole app.
+            let handle = app.handle().clone();
+            let bootstrap = match startup::bootstrap(&handle) {
+                Ok(bootstrap) => bootstrap,
+                Err(failure) => {
+                    // The only stages that can fail this early are the
+                    // retry-safe ones — nothing process-global is installed
+                    // yet — so the user gets a real second attempt rather
+                    // than a button that cannot work.
+                    let outcome = {
+                        let mut retry = || startup::bootstrap(&handle).map(|_| ());
+                        startup::report_with_retry(failure, &mut retry)
+                    };
+                    match outcome {
+                        // The user's retry got past it; carry on with the
+                        // normal startup.
+                        Ok(()) => startup::installed()
+                            .expect("a successful retry installs the bootstrap"),
+                        // The user quit with the failure outstanding. It is
+                        // already recorded and already on screen, so this
+                        // only has to end the process.
+                        Err(failure) => {
+                            return Err(Box::new(failure) as Box<dyn std::error::Error>)
+                        }
+                    }
+                }
+            };
+
             // One Buildmesh process per app-data profile (issue #1521). The
             // claim is taken before `db::init` and before any worker starts,
             // and the startup body runs only for the winner — see
             // `instance_guard` for why a second process must reach neither.
             // The `.dev` profile is a different profile, so a dev build still
             // runs alongside a stable install.
-            let app_dir = app.path().app_data_dir().unwrap();
-            std::fs::create_dir_all(&app_dir)?;
+            let app_dir = bootstrap.profile_dir().to_path_buf();
             let identifier = app.config().identifier.clone();
             let identity = match instance_guard::ProfileIdentity::new(&identifier, &app_dir) {
                 Ok(identity) => identity,
@@ -176,7 +211,7 @@ pub fn run() {
                         eprintln!("could not record the forwarded launch: {e}");
                     }
                 },
-                || run_profile_startup(app, &identity),
+                || run_profile_startup(app, &identity, bootstrap),
             ) {
                 Ok(instance_guard::Startup::Owned) => Ok(()),
                 // The profile belongs to a live process: its window was asked
@@ -185,6 +220,8 @@ pub fn run() {
                 Err(instance_guard::StartupError::Ownership(error)) => {
                     Err(ownership_failure(&identifier, &app_dir, error))
                 }
+                // The continuation already reported the failure through the
+                // native error surface, so this only propagates it.
                 Err(instance_guard::StartupError::Body(error)) => Err(error),
             }
         })
@@ -421,6 +458,9 @@ pub fn run() {
             commands::file_watcher::unwatch_agent_node,
             // Clipboard (native read bypasses macOS WKWebView permission popup)
             commands::clipboard::read_clipboard,
+            // Resolved absolute log locations (issue #1525) so the Boot Error
+            // Panel can name a real path instead of "buildmesh.log".
+            commands::diagnostics::get_diagnostic_paths,
             // Frontend log bridge
             commands::frontend_log::log_frontend,
             // Attention (renamed from `*_attention_session` to `*_attention_node`)
@@ -593,14 +633,36 @@ pub fn run() {
 /// background workers. Takes the identity rather than a raw path so the
 /// canonicalised profile dir has exactly one owner and the claim target can be
 /// logged with the rest of the startup line.
+///
+/// `bootstrap` is the [`startup::Bootstrap`] installed before this function
+/// was entered, so the database, preferences, and migrations below are all
+/// already inside a live `tracing` pipeline (issue #1525). That is the whole
+/// reason the non-fatal `warn!` lines in this function have ever been
+/// reviewable: before the bootstrap, they were emitted before a subscriber
+/// existed and went nowhere.
+///
+/// A fatal failure here has already been shown to the user through
+/// [`startup::report`], so the returned error only has to end the process.
 fn run_profile_startup(
     app: &mut tauri::App,
     identity: &instance_guard::ProfileIdentity,
+    bootstrap: &'static startup::Bootstrap,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_dir = identity.profile_dir().to_path_buf();
     // Initialize database
     let db_path = app_dir.join("buildmesh.db");
-    db::init(&db_path)?;
+    // The one failure that most often stops Buildmesh opening, and the reason
+    // `buildmesh.log` now exists before it: a corrupt or unreadable database
+    // used to return here as an opaque error with no log behind it. The
+    // failure is typed, so a corrupt image is reported as damage with
+    // instructions and an unopenable one as a permissions problem — and
+    // neither ever touches the file.
+    db::init(&db_path).map_err(|error| {
+        startup::report(
+            startup::StartupFailure::database(&db_path, &error)
+                .with_paths(Some(bootstrap.main_log().to_path_buf()), Some(app_dir.clone())),
+        )
+    })?;
 
     // Wire the preferences module to the same on-disk location as the DB.
     // This MUST run before the v19 custom-account migration below —
@@ -610,6 +672,22 @@ fn run_profile_startup(
     // list, which requires `APP_DATA_DIR` to be set. See
     // `db::migrate_agent_node_provider_id_custom_accounts` (issue #575).
     preferences::init(app_dir.clone());
+    // A `preferences.json` that will not parse degrades to defaults by design
+    // — the resolver accessors log and carry on — so this is deliberately NOT
+    // a fatal `StartupStage`: `preferences::init` cannot fail, and refusing to
+    // launch over a settings file would strand an app whose database is fine.
+    // What it *is*, though, is a user who believes settings that are not in
+    // effect are, so make it loud and name the file. This is the first read
+    // of it in the session, and — unlike the resolver's own line — it lands in
+    // `buildmesh.log` now that the bootstrap subscriber is installed.
+    if let Err(error) = preferences::load() {
+        tracing::error!(
+            "startup stage=preferences: could not read {} — running with \
+             default preferences for this session: {}",
+            app_dir.join("preferences.json").display(),
+            error
+        );
+    }
     for pairing in preferences::provider_pairings()
         .into_iter()
         .filter(|pairing| pairing.surface == preferences::ApiSurface::OpenAI)
@@ -692,35 +770,18 @@ fn run_profile_startup(
         tracing::warn!("Launch history migration failed: {error}");
     }
 
-    // Set up file-based logging with tracing.
+    // Leave the bootstrap phase (issue #1525). The subscriber and its
+    // size-bounded, fixed-name `buildmesh.log` writer were installed before
+    // `db::init`; this only stops mirroring the log to stderr, so a long
+    // `debug`-level session does not spray into a developer's terminal.
     //
-    // Size-bounded, NOT `rolling::never`: a long multi-node session at
-    // `debug` level (esp. during a build storm) would otherwise grow a
-    // single `buildmesh.log` without bound — a disk-fill risk, and a
-    // log that eventually eats the disk is the opposite of a
-    // diagnostic. `diagnostics::main_log_writer` rotates by BYTES at a
-    // fixed cap while keeping the file's name `buildmesh.log`: the
-    // `/use`, `/verify`, `/verify-ui` skills and `scripts/*log*.ps1`
-    // tail that exact path, so a time-based appender (which renames to
-    // `buildmesh.YYYY-MM-DD-HH.log`) would break them AND fail to bound
-    // a single hour's size. Wrapped in `non_blocking` so log writes
-    // never block the async runtime.
-    let log_dir = app_dir.join("logs");
-    std::fs::create_dir_all(&log_dir)?;
-    let file_appender = diagnostics::main_log_writer(&log_dir)
-        .expect("failed to open rotating buildmesh.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("buildmesh_lib=debug".parse().unwrap())
-            .add_directive("buildmesh=debug".parse().unwrap())
-            .add_directive("info".parse().unwrap()))
-        .init();
-
-    // Keep guard alive for app lifetime
-    Box::leak(Box::new(_guard));
+    // There is deliberately no second `tracing_subscriber::fmt().init()` here.
+    // That call is what used to sit at this point, which is precisely why the
+    // database, preferences, and migrations above ran with no logging at all.
+    // Installing once, early, means early records are already in the same
+    // bounded log the rest of the session appends to — nothing to bridge, and
+    // no "a global default subscriber has already been set" panic.
+    bootstrap.promote();
 
     // The claim target is in the startup line on purpose (issue #1521): when
     // a user reports that Buildmesh "did not start", the first question is
@@ -731,12 +792,19 @@ fn run_profile_startup(
         identity.claim_target()
     );
 
+    let log_dir = bootstrap.log_dir().to_path_buf();
+
     if let Err(error) = diagnostics::start_crash_watchdog(&log_dir) {
         tracing::error!("failed to start external crash watchdog: {error}");
     }
 
     // Commit legacy cancellation before crash recovery can offer auto-resume.
-    services::legacy_retirement::retire_legacy_automation()?;
+    services::legacy_retirement::retire_legacy_automation().map_err(|error| {
+        startup::report(
+            startup::StartupFailure::services("retiring legacy automation", &error)
+                .with_paths(Some(bootstrap.main_log().to_path_buf()), Some(app_dir.clone())),
+        )
+    })?;
 
     // Crash recovery: any sessions still marked 'running' from a previous
     // crash have no live process. Mark them suspended for auto-resume.
@@ -892,26 +960,28 @@ fn run_profile_startup(
 /// which profile it owns must not open that profile's database, because the
 /// next process to do the same would sweep the live instance's Agent Nodes.
 ///
-/// A native message box rather than the dialog plugin, because this runs
-/// inside `setup` on the main thread where the plugin's `blocking_show`
-/// deadlocks. Tracing is not installed this early either, so the reason is
-/// recorded in the profile's ownership log.
+/// The surface is the one in [`startup`], so an ownership failure reads like
+/// every other fatal startup failure — same native dialog, same log, same
+/// "copy details" — instead of the second, subtly different message box this
+/// used to raise. The profile's `logs/profile-ownership.log` line is kept:
+/// that file exists even when the main log never opened, and it is what the
+/// existing troubleshooting page points at.
 fn ownership_failure(
     identifier: &str,
     app_dir: &std::path::Path,
     error: instance_guard::OwnershipError,
 ) -> Box<dyn std::error::Error> {
-    let reason = format!(
-        "Buildmesh cannot confirm that it owns its app-data profile, so it \
-         will not start.\n\nCarrying on would risk a second Buildmesh rewriting \
-         the running instance's Agent Nodes.\n\n{error}"
-    );
-    eprintln!("{reason}");
     if let Err(e) = instance_guard::record_claim_failure(app_dir, identifier, &error) {
         eprintln!("could not record the ownership failure: {e}");
     }
-    instance_guard::show_fatal_startup_error(&reason);
-    Box::new(error)
+    let failure = startup::StartupFailure::profile_ownership(&error, app_dir, identifier);
+    // `with_paths` fills in the log location the bootstrap resolved, so the
+    // dialog can offer "open log folder" for this failure too.
+    let failure = match startup::installed_paths() {
+        Some(paths) => failure.with_paths(Some(paths.main_log), Some(paths.profile_dir)),
+        None => failure,
+    };
+    startup::report(failure)
 }
 
 /// Set when the user (or frontend) closes a window through the normal
