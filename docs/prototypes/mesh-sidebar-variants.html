@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<!-- PROTOTYPE — throwaway mesh-sidebar exploration, not production code. See SKILL.md "prototype". -->
+<!-- Fourteen variants (A–F round 1, G–K round 2 compact, L–N round 3 finalists), switchable via ?variant= + floating bottom bar. -->
+<html lang="en" data-variant="A">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Mesh sidebar, 6 variants</title>
+<style>
+  :root{
+    --bg-base:#0a0a0e; --bg-surface:#111116; --bg-card:#16161d; --bg-hover:#1b1b23;
+    --border:rgba(255,255,255,.09); --text:#e2e8f0; --text2:#94a3b8; --muted:#7a8492;
+    --cyan:#00d4ff; --green:#22c55e; --amber:#f59e0b; --red:#ef4444; --violet:#8b5cf6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg-base);color:var(--text);
+    font-family:ui-sans-serif,system-ui,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;font-size:14px}
+  .page{display:grid;grid-template-columns:320px 1fr;min-height:100vh}
+  .demo{background:var(--bg-surface);border-right:1px solid var(--border);padding:12px;
+    position:sticky;top:0;height:100vh;overflow:auto}
+  .demo-label{font-size:11px;color:var(--muted);margin:0 0 8px;letter-spacing:.02em}
+  .explain{padding:28px 32px 120px;max-width:760px}
+  .explain h1{font-size:20px;margin:0 0 4px}
+  .explain h1 .tag{font-size:11px;font-weight:600;color:#062b36;background:var(--cyan);
+    border-radius:4px;padding:2px 6px;vertical-align:2px;margin-right:8px}
+  .explain p.sub{color:var(--text2);margin:0 0 20px;font-size:13px}
+  .explain h2{font-size:13px;margin:24px 0 8px;color:var(--text)}
+  .explain ul{margin:6px 0;padding-left:20px;color:var(--text2);font-size:13px;line-height:1.55}
+  .explain li strong{color:var(--text);font-weight:600}
+  .legend{display:flex;flex-wrap:wrap;gap:8px 14px;font-size:12px;color:var(--text2);margin:8px 0}
+  .pill{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:8px;height:8px;border-radius:50%;flex:none}
+  /* shared bits */
+  .sb{font-size:13px}
+  .meshname{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .node{border-radius:6px}
+  .fault{font-size:11px;font-weight:700;border-radius:5px;padding:1px 6px;line-height:18px;white-space:nowrap}
+  .fault-warn{color:var(--amber);background:rgba(245,158,11,.14)}
+  .fault-err{color:var(--red);background:rgba(239,68,68,.13)}
+  .st{font-size:12px;flex:none;width:16px;text-align:center}
+  .st-run{color:var(--cyan)} .st-idle{color:var(--cyan);opacity:.55} .st-att{color:var(--amber)}
+  .st-ok{color:var(--green)} .st-err{color:var(--red)} .st-sus{color:var(--violet)} .st-mut{color:var(--muted)}
+  .prov{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:4px;
+    padding:0 4px;line-height:16px;flex:none}
+  .hover-actions{display:none;gap:2px}
+  .node:hover .hover-actions,.mrow:hover .hover-actions{display:inline-flex}
+  .iconbtn{width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;
+    border:0;background:transparent;color:var(--text2);border-radius:5px;cursor:pointer;font-size:13px}
+  .iconbtn:hover{background:var(--bg-hover);color:var(--text)}
+  .spawnbtn{border:1px solid var(--border);background:transparent;color:var(--text2);
+    border-radius:6px;font-size:12px;padding:2px 8px;cursor:pointer;flex:none}
+  .spawnbtn:hover{color:var(--cyan);border-color:rgba(0,212,255,.4)}
+  .spawnbtn.primary{background:var(--cyan);border-color:var(--cyan);color:#062b36;font-weight:700}
+  .count{font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;flex:none}
+  .meshbar{width:3px;border-radius:2px;flex:none;align-self:stretch}
+  /* switcher */
+  .switcher{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:50;
+    display:flex;align-items:center;gap:4px;background:#0e0e13;border:1px solid rgba(0,212,255,.45);
+    border-radius:999px;padding:6px 8px;box-shadow:0 6px 24px rgba(0,0,0,.6)}
+  .switcher button{border:0;background:transparent;color:var(--text);border-radius:999px;
+    min-width:30px;height:30px;cursor:pointer;font-size:14px;padding:0 8px}
+  .switcher button:hover{background:var(--bg-hover)}
+  .switcher button[aria-current="true"]{background:var(--cyan);color:#062b36;font-weight:700}
+  .switcher .vlabel{font-size:12px;color:var(--text2);padding:0 8px;min-width:210px;text-align:center}
+  .switcher .vlabel strong{color:var(--text)}
+  .variant{display:none}
+  html[data-variant="A"] #vA,html[data-variant="B"] #vB,html[data-variant="C"] #vC,
+  html[data-variant="D"] #vD,html[data-variant="E"] #vE,html[data-variant="F"] #vF,
+  html[data-variant="G"] #vG,html[data-variant="H"] #vH,html[data-variant="I"] #vI,
+  html[data-variant="J"] #vJ,html[data-variant="K"] #vK{display:block}
+  html[data-variant="A"] #eA,html[data-variant="B"] #eB,html[data-variant="C"] #eC,
+  html[data-variant="D"] #eD,html[data-variant="E"] #eE,html[data-variant="F"] #eF,
+  html[data-variant="G"] #eG,html[data-variant="H"] #eH,html[data-variant="I"] #eI,
+  html[data-variant="J"] #eJ,html[data-variant="K"] #eK,
+  html[data-variant="L"] #vL,html[data-variant="M"] #vM,html[data-variant="N"] #vN{display:block}
+  html[data-variant="L"] #eL,html[data-variant="M"] #eM,html[data-variant="N"] #eN{display:block}
+  /* round 3 (L–N finalists): enclosed mesh card kit */
+  .mbox{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:4px}
+  .mbox summary{list-style:none;cursor:pointer;display:block;border-radius:6px}
+  .mbox .mhead{display:flex;align-items:center;gap:8px;padding:5px 6px 5px 3px}
+  .mbox .nodes{margin:0 4px 4px 8px;display:grid;gap:2px;border-top:1px solid var(--border);padding-top:6px}
+  #vM .mbox{position:relative}
+  #vM .tip{display:none;position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:5;
+    background:var(--bg-overlay);border:1px solid rgba(0,212,255,.4);border-radius:6px;
+    padding:6px 8px;font-size:12px;color:var(--text2)}
+  #vM .mbox:hover .tip,#vM .mbox:focus-within .tip{display:block}
+  #vM details[open] .tip{display:none}
+  #vN .nnodes{display:none;margin:0 4px 4px 8px}
+  #vN .nrow.open .nnodes{display:grid;gap:2px;border-top:1px solid var(--border);padding-top:6px;margin-top:4px}
+  #vN .nrow.open .chev{transform:rotate(90deg)}
+  #vN .chev{display:inline-block;transition:transform .12s}
+  #vN .nhead{width:100%;text-align:left;cursor:pointer;font:inherit;color:inherit}
+  /* round 2 (G–K): shared compact-row kit */
+  .crow{display:flex;align-items:center;gap:8px;background:var(--bg-card);
+    border:1px solid var(--border);border-radius:8px;padding:7px 8px 7px 5px}
+  .crow .nodes{display:none}
+  .segbar{display:flex;height:5px;border-radius:3px;overflow:hidden;flex:none;background:rgba(255,255,255,.08)}
+  .segbar i{display:block;height:100%}
+  .explain .evariant{display:none}
+  kbd{border:1px solid var(--border);border-radius:4px;padding:0 5px;font-size:11px;background:var(--bg-card)}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="demo">
+    <p class="demo-label">PROTOTYPE — mesh sidebar variants (mock data, read-only)</p>
+
+    <!-- ============ VARIANT A : tidy current ============ -->
+    <section class="variant" id="vA"><div class="sb">
+      <div style="display:flex;gap:6px;margin-bottom:10px">
+        <span class="count" style="flex:1;text-align:center;background:var(--bg-card);border-radius:6px;padding:4px">Workspace</span>
+        <span class="count" style="flex:1;text-align:center;padding:4px">Attention · 1</span>
+      </div>
+      <p class="count" style="margin:6px 2px 4px">ACTIVE</p>
+      <div>
+        <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;background:var(--bg-card)">
+          <span class="meshbar" style="background:#22d3ee"></span>
+          <span class="meshname">buildmesh</span>
+          <span class="count">3</span>
+          <span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+ New</button>
+        </div>
+        <div style="margin:2px 0 10px 11px;display:grid;gap:2px">
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(34,211,238,.07)">
+            <span class="st st-run">●</span><span style="flex:1">auth-refactor</span>
+            <span class="prov">claude</span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35)">
+            <span class="st st-att">●</span><span style="flex:1">probe-tabs <span class="fault fault-warn">needs you</span></span>
+            <span class="prov">codex</span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+            <span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span>
+            <span class="prov">term</span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+        </div>
+        <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px">
+          <span class="meshbar" style="background:#34d399"></span>
+          <span class="meshname">docs-site</span><span class="count">2</span><span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+ New</button>
+        </div>
+        <div style="margin:2px 0 10px 11px;display:grid;gap:2px">
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+            <span class="st st-ok">✓</span><span style="flex:1">release-notes</span><span class="prov">claude</span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+            <span class="st st-sus">⏸</span><span style="flex:1">link-check</span><span class="prov">opencode</span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+        </div>
+        <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;opacity:.75">
+          <span class="meshbar" style="background:#fbbf24"></span>
+          <span class="meshname">infra</span>
+          <span class="fault fault-warn">↓3 behind</span>
+          <span class="fault fault-err">sync failed</span>
+          <span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+ New</button>
+        </div>
+        <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:6px">
+          <span class="meshbar" style="background:#fb7185"></span>
+          <span class="meshname">mobile-app</span><span class="count">2</span><span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+ New</button>
+        </div>
+        <div style="margin:2px 0 0 11px;display:grid;gap:2px">
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35)">
+            <span class="st st-err">✗</span><span style="flex:1">login-screen <span class="fault fault-err">failed · retry</span></span>
+            <span class="hover-actions"><button class="iconbtn" tabindex="-1">↻</button><button class="iconbtn" tabindex="-1">×</button></span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+            <span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="prov">term</span>
+          </div>
+        </div>
+      </div>
+    </div></section>
+
+    <!-- ============ VARIANT B : quiet rows ============ -->
+    <section class="variant" id="vB"><div class="sb">
+      <div style="display:flex;align-items:baseline;gap:8px;margin:2px 2px 10px">
+        <span style="font-weight:700">Workspace</span>
+        <span class="count">4 meshes · 7 agents · 1 needs you</span>
+      </div>
+      <div style="display:grid;gap:10px">
+        <div>
+          <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:4px 2px">
+            <span class="meshname">buildmesh</span><span class="count">3</span><span style="flex:1"></span>
+            <span class="hover-actions"><button class="spawnbtn" tabindex="-1">+ New agent</button></span>
+          </div>
+          <div style="display:grid">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--cyan)"></span><span style="flex:1">auth-refactor</span><span class="count">running</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--amber)"></span><span style="flex:1;font-weight:600">probe-tabs</span><span class="count" style="color:var(--amber)">waiting on you</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:transparent;border:1px solid var(--muted)"></span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:4px 2px">
+            <span class="meshname">docs-site</span><span class="count">2</span><span style="flex:1"></span>
+            <span class="hover-actions"><button class="spawnbtn" tabindex="-1">+ New agent</button></span>
+          </div>
+          <div style="display:grid">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--green)"></span><span style="flex:1">release-notes</span><span class="count">ready</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--violet)"></span><span style="flex:1">link-check</span><span class="count">suspended</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:4px 2px">
+            <span class="meshname">infra</span><span class="count" style="color:var(--amber)">↓3 · sync failed</span><span style="flex:1"></span>
+            <span class="hover-actions"><button class="spawnbtn" tabindex="-1">+ New agent</button></span>
+          </div>
+          <p class="count" style="margin:2px 2px">No agents yet</p>
+        </div>
+        <div>
+          <div class="mrow" style="display:flex;align-items:center;gap:8px;padding:4px 2px">
+            <span class="meshname">mobile-app</span><span class="count">2</span><span style="flex:1"></span>
+            <span class="hover-actions"><button class="spawnbtn" tabindex="-1">+ New agent</button></span>
+          </div>
+          <div style="display:grid">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--red)"></span><span style="flex:1;font-weight:600">login-screen</span><span class="count" style="color:var(--red)">failed</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 2px;border-bottom:1px solid var(--border)">
+              <span class="dot" style="background:var(--muted)"></span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">starting</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="count" style="margin:12px 2px 0">No mesh colours, no provider icons, no drag handles. Detail lives in tooltips and the probe panel.</p>
+    </div></section>
+
+    <!-- ============ VARIANT C : triage sections ============ -->
+    <section class="variant" id="vC"><div class="sb">
+      <button class="spawnbtn primary" style="width:100%;padding:7px" tabindex="-1">+ New agent…</button>
+      <p class="count" style="margin:12px 2px 6px">NEEDS YOU · 2</p>
+      <div style="display:grid;gap:6px">
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:8px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.4);border-radius:8px">
+          <span class="st st-att">●</span>
+          <span style="flex:1"><span style="font-weight:600">probe-tabs</span><br><span class="count">buildmesh · codex · waiting 12m</span></span>
+          <button class="spawnbtn" tabindex="-1">Open</button>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:8px;background:rgba(239,68,68,.07);border:1px solid rgba(239,68,68,.4);border-radius:8px">
+          <span class="st st-err">✗</span>
+          <span style="flex:1"><span style="font-weight:600">login-screen</span><br><span class="count">mobile-app · failed · retry available</span></span>
+          <button class="spawnbtn" tabindex="-1">Retry</button>
+        </div>
+      </div>
+      <p class="count" style="margin:14px 2px 6px">WORKING · 2</p>
+      <div style="display:grid;gap:2px">
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-card);border-radius:6px">
+          <span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">buildmesh</span>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-card);border-radius:6px">
+          <span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">mobile-app · starting</span>
+        </div>
+      </div>
+      <p class="count" style="margin:14px 2px 6px">QUIET · 3</p>
+      <div style="display:grid;gap:2px;opacity:.8">
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 8px">
+          <span class="st st-ok">✓</span><span style="flex:1">release-notes</span><span class="count">docs-site</span>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 8px">
+          <span class="st st-idle">○</span><span style="flex:1">lint-cleanup</span><span class="count">buildmesh</span>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 8px">
+          <span class="st st-sus">⏸</span><span style="flex:1">link-check</span><span class="count">docs-site</span>
+        </div>
+      </div>
+      <p class="count" style="margin:14px 2px 6px">MESH HEALTH · 1</p>
+      <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-card);border-radius:6px">
+        <span class="st st-att">!</span><span style="flex:1">infra</span><span class="count">↓3 · sync failed</span>
+      </div>
+    </div></section>
+
+    <!-- ============ VARIANT D : mesh cards ============ -->
+    <section class="variant" id="vD"><div class="sb" style="display:grid;gap:10px">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span class="dot" style="background:#22d3ee"></span>
+          <span class="meshname">buildmesh</span><span class="count">3 agents</span><span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+</button>
+        </div>
+        <div style="display:grid;gap:2px">
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+            <span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">claude · running</span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(245,158,11,.4);border-radius:6px;background:rgba(245,158,11,.07)">
+            <span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b> <span class="fault fault-warn">needs you</span></span>
+            <button class="spawnbtn" tabindex="-1">Open</button>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+            <span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span>
+          </div>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span class="dot" style="background:#34d399"></span>
+          <span class="meshname">docs-site</span><span class="count">2 agents</span><span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+</button>
+        </div>
+        <div style="display:grid;gap:2px">
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+            <span class="st st-ok">✓</span><span style="flex:1">release-notes</span><span class="count">ready</span>
+          </div>
+          <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+            <span class="st st-sus">⏸</span><span style="flex:1">link-check</span><span class="count">suspended</span>
+          </div>
+        </div>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid rgba(245,158,11,.4);border-radius:10px;padding:10px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="dot" style="background:#fbbf24"></span>
+          <span class="meshname">infra</span><span style="flex:1"></span>
+          <span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+          <button class="spawnbtn" tabindex="-1">+</button>
+        </div>
+        <p class="count" style="margin:6px 0 0">Empty — spawn the first agent, or <u>fix sync</u>.</p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:10px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <span class="dot" style="background:#fb7185"></span>
+          <span class="meshname">mobile-app</span><span class="count">2 agents</span><span style="flex:1"></span>
+          <button class="spawnbtn" tabindex="-1">+</button>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px;border:1px solid rgba(239,68,68,.4);border-radius:6px;background:rgba(239,68,68,.07)">
+          <span class="st st-err">✗</span><span style="flex:1"><b>login-screen</b> <span class="fault fault-err">failed</span></span>
+          <button class="spawnbtn" tabindex="-1">Retry</button>
+        </div>
+        <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+          <span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">starting</span>
+        </div>
+      </div>
+    </div></section>
+
+    <!-- ============ VARIANT E (radical): activity feed ============ -->
+    <section class="variant" id="vE"><div class="sb">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px;margin-bottom:10px">
+        <span class="count">What should happen next?</span>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="spawnbtn primary" tabindex="-1">Reply in probe-tabs</button>
+          <button class="spawnbtn" tabindex="-1">Retry login-screen</button>
+        </div>
+      </div>
+      <div style="display:grid;gap:0">
+        <div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">
+          <span class="st st-att">●</span>
+          <span style="flex:1"><b>probe-tabs</b> asked you a question <span class="count">· 12m</span><br>
+          <span class="count">buildmesh · codex · “Which API should the tab read?”</span></span>
+        </div>
+        <div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">
+          <span class="st st-err">✗</span>
+          <span style="flex:1"><b>login-screen</b> failed to start <span class="count">· 26m</span><br>
+          <span class="count">mobile-app · claude · resume expired — <u>retry</u> or <u>start fresh</u></span></span>
+        </div>
+        <div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">
+          <span class="st st-run">●</span>
+          <span style="flex:1">auth-refactor is editing <span class="count">· 3 files · buildmesh</span></span>
+        </div>
+        <div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">
+          <span class="st st-ok">✓</span>
+          <span style="flex:1">release-notes is ready for review <span class="count">· docs-site</span></span>
+        </div>
+        <div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--border)">
+          <span class="st st-att">!</span>
+          <span style="flex:1">infra drifted <span class="count">· ↓3 behind, sync failed · <u>fix</u></span></span>
+        </div>
+        <div style="display:flex;gap:10px;padding:8px 2px;opacity:.7">
+          <span class="st st-mut">○</span>
+          <span style="flex:1;color:var(--text2)">lint-cleanup idle · link-check suspended · deep-link starting</span>
+        </div>
+      </div>
+      <p class="count" style="margin:10px 2px 0">No mesh tree, no per-node buttons. Mesh is context text; actions surface only on the two things that need you.</p>
+    </div></section>
+
+    <!-- ============ VARIANT F (radical): compact dots ============ -->
+    <section class="variant" id="vF"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">7 agents · 1 needs you</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">+ New</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        <details open style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px">
+          <summary style="display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none">
+            <span class="meshname">buildmesh</span>
+            <span style="display:inline-flex;gap:3px">
+              <span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span>
+            </span>
+            <span class="count">3</span><span style="flex:1"></span><span class="count">▾</span>
+          </summary>
+          <div style="margin-top:6px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+              <span class="dot" style="background:var(--cyan)"></span><span style="flex:1">auth-refactor</span>
+              <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+              <span class="dot" style="background:var(--amber)"></span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 4px">
+              <span class="dot" style="background:transparent;border:1px solid var(--muted)"></span><span style="flex:1;color:var(--text2)">lint-cleanup</span>
+            </div>
+          </div>
+        </details>
+        <details style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px">
+          <summary style="display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none">
+            <span class="meshname">docs-site</span>
+            <span style="display:inline-flex;gap:3px">
+              <span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span>
+            </span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span>
+          </summary>
+        </details>
+        <details style="background:var(--bg-card);border:1px solid rgba(245,158,11,.4);border-radius:8px;padding:8px">
+          <summary style="display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none">
+            <span class="meshname">infra</span>
+            <span class="fault fault-warn">↓3</span><span class="fault fault-err">!</span>
+            <span class="count">0</span><span style="flex:1"></span><span class="count">▸</span>
+          </summary>
+        </details>
+        <details style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px">
+          <summary style="display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none">
+            <span class="meshname">mobile-app</span>
+            <span style="display:inline-flex;gap:3px">
+              <span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span>
+            </span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span>
+          </summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">One line per mesh: stacked dots carry status, counts carry scale. Everything else — spawn, retry, delete, health — opens on expand or hover.</p>
+    </div></section>
+
+    <!-- ============ VARIANT G : colour-bar compact (click to expand) ============ -->
+    <section class="variant" id="vG"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">7 agents · 1 needs you</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">+ New</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        <details open>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow"><span class="meshbar" style="background:#22d3ee"></span>
+              <span class="meshname">buildmesh</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+              <span class="count">3</span><span style="flex:1"></span><span class="count">▾</span></span>
+          </summary>
+          <div style="margin:2px 0 2px 8px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+              <span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span>
+              <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px">
+              <span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px">
+              <span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span>
+              <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span>
+            </div>
+          </div>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow"><span class="meshbar" style="background:#34d399"></span>
+              <span class="meshname">docs-site</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+              <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="border-color:rgba(245,158,11,.4)"><span class="meshbar" style="background:#fbbf24"></span>
+              <span class="meshname">infra</span>
+              <span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+              <span class="count">0</span><span style="flex:1"></span><span class="count">▸</span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow"><span class="meshbar" style="background:#fb7185"></span>
+              <span class="meshname">mobile-app</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+              <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span>
+          </summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">F plus A’s colour bar. Click a row to expand; faults stay visible on the collapsed line. The baseline — judge the others against it.</p>
+    </div></section>
+
+    <!-- ============ VARIANT H : hover peek (hover expands, click pins) ============ -->
+    <section class="variant" id="vH"><div class="sb">
+      <style>
+        #vH .peek .nodes{display:none;margin:2px 0 2px 8px}
+        #vH .peek:hover .nodes,#vH .peek:focus-within .nodes,#vH .peek.pinned .nodes{display:grid;gap:2px}
+        #vH .peek:hover .chev,#vH .peek:focus-within .chev,#vH .peek.pinned .chev{transform:rotate(90deg)}
+        #vH .chev{display:inline-block;transition:transform .12s}
+      </style>
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">hover to peek · click to pin</span>
+      </div>
+      <div style="display:grid;gap:4px">
+        <div class="peek" tabindex="0" onclick="this.classList.toggle('pinned')">
+          <span class="crow"><span class="meshbar" style="background:#22d3ee"></span>
+            <span class="meshname">buildmesh</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+            <span class="count">3</span><span style="flex:1"></span><span class="count chev">▸</span></span>
+          <div class="nodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </div>
+        <div class="peek" tabindex="0" onclick="this.classList.toggle('pinned')">
+          <span class="crow"><span class="meshbar" style="background:#34d399"></span>
+            <span class="meshname">docs-site</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count chev">▸</span></span>
+          <div class="nodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-ok">✓</span><span style="flex:1">release-notes</span><span class="count">ready</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-sus">⏸</span><span style="flex:1">link-check</span><span class="count">suspended</span></div>
+          </div>
+        </div>
+        <div class="peek" tabindex="0" onclick="this.classList.toggle('pinned')">
+          <span class="crow" style="border-color:rgba(245,158,11,.4)"><span class="meshbar" style="background:#fbbf24"></span>
+            <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+            <span class="count">0</span><span style="flex:1"></span><span class="hover-actions"><button class="spawnbtn" tabindex="-1">+ New</button></span></span>
+        </div>
+        <div class="peek" tabindex="0" onclick="this.classList.toggle('pinned')">
+          <span class="crow"><span class="meshbar" style="background:#fb7185"></span>
+            <span class="meshname">mobile-app</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count chev">▸</span></span>
+          <div class="nodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:6px"><span class="st st-err">✗</span><span style="flex:1"><b>login-screen</b></span><span class="count" style="color:var(--red)">failed</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">starting</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Hover a row to peek inside — try it here. Click pins it open; keyboard focus works the same. Zero clicks to scan, at the cost of rows shifting under the cursor.</p>
+    </div></section>
+
+    <!-- ============ VARIANT I : headline compact (collapsed line names the one thing) ============ -->
+    <section class="variant" id="vI"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">7 agents</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">+ New</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        <details open>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#22d3ee"></span>
+              <span class="meshname">buildmesh</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+              <span style="flex:1"></span><span class="count">▾</span>
+              <span class="count" style="flex-basis:100%;margin:2px 0 0 11px;color:var(--amber)">probe-tabs needs you · 2 more working</span></span>
+          </summary>
+          <div style="margin:2px 0 2px 8px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#34d399"></span>
+              <span class="meshname">docs-site</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+              <span style="flex:1"></span><span class="count">▸</span>
+              <span class="count" style="flex-basis:100%;margin:2px 0 0 11px">all quiet · release-notes ready</span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap;border-color:rgba(245,158,11,.4)"><span class="meshbar" style="background:#fbbf24"></span>
+              <span class="meshname">infra</span><span class="fault fault-warn">↓3</span>
+              <span style="flex:1"></span><span class="count">▸</span>
+              <span class="count" style="flex-basis:100%;margin:2px 0 0 11px;color:var(--amber)">empty · sync failed — fix before spawning</span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#fb7185"></span>
+              <span class="meshname">mobile-app</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+              <span style="flex:1"></span><span class="count">▸</span>
+              <span class="count" style="flex-basis:100%;margin:2px 0 0 11px;color:var(--red)">login-screen failed · retry available</span></span>
+          </summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Each collapsed row answers “what’s going on here?” in one clause, so you rarely expand at all. Costs a second text line per mesh.</p>
+    </div></section>
+
+    <!-- ============ VARIANT J : signal bar (proportional status strip) ============ -->
+    <section class="variant" id="vJ"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">bar = agent mix</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">+ New</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        <details open>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#22d3ee"></span>
+              <span class="meshname">buildmesh</span><span class="count">3</span><span style="flex:1"></span><span class="count">▾</span>
+              <span class="segbar" style="flex-basis:100%;margin:4px 0 0 11px" title="1 running, 1 needs you, 1 idle"><i style="width:33%;background:var(--cyan)"></i><i style="width:34%;background:var(--amber)"></i><i style="width:33%;background:var(--muted)"></i></span></span>
+          </summary>
+          <div style="margin:2px 0 2px 8px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#34d399"></span>
+              <span class="meshname">docs-site</span><span class="count">2</span><span style="flex:1"></span><span class="count">▸</span>
+              <span class="segbar" style="flex-basis:100%;margin:4px 0 0 11px" title="1 ready, 1 suspended"><i style="width:50%;background:var(--green)"></i><i style="width:50%;background:var(--violet)"></i></span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap;border-color:rgba(245,158,11,.4)"><span class="meshbar" style="background:#fbbf24"></span>
+              <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span><span style="flex:1"></span><span class="count">▸</span>
+              <span class="segbar" style="flex-basis:100%;margin:4px 0 0 11px" title="empty mesh"><i style="width:100%;background:transparent"></i></span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="flex-wrap:wrap"><span class="meshbar" style="background:#fb7185"></span>
+              <span class="meshname">mobile-app</span><span class="count">2</span><span style="flex:1"></span><span class="count">▸</span>
+              <span class="segbar" style="flex-basis:100%;margin:4px 0 0 11px" title="1 failed, 1 starting"><i style="width:50%;background:var(--red)"></i><i style="width:50%;background:var(--muted)"></i></span></span>
+          </summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Dots become one proportional strip: amber/red segments shout from the collapsed line; a fully cyan bar means healthy. Needs the legend (left) until the mapping is learned.</p>
+    </div></section>
+
+    <!-- ============ VARIANT K : attention-led (hot meshes open, quiet ones sleep) ============ -->
+    <section class="variant" id="vK"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">hot ones open themselves</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">Collapse all</button>
+      </div>
+      <div style="display:grid;gap:4px">
+        <details open>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow"><span class="meshbar" style="background:#22d3ee"></span>
+              <span class="meshname">buildmesh</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+              <span class="count">3</span><span style="flex:1"></span><span class="count">▾ auto</span></span>
+          </summary>
+          <div style="margin:2px 0 2px 8px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px">
+              <span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><button class="spawnbtn" tabindex="-1">Open</button>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </details>
+        <details open>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow"><span class="meshbar" style="background:#fb7185"></span>
+              <span class="meshname">mobile-app</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+              <span class="count">2</span><span style="flex:1"></span><span class="count">▾ auto</span></span>
+          </summary>
+          <div style="margin:2px 0 2px 8px;display:grid;gap:2px">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:6px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:6px">
+              <span class="st st-err">✗</span><span style="flex:1"><b>login-screen</b></span><button class="spawnbtn" tabindex="-1">Retry</button>
+            </div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">starting</span></div>
+          </div>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="opacity:.75"><span class="meshbar" style="background:#34d399"></span>
+              <span class="meshname">docs-site</span>
+              <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+              <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span>
+          </summary>
+        </details>
+        <details>
+          <summary style="list-style:none;cursor:pointer">
+            <span class="crow" style="opacity:.75;border-color:rgba(245,158,11,.4)"><span class="meshbar" style="background:#fbbf24"></span>
+              <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+              <span class="count">0</span><span style="flex:1"></span><span class="count">▸</span></span>
+          </summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Meshes that need you open themselves (“▾ auto”); quiet ones stay one line. The “Collapse all” button (top right) resets the board after triage.</p>
+    </div></section>
+
+    <!-- ============ VARIANT L (finalist): bordered compact, click to expand ============ -->
+    <section class="variant" id="vL"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">7 agents · 1 needs you</span>
+        <span style="flex:1"></span><button class="spawnbtn" tabindex="-1">+ New</button>
+      </div>
+      <div style="display:grid;gap:6px">
+        <details class="mbox" open>
+          <summary><span class="mhead"><span class="meshbar" style="background:#22d3ee"></span>
+            <span class="meshname">buildmesh</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+            <span class="count">3</span><span style="flex:1"></span><span class="count">▾</span></span></summary>
+          <div class="nodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span>
+              <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span>
+              <span class="hover-actions"><button class="iconbtn" tabindex="-1">×</button></span></div>
+          </div>
+        </details>
+        <details class="mbox">
+          <summary><span class="mhead"><span class="meshbar" style="background:#34d399"></span>
+            <span class="meshname">docs-site</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span></summary>
+        </details>
+        <details class="mbox" style="border-color:rgba(245,158,11,.4)">
+          <summary><span class="mhead"><span class="meshbar" style="background:#fbbf24"></span>
+            <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+            <span class="count">0</span><span style="flex:1"></span><span class="count">▸</span></span></summary>
+        </details>
+        <details class="mbox">
+          <summary><span class="mhead"><span class="meshbar" style="background:#fb7185"></span>
+            <span class="meshname">mobile-app</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span></summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">G with F’s enclosure: header and nodes share one border, split by a hairline. Click to expand; faults stay on the collapsed line.</p>
+    </div></section>
+
+    <!-- ============ VARIANT M (finalist): hover headline, click to open ============ -->
+    <section class="variant" id="vM"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">hover for the headline · click to open</span>
+      </div>
+      <div style="display:grid;gap:6px">
+        <details class="mbox" open>
+          <summary><span class="mhead"><span class="meshbar" style="background:#22d3ee"></span>
+            <span class="meshname">buildmesh</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+            <span class="count">3</span><span style="flex:1"></span><span class="count">▾</span></span>
+            <span class="tip">probe-tabs needs you · 2 more working</span></summary>
+          <div class="nodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </details>
+        <details class="mbox">
+          <summary><span class="mhead"><span class="meshbar" style="background:#34d399"></span>
+            <span class="meshname">docs-site</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span>
+            <span class="tip">all quiet · release-notes ready</span></summary>
+        </details>
+        <details class="mbox" style="border-color:rgba(245,158,11,.4)">
+          <summary><span class="mhead"><span class="meshbar" style="background:#fbbf24"></span>
+            <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+            <span class="count">0</span><span style="flex:1"></span><span class="count">▸</span></span>
+            <span class="tip">empty · sync failed — fix before spawning</span></summary>
+        </details>
+        <details class="mbox">
+          <summary><span class="mhead"><span class="meshbar" style="background:#fb7185"></span>
+            <span class="meshname">mobile-app</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count">▸</span></span>
+            <span class="tip">login-screen failed · retry available</span></summary>
+        </details>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Hover a collapsed row to preview its headline — try it here. The bubble floats over the list, so rows never shift and nothing can collapse under you. Click still opens the card.</p>
+    </div></section>
+
+    <!-- ============ VARIANT N (finalist): dwell-and-grace hover ============ -->
+    <section class="variant" id="vN"><div class="sb">
+      <div style="display:flex;align-items:center;gap:8px;margin:2px 2px 8px">
+        <span style="font-weight:700">Meshes</span><span class="count">dwell 200ms · grace 350ms</span>
+      </div>
+      <div style="display:grid;gap:6px">
+        <div class="nrow mbox" tabindex="0">
+          <button class="nhead mhead" type="button"><span class="meshbar" style="background:#22d3ee"></span>
+            <span class="meshname">buildmesh</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--cyan)"></span><span class="dot" style="background:var(--amber)"></span><span class="dot" style="background:transparent;border:1px solid var(--muted)"></span></span>
+            <span class="count">3</span><span style="flex:1"></span><span class="count chev">▸</span></button>
+          <div class="nnodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-run">●</span><span style="flex:1">auth-refactor</span><span class="count">running</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);border-radius:6px"><span class="st st-att">●</span><span style="flex:1"><b>probe-tabs</b></span><span class="count" style="color:var(--amber)">needs you</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-idle">○</span><span style="flex:1;color:var(--text2)">lint-cleanup</span><span class="count">idle</span></div>
+          </div>
+        </div>
+        <div class="nrow mbox" tabindex="0">
+          <button class="nhead mhead" type="button"><span class="meshbar" style="background:#34d399"></span>
+            <span class="meshname">docs-site</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--green)"></span><span class="dot" style="background:var(--violet)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count chev">▸</span></button>
+          <div class="nnodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-ok">✓</span><span style="flex:1">release-notes</span><span class="count">ready</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-sus">⏸</span><span style="flex:1">link-check</span><span class="count">suspended</span></div>
+          </div>
+        </div>
+        <div class="nrow mbox" style="border-color:rgba(245,158,11,.4)" tabindex="0">
+          <button class="nhead mhead" type="button"><span class="meshbar" style="background:#fbbf24"></span>
+            <span class="meshname">infra</span><span class="fault fault-warn">↓3</span><span class="fault fault-err">sync failed</span>
+            <span class="count">0</span><span style="flex:1"></span><span class="chev count">·</span></button>
+        </div>
+        <div class="nrow mbox" tabindex="0">
+          <button class="nhead mhead" type="button"><span class="meshbar" style="background:#fb7185"></span>
+            <span class="meshname">mobile-app</span>
+            <span style="display:inline-flex;gap:3px"><span class="dot" style="background:var(--red)"></span><span class="dot" style="background:var(--muted)"></span></span>
+            <span class="count">2</span><span style="flex:1"></span><span class="count chev">▸</span></button>
+          <div class="nnodes">
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:6px"><span class="st st-err">✗</span><span style="flex:1"><b>login-screen</b></span><span class="count" style="color:var(--red)">failed</span></div>
+            <div class="node" style="display:flex;align-items:center;gap:8px;padding:5px 6px"><span class="st st-mut">◌</span><span style="flex:1;color:var(--text2)">deep-link</span><span class="count">starting</span></div>
+          </div>
+        </div>
+      </div>
+      <p class="count" style="margin:10px 2px 0">Rest the cursor on a row to peek — try sweeping down the list: brushes are ignored, and sliding onto a neighbour transfers the peek instead of collapsing it. Click pins a card open.</p>
+    </div></section>
+    <script>(function(){
+      var DWELL=200, GRACE=350, TRANSFER=120;
+      var rows=Array.prototype.slice.call(document.querySelectorAll('#vN .nrow'));
+      var auto=null, openT=null, closeT=null;
+      function clear(){ clearTimeout(openT); clearTimeout(closeT); }
+      function open(row){ if(auto&&auto!==row) auto.classList.remove('open'); auto=row; row.classList.add('open'); }
+      function enter(row){
+        clear();
+        if(row.classList.contains('pinned')){ if(auto&&auto!==row){auto.classList.remove('open');auto=null;} return; }
+        var ms=(auto&&auto!==row)?TRANSFER:DWELL;
+        openT=setTimeout(function(){open(row);},ms);
+      }
+      function leave(row){
+        clearTimeout(openT);
+        closeT=setTimeout(function(){
+          if(auto===row&&!row.classList.contains('pinned')){row.classList.remove('open');auto=null;}
+        },GRACE);
+      }
+      rows.forEach(function(row){
+        var head=row.querySelector('.nhead');
+        row.addEventListener('mouseenter',function(){enter(row);});
+        row.addEventListener('mouseleave',function(){leave(row);});
+        row.addEventListener('focus',function(){enter(row);});
+        row.addEventListener('blur',function(){leave(row);});
+        head.addEventListener('click',function(){
+          clear();
+          if(row.classList.contains('pinned')){row.classList.remove('pinned','open');if(auto===row)auto=null;}
+          else{if(auto&&auto!==row){auto.classList.remove('open');auto=null;}row.classList.add('pinned','open');}
+        });
+      });
+    })();</script>
+  </div>
+  <div class="explain">
+    <h1><span class="tag">PROTOTYPE</span><span id="etitle">A — Tidy Current</span></h1>
+    <p class="sub">Mock data: 4 meshes, 7 agents, 1 waiting on you, 1 failed, 1 mesh fault (infra ↓3 + sync failed). Read-only; hover rows to reveal hidden actions. Flip variants below or with <kbd>←</kbd> <kbd>→</kbd>.</p>
+    <div class="legend" aria-label="Status legend">
+      <span class="pill"><span class="dot" style="background:var(--cyan)"></span>working</span>
+      <span class="pill"><span class="dot" style="background:var(--amber)"></span>needs you</span>
+      <span class="pill"><span class="dot" style="background:var(--red)"></span>failed</span>
+      <span class="pill"><span class="dot" style="background:var(--green)"></span>ready</span>
+      <span class="pill"><span class="dot" style="background:var(--violet)"></span>suspended</span>
+      <span class="pill"><span class="dot" style="background:var(--muted)"></span>idle / starting</span>
+    </div>
+    <section class="evariant" id="eA">
+      <h2>What changed vs today</h2>
+      <ul>
+        <li><strong>One fault language:</strong> drift, behind-count, and sync-failure collapse into at most two pills per mesh; the <strong>!</strong> always means “click to fix in Worktrees”, never decoration.</li>
+        <li><strong>Hover-only chrome:</strong> delete, retry, drag handle hide until hover; status dot + name + provider carry the row at rest.</li>
+        <li><strong>Attention keeps its border:</strong> only “needs you” and “failed” rows get tinted fills; everything else drops the mesh-colour wash.</li>
+      </ul>
+      <h2>Kept / dropped</h2>
+      <ul><li><strong>Kept:</strong> mesh tree, Active grouping, per-mesh + New, provider tags, counts.</li>
+      <li><strong>Dropped from rest state:</strong> drag glyphs, sync icon (failure-only pill instead), restart affordances on healthy rows.</li></ul>
+    </section>
+    <section class="evariant" id="eB">
+      <h2>B — Quiet Rows</h2>
+      <ul>
+        <li><strong>Text over glyphs:</strong> status is a plain word (running, waiting on you, failed); the dot is 8px and decorative.</li>
+        <li><strong>No mesh colours at all</strong> — identity comes from the name and the header count line, not washes or accent bars.</li>
+        <li><strong>Spawn on hover only</strong>, so an idle sidebar reads as a calm list, not a wall of buttons.</li>
+      </ul>
+      <h2>Trade-off</h2>
+      <ul><li>Scans slower for “which mesh is hot?” across 10+ meshes; wins on visual noise. Best if you mostly live in 2–4 meshes.</li></ul>
+    </section>
+    <section class="evariant" id="eC">
+      <h2>C — Triage Sections</h2>
+      <ul>
+        <li><strong>Attention is the hierarchy:</strong> Needs you / Working / Quiet replace the mesh tree as the top split; mesh becomes a second-line context.</li>
+        <li><strong>One spawn entry point</strong> at the top (“New agent…”) instead of a + on every mesh.</li>
+        <li><strong>Mesh health gets its own shelf</strong> at the bottom so infra faults can’t hide inside a collapsed mesh.</li>
+      </ul>
+      <h2>Trade-off</h2>
+      <ul><li>Fastest “what do I owe the machine?” read; weakest “where does this agent live?” intuition. Pairs well with the canvas grid for spatial context.</li></ul>
+    </section>
+    <section class="evariant" id="eD">
+      <h2>D — Mesh Cards</h2>
+      <ul>
+        <li><strong>Each mesh is a card</strong> with its own header (dot, name, count, +) — scannable at 6–8 meshes, roomy click targets.</li>
+        <li><strong>Faults promoted to card chrome:</strong> the infra card carries the ↓3 + sync-failed pills in its header and an inline “fix sync” line.</li>
+        <li><strong>Action rows only when actionable:</strong> Open / Retry buttons appear solely on needs-you and failed nodes.</li>
+      </ul>
+      <h2>Trade-off</h2>
+      <ul><li>Uses ~30% more vertical space than A/B; the calmest to click through with a trackpad.</li></ul>
+    </section>
+    <section class="evariant" id="eE">
+      <h2>E — Activity Feed (radical)</h2>
+      <ul>
+        <li><strong>No tree at all:</strong> one time-ordered feed; mesh names shrink to grey context text.</li>
+        <li><strong>“What should happen next?” card</strong> owns the only two primary buttons (reply, retry) — everything else is read-only narrative.</li>
+        <li><strong>Quiet agents collapse to one line</strong> at the bottom; health events (drift) are feed entries, not badges.</li>
+      </ul>
+      <h2>Trade-off</h2>
+      <ul><li>Most “modern agent inbox” feeling; loses drag-reorder, per-mesh spawn, and the spatial map of where work lives. A real departure — needs the canvas to carry structure.</li></ul>
+    </section>
+    <section class="evariant" id="eF">
+      <h2>F — Compact Dots (radical)</h2>
+      <ul>
+        <li><strong>One line per mesh:</strong> stacked status dots + count tell you “3 agents, one needs you” without listing anyone.</li>
+        <li><strong>Expand to work:</strong> disclosure rows reveal nodes; faults (↓3, !) live on the collapsed line so nothing hides.</li>
+        <li><strong>Densest option:</strong> ~12 meshes fit where today fits 5; hover/expand carries every action.</li>
+      </ul>
+      <h2>Trade-off</h2>
+      <ul><li>Maximum density, minimum glanceability into names. Built for operators juggling many meshes who navigate by mesh, not by node.</li></ul>
+    </section>
+    <section class="evariant" id="eG">
+      <h2>G — Colour-bar compact (round-2 baseline)</h2>
+      <ul>
+        <li><strong>Exactly your brief:</strong> F’s one-line rows plus A’s colour bar. Click expands; faults stay on the collapsed line.</li>
+        <li>Judge H–K against this. If none beats it, G is the build.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eH">
+      <h2>H — Hover peek</h2>
+      <ul>
+        <li><strong>Hover expands, click pins:</strong> zero clicks to scan every mesh; pinned rows survive cursor travel; keyboard focus behaves like hover.</li>
+        <li><strong>Risk:</strong> rows shift under the cursor and accidental brushes fire expansion — trackpad-heavy users may hate it. A small open delay would be the production tuning knob.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eI">
+      <h2>I — Headline compact</h2>
+      <ul>
+        <li><strong>The collapsed line names the one thing:</strong> “probe-tabs needs you”, “login-screen failed”, “all quiet”. You expand only to act, not to understand.</li>
+        <li><strong>Cost:</strong> a second text line per mesh and a headline rule to design (most severe fault wins; ties broken by recency).</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eJ">
+      <h2>J — Signal bar</h2>
+      <ul>
+        <li><strong>Dots become one proportional strip:</strong> a sliver of amber/red shouts from the collapsed line; an all-cyan bar reads healthy without reading anything.</li>
+        <li><strong>Cost:</strong> the segment→status mapping must be learned (legend provided); thin segments are hard to hit as anything but signal.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eK">
+      <h2>K — Attention-led</h2>
+      <ul>
+        <li><strong>Hot meshes open themselves</strong> (“▾ auto”); quiet ones sleep at one dimmed line. Triage in one glance, then “Collapse all” resets the board.</li>
+        <li><strong>Risk:</strong> the sidebar rearranges itself as statuses flip — spatial memory suffers. Best if attention flips are infrequent, worst in a very lively session.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eL">
+      <h2>L — Bordered compact (finalist, the safe build)</h2>
+      <ul>
+        <li><strong>G plus F’s enclosure:</strong> header and nodes share one card border, split by a hairline. Click to expand, faults on the collapsed line.</li>
+        <li>No hover behaviour at all — nothing moves unless you click it. If M and N lose, L ships.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eM">
+      <h2>M — Hover headline (finalist)</h2>
+      <ul>
+        <li><strong>Hover shows a floating headline bubble</strong> (“probe-tabs needs you · 2 more working”); it overlays the list, so rows never shift and your tunnel scenario cannot happen.</li>
+        <li>Click still opens the card. Trade-off: the headline rule (most severe fault wins) needs designing, and the bubble briefly covers the row below.</li>
+      </ul>
+    </section>
+    <section class="evariant" id="eN">
+      <h2>N — Dwell-and-grace hover (finalist, try sweeping the list)</h2>
+      <ul>
+        <li><strong>200ms dwell</strong> ignores passing brushes; <strong>350ms grace</strong> survives cursor travel; sliding onto a neighbour <strong>transfers</strong> the peek (120ms) instead of collapsing it. Click pins.</li>
+        <li>Trade-off: the most engineered option — three timing knobs to tune, and constant expand/collapse motion for users who mostly navigate by click (L people).</li>
+      </ul>
+    </section>
+    <h2>What today is telling you (audit)</h2>
+    <ul>
+      <li><strong>Must know at a glance:</strong> mesh identity, node name, working vs waiting-on-you vs broken, and how many agents each mesh holds.</li>
+      <li><strong>Should know on demand:</strong> provider, pairing, drift/behind/sync faults with a fix path, retry/resume on failed rows.</li>
+      <li><strong>Noise candidates:</strong> permanent drag handles, colour washes on every row, provider icons on every row, sync icon at rest, restart buttons on healthy rows, dual Workspace/Attention tabs plus an Active label.</li>
+    </ul>
+    <h2>How to answer</h2>
+    <ul><li>Tell me your favourite (or “header of B with rows of D” — mixes are the expected answer) and I’ll fold the winner into the real sidebar properly, then move this file to a throwaway branch.</li></ul>
+  </div>
+</div>
+<nav class="switcher" aria-label="Prototype variant switcher">
+  <button id="swPrev" aria-label="Previous variant">←</button>
+  <button data-v="A" aria-current="true">A</button>
+  <button data-v="B" aria-current="false">B</button>
+  <button data-v="C" aria-current="false">C</button>
+  <button data-v="D" aria-current="false">D</button>
+  <button data-v="E" aria-current="false">E</button>
+  <button data-v="F" aria-current="false">F</button>
+  <button data-v="G" aria-current="false">G</button>
+  <button data-v="H" aria-current="false">H</button>
+  <button data-v="I" aria-current="false">I</button>
+  <button data-v="J" aria-current="false">J</button>
+  <button data-v="K" aria-current="false">K</button>
+  <button data-v="L" aria-current="false">L</button>
+  <button data-v="M" aria-current="false">M</button>
+  <button data-v="N" aria-current="false">N</button>
+  <button id="swNext" aria-label="Next variant">→</button>
+  <span class="vlabel" id="swLabel"><strong>A</strong> — Tidy Current</span>
+</nav>
+<script>
+(function(){
+  var ORDER=["A","B","C","D","E","F","G","H","I","J","K","L","M","N"];
+  var NAMES={A:"Tidy Current",B:"Quiet Rows",C:"Triage Sections",D:"Mesh Cards",E:"Activity Feed (radical)",F:"Compact Dots (radical)",G:"Colour-bar compact",H:"Hover peek",I:"Headline compact",J:"Signal bar",K:"Attention-led",L:"Bordered compact",M:"Hover headline",N:"Dwell-and-grace hover"};
+  var TITLES={A:"A — Tidy Current",B:"B — Quiet Rows",C:"C — Triage Sections",D:"D — Mesh Cards",E:"E — Activity Feed (radical)",F:"F — Compact Dots (radical)",G:"G — Colour-bar compact",H:"H — Hover peek",I:"I — Headline compact",J:"J — Signal bar",K:"K — Attention-led",L:"L — Bordered compact",M:"M — Hover headline",N:"N — Dwell-and-grace hover"};
+  function current(){var m=new URLSearchParams(location.search).get("variant");return ORDER.indexOf(m)>=0?m:"A";}
+  function show(v,push){
+    document.documentElement.dataset.variant=v;
+    document.querySelectorAll(".switcher [data-v]").forEach(function(b){b.setAttribute("aria-current",b.dataset.v===v?"true":"false");});
+    document.getElementById("swLabel").innerHTML="<strong>"+v+"</strong> — "+NAMES[v];
+    document.getElementById("etitle").textContent=TITLES[v];
+    var url=new URL(location.href);url.searchParams.set("variant",v);
+    if(push){history.pushState({v:v},"",url);}else{history.replaceState({v:v},"",url);}
+  }
+  document.querySelectorAll(".switcher [data-v]").forEach(function(b){b.addEventListener("click",function(){show(b.dataset.v,true);});});
+  function step(d){var i=(ORDER.indexOf(current())+d+ORDER.length)%ORDER.length;show(ORDER[i],true);}
+  document.getElementById("swPrev").addEventListener("click",function(){step(-1);});
+  document.getElementById("swNext").addEventListener("click",function(){step(1);});
+  document.addEventListener("keydown",function(e){
+    var t=e.target;if(t&&(t.tagName==="INPUT"||t.tagName==="TEXTAREA"||t.isContentEditable))return;
+    if(e.key==="ArrowLeft"){step(-1);}else if(e.key==="ArrowRight"){step(1);}
+  });
+  window.addEventListener("popstate",function(){show(current(),false);});
+  show(current(),false);
+})();
+</script>
+</body>
+</html>
