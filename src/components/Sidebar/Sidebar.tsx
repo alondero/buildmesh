@@ -22,6 +22,15 @@ import { NodeActivityCluster, clusterActivityNodes } from '../../lib/nodeActivit
 import { AttentionList } from './AttentionList';
 import { needsAgentAttention } from '../../lib/status';
 import { MeshItem } from './MeshItem';
+import { CompactMeshItem } from './CompactMeshItem';
+
+// PROTOTYPE (variant L, "bordered compact") — dev-only preview of the winning
+// sidebar direction. Enabled via `?sidebar=compact` or
+// `localStorage["bm.sidebar"] === "compact"`; default path is untouched.
+const COMPACT_SIDEBAR =
+  typeof window !== 'undefined' &&
+  (new URLSearchParams(window.location.search).get('sidebar') === 'compact' ||
+    window.localStorage.getItem('bm.sidebar') === 'compact');
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';
@@ -40,6 +49,14 @@ const KEYBOARD_SENSOR_OPTIONS = { coordinateGetter: sortableKeyboardCoordinates 
 // Issue #1939 — stable empty identity for the sortable-id retention below,
 // so the band-empty initial state shares one reference like `EMPTY_CLUSTERS`.
 const EMPTY_SORTABLE_IDS: number[] = [];
+
+// PROTOTYPE (compact rows) — the colour bar doubles as the reorder handle
+// (click = picker, drag = reorder), so a press must travel 5px before a drag
+// activates and clicks pass through. Module-level for the same referential
+// stability `KEYBOARD_SENSOR_OPTIONS` above needs (issue #1748). Side effect
+// on the default rows: their ⋮⋮ handle also gains the 5px grace, which only
+// filters out accidental micro-drags.
+const POINTER_SENSOR_OPTIONS = { activationConstraint: { distance: 5 } };
 
 export function Sidebar() {
   const { width, isResizing, handleMouseDown } = useSidebarResize();
@@ -257,12 +274,13 @@ export function Sidebar() {
   // defaultCoordinateGetter would translate freely, which doesn't fit a
   // vertical list. Space picks up the focused handle, Enter picks it
   // up too, Arrow keys move, Escape drops the item back where it
-  // started. No options on PointerSensor — matches the dnd-kit default
-  // sensor set so existing pointer behaviour (drag starts on
-  // pointerdown of the handle, clicks elsewhere on the row still
-  // select the mesh) is unchanged.
+  // started. PointerSensor carries a 5px activation distance (PROTOTYPE:
+  // the compact colour bar is both picker and handle, so clicks must pass
+  // through) — the only change to existing behaviour is that a handle drag
+  // starts after 5px of travel instead of on pointerdown, which filters out
+  // accidental micro-drags; clicks elsewhere on the row still select.
   const sensors = useSensors(
-    useSensor(PointerSensor),
+    useSensor(PointerSensor, POINTER_SENSOR_OPTIONS),
     useSensor(KeyboardSensor, KEYBOARD_SENSOR_OPTIONS),
   );
 
@@ -295,8 +313,10 @@ export function Sidebar() {
 
   // Issue #1939 — one row renderer for both bands. Inactive rows render
   // `dimmed` (presentational only: same structure, same spawn affordance).
-  const renderMeshRow = (mesh: Mesh, dimmed: boolean) => (
-    <MeshItem
+  const renderMeshRow = (mesh: Mesh, dimmed: boolean) => {
+    const Row = COMPACT_SIDEBAR ? CompactMeshItem : MeshItem;
+    return (
+    <Row
       key={mesh.id}
       mesh={mesh}
       isSelected={selectedMeshId === mesh.id}
@@ -318,7 +338,8 @@ export function Sidebar() {
       onDeleteNode={handleDeleteNode}
       getDefaultProvider={getDefaultProvider}
     />
-  );
+    );
+  };
 
   return (
     <div className="relative flex h-full" style={{ width }}>
