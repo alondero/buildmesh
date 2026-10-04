@@ -97,12 +97,46 @@ function createGitFixture() {
   return fixtureRoot;
 }
 
-function runHook(fixtureRoot, command) {
+function runHook(fixtureRoot, command, toolName = 'Bash') {
   return spawnSync(process.execPath, [hookPath], {
-    input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: fixtureRoot }),
+    input: JSON.stringify({ tool_name: toolName, tool_input: { command }, cwd: fixtureRoot }),
     encoding: 'utf8',
   });
 }
+
+test('documentation guard reads PowerShell here-string commit messages', () => {
+  const exempt = "git add src/App.tsx; git commit -m @'\nfeat: don't change the app\n\ndocs: none — internal refactor\n'@";
+  assert.equal(classifyCommitCommand(exempt).hasAddBefore, true);
+  assert.equal(hasDocumentationExemption(exempt), true);
+  const doubleQuoted = 'git commit -m @"\nfeat: change\n\ndocs: none — generated file\n"@';
+  assert.equal(hasDocumentationExemption(doubleQuoted), true);
+  // A here-string body is message text: its words are never commands.
+  const prose = "git commit -m @'\nfeat: change\n\ngit add docs/user-guide.md later\n'@";
+  assert.equal(classifyCommitCommand(prose).hasAddBefore, false);
+  assert.equal(hasDocumentationExemption(prose), false);
+});
+
+test('the executable hook guards commits made through the PowerShell tool', () => {
+  const fixtureRoot = createGitFixture();
+  try {
+    mkdirSync(join(fixtureRoot, 'src'));
+    writeFileSync(join(fixtureRoot, 'src', 'App.tsx'), 'export const App = () => null;\n');
+    execFileSync('git', ['add', 'src/App.tsx'], { cwd: fixtureRoot });
+
+    const denial = runHook(fixtureRoot, "git commit -m @'\nfeat: change the app\n'@", 'PowerShell');
+    assert.equal(denial.status, 0);
+    assert.equal(denied(denial.stdout), true);
+
+    const exempt = runHook(fixtureRoot, "git commit -m @'\nfeat: change the app\n\ndocs: none — internal only\n'@", 'PowerShell');
+    assert.equal(exempt.status, 0);
+    assert.equal(exempt.stdout, '');
+
+    const otherTool = runHook(fixtureRoot, 'git commit -m "feat: change the app"', 'Read');
+    assert.equal(otherTool.stdout, '');
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
 
 function denied(output) {
   return JSON.parse(output).hookSpecificOutput.permissionDecision === 'deny';

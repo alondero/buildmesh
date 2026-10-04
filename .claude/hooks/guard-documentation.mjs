@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// PreToolUse(Bash) guard: require a documentation decision before committing
+// PreToolUse(Bash|PowerShell) guard: require a documentation decision before committing
 // behavior-sensitive changes. The decision is pure; the hook supplies a
 // read-only Git snapshot for the commit shape it detected. Ambiguous shell
 // commands fail open because CI is the authoritative post-commit check.
@@ -14,11 +14,15 @@ import { resolve } from "node:path";
 const MAX_BUFFER = 32 * 1024 * 1024;
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
+// PowerShell here-strings (`@'` / `@"` then a newline, closed by `'@` / `"@` at the start
+// of a line) are how Windows sessions pass multi-line commit messages.
+const POWERSHELL_HERE_STRING = /@(['"])\r?\n([\s\S]*?)\r?\n\1@/g;
+const HERE_STRING_PLACEHOLDER = "@here-string@";
+
 export function stripHeredocs(command) {
-  return String(command ?? "").replace(
-    /<<-?\s*(["']?)([A-Za-z_]\w*)\1[\s\S]*?(?:\n|^)[ \t]*\2(?=\s|$)/g,
-    " <<heredoc ",
-  );
+  return String(command ?? "")
+    .replace(/<<-?\s*(["']?)([A-Za-z_]\w*)\1[\s\S]*?(?:\n|^)[ \t]*\2(?=\s|$)/g, " <<heredoc ")
+    .replace(POWERSHELL_HERE_STRING, ` ${HERE_STRING_PLACEHOLDER} `);
 }
 
 function splitShellSegments(command) {
@@ -242,6 +246,10 @@ function commitMessageValues(classification) {
   return values;
 }
 
+function hereStringBodies(command) {
+  return [...String(command ?? "").matchAll(POWERSHELL_HERE_STRING)].map((match) => match[2]);
+}
+
 function heredocBodies(command) {
   return [...String(command ?? "").matchAll(/<<-?\s*(["']?)([A-Za-z_]\w*)\1\r?\n([\s\S]*?)\r?\n[ \t]*\2(?=\s|$)/g)].map((match) => match[3]);
 }
@@ -253,6 +261,9 @@ export function hasDocumentationExemption(command, { cwd = process.cwd() } = {})
 
   for (const value of commitMessageValues(classification)) {
     if (value.kind === "message" && hasReasonedExemption(value.value)) return true;
+    if (value.kind === "message" && value.value === HERE_STRING_PLACEHOLDER) {
+      if (hereStringBodies(text).some(hasReasonedExemption)) return true;
+    }
     if (value.kind === "file" && value.value !== "-") {
       try {
         if (hasReasonedExemption(readFileSync(resolve(cwd, value.value), "utf8"))) return true;
@@ -464,7 +475,8 @@ function main() {
   } catch {
     return;
   }
-  if (payload?.tool_name !== "Bash") return;
+  // PowerShell is the primary shell on Windows; a Bash-only guard is silently bypassed there.
+  if (payload?.tool_name !== "Bash" && payload?.tool_name !== "PowerShell") return;
   try {
     const command = payload?.tool_input?.command ?? "";
     const classification = classifyCommitCommand(command);

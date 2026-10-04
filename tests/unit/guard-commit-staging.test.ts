@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { classifyCommand, decide } from "../../.claude/hooks/guard-commit-staging.mjs";
 
 describe("classifyCommand", () => {
@@ -123,5 +127,35 @@ describe("decide", () => {
       throw new Error("not a git repository");
     };
     expect(decide("git commit -m x", provider)).toBeNull();
+  });
+});
+
+describe("PowerShell commands", () => {
+  it("classifies a here-string commit message as message text, not commands", () => {
+    const cmd = "git commit -m @'\nfix: don't stage\n\ngit add happens later\n'@";
+    expect(classifyCommand(cmd)).toEqual({ isCommit: true, isPlainCommit: true });
+  });
+
+  it("denies an empty commit run through the PowerShell tool entrypoint", () => {
+    const hookPath = join(__dirname, "..", "..", ".claude", "hooks", "guard-commit-staging.mjs");
+    const repo = mkdtempSync(join(tmpdir(), "buildmesh-staging-hook-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: repo });
+      writeFileSync(join(repo, "a.ts"), "export {};\n");
+      const env = { ...process.env };
+      delete env.VITEST;
+      const run = (toolName: string) =>
+        spawnSync(process.execPath, [hookPath], {
+          input: JSON.stringify({ tool_name: toolName, tool_input: { command: "git commit -m 'wip'" }, cwd: repo }),
+          encoding: "utf8",
+          env,
+        });
+      const powershell = run("PowerShell");
+      expect(powershell.status).toBe(0);
+      expect(JSON.parse(powershell.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(run("Read").stdout).toBe("");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   });
 });
