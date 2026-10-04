@@ -10,7 +10,7 @@
 //! the Spawn Menu derivation that previously lived next to the lifecycle
 //! commands in the same 2,400-line `commands::agent` file.
 
-use crate::agent::session_lifecycle::{self, SessionLifecycleSink as _};
+use crate::agent::session_lifecycle;
 use crate::db;
 use crate::pty::PtyRegistry;
 use portable_pty::{Child, MasterPty};
@@ -1751,6 +1751,25 @@ mod tests {
         }
     }
 
+    /// Submitting a prompt must publish the stored `work_resumed` envelope.
+    /// The legacy attention-clear event has no status, so a desktop that
+    /// still shows "Starting…" never leaves it.
+    #[test]
+    fn submitted_input_publishes_the_running_lifecycle() {
+        let blocking = crate::agent::session_lifecycle::testing::RecordingSink::new();
+        let payload = crate::agent::session_lifecycle::commit_user_resumed(&blocking, 7)
+            .unwrap()
+            .expect("a live row accepts the resume");
+        let desktop = crate::agent::session_lifecycle::testing::RecordingSink::new();
+        super::publish_submitted_input(&desktop, payload);
+        let events = desktop.lifecycle_changed();
+        assert_eq!(events.len(), 1, "submitting input must publish agent-lifecycle, not only the legacy clear");
+        assert_eq!(events[0].session_id, 7);
+        assert_eq!(events[0].status, crate::models::SessionStatus::Running);
+        assert_eq!(events[0].kind, crate::agent::session_lifecycle::LifecycleKind::WorkResumed);
+        assert_eq!(*desktop.attention_cleared(), vec![7]);
+    }
+
     /// Regression test for the sync core: an unregistered session must short-
     /// circuit on the PTY write before the DB read. Without the `?` ordering
     /// the unit-test DB-not-initialised panic surfaces as a test failure.
@@ -1845,46 +1864,57 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     if !activity.submitted {
         return Ok(());
     }
-    let should_signal = crate::commands::run_blocking("write_to_agent_signal", move || {
+    let published = crate::commands::run_blocking("write_to_agent_signal", move || {
         write_to_agent_signal_blocking(session_id)
     })
     .await?;
-    if should_signal {
-        // Route through the SessionLifecycle sink so all `attention-cleared`
-        // emits pass through one owner — matches the invariant in
-        // `session_lifecycle.rs` that no caller emits lifecycle events
-        // directly. (`on_attention_cleared` would also write `Running`
-        // status, which `write_to_agent` intentionally doesn't — user
-        // input doesn't by itself mark the node as no longer awaiting.)
+    if let Some(payload) = published {
         let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
-        sink.emit_attention_cleared(session_id);
+        publish_submitted_input(&sink, payload);
     }
     Ok(())
 }
 
-/// Slow-path DB work for [`write_to_agent`]. The PTY write and autoclear
-/// disarm already ran on the async runtime by the time this is called;
-/// only the attention-cleared transition is left, and that requires a DB
-/// read (to skip plain-shell providers) and a DB write (to flip status
-/// out of `AwaitingInput`). Returns `Ok(true)` when the caller should
-/// emit `attention-cleared`.
+/// Publish a resume envelope that was already committed on the blocking pool.
 ///
-/// The read is here because plain-shell providers have no LLM attention
-/// state to clear — a shell's Enter is just shell input, and flipping
-/// status to `Running` would render a spurious "Running" badge for a
-/// shell sitting at a prompt (issue #535).
-pub(crate) fn write_to_agent_signal_blocking(session_id: i64) -> Result<bool, String> {
+/// The legacy `attention-cleared` event does not carry a status. Desktop
+/// ignores it for the badge, so a node whose list snapshot was still
+/// `spawning` stays on "Starting…" after the user sends a prompt unless this
+/// also publishes `agent-lifecycle`.
+pub(crate) fn publish_submitted_input(
+    sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
+    payload: crate::agent::session_lifecycle::LifecycleChangedPayload,
+) {
+    let session_id = payload.session_id;
+    sink.emit_lifecycle_changed(payload);
+    sink.emit_attention_cleared(session_id);
+}
+
+/// Commit a submitted keystroke's resume on the blocking pool.
+///
+/// Plain-shell providers have no LLM attention state to clear — a shell's
+/// Enter is just shell input, and flipping status to `Running` would render
+/// a spurious "Running" badge for a shell sitting at a prompt (issue #535).
+/// Returns the stored envelope so the async caller can publish it. `None`
+/// means the keystroke was shell input, or the row rejected the transition.
+/// A commit error is logged and treated as "nothing to publish": the PTY
+/// bytes were already accepted.
+pub(crate) fn write_to_agent_signal_blocking(
+    session_id: i64,
+) -> Result<Option<crate::agent::session_lifecycle::LifecycleChangedPayload>, String> {
     if should_skip_attention_signals(session_id) {
-        return Ok(false);
+        return Ok(None);
     }
-    // Status write routes through SessionLifecycle (issue #132). The
-    // sink here is `DbOnlySink` because the blocking core has no
-    // `AppHandle`; the corresponding `attention-cleared` emit is the
-    // caller's responsibility (the `should_signal` flag tells the
-    // caller to emit, preserving the original behaviour where the
-    // emit lived in the async wrapper).
-    session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
-    Ok(true)
+    match crate::agent::session_lifecycle::commit_user_resumed(
+        &crate::agent::session_lifecycle::DbOnlySink,
+        session_id,
+    ) {
+        Ok(payload) => Ok(payload),
+        Err(error) => {
+            tracing::warn!(session_id, %error, "submitted input could not commit a lifecycle");
+            Ok(None)
+        }
+    }
 }
 
 /// Sync core for [`write_to_agent`] — **legacy combined entry point**

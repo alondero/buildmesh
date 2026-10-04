@@ -1,5 +1,6 @@
 import type { FileDiffStatus } from './tauri';
 import type { AgentNode } from '../types/generated/AgentNode';
+import type { LifecycleChangedPayload } from '../types/generated/LifecycleChangedPayload';
 import type { SignalHealth } from '../types/generated/SignalHealth';
 
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
@@ -119,6 +120,28 @@ export const STATUS_CONFIG = {
 export function getStatusConfig(status: string | undefined | null) {
   if (!status) return STATUS_CONFIG.idle;
   return STATUS_CONFIG[status as keyof typeof STATUS_CONFIG] || STATUS_CONFIG.idle;
+}
+
+/**
+ * Store fields an `agent-lifecycle` event may write.
+ *
+ * `process_running` is the post-spawn early-exit promotion. The list refetch
+ * that follows `node-spawn-completed` can still observe `spawning`, and this
+ * event is the snapshot that was stored with the `running` write. Clients
+ * adopt that status and snapshot. They do not copy its signal health onto
+ * the node: the snapshot reports the row's current health, and writing that
+ * back would turn an unknown column into the unverified tooltip.
+ */
+export function lifecycleNodePatch(
+  payload: LifecycleChangedPayload,
+): Partial<Pick<AgentNode, 'status' | 'lifecycle' | 'signal_health'>> {
+  if (payload.kind === 'process_running') return { status: payload.status, lifecycle: payload };
+  if (payload.kind === 'signal_unavailable') return { signal_health: payload.signal_health };
+  return {
+    status: payload.status,
+    lifecycle: payload,
+    ...(payload.signal_health ? { signal_health: payload.signal_health } : {}),
+  };
 }
 
 /** One vocabulary for live events and reconnect snapshots on both clients. */

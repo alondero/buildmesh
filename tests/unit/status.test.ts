@@ -4,7 +4,8 @@
  * an Idle dot and tooltip in the desktop sidebar).
  */
 import { describe, it, expect } from 'vitest';
-import { STATUS_CONFIG, getStatusConfig } from '../../src/lib/status';
+import type { LifecycleChangedPayload } from '../../src/types/generated/LifecycleChangedPayload';
+import { STATUS_CONFIG, getNodeStatusConfig, getStatusConfig, lifecycleNodePatch } from '../../src/lib/status';
 
 describe('STATUS_CONFIG', () => {
   it('returns the archived config for archived status', () => {
@@ -64,5 +65,33 @@ describe('STATUS_CONFIG', () => {
     const config = getStatusConfig('completed');
     expect(config.label).toBe('PR opened');
     expect(config).not.toBe(STATUS_CONFIG.ready);
+  });
+});
+
+describe('lifecycleNodePatch', () => {
+  const promotion: LifecycleChangedPayload = {
+    session_id: 4884,
+    provider: null,
+    kind: 'process_running',
+    status: 'running',
+    message: 'agent process is running',
+    provider_event: null,
+    provider_session_id: null,
+    completion_reason: null,
+    transcript_path: null,
+    timestamp: '2026-10-03T14:32:26+00:00',
+    signal_health: 'ok',
+    semantic_turn: null,
+  };
+
+  it('lets a survived spawn leave Starting without claiming the hooks were observed', () => {
+    const stuck = { status: 'spawning' as const, signal_health: 'unverified' as const, lifecycle: null };
+    const patch = lifecycleNodePatch(promotion);
+    const shown = getNodeStatusConfig({ ...stuck, ...patch });
+    expect(shown.label).toBe('Running');
+    expect(patch).toEqual({ status: 'running', lifecycle: promotion });
+    expect(patch).not.toHaveProperty('signal_health');
+    expect(getNodeStatusConfig({ ...stuck, ...patch }).title).toContain('Status reporting is not confirmed yet');
+    expect(getNodeStatusConfig({ ...stuck, ...patch }).title).toContain('Last observed');
   });
 });

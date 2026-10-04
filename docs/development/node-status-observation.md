@@ -61,6 +61,15 @@ instead. See [DESIGN.md principle 6](../../DESIGN.md#principles) and
    a reconnect. A legacy attention-clear notification only clears presentation;
    it cannot invent `running`. In-flight list reads cannot overwrite a newer
    lifecycle patch; desktop queues a fresh read and mobile rejects older refreshes.
+   The spawn-completed list read happens before the early-exit window elapses, so
+   it can still observe `spawning`. When that window promotes the row, the same
+   write stores `process_running` and `running` with one timestamp. Clients adopt
+   that status and snapshot. They do not copy the snapshot's signal health onto
+   the node, so an unknown health column does not become the unverified tooltip
+   and an unverified column is not repaired to ok. The badge cannot stay on
+   Starting after the process has survived startup. A submitted prompt publishes the
+   `work_resumed` envelope that was stored for that keystroke; the legacy clear
+   still does not carry a status.
 5. Circuits retain their separate, stronger
    [session observation contract](circuit-session-observation.md). The display
    snapshot is not new permission to advance a circuit. Native receipts, request

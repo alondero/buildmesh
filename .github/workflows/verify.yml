@@ -433,7 +433,7 @@ jobs:
           # `--skip agent::sandbox::` is the same nested-path problem the other
           # shards solve: `sandbox::` would otherwise also claim it.
           - label: remaining
-            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: windowing:: --skip agent::sandbox::"
+            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: windowing:: --skip agent::sandbox::"
 
     steps:
       - name: Checkout

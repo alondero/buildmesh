@@ -117,12 +117,17 @@ ts-rs = { version = "12", features = ["chrono-impl"] }
 # WindowsAndMessaging), scaling it for the monitor DPI (HiDpi), learning that
 # the pointer left it (Input_KeyboardAndMouse), and hooking the parent's
 # message stream so it stays pinned during a resize (Shell, for
-# `SetWindowSubclass`).
+# `SetWindowSubclass`). `System_Threading` + `Security` are the named mutex
+# behind `instance_guard`'s one-process-per-profile claim: `CreateMutexW` is
+# gated on `Security` in windows-sys because of its SECURITY_ATTRIBUTES
+# parameter, which we pass as null.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
+    "Win32_Security",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",

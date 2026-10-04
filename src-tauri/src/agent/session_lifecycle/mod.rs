@@ -220,6 +220,11 @@ pub enum LifecycleKind {
     /// A node was marked idle without a clean process exit (kill, resume
     /// skip).
     ProcessIdle,
+    /// The process survived the post-spawn early-exit window. This is not a
+    /// harness observation. The stored snapshot is the envelope clients
+    /// adopt; its copied signal health must not be written back onto the
+    /// node's delivery column.
+    ProcessRunning,
     /// The agent's PTY exited cleanly (EOF) — the process is gone.
     SessionExited,
     /// A spawn / autopilot run failed.
@@ -480,6 +485,9 @@ pub trait SessionLifecycleSink {
     fn emit_attention_needed(&self, node_id: i64);
     /// Persist the observation before either transport or passive consumers see it.
     fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String>;
+    /// Store the early-exit promotion only while the row is still `spawning`.
+    /// On success, `payload` is the envelope that was stored.
+    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String>;
     fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
         let _ = semantic_turn;
         self.emit_attention_needed(node_id);
@@ -509,6 +517,9 @@ pub struct AppSessionLifecycleSink<'a> {
 impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
     fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
         commit_lifecycle_with_logging(payload, forbidden)
+    }
+    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+        commit_spawn_promotion_with_logging(payload)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -592,6 +603,16 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
 #[cfg(test)]
 pub mod testing;
 
+fn commit_spawn_promotion_with_logging(payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+    match db::agent_node::commit_spawn_promotion_inner(&db::write_conn(), payload) {
+        Ok(committed) => Ok(committed),
+        Err(error) => {
+            tracing::error!(node_id = payload.session_id, %error, "failed to persist spawn promotion");
+            Err(error.to_string())
+        }
+    }
+}
+
 fn commit_lifecycle_with_logging(
     payload: &mut LifecycleChangedPayload,
     forbidden: &[SessionStatus],
@@ -610,6 +631,9 @@ pub struct DbOnlySink;
 impl SessionLifecycleSink for DbOnlySink {
     fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
         commit_lifecycle_with_logging(payload, forbidden)
+    }
+    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+        commit_spawn_promotion_with_logging(payload)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         db::update_agent_node_status(node_id, new).map_err(|e| e.to_string())
@@ -666,14 +690,28 @@ pub fn on_spawn_complete(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
 ) -> Result<bool, String> {
-    let promoted = sink.write_status_if(node_id, SessionStatus::Running, SessionStatus::Spawning)?;
+    // `node-spawn-completed` is emitted when the process is spawned, before this
+    // window elapses, and its refetch can commit `spawning`. The promotion has
+    // to be the same envelope a later list read returns, or the badge stays on
+    // "Starting…" and a refetch drops the event. One conditional write stores
+    // `process_running` only while the row is still `spawning`.
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::ProcessRunning,
+        SessionStatus::Running,
+        &HookSignalDetail::default(),
+        "agent process is running",
+    );
+    let promoted = sink.commit_spawn_promotion(&mut payload)?;
     if !promoted {
         tracing::warn!(
             "SessionLifecycle::on_spawn_complete: session {node_id} was no longer Spawning \
              (reader early-exit Error write won the race)"
         );
+        return Ok(false);
     }
-    Ok(promoted)
+    sink.emit_lifecycle_changed(payload);
+    Ok(true)
 }
 
 /// Reconcile a stale DB row to `Running` when the orchestrator discovers
@@ -822,6 +860,23 @@ pub fn on_attention_cleared(
     Ok(())
 }
 
+/// Commit a user-submitted resume and return the envelope that was stored.
+///
+/// The blocking PTY path has no `AppHandle`, so it commits through
+/// [`DbOnlySink`] (whose emit is a no-op) and the async caller publishes the
+/// returned payload. Dropping it leaves the desktop badge on whatever status
+/// the last list read saw — including `spawning` ("Starting…") — because the
+/// legacy `attention-cleared` event does not carry a status.
+pub fn commit_user_resumed(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+) -> Result<Option<LifecycleChangedPayload>, String> {
+    commit_settled_signal(sink, LifecycleChangedPayload::new(
+        node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
+        &HookSignalDetail::default(), "agent resumed work",
+    ))
+}
+
 /// A harness reports that work resumed. Unlike manual input, a delayed hook
 /// must not revive a stopped node. Returns false when the callback is stale.
 pub fn on_hook_running(
@@ -838,21 +893,29 @@ pub fn on_hook_running_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    commit_settled_signal(sink, LifecycleChangedPayload::new(
+    applied(sink, LifecycleChangedPayload::new(
         node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
         detail, "agent resumed work",
     ))
 }
 
-fn commit_settled_signal(sink: &dyn SessionLifecycleSink, mut payload: LifecycleChangedPayload) -> Result<bool, String> {
+fn applied(sink: &dyn SessionLifecycleSink, payload: LifecycleChangedPayload) -> Result<bool, String> {
+    Ok(commit_settled_signal(sink, payload)?.is_some())
+}
+
+fn commit_settled_signal(
+    sink: &dyn SessionLifecycleSink,
+    mut payload: LifecycleChangedPayload,
+) -> Result<Option<LifecycleChangedPayload>, String> {
     payload.semantic_turn = None;
     // A settled turn is not blocked on an answer (issue #1966): the request
     // schema belongs to the awaiting signal that carried it, never to the
     // running/ready signal that follows.
     payload.request = None;
-    if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? { return Ok(false); }
+    if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? { return Ok(None); }
+    let published = payload.clone();
     emit_settled_signal(sink, payload);
-    Ok(true)
+    Ok(Some(published))
 }
 
 fn emit_settled_signal(sink: &dyn SessionLifecycleSink, payload: LifecycleChangedPayload) {
@@ -964,7 +1027,7 @@ pub fn on_turn_completed(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    commit_settled_signal(sink, LifecycleChangedPayload::new(
+    applied(sink, LifecycleChangedPayload::new(
         node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready, detail,
         "turn finished - agent is ready for another prompt",
     ))
@@ -1038,7 +1101,7 @@ pub fn on_background_running(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    commit_settled_signal(sink, LifecycleChangedPayload::new(
+    applied(sink, LifecycleChangedPayload::new(
         node_id,
         LifecycleKind::BackgroundRunning,
         SessionStatus::Running,
@@ -1140,12 +1203,35 @@ mod tests {
 
     #[test]
     fn on_spawn_complete_writes_running_only_if_currently_spawning() {
-        let sink = RecordingSink::new();
+        let sink = RecordingSink::with_status(SessionStatus::Spawning);
         let promoted = on_spawn_complete(&sink, 7).unwrap();
         assert!(promoted, "on_spawn_complete must report success on a happy path");
         let w = sink.writes_if();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0], (7, SessionStatus::Running, SessionStatus::Spawning));
+        assert_eq!(sink.status(), Some(SessionStatus::Running));
+        // The spawn-completed refetch races this write: it can commit `spawning`
+        // ("Starting…") and then nothing else publishes the promotion. Clients
+        // leave Starting only if this transition emits the resulting status.
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1, "surviving the early-exit window must publish Running");
+        assert_eq!(events[0].session_id, 7);
+        assert_eq!(events[0].status, SessionStatus::Running);
+        assert_eq!(events[0].kind, LifecycleKind::ProcessRunning);
+        assert!(events[0].provider.is_none());
+        assert!(events[0].provider_event.is_none());
+    }
+
+    #[test]
+    fn on_spawn_complete_does_not_publish_when_the_row_left_spawning() {
+        let sink = RecordingSink::with_status(SessionStatus::Error);
+        let promoted = on_spawn_complete(&sink, 7).unwrap();
+        assert!(!promoted, "a row that is no longer Spawning must not be promoted");
+        assert_eq!(sink.status(), Some(SessionStatus::Error));
+        assert!(
+            sink.lifecycle_changed().is_empty(),
+            "a lost race (early-exit Error, or a hook that already moved the row) must not publish Running"
+        );
     }
 
     /// `on_already_active` is the `Pending → Running` (or any non-terminal

@@ -102,6 +102,15 @@ impl SessionLifecycleSink for RecordingSink {
             self.write_status_unless_in(payload.session_id, payload.status, forbidden)
         }
     }
+    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+        self.writes_if.borrow_mut().push((payload.session_id, payload.status, SessionStatus::Spawning));
+        if !matches!(*self.status.borrow(), Some(SessionStatus::Spawning)) {
+            return Ok(false);
+        }
+        *self.status.borrow_mut() = Some(payload.status);
+        self.effects.borrow_mut().push("status-written");
+        Ok(true)
+    }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
         self.writes.borrow_mut().push((node_id, new));
         Ok(())

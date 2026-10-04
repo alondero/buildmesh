@@ -1256,6 +1256,9 @@ mod tests {
     fn provisioned_hook_posts_stdin_to_the_attention_route() {
         use std::io::{Read, Write};
         use std::time::{Duration, Instant};
+        // PATH-mutating tests hold ENV_LOCK. The hook is launched as
+        // `powershell.exe`, which is looked up in that process-global PATH.
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

@@ -137,6 +137,28 @@ state cannot be updated until a later callback succeeds. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
+## Codex refuses to start over a proxied provider
+
+A node opened from a proxied provider (a Codex route) fails immediately with a
+startup error instead of a prompt, for example:
+
+```
+error: the argument '--model <MODEL>' cannot be used multiple times
+```
+
+Codex accepts `--model` only once, so a launch that passes it twice is rejected
+before the session starts. Older builds could do this for any proxied Codex node
+whose launch resolved a model — which is every node spawned from a saved Launch
+Configuration, because a proxied provider's model is the route's. Update to a
+current build and start the node again: the launch command is rebuilt for every
+start, and the CLI session never started, so there is no work to lose.
+
+On a current build the only remaining way to repeat the flag is the verbatim
+extra-argument layer: a Launch Configuration or Circuit step that puts `--model`
+in its extra arguments is forwarded to Codex untouched, alongside the model
+Buildmesh already passes. Remove it from the extra arguments and choose the model
+in the configuration's model field instead.
+
 ## GitHub feeds fail for a WSL mesh
 
 On a Windows host, Buildmesh reads the repository through its WSL network
@@ -297,6 +319,32 @@ runtime, then run the command manually in the same directory. Include the
 command, exit status, OS/runtime, and a redacted output excerpt in a report.
 
 ## The app fails to start or closes unexpectedly
+
+Launching Buildmesh again while it is already running looks like nothing
+happening, on purpose: one process owns each app-data profile. The second
+launch brings the running window to the front (restoring it if it was
+minimized) and exits, leaving the running instance's Agent Nodes untouched.
+On Windows that focus is automatic; on macOS and Linux the second launch
+exits quietly and you switch to the running window yourself. Each launch
+appends a line to `logs/profile-ownership.log` in the same profile directory
+as `buildmesh.log`; that line is the record of a launch being forwarded. The
+stable and dev profiles are separate, so both can run at the same time.
+
+If Buildmesh instead reports that it cannot confirm it owns its profile, it
+starts nothing at all. Read that log line for the underlying error — in
+practice the app-data directory could not be read or written. Fix the
+directory's permissions (or free some disk space, which can also make a
+directory unwritable), then launch again.
+
+There is no lock file to delete if the message persists. The claim itself is
+held by an operating-system object — a named mutex on Windows, a locked file on
+macOS and Linux — and the operating system releases it the moment the owning
+process ends, including a crash or a forced kill. So if Buildmesh cannot start
+and no other Buildmesh is running, the cause is the directory, not a stale
+claim: check that the profile directory still exists and is writable, and that
+free disk space is available. (`instance-owner.pid` in the profile directory is
+only a breadcrumb recording which process owns the profile; deleting it has no
+effect on whether the profile can be claimed.)
 
 For a release install, check the stable profile; for a development build, use
 the dev profile. The usual Windows locations are:
