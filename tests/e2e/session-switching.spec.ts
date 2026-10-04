@@ -13,7 +13,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { waitForTauriReady, createTestSessionViaHttp, cleanupTestProjects } from './utils/tauri-http';
-import { waitForAppBoot } from './utils/state-waits';
+import { waitForAppBoot, expandMeshCards } from './utils/state-waits';
 
 test.describe('session switching E2E', () => {
 
@@ -35,6 +35,8 @@ test.describe('session switching E2E', () => {
 
   test('sidebar session click selects and shows terminal', async ({ page }) => {
     await createTestSessionViaHttp(1);
+    // Mesh cards collapse their node list until the dots line is clicked.
+    await expandMeshCards(page);
 
     const sessionItems = page.locator('[data-session-item]');
     await expect(sessionItems, 'first session row should appear after WS push').toHaveCount(1, { timeout: 10000 });
@@ -47,6 +49,7 @@ test.describe('session switching E2E', () => {
   test('active indicator updates on sidebar session switch', async ({ page }) => {
     await createTestSessionViaHttp(1);
     await createTestSessionViaHttp(2);
+    await expandMeshCards(page);
 
     const sessionItems = page.locator('[data-session-item]');
     await expect(sessionItems, 'sidebar should hold 2 session rows').toHaveCount(2, { timeout: 10000 });

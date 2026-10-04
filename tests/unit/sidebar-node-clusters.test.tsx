@@ -67,16 +67,23 @@ function renderMeshItem(clusters: NodeActivityCluster[], onActivateNode = vi.fn(
     nodeClusters: clusters, onActivateNode, selectMesh: vi.fn(), onDeleteNode: vi.fn(),
     getDefaultProvider: vi.fn().mockResolvedValue('anthropic'),
   };
-  return {
-    props,
-    ...render(
-      <DndContext>
-        <SortableContext items={[MESH.id]}>
-          <MeshItem {...props} />
-        </SortableContext>
-      </DndContext>,
-    ),
-  };
+  const result = render(
+    <DndContext>
+      <SortableContext items={[MESH.id]}>
+        <MeshItem {...props} />
+      </SortableContext>
+    </DndContext>,
+  );
+  // Issue #2042 — the mesh card renders its node rows only while expanded, and
+  // only a hot mesh (a member needing attention or errored) auto-expands. These
+  // tests assert on the rows themselves — a bare row, a rail, a marker, a
+  // click target — so open the card through the same dots-line toggle a user
+  // clicks. Left unexpanded, a quiet fixture would assert against an empty card
+  // and pass for the wrong reason. Hot fixtures (a pair with an errored or
+  // waiting member) are already open and are left alone.
+  const toggle = screen.queryByLabelText(`Show agents for ${MESH.name}`);
+  if (toggle) fireEvent.click(toggle);
+  return { props, ...result };
 }
 
 

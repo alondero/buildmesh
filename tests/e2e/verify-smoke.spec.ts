@@ -53,6 +53,7 @@
  *    stable hub on :1991 is never disturbed.)
  */
 import { test, expect, Page } from '@playwright/test';
+import { expandMeshCards } from './utils/state-waits';
 import { buildInitScript } from '../../scripts/ui-mock/tauri-mock.mjs';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 
@@ -161,7 +162,9 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
         await page.addInitScript(theme => localStorage.setItem('buildmesh.theme', theme), theme);
         await page.goto('/');
         await page.mouse.move(size.width - 1, size.height - 1);
-        const colour = page.getByRole('button', { name: 'Change mesh colour', exact: true });
+        // The mesh colour bar is both the picker and the reorder handle, so its
+    // accessible name carries both gestures.
+    const colour = page.getByRole('button', { name: /^Change mesh colour for / });
         const resume = page.getByRole('button', { name: `Resume ${SMOKE_NODE_NAME}`, exact: true });
         const restart = page.getByRole('button', { name: 'Restart failed-node', exact: true });
         const close = page.getByRole('button', { name: `Delete ${SMOKE_NODE_NAME}`, exact: true });
@@ -257,6 +260,7 @@ test('Windows Grok clipboard gestures send one native paste command through real
     host.__BUILDMESH_MOCK__.on('read_clipboard', () => { throw new Error('Grok must read its own clipboard'); });
   });
   await page.goto('/');
+  await expandMeshCards(page);
   await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
   const terminal = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm`);
   const textarea = terminal.locator('textarea');
@@ -434,6 +438,7 @@ test.describe('verify-smoke (issue #157)', () => {
 
     // The fixture node should appear in the sidebar (data-session-id
     // is set on the row by NodeItem.tsx:294).
+    await expandMeshCards(page);
     const sidebarNode = page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`);
     await expect(sidebarNode, 'smoke node should appear in the sidebar from fixture').toBeVisible({ timeout: 10000 });
     await sidebarNode.click();
@@ -467,7 +472,8 @@ test.describe('verify-smoke (issue #157)', () => {
     const writes: string[] = [];
     await page.exposeFunction('recordTerminalInput', (data: string) => { writes.push(data); });
     await page.goto('/');
-    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    await expandMeshCards(page);
+  await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
     const input = page.locator(`[data-node-id="${SMOKE_NODE_ID}"] .xterm-helper-textarea`);
     await input.focus();
     await page.evaluate(() => {
@@ -486,7 +492,8 @@ test.describe('verify-smoke (issue #157)', () => {
 
   test('utility tabs fill the body and preserve terminal and keyboard state across switches', async ({ page }) => {
     await page.goto('/');
-    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    await expandMeshCards(page);
+  await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
     const header = page.getByTestId('grid-node-header');
     await header.getByRole('button', { name: 'Open build menu' }).click();
     await page.getByRole('menuitem', { name: /^Terminal/ }).click();
@@ -519,7 +526,8 @@ test.describe('verify-smoke (issue #157)', () => {
   // should be reused.
   test('utility terminal reattaches the same .xterm element across a tab round trip', async ({ page }) => {
     await page.goto('/');
-    await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
+    await expandMeshCards(page);
+  await page.locator(`[data-session-id="${SMOKE_NODE_ID}"]`).click();
     await page.getByTestId('grid-node-header').getByRole('button', { name: 'Open build menu' }).click();
     await page.getByRole('menuitem', { name: /^Terminal/ }).click();
     const panel = page.getByRole('tabpanel');

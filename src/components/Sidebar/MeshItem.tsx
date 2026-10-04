@@ -5,6 +5,7 @@ import { CSS } from '@dnd-kit/utilities';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import type { Mesh } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
+import type { AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
 import type { MeshHealth } from '../../lib/tauri';
@@ -17,6 +18,7 @@ import { useMeshGitHubUrl } from '../../hooks/useMeshGitHubUrl';
 import { useClickOutside } from '../../hooks/useClickOutside';
 import { useAriaMenu } from '../../hooks/useAriaMenu';
 import { dropdownId } from '../../lib/dropdownId';
+import { getNodeStatusConfig, needsAgentAttention } from '../../lib/status';
 import { NodeCluster } from './NodeCluster';
 import type { NodeActivityCluster } from '../../lib/nodeActivities';
 import { NodeCreationForm } from './NodeCreationForm';
@@ -26,9 +28,8 @@ import type { SpawnOption } from '../../lib/groups';
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
 /// reasons in priority order — hostage first (it blocks a restore), then
 /// drift, then dirty / unpushed. Mirrors the issue spec's "what to fix
-/// first" priority. Exported for the compact prototype row so the two
-/// renderings cannot drift apart before the fold-in unifies them.
-export function buildDriftTooltip(health: MeshHealth): string {
+/// first" priority.
+function buildDriftTooltip(health: MeshHealth): string {
   const lines: string[] = [];
   if (health.base_branch_holder) {
     const h = health.base_branch_holder;
@@ -55,7 +56,7 @@ interface MeshItemProps {
    *  "Spawning…" and disables to prevent duplicate nodes. */
   isSpawning: boolean;
   /** Issue #1939 — the mesh sits in the sidebar's inactive band (no open
-   *  nodes). Presentational only: dimmed text with the colour accent
+   *  nodes). Presentational only: dimmed text with the colour bar
    *  suppressed. Structure, height, and every affordance (spawn, reorder,
    *  context menu) are unchanged. Optional so existing call sites are
    *  unaffected; absent means active. */
@@ -124,11 +125,7 @@ function sameClusterLists(left: NodeActivityCluster[], right: NodeActivityCluste
   });
 }
 
-/// The #1748 memo contract: Sidebar hands every row a fresh nodeClusters
-/// array on any unrelated store update, so the default shallow compare would
-/// re-render every row on every tick. Exported so the compact prototype row
-/// (same props, same data flow) honors the identical contract.
-export function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
+function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
   return (
     previous.mesh === next.mesh
     && previous.isSelected === next.isSelected
@@ -154,6 +151,11 @@ export function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemPro
 
 export const MeshItem = memo(MeshItemView, areMeshItemPropsEqual);
 
+/// A mesh counts as hot when any member needs the user or errored.
+function isHotMesh(nodes: AgentNode[]): boolean {
+  return nodes.some((node) => needsAgentAttention(node.status) || node.status === 'error');
+}
+
 function MeshItemView({
   mesh,
   isSelected,
@@ -175,6 +177,11 @@ function MeshItemView({
   onOpenPropertiesProbe,
   onOpenWorktreesProbe,
 }: MeshItemProps) {
+  // The colour bar IS the reorder handle (click = picker, drag = reorder)
+  // through the same dnd-kit context the sidebar provides. The 5px
+  // pointer-sensor grace in `Sidebar` lets clicks pass through; the
+  // press-position guard in `handleBarClick` swallows the stray click a
+  // real drag leaves behind.
   const {
     setNodeRef,
     transform,
@@ -183,76 +190,98 @@ function MeshItemView({
     attributes,
     listeners,
   } = useSortable({ id: mesh.id });
+  // Click-vs-drag on the bar: AT-style activation (`detail === 0`, no pointer
+  // sequence) always opens the picker, so a stale press record can never
+  // affect it; a mouse release within 5px of the recorded press is a picker
+  // click; anything further travelled means a drag just ran and the trailing
+  // click is swallowed. The record needs no clearing: the next pointerdown
+  // always overwrites it, and a bar click with no recorded press cannot be a
+  // drag remnant (a real press always precedes it). Every branch stops
+  // propagation — the swallowed branch must not bubble up and select the mesh.
+  // (jsdom + userEvent cannot drive clicks through attached dnd-kit
+  // activators, so the click path is covered by fireEvent-sequence tests here
+  // and by a real CDP click in the dev-view steps.)
+  const pressPos = useRef<{ x: number; y: number } | null>(null);
 
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
-  const [recolorOpen, setRecolorOpen] = useState(false);
-  // Issue #1748 — palette entries already have stable identity, but a custom
-  // hex builds a fresh object per call; memoize so `NodeItem` rows (which
-  // compare `meshColor` by reference) don't re-render with this mesh.
-  const meshColor = useMemo(() => getMeshColor(mesh.id, mesh.color), [mesh.id, mesh.color]);
-
-  // Issue #1748 — one id-keyed select handler for every row in this mesh,
-  // stable across renders (both captured actions are stable), so the
-  // memoized `NodeItem` rows can cover it by reference instead of
-  // receiving a fresh closure per row per render.
-  // Single mode stays single (wayfinder #982 / #983): it renders
-  // the active node, so the click retargets the solo view
-  // automatically — this replaces the old setMaximizedNode
-  // retarget. In any grid mode we also select the node's mesh,
-  // which flips the canvas to Mesh Grid via the uiStore sync
-  // (calling selectMesh unconditionally would break out of
-  // Single). Ctrl+Arrow from Single still exits in App.tsx —
-  // keyboard parity follow-up is #987.
-  const handleSelectNode = useCallback((nodeId: number, meshId: number) => {
-    onActivateNode(nodeId);
-    if (useUIStore.getState().viewMode !== 'single') {
-      selectMesh(meshId);
+  const handleBarClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (e.detail === 0) {
+      setRecolorOpen(true);
+      return;
     }
-  }, [onActivateNode, selectMesh]);
-  const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState<string | null>(null);
-  // The header no longer carries a sync *button* — the background sync (ADR
-  // 0020) and the spawn-time auto-sync keep the mesh fresh, and a permanent
-  // button shared the Regenerate icon (read as "regenerate"). What IS worth
-  // surfacing in the header is a failed sync: the backend emits
-  // `mesh-sync-warning` for any non-fatal sync failure (fetch failed,
-  // diverged history, ...), and until something re-syncs successfully the
-  // mesh is going stale. This flag drives that failure-only icon.
-  const [syncFailed, setSyncFailed] = useState(false);
-  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Issue #735 — viewport clamping + ARIA menu keyboard navigation.
-  // The menu container ref lets us measure its rendered size for clamping;
-  // the trigger ref remembers the row that opened the menu so Escape can
-  // return focus there.
-  //
-  // Issue #837 — keyboard nav (Escape/Tab/Arrow/Home/End + auto-focus on
-  // open) is now the shared `useAriaMenu` hook below. The hook reads
-  // `itemCount` via a ref it owns and finds menuitems via
-  // `querySelectorAll('[role="menuitem"]')`, so the previous
-  // `menuItemRefs` + `itemCountRef` mirrors here are no longer needed
-  // (the hook handles the live-value closure and the per-item focus
-  // walk).
-  const menuRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLDivElement>(null);
-  const [activeIndex, setActiveIndex] = useState(0);
-  // View on GitHub — only shown when the mesh's `origin` resolves to a
-  // github.com URL. The hook fires the IPC on mount so by the time the
-  // user right-clicks the value is in the cache; non-GitHub meshes get
-  // `url === null` and the menu item is simply not rendered.
-  const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
-  // Render-time item count: 5 always-present items + the conditional
-  // 6th when the mesh has a GitHub origin. The hook uses this as its
-  // `itemCount` so a non-GitHub mesh's menu correctly wraps at 5 and a
-  // GitHub mesh's wraps at 6.
-  const itemCount = 5 + (githubUrl ? 1 : 0);
+    const start = pressPos.current;
+    pressPos.current = null;
+    if (!start) {
+      setRecolorOpen(true);
+      return;
+    }
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= 5) {
+      setRecolorOpen(true);
+    }
+  };
+  // Keyboard parity for the merged bar. dnd-kit's KeyboardSensor claims
+  // Enter and Space as its pickup keys, so Enter is intercepted here to
+  // open the picker (what the pre-merge round swatch button did) and every
+  // other key is chained straight to the sensor activator — Space still
+  // picks the row up for keyboard reordering.
+  const handleBarKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      e.stopPropagation();
+      setRecolorOpen(true);
+      return;
+    }
+    listeners?.onKeyDown?.(e);
+  };
+  const meshColor = useMemo(() => getMeshColor(mesh.id, mesh.color), [mesh.id, mesh.color]);
+  const [recolorOpen, setRecolorOpen] = useState(false);
   const { branchStatus, refresh: refreshBranchStatus } = useGitBranchStatus(mesh.path);
   const { health } = useMeshHealth(mesh.id, mesh.path);
   const behind = branchStatus?.behind ?? 0;
 
+  // Flat, de-duplicated member list across clusters (a node appears once —
+  // as root or member — but dedupe by id so future cluster shapes stay safe).
+  const members = useMemo(() => {
+    const seen = new Set<number>();
+    const out: AgentNode[] = [];
+    for (const cluster of nodeClusters) {
+      for (const node of cluster.members) {
+        if (!seen.has(node.id)) {
+          seen.add(node.id);
+          out.push(node);
+        }
+      }
+    }
+    return out;
+  }, [nodeClusters]);
+
+  // Hot meshes (attention or error) start expanded; quiet ones start as one
+  // line. Nodes often arrive after first mount (store hydration), so heat is
+  // tracked continuously until the user touches the toggle — afterwards the
+  // toggle owns the state and heat changes never fight the user.
+  const [expanded, setExpanded] = useState(() => isHotMesh(members));
+  const userToggled = useRef(false);
+  useEffect(() => {
+    if (!userToggled.current && isHotMesh(members)) setExpanded(true);
+  }, [members]);
+  const toggleExpanded = useCallback(() => {
+    userToggled.current = true;
+    setExpanded((v) => !v);
+  }, []);
+
+  // Failure-only sync indicator (no always-on button): syncs are automatic
+  // (background sync per ADR 0020 + spawn-time auto-sync), so a permanent
+  // header button duplicated the Regenerate icon for an action the user
+  // rarely needs. The badge appears ONLY when the backend reported a failed
+  // sync for this mesh — i.e. it may be going stale — and the card has no
+  // textual status line, so the badge is itself the retry affordance.
+  const [syncFailed, setSyncFailed] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+
   // Light the failure icon only for THIS mesh: the event is app-global and
   // carries the mesh path that failed, so match through the same
   // path-normalisation helper every other mesh-scoped subscriber uses
-  // (slash/case/worktree-aware). A successful force sync below clears it.
+  // (slash/case/worktree-aware). A successful sync below clears it.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let disposed = false;
@@ -272,25 +301,64 @@ function MeshItemView({
     };
   }, [mesh.path]);
 
+  // One sync path behind both entry points: the failure badge in the header
+  // and "Force sync from upstream" in the context menu. A success clears the
+  // badge and recomputes the behind count (the pull may have advanced HEAD);
+  // a failure leaves the badge lit, which is the only feedback the card
+  // gives by design.
   const handleSync = async () => {
+    if (syncing) return;
     setSyncing(true);
-    setSyncMessage(null);
-    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
     try {
-      const result = await gitSync(mesh.path);
-      setSyncMessage(result.message);
-      // A sync that succeeded means the mesh is fresh again — clear the
-      // failure icon the warning event may have lit.
+      await gitSync(mesh.path);
       setSyncFailed(false);
-      // The pull may have advanced HEAD — recompute the behind count.
       refreshBranchStatus();
-    } catch (e) {
-      setSyncMessage(`Sync error: ${e}`);
+    } catch (err) {
+      console.error('Sync failed:', err);
     } finally {
       setSyncing(false);
-      syncTimeoutRef.current = setTimeout(() => setSyncMessage(null), 4000);
     }
   };
+
+  // Issue #1748 — one id-keyed select handler for every row in this mesh,
+  // stable across renders (both captured actions are stable), so the
+  // memoized `NodeItem` rows can cover it by reference instead of
+  // receiving a fresh closure per row per render.
+  // Single mode stays single (wayfinder #982 / #983): it renders
+  // the active node, so the click retargets the solo view
+  // automatically — this replaces the old setMaximizedNode
+  // retarget. In any grid mode we also select the node's mesh,
+  // which flips the canvas to Mesh Grid via the uiStore sync
+  // (calling selectMesh unconditionally would break out of
+  // Single). Ctrl+Arrow from Single still exits in App.tsx —
+  // keyboard parity follow-up is #987.
+  const handleSelectNode = useCallback((nodeId: number, meshId: number) => {
+    onActivateNode(nodeId);
+    if (useUIStore.getState().viewMode !== 'single') {
+      selectMesh(meshId);
+    }
+  }, [onActivateNode, selectMesh]);
+
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+  // Issue #735 — the menu container ref lets us measure its rendered size
+  // for clamping; the trigger ref remembers the row that opened the menu so
+  // Escape can return focus there.
+  //
+  // Issue #837 — keyboard nav (Escape/Tab/Arrow/Home/End + auto-focus on
+  // open) is the shared `useAriaMenu` hook below.
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  // View on GitHub — only shown when the mesh's `origin` resolves to a
+  // github.com URL. The hook fires the IPC on mount so by the time the
+  // user right-clicks the value is in the cache; non-GitHub meshes get
+  // `url === null` and the menu item is simply not rendered.
+  const { url: githubUrl } = useMeshGitHubUrl(mesh.id, mesh.path);
+  // Render-time item count: 5 always-present items + the conditional
+  // 6th when the mesh has a GitHub origin. The hook uses this as its
+  // `itemCount` so a non-GitHub mesh's menu correctly wraps at 5 and a
+  // GitHub mesh's wraps at 6.
+  const itemCount = 5 + (githubUrl ? 1 : 0);
 
   // Issue #735 — close the menu and return focus to the trigger. Used by
   // Escape and any menuitem click so the user's focus stays predictable
@@ -302,33 +370,9 @@ function MeshItemView({
     requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
   };
 
-  // Issue #1264 — the `setSyncMessage(null)` timeout in `handleSync` is
-  // armed with `syncTimeoutRef.current` but the component previously
-  // never cleared it on unmount. If the mesh was deleted (or the user
-  // switched views) within the 4-second auto-clear window, the timer
-  // fired against the unmounted component and triggered React's
-  // "setState on unmounted component" warning. Cancel pending timers on
-  // unmount; deps `[]` so the cleanup is bound exactly once to the
-  // component lifecycle (the ref handles in-flight updates from
-  // `handleSync`).
-  useEffect(() => {
-    return () => {
-      if (syncTimeoutRef.current !== null) {
-        clearTimeout(syncTimeoutRef.current);
-        syncTimeoutRef.current = null;
-      }
-    };
-  }, []);
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  };
-
   // Issue #837 — the WAI-ARIA keyboard handler + auto-focus on open
-  // are now the shared `useAriaMenu` hook (#837). The hook attaches
-  // the document-level keydown listener only while `enabled` is true
+  // are the shared `useAriaMenu` hook. The hook attaches the
+  // document-level keydown listener only while `enabled` is true
   // (gated on `contextMenu` being open) and re-runs the auto-focus
   // layout effect on every open flip — so `closeContextMenu()`'s
   // trigger-focus return is the only thing left here.
@@ -359,10 +403,10 @@ function MeshItemView({
   //
   // Issue #837 — this `setState` repositioning shape is OUT OF SCOPE for
   // the shared `useViewportClamp` hook (which only handles `translateY`).
-  // The MeshItem context menu is anchored at the right-click point
-  // (not at a trigger), so a `transform` doesn't help — we need to
-  // rewrite the `{x, y}` state object. Leaving it alone keeps the
-  // behaviour identical to pre-#837.
+  // The mesh context menu is anchored at the right-click point (not at a
+  // trigger), so a `transform` doesn't help — we need to rewrite the
+  // `{x, y}` state object. Leaving it alone keeps the behaviour
+  // identical to pre-#837.
   useLayoutEffect(() => {
     if (!contextMenu) return;
     const el = menuRef.current;
@@ -385,152 +429,191 @@ function MeshItemView({
     setContextMenu({ x: nextX, y: nextY });
   }, [contextMenu]);
 
+  const dotSummary = useMemo(() => {
+    if (members.length === 0) return 'No agents yet';
+    const labels = members.map((node) => getNodeStatusConfig(node).label);
+    return `${members.length} agent${members.length === 1 ? '' : 's'}: ${labels.join(', ')}`;
+  }, [members]);
+
+  const drifted = !!health && (health.is_drifted || health.base_branch_holder !== null);
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
   return (
-    <div ref={setNodeRef} style={style} className="mb-1 group/mesh">
-      {/* Mesh header — double height with color accent */}
+    <div
+      ref={setNodeRef}
+      style={style}
+      // Stable seam for the sidebar's row-level tests and e2e steps.
+      data-mesh-card={mesh.id}
+      className={`mb-1.5 rounded-lg border bg-bg-card/60 ${drifted ? 'border-status-warning/40' : 'border-border-subtle'}`}
+    >
+      {/* Two-line header. Line 1 is identity + actions; line 2 is status
+          (dots + count, no textual labels) and doubles as the expand toggle,
+          so no chevron takes up horizontal space. */}
+      {/* Header is a plain clickable container like the pre-merge row
+          (issue #735): tabIndex -1 keeps it out of the natural Tab order
+          (and gives the context menu a focus target to return to), and it
+          carries no role so the bar/dots/drift/sync/spawn buttons nested
+          inside are valid interactive descendants. Keyboard users drive
+          those buttons directly. */}
       <div
         ref={triggerRef}
-        // Issue #735 — `tabIndex={-1}` makes the row programmatically
-        // focusable so the per-mesh menu can return focus to its trigger
-        // on Escape, without putting the row in the natural Tab order.
         tabIndex={-1}
-        // The left accent shows the mesh colour. Rendered via inline style
-        // (not a Tailwind class) so a user-picked custom hex works, not just
-        // the eight palette entries.
-        // Issue #1939 — inactive-band rows suppress the accent (transparent
-        // keeps the border width, so the row height and structure are
-        // unchanged).
-        style={{ borderLeftColor: dimmed ? 'transparent' : meshColor.hex }}
-        className={`border-l-3 rounded-r-md px-2 py-2.5 cursor-pointer transition-colors ${
-          isSelected ? 'bg-bg-card' : 'hover:bg-bg-card/50'
-        }`}
         onClick={() => onSelectMesh(mesh.id)}
         onContextMenu={(e) => {
           e.preventDefault();
           setContextMenu({ x: e.clientX, y: e.clientY });
         }}
+        className={`rounded-lg px-1.5 pt-1.5 pb-1 cursor-pointer transition-colors ${
+          isSelected ? 'bg-bg-card' : 'hover:bg-bg-card-hover/60'
+        }`}
       >
-        <div className="flex items-center gap-2">
-          <span
-            {...attributes}
-            {...listeners}
-            // Issue #727 — make the grab handle focusable so the
-            // KeyboardSensor can pick it up. dnd-kit's `attributes`
-            // spread already injects `role="button"` + `tabIndex={0}`
-            // + `aria-pressed` (the drag-active toggle); we override
-            // `aria-roledescription` to "sortable" (dnd-kit's default
-            // is "draggable", which doesn't tell assistive tech this
-            // row is a positional list item that can be reordered).
-            // The `aria-label` gives it a screen-reader friendly name.
-            tabIndex={0}
-            role="button"
-            aria-label={`Reorder ${mesh.name}`}
-            aria-roledescription="sortable"
-            className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
-            title="Drag to reorder"
-          >
-            ⋮⋮
-          </span>
-          {/* Colour swatch — clicking it opens the colour picker (issue:
-              mesh colour picker). stopPropagation so it doesn't also
-              select/deselect the mesh row. */}
+        <div className="flex items-stretch gap-2">
+          {/* The vertical bar is picker AND reorder handle: click opens the
+              colour picker, drag reorders the mesh. Hover fattens the bar and
+              shows the grab cursor so the handle reads with no extra chrome. */}
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); setRecolorOpen(true); }}
-            title="Change mesh colour"
-            aria-label="Change mesh colour"
-            className="h-[24px] w-[24px] shrink-0 flex items-center justify-center rounded-md hover:bg-bg-card-hover"
+            {...attributes}
+            {...listeners}
+            onPointerDown={(e) => {
+              // Chain the sensor activator, then record the press for the
+              // click-vs-drag guard in `handleBarClick`.
+              listeners?.onPointerDown?.(e);
+              pressPos.current = { x: e.clientX, y: e.clientY };
+            }}
+            onKeyDown={handleBarKeyDown}
+            onClick={handleBarClick}
+            title={`Drag to reorder ${mesh.name} · click or Enter to change mesh colour`}
+            aria-label={`Change mesh colour for ${mesh.name} — Enter to open, Space to pick up for reordering`}
+            // Issue #727, same documented trade as the pre-merge drag
+            // handle: announce the bar as "sortable" (a positional item that
+            // can be reordered) rather than dnd-kit's default "draggable".
+            aria-roledescription="sortable"
+            className="group/bar flex w-[24px] shrink-0 cursor-grab active:cursor-grabbing items-center justify-center rounded-md hover:bg-bg-card-hover self-stretch"
           >
             <span
               aria-hidden="true"
-              className={`h-3 w-3 rounded-full border border-border-strong ${dimmed ? 'opacity-30' : ''}`}
-              style={{ backgroundColor: meshColor.hex }}
+              style={{ backgroundColor: dimmed ? 'transparent' : meshColor.hex }}
+              className={`w-[3px] self-stretch rounded-sm border border-border-strong transition-[width] group-hover/bar:w-[6px] ${dimmed ? 'opacity-30' : ''}`}
             />
           </button>
-          <span
-            id={`mesh-item-name-${mesh.id}`}
-            className={`font-sans font-semibold text-sm truncate flex-1 ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
-          >
-            {mesh.name}
-          </span>
-          {health && (health.is_drifted || health.base_branch_holder !== null) && (
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span
+                id={`mesh-item-name-${mesh.id}`}
+                className={`font-sans font-semibold text-sm truncate flex-1 ${dimmed ? 'text-text-muted' : 'text-text-primary'}`}
+              >
+                {mesh.name}
+              </span>
+              {drifted && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); onOpenWorktreesProbe(mesh.id); }}
+                  title={buildDriftTooltip(health!)}
+                  aria-label={`Mesh health issue for ${mesh.name}`}
+                  className="text-xs font-bold text-status-warning bg-status-warning/15 hover:bg-status-warning/30 rounded-md px-1.5 leading-[18px] transition-colors shrink-0"
+                >
+                  !
+                </button>
+              )}
+              {behind > 0 && (
+                <span
+                  title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}
+                  className="text-xs font-semibold text-status-warning leading-none tabular-nums shrink-0"
+                >
+                  ↓{behind}
+                </span>
+              )}
+              {syncFailed && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); void handleSync(); }}
+                  disabled={syncing}
+                  title="Last sync from upstream failed — click to retry."
+                  aria-label={`Sync failed for ${mesh.name} — click to retry`}
+                  className="text-status-error hover:text-text-primary transition-colors shrink-0 disabled:opacity-50"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncing ? 'animate-spin' : ''}>
+                    <polyline points="23 4 23 10 17 10" />
+                    <polyline points="1 20 1 14 7 14" />
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10" />
+                    <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14" />
+                  </svg>
+                </button>
+              )}
+            </div>
+            {/* Status subtitle: smaller dots + count, and the whole line
+                toggles expansion. */}
             <button
               type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onOpenWorktreesProbe(mesh.id);
-              }}
-              title={buildDriftTooltip(health)}
-              className="text-xs font-bold text-status-warning bg-status-warning/15 hover:bg-status-warning/30 rounded-md px-1.5 leading-[18px] transition-colors"
-              aria-label="Mesh health issue"
+              onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
+              aria-expanded={expanded}
+              aria-label={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}
+              title={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}
+              className="mt-px flex w-full items-center gap-1 rounded-md pr-1 py-px text-left hover:bg-bg-card-hover/60 transition-colors"
             >
-              !
+              {members.length > 0 ? (
+                <span role="img" aria-label={dotSummary} className="inline-flex items-center gap-[3px]">
+                  {members.map((node) => {
+                    const config = getNodeStatusConfig(node);
+                    return (
+                      <span
+                        key={node.id}
+                        aria-hidden="true"
+                        title={`${node.name} — ${config.title}`}
+                        className={`h-1.5 w-1.5 rounded-full ${config.bgColor}`}
+                      />
+                    );
+                  })}
+                </span>
+              ) : (
+                <span className="text-2xs text-text-muted">No agents yet</span>
+              )}
+              {members.length > 0 && (
+                <span className="text-2xs text-text-muted tabular-nums">{members.length}</span>
+              )}
+              <span aria-hidden="true" className={`inline-block text-2xs text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`}>▸</span>
             </button>
-          )}
-          {behind > 0 && (
-            <span
-              className="text-xs font-semibold text-status-warning leading-none tabular-nums"
-              title={`${behind} commit${behind === 1 ? '' : 's'} behind upstream`}
-            >
-              ↓{behind}
-            </span>
-          )}
-          {/* Failure-only sync indicator (no button): syncs are automatic
-              (background sync per ADR 0020 + spawn-time auto-sync), so a
-              header button duplicated the Regenerate icon for an action the
-              user rarely needs. The icon appears ONLY when the backend
-              reported a failed sync for this mesh — i.e. it may be going
-              stale — and clears on a successful "Force sync from upstream"
-              from the context menu. */}
-          {syncFailed && (
-            <span
-              role="img"
-              aria-label="Sync from upstream failed — mesh may be stale"
-              title="Last sync from upstream failed — the mesh may be stale. Right-click → Force sync from upstream to retry."
-              className="text-status-error transition-colors"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="23 4 23 10 17 10"/>
-                <polyline points="1 20 1 14 7 14"/>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
-                <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
-              </svg>
-            </span>
-          )}
-          <NodeCreationForm
-            mesh={mesh}
-            isDropdownOpen={isDropdownOpen}
-            isSpawning={isSpawning}
-            providers={providerList}
-            onToggleDropdown={onNewNode}
-            onSelectProvider={onSelectProvider}
-            getDefaultProvider={getDefaultProvider}
-          />
+          </div>
+          {/* Spawn sits outside the text column so it centres on the full
+              two-line header height. */}
+          <div className="flex shrink-0 items-center">
+            <NodeCreationForm
+              mesh={mesh}
+              isDropdownOpen={isDropdownOpen}
+              isSpawning={isSpawning}
+              providers={providerList}
+              onToggleDropdown={onNewNode}
+              onSelectProvider={onSelectProvider}
+              getDefaultProvider={getDefaultProvider}
+            />
+          </div>
         </div>
       </div>
-      {syncMessage && (
-        <div className="ml-2 mr-2 mb-1 px-2 py-1 rounded-md text-xs bg-bg-overlay border border-border-subtle text-text-secondary">
-          {syncMessage}
-        </div>
-      )}
 
       {/* Agent nodes within this mesh, clustered by Node Activity so paired
           agents read as one card with sub-agents. A lone node renders as a
-          bare row with no rail — unchanged from the flat list. */}
-      {nodeClusters.map(cluster => (
-        <NodeCluster
-          key={cluster.root.id}
-          cluster={cluster}
-          meshColor={meshColor}
-          // Issue #774 — the Regenerate submenu shows every available
-          // Spawn Option as a picker; threading `providerList` keeps the
-          // submenu visually consistent with `ProviderDropdown` (same
-          // harness-grouped render, same icons).
-          providerList={providerList}
-          onSelectNode={handleSelectNode}
-          onDeleteNode={onDeleteNode}
-        />
-      ))}
+          bare row with no rail. Enclosed in this mesh's own card and shown
+          only while expanded (the dots line above toggles it). */}
+      {expanded && members.length > 0 && (
+        <div className="mx-2 mb-1.5 border-t border-border-subtle pt-1.5">
+          {nodeClusters.map((cluster) => (
+            <NodeCluster
+              key={cluster.root.id}
+              cluster={cluster}
+              meshColor={meshColor}
+              providerList={providerList}
+              onSelectNode={handleSelectNode}
+              onDeleteNode={onDeleteNode}
+            />
+          ))}
+        </div>
+      )}
 
       {recolorOpen && (
         <MeshRecolorModal
@@ -550,9 +633,7 @@ function MeshItemView({
           ref={menuRef}
           // Issue #814 — scoped attribute for `useClickOutside`. `mesh.id`
           // ensures sibling meshes' menus don't satisfy this menu's
-          // "inside" check (the previous hand-rolled ref.contains shape
-          // was scoped per-instance via the same `mesh.id`-keyed
-          // selector inside the closure).
+          // "inside" check.
           // Issue #1264 — prefix with the surface tag so a mesh-keyed
           // menu can't collide with a node- or terminal-keyed menu that
           // shares the same numeric id.
@@ -578,7 +659,7 @@ function MeshItemView({
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/>
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
             Properties
           </button>
@@ -596,7 +677,7 @@ function MeshItemView({
           <button
             role="menuitem"
             tabIndex={activeIndex === 2 ? 0 : -1}
-            onClick={() => { closeContextMenu(); handleSync(); }}
+            onClick={() => { closeContextMenu(); void handleSync(); }}
             disabled={syncing}
             className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2 disabled:opacity-50"
           >
@@ -653,7 +734,7 @@ function MeshItemView({
               }}
               className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-bg-card-hover flex items-center gap-2"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
                 <polyline points="15 3 21 3 21 9"/>
                 <line x1="10" y1="14" x2="21" y2="3"/>

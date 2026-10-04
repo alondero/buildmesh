@@ -14,7 +14,7 @@
  * it before asserting.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, act, waitFor, cleanup, fireEvent } from '@testing-library/react';
 import type { ComponentProps } from 'react';
 import { Sidebar } from '../../src/components/Sidebar/Sidebar';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
@@ -123,6 +123,16 @@ function meshOrder(): string[] {
 }
 
 async function settleSidebar() {
+  // Issue #2042 — a mesh card renders its agent nodes only while expanded, and
+  // only a hot mesh (a member needing attention or errored) auto-expands. The
+  // fixtures here are deliberately quiet (`idle`/`archived`) so the #1939 band
+  // predicate keeps being exercised on an emptiness test, not on heat: open
+  // every card through the same dots-line toggle a user clicks instead. The
+  // #1748 row-counting test below needs the node rows to genuinely exist, or
+  // its "untouched rows read zero" assertions would hold trivially.
+  for (const toggle of screen.queryAllByLabelText(/^Show agents for /)) {
+    fireEvent.click(toggle);
+  }
   await waitFor(() => expect(screen.getByText('beta-one')).toBeTruthy());
   expect(screen.getByText('zeta-one')).toBeTruthy();
   for (let i = 0; i < 10; i++) {

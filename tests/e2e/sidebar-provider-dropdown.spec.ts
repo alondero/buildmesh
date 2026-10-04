@@ -10,7 +10,7 @@
  */
 import { test, expect } from '@playwright/test';
 import { waitForTauriReady, invokeViaHttp } from './utils/tauri-http';
-import { waitForAppBoot } from './utils/state-waits';
+import { waitForAppBoot, expandMeshCards } from './utils/state-waits';
 
 test.describe('sidebar provider dropdown', () => {
 
@@ -56,6 +56,9 @@ test.describe('sidebar provider dropdown', () => {
     await plusButton.click();
 
     await page.locator('text=Terminal').first().click();
+    // The spawned node lands in a collapsed mesh card; open it the way a
+    // user does before asserting the row is there.
+    await expandMeshCards(page);
 
     const sessionItems = page.locator('[data-session-item]');
     await expect(sessionItems, 'a new session row should appear after clicking Terminal').toHaveCount(1, { timeout: 10000 });
@@ -78,6 +81,7 @@ test.describe('sidebar provider dropdown', () => {
     });
 
     const sessionItem = page.locator('[data-session-item]').first();
+    await expandMeshCards(page);
     await expect(sessionItem, 'session row should appear after WS push').toBeVisible({ timeout: 10000 });
 
     const archiveButton = sessionItem.locator('[title="Archive session"]');
