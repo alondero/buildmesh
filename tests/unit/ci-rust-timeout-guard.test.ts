@@ -112,7 +112,7 @@ const nonShard = runScript('Run Rust export, documentation, and integration test
 
 const guards = [
   { job: 'rust-tests', script: shard, stepMinutes: 30 },
-  { job: 'rust-bindings', script: nonShard, stepMinutes: 45 },
+  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45 },
 ];
 
 describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {

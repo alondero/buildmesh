@@ -16,7 +16,7 @@ name: Verify
 # The jobs form a fan-out, not a chain. `changes` (change-scope
 # classification) and `quality` (frontend) start at t=0; `changes` reads the
 # pull request's diff and the Rust branch of the graph (`rust-build`, the
-# seven `rust-tests` shards, and the `rust-bindings` aggregate) only starts
+# seven `rust-tests` shards, `rust-nonshard`, and the `rust-bindings` aggregate) only starts
 # when it reports that Rust moved, so a frontend-only pull request never
 # compiles and a Rust-only pull request never boots the browser suites.
 # Nothing waits behind one ~10-minute monolith any more: a runner that takes
@@ -496,24 +496,17 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-  # The authoritative Rust pass: every target, in one process, with the real
-  # export directory, so ts-rs regenerates the committed bindings and the
-  # drift gate has a single writer. Runs only once the compile and every shard
-  # have passed, with `if: always()` and an explicit result check rather than
-  # relying on the implicit skip: a required status check that is *skipped*
-  # counts as satisfied by GitHub, so a silently skipped aggregate would be a
-  # hole in the merge gate. It fails instead.
-  #
-  # The one legitimate skip is a pull request that touched no Rust on a
-  # successful change-scope classification - there is nothing for this job to
-  # prove, and the check reports success as a skipped job does. Every other
-  # absent input (change-scope failed, outputs missing, profile: light where
-  # this check is not evaluated) keeps the job running so the guard below
-  # fails with a reason instead.
-  rust-bindings:
-    name: Rust tests + TS bindings
-    needs: [quality, rust-build, rust-tests, changes]
-    if: always() && inputs.profile == 'full' && !(needs.changes.outputs.rust == 'false' && needs.changes.result == 'success')
+  # The non-unit Rust pass: ts-rs export (the single writer of the committed
+  # bindings), doctests, every integration-test target, the shard-coverage
+  # gate, and the binding drift check. It needs only the compiled cache, so it
+  # runs beside the shards instead of after them: it is the longest Rust leg,
+  # and queueing it behind the slowest shard added minutes to every Rust pull
+  # request's critical path for no extra assurance. The required check is the
+  # `rust-bindings` aggregate below, which fails closed unless this job, the
+  # compile, every shard, and Quality all succeeded.
+  rust-nonshard:
+    name: Rust export, doc, and integration tests
+    needs: [changes, rust-build]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -528,40 +521,6 @@ jobs:
       RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
     steps:
-      # Fail closed, and say why in the run rather than letting a skipped job
-      # read as success. GitHub counts a *skipped* required status check as
-      # satisfied, so an aggregate that silently skips when a shard fails would
-      # be a hole in the merge gate; this job always runs and fails instead.
-      #
-      # The dependency results arrive as env vars, not through an expression:
-      # GitHub's workflow validator rejects the `needs.*.result` wildcard
-      # inside a function call (`join(needs.*.result, " ")` fails the whole file
-      # with zero jobs), so read the jobs individually. A matrix dependency's
-      # `result` is `success` only when every leg succeeded, which is the
-      # aggregate this gate needs.
-      - name: Refuse to run unless every upstream gate succeeded
-        shell: bash
-        env:
-          QUALITY_RESULT: ${{ needs.quality.result }}
-          RUST_BUILD_RESULT: ${{ needs.rust-build.result }}
-          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
-          CHANGES_RESULT: ${{ needs.changes.result }}
-          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
-        run: |
-          # A classification that did not succeed leaves empty outputs, which
-          # would otherwise read as "Rust did not change" and silently skip
-          # the compile and the shards. Fail closed: no green Rust gate
-          # without a successful change-scope classification behind it.
-          if [ "$CHANGES_RESULT" != success ] || [ -z "$RUST_CHANGED" ]; then
-            echo "::error::change-scope result=$CHANGES_RESULT rust='$RUST_CHANGED' - refusing to certify the Rust suite without a successful classification."
-            exit 1
-          fi
-          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_BUILD_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ]; then
-            echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT - the Rust suite is not fully green, so the authoritative pass is not running."
-            exit 1
-          fi
-          echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT"
-
       - name: Checkout
         uses: actions/checkout@v7
 
@@ -638,6 +597,57 @@ jobs:
             echo "::error::Generated TS bindings are out of date. Run 'cargo test' in src-tauri/ and commit the changes under src/types/generated/."
             exit 1
           fi
+
+  # The required Rust gate. It does no work of its own: it certifies that the
+  # compile, every shard, the non-shard pass (with its binding drift check),
+  # and Quality all succeeded. It keeps `if: always()` and an explicit result
+  # check rather than relying on the implicit skip: a required status check
+  # that is *skipped* counts as satisfied by GitHub, so a silently skipped
+  # aggregate would be a hole in the merge gate. It fails instead.
+  #
+  # The one legitimate skip is a pull request that touched no Rust on a
+  # successful change-scope classification - there is nothing for this job to
+  # prove, and the check reports success as a skipped job does. Every other
+  # absent input (change-scope failed, outputs missing, profile: light where
+  # this check is not evaluated) keeps the job running so the guard below
+  # fails with a reason instead.
+  rust-bindings:
+    name: Rust tests + TS bindings
+    needs: [quality, rust-build, rust-tests, rust-nonshard, changes]
+    if: always() && inputs.profile == 'full' && !(needs.changes.outputs.rust == 'false' && needs.changes.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # The dependency results arrive as env vars, not through an expression:
+      # GitHub's workflow validator rejects the `needs.*.result` wildcard
+      # inside a function call (`join(needs.*.result, " ")` fails the whole file
+      # with zero jobs), so read the jobs individually. A matrix dependency's
+      # `result` is `success` only when every leg succeeded, which is the
+      # aggregate this gate needs.
+      - name: Refuse to pass unless every upstream gate succeeded
+        shell: bash
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          RUST_BUILD_RESULT: ${{ needs.rust-build.result }}
+          RUST_TESTS_RESULT: ${{ needs.rust-tests.result }}
+          RUST_NONSHARD_RESULT: ${{ needs.rust-nonshard.result }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
+        run: |
+          # A classification that did not succeed leaves empty outputs, which
+          # would otherwise read as "Rust did not change" and silently skip
+          # the compile and the shards. Fail closed: no green Rust gate
+          # without a successful change-scope classification behind it.
+          if [ "$CHANGES_RESULT" != success ] || [ -z "$RUST_CHANGED" ]; then
+            echo "::error::change-scope result=$CHANGES_RESULT rust='$RUST_CHANGED' - refusing to certify the Rust suite without a successful classification."
+            exit 1
+          fi
+          if [ "$QUALITY_RESULT" != success ] || [ "$RUST_BUILD_RESULT" != success ] || [ "$RUST_TESTS_RESULT" != success ] || [ "$RUST_NONSHARD_RESULT" != success ]; then
+            echo "::error::quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT - the Rust suite is not fully green."
+            exit 1
+          fi
+          echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT"
 
   # Issue #1257 ??? the Playwright verify-smoke spec (issue #157) was
   # designed to run WITHOUT a Rust compile ??? it boots just Vite and

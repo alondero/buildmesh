@@ -106,7 +106,7 @@ same ground:
 | Check | Required | What it proves |
 |---|---|---|
 | `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, and bundle budget always; the vitest unit + integration suites as well whenever the change-scope job (`Detect changes`) reports frontend changes. The fast frontend gate — it no longer compiles Rust. |
-| `Verification / Rust tests + TS bindings` | yes | The Rust export, doctest, and integration targets, run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build. It refuses to run unless the change-scope job succeeded and the compile job and every test shard passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
+| `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
 | `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. |
 | `Verification / Platform smoke (macos-latest)` | no — post-merge signal | The Tauri app compiles and links on macOS. Same triggers as the Windows leg. |
@@ -122,13 +122,13 @@ says Rust moved, and `Quality (Linux)`'s browser/vitest steps and
 pull request never boots Chromium and a frontend-only pull request never
 compiles Rust. The two `Platform smoke` jobs are outside all of this: they
 are not required checks (see the table above) and run on pushes, release
-tags, and manual dispatches rather than on pull requests. The shards start
-once `Rust build (compile)` has populated the shared Cargo cache; the `Rust
-tests + TS bindings` aggregate then starts once `Quality (Linux)`, `Rust build
-(compile)`, every shard, and `Detect changes` have finished. It keeps
-`Quality (Linux)` in its `needs` so the authoritative pass only runs against a
-fully green tree — that dependency costs no wall-clock, because the frontend
-gate finishes in a few minutes, well before the shards. The old shape queued
+tags, and manual dispatches rather than on pull requests. The shards and the non-shard `Rust export, doc, and integration tests` job
+start together once `Rust build (compile)` has populated the shared Cargo
+cache; the non-shard pass is the longest Rust leg, so it no longer waits behind
+the slowest shard. The `Rust tests + TS bindings` aggregate then only checks
+that `Quality (Linux)`, `Rust build (compile)`, every shard, the non-shard
+pass, and `Detect changes` all succeeded, so it certifies a fully green tree
+without adding a serial stage of its own. The old shape queued
 everything behind one ~10-minute frontend job; this one does not. `Rust build
 (compile)` compiles every Rust test binary once — with `lld` and a runner
 swapfile in place of the old single-threaded `CARGO_BUILD_JOBS=1` — and the
@@ -147,7 +147,7 @@ The Rust unit target also runs as seven parallel `Rust tests (<group>)` jobs —
 mid-`cargo-test` reports no step conclusion and no log, so a single combined
 run cannot say which test did it; one job per group means a loss costs one
 group. The shards are **not** required checks — `Rust tests + TS bindings` is
-the authoritative, single-writer pass and the gate.
+the gate, and the non-shard job is the single writer of the generated bindings.
 
 Each Rust test step runs under `scripts/ci/run-guarded.mjs` (30 minutes for a
 shard, 45 for the non-shard pass) beneath a longer job cap, and writes its log
