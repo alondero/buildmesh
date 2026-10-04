@@ -186,8 +186,14 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
         await page.getByRole('button', { name: 'Open settings', exact: true }).click();
         const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
         const tabs = dialog.getByRole('tab');
+        // Derived from the live tab count rather than pinned to an index: this
+        // asserts that `ArrowUp`/`End` wrap to the *last* tab, which is the
+        // behaviour. Hard-coding the last index re-breaks every time the
+        // Settings modal gains a tab (issue #1537 added "Data & Diagnostics").
+        const tabCount = await tabs.count();
+        const last = tabCount - 1;
         await expect(tabs.nth(0)).toBeFocused();
-        for (const [key, index] of [['ArrowUp', 3], ['ArrowDown', 0], ['End', 3], ['Home', 0], ['ArrowDown', 1]] as const) {
+        for (const [key, index] of [['ArrowUp', last], ['ArrowDown', 0], ['End', last], ['Home', 0], ['ArrowDown', 1]] as const) {
           await page.keyboard.press(key);
           await expect(tabs.nth(index)).toBeFocused();
           await expect(tabs.nth(index)).toHaveAttribute('aria-selected', 'true');
@@ -195,7 +201,7 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
           await expect(dialog.getByRole('tabpanel')).toHaveAttribute('id', await tabs.nth(index).getAttribute('aria-controls') ?? 'missing');
           await expect(dialog.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', await tabs.nth(index).getAttribute('id') ?? 'missing');
         }
-        for (const index of [0, 1, 2, 3]) {
+        for (let index = 0; index < tabCount; index++) {
           await tabs.nth(index).click();
           await page.keyboard.press('Tab');
           await expect(dialog.getByRole('tabpanel')).toBeFocused();
