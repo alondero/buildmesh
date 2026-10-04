@@ -1,9 +1,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
+import type { ComponentProps } from 'react';
 import { DndContext } from '@dnd-kit/core';
 import { SortableContext } from '@dnd-kit/sortable';
+
+// Row-body execution counter, mirroring the CountingNodeItem seam in
+// sidebar-render-count.test.tsx: the mocked spawn form renders exactly once
+// per CompactMeshItem body execution, so a skipped memo re-render reads as a
+// flat counter across a rerender with fresh-but-equal props.
+const rowBodyRenders = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock('../../src/components/Sidebar/NodeCreationForm', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/components/Sidebar/NodeCreationForm')>();
+  const RealForm = actual.NodeCreationForm;
+  function CountingForm(props: ComponentProps<typeof RealForm>) {
+    rowBodyRenders.count += 1;
+    return <RealForm {...props} />;
+  }
+  return { ...actual, NodeCreationForm: CountingForm };
+});
+
+// Pin the per-mesh async hooks to static values so no background fetch can
+// self-render the row inside the memo measurement window.
+vi.mock('../../src/hooks/useMeshHealth', () => ({
+  useMeshHealth: () => ({ health: null, refresh: vi.fn() }),
+}));
+
+vi.mock('../../src/hooks/useGitBranchStatus', () => ({
+  useGitBranchStatus: () => ({ branchStatus: null, refresh: vi.fn() }),
+}));
 import { CompactMeshItem } from '../../src/components/Sidebar/CompactMeshItem';
 import type { Mesh } from '../../src/stores/meshStore';
 import type { AgentNode } from '../../src/stores/agentNodeStore';
@@ -47,6 +74,11 @@ function loneCluster(node: AgentNode): NodeActivityCluster {
 
 type Props = React.ComponentProps<typeof CompactMeshItem>;
 
+// Stable across renders: a fresh items array would churn SortableContext and
+// re-render the row underneath the memo boundary (issue #1748), which is not
+// what the isolation test measures.
+const SORTABLE_IDS = [MESH.id];
+
 function renderCompact(overrides: Partial<Props> = {}) {
   const props: Props = {
     mesh: MESH,
@@ -70,14 +102,19 @@ function renderCompact(overrides: Partial<Props> = {}) {
     ...overrides,
   };
   // `useSortable` needs the dnd-kit context Sidebar provides in production.
-  const result = render(
+  const renderEl = (p: Props) => (
     <DndContext>
-      <SortableContext items={[MESH.id]}>
-        <CompactMeshItem {...props} />
+      <SortableContext items={SORTABLE_IDS}>
+        <CompactMeshItem {...p} />
       </SortableContext>
-    </DndContext>,
+    </DndContext>
   );
-  return { ...result, props };
+  const result = render(renderEl(props));
+  return {
+    ...result,
+    props,
+    rerenderWith: (o: Partial<Props>) => result.rerender(renderEl({ ...props, ...o })),
+  };
 }
 
 describe('CompactMeshItem (prototype L)', () => {
@@ -121,11 +158,11 @@ describe('CompactMeshItem (prototype L)', () => {
     expect(bar.title).toBe('Drag to reorder my-mesh · click to change mesh colour');
   });
 
-  it('opens the picker on a press-and-release in place', () => {
+  it('opens the picker on a mouse press-and-release in place', () => {
     renderCompact();
     const bar = screen.getByRole('button', { name: /Change mesh colour/ });
     fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
-    fireEvent.click(bar, { clientX: 10, clientY: 10 });
+    fireEvent.click(bar, { clientX: 10, clientY: 10, detail: 1 });
     expect(screen.getByText('Colour for my-mesh')).toBeTruthy();
   });
 
@@ -133,8 +170,74 @@ describe('CompactMeshItem (prototype L)', () => {
     renderCompact();
     const bar = screen.getByRole('button', { name: /Change mesh colour/ });
     fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
-    fireEvent.click(bar, { clientX: 60, clientY: 10 });
+    // A real mouse click carries detail >= 1 (fireEvent defaults to 0, which
+    // is the keyboard/AT path and must open).
+    fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
     expect(screen.queryByText('Colour for my-mesh')).toBeNull();
   });
 
+  it('does not select the mesh on the trailing click of a travelled press', () => {
+    const { props } = renderCompact();
+    const bar = screen.getByRole('button', { name: /Change mesh colour/ });
+    fireEvent.pointerDown(bar, { clientX: 10, clientY: 10 });
+    fireEvent.click(bar, { clientX: 60, clientY: 10, detail: 1 });
+    expect(props.onSelectMesh).not.toHaveBeenCalled();
+  });
+
+  it('opens the picker on AT activation even after an off-target travelled press', () => {
+    renderCompact();
+    const bar = screen.getByRole('button', { name: /Change mesh colour/ });
+    fireEvent.pointerDown(bar, { clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(document.body, { clientX: 400, clientY: 100 });
+    expect(screen.queryByText('Colour for my-mesh')).toBeNull();
+    fireEvent.click(bar, { detail: 0 });
+    expect(screen.getByText('Colour for my-mesh')).toBeTruthy();
+  });
+
+  it('keeps the header out of the tab order and announces the bar as sortable', () => {
+    renderCompact({ nodeClusters: [loneCluster(makeNode())] });
+    const bar = screen.getByRole('button', { name: 'Change mesh colour for my-mesh — drag to reorder' });
+    expect(bar.getAttribute('aria-roledescription')).toBe('sortable');
+    const header = bar.closest('[data-prototype-mesh]')?.firstElementChild;
+    expect(header?.getAttribute('tabindex')).toBe('-1');
+    expect(header?.getAttribute('role')).toBeNull();
+  });
+
+  it('skips re-render when clusters are fresh arrays with identical members (#1748)', async () => {
+    const node = makeNode({ status: 'idle' });
+    const { rerenderWith } = renderCompact({ nodeClusters: [loneCluster(node)] });
+    await act(async () => {});
+    rowBodyRenders.count = 0;
+
+    // Fresh cluster wrappers, identical member references — what Sidebar's
+    // grouped map produces on every unrelated store update.
+    rerenderWith({ nodeClusters: [loneCluster(node)] });
+    await act(async () => {});
+    expect(rowBodyRenders.count).toBe(0);
+  });
+
+  it('still re-renders when a member actually changes', async () => {
+    const node = makeNode({ status: 'idle' });
+    const { rerenderWith } = renderCompact({ nodeClusters: [loneCluster(node)] });
+    await act(async () => {});
+    rowBodyRenders.count = 0;
+
+    rerenderWith({ nodeClusters: [loneCluster({ ...node, status: 'running' })] });
+    await act(async () => {});
+    expect(rowBodyRenders.count).toBeGreaterThan(0);
+  });
+
+  it('expands when heat arrives after mount, but yields to a manual collapse', async () => {
+    const hot = makeNode({ id: 11, name: 'node-hot', status: 'awaiting_input' });
+    const { rerenderWith } = renderCompact({ nodeClusters: [] });
+    expect(screen.queryByText('node-hot')).toBeNull();
+
+    rerenderWith({ nodeClusters: [loneCluster(hot)] });
+    expect(screen.getByText('node-hot')).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Hide agents for my-mesh' }));
+    expect(screen.queryByText('node-hot')).toBeNull();
+    rerenderWith({ nodeClusters: [loneCluster({ ...hot, id: 12, name: 'node-hotter' })] });
+    expect(screen.queryByText('node-hotter')).toBeNull();
+  });
 });

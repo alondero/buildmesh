@@ -14,7 +14,7 @@ import { useUIStore } from '../../stores/uiStore';
 import type { AgentNode } from '../../stores/agentNodeStore';
 import { getMeshColor } from '../../lib/meshColors';
 import { gitSync } from '../../lib/tauri';
-import type { MeshHealth } from '../../lib/tauri';
+import { areMeshItemPropsEqual, buildDriftTooltip } from './MeshItem';
 import { listen } from '@tauri-apps/api/event';
 import { pathMatchesGitEvent } from '../../lib/paths';
 import type { MeshSyncWarningPayload } from '../../types/generated/MeshSyncWarningPayload';
@@ -27,26 +27,12 @@ import { NodeCreationForm } from './NodeCreationForm';
 import { MeshRecolorModal } from '../Mesh/MeshRecolorModal';
 import type { SpawnOption } from '../../lib/groups';
 
-/// Mirrors `buildDriftTooltip` in MeshItem: reasons in fix-first priority.
-function buildDriftTooltip(health: MeshHealth): string {
-  const lines: string[] = [];
-  if (health.base_branch_holder) {
-    const h = health.base_branch_holder;
-    const localBase = health.local_base_branch ?? 'main';
-    lines.push(`${localBase} held by ${h.name} — click to fix`);
-  }
-  if (health.is_drifted) {
-    const localBase = health.local_base_branch ?? 'base';
-    const current = health.current_branch ?? `detached @ ${health.current_short_sha}`;
-    lines.push(`Root on ${current}, base is ${localBase}`);
-  }
-  if (health.is_dirty) lines.push('uncommitted changes');
-  if (health.unpushed_ahead > 0) {
-    lines.push(`${health.unpushed_ahead} unpushed commit${health.unpushed_ahead === 1 ? '' : 's'}`);
-  }
-  return lines.join('\n');
-}
-
+/// Props mirror MeshItemProps field-for-field on purpose: Sidebar renders
+/// both rows through one shared call site, and the #1748 memo comparator
+/// (`areMeshItemPropsEqual`) compares the full set. Four probes are held for
+/// call-site parity and consumed by the fold-in context menu; until then the
+/// prototype ignores them: onOpenFilesProbe, onOpenIssuesProbe,
+/// onOpenSessionHistoryProbe, onOpenPropertiesProbe.
 interface CompactMeshItemProps {
   mesh: Mesh;
   isSelected: boolean;
@@ -69,7 +55,15 @@ interface CompactMeshItemProps {
   onOpenWorktreesProbe: (meshId: number) => void;
 }
 
-export const CompactMeshItem = memo(CompactMeshItemView);
+// Same #1748 comparator as MeshItem: Sidebar hands every row a fresh
+// nodeClusters array on any unrelated store update, and the default shallow
+// compare would re-render every row on every node-status tick.
+export const CompactMeshItem = memo(CompactMeshItemView, areMeshItemPropsEqual);
+
+/// A mesh counts as hot when any member needs the user or errored.
+function isHotMesh(nodes: AgentNode[]): boolean {
+  return nodes.some((node) => needsAgentAttention(node.status) || node.status === 'error');
+}
 
 function CompactMeshItemView({
   mesh,
@@ -100,22 +94,39 @@ function CompactMeshItemView({
     attributes,
     listeners,
   } = useSortable({ id: mesh.id });
-  // Click-vs-drag on the bar: the press position decides. A release within
-  // 5px of the press is a picker click; anything further travelled means a
-  // drag just ran and the trailing click is swallowed. (jsdom + userEvent
-  // cannot drive clicks through attached dnd-kit activators — the sensor's
-  // native listeners consume the emulated sequence — so the click path is
-  // covered by fireEvent-sequence tests here and by a real CDP click in the
-  // dev-view steps. Keyboard Enter/Space on the bar starts a drag, matching
-  // handle semantics elsewhere; keyboard picker access returns at fold-in.)
+  // Click-vs-drag on the bar: keyboard/AT activation (`detail === 0`, no
+  // pointer sequence) always opens the picker; a mouse release within 5px of
+  // the recorded press is a picker click; anything further travelled means a
+  // drag just ran and the trailing click is swallowed. The press record is
+  // cleared on pointer-up/cancel so a travelled press released off-target can
+  // never poison a later activation. Every branch stops propagation — the
+  // swallowed branch must not bubble up and select the mesh.
+  // (jsdom + userEvent cannot drive clicks through attached dnd-kit
+  // activators, so the click path is covered by fireEvent-sequence tests here
+  // and by a real CDP click in the dev-view steps. Keyboard Enter/Space on
+  // the bar starts a drag, matching handle semantics elsewhere; keyboard
+  // picker access returns at fold-in.)
   const pressPos = useRef<{ x: number; y: number } | null>(null);
 
+  const clearPress = useCallback(() => {
+    pressPos.current = null;
+  }, []);
+
   const handleBarClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (e.detail === 0) {
+      setRecolorOpen(true);
+      return;
+    }
     const start = pressPos.current;
     pressPos.current = null;
-    if (start && Math.hypot(e.clientX - start.x, e.clientY - start.y) > 5) return;
-    e.stopPropagation();
-    setRecolorOpen(true);
+    if (!start) {
+      setRecolorOpen(true);
+      return;
+    }
+    if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= 5) {
+      setRecolorOpen(true);
+    }
   };
   const meshColor = useMemo(() => getMeshColor(mesh.id, mesh.color), [mesh.id, mesh.color]);
   const [recolorOpen, setRecolorOpen] = useState(false);
@@ -140,10 +151,18 @@ function CompactMeshItemView({
   }, [nodeClusters]);
 
   // Hot meshes (attention or error) start expanded; quiet ones start as one
-  // line. Initial-only — afterwards the chevron owns the state.
-  const [expanded, setExpanded] = useState(() =>
-    members.some((node) => needsAgentAttention(node.status) || node.status === 'error'),
-  );
+  // line. Nodes often arrive after first mount (store hydration), so heat is
+  // tracked continuously until the user touches the toggle — afterwards the
+  // toggle owns the state and heat changes never fight the user.
+  const [expanded, setExpanded] = useState(() => isHotMesh(members));
+  const userToggled = useRef(false);
+  useEffect(() => {
+    if (!userToggled.current && isHotMesh(members)) setExpanded(true);
+  }, [members]);
+  const toggleExpanded = useCallback(() => {
+    userToggled.current = true;
+    setExpanded((v) => !v);
+  }, []);
 
   // Failure-only sync indicator with retry-on-click (same backend event as
   // MeshItem's header icon; the prototype has no context menu to host the
@@ -189,7 +208,7 @@ function CompactMeshItemView({
   }, [onActivateNode, selectMesh]);
 
   const dotSummary = useMemo(() => {
-    if (members.length === 0) return 'No agents';
+    if (members.length === 0) return 'No agents yet';
     const labels = members.map((node) => getNodeStatusConfig(node).label);
     return `${members.length} agent${members.length === 1 ? '' : 's'}: ${labels.join(', ')}`;
   }, [members]);
@@ -212,17 +231,14 @@ function CompactMeshItemView({
       {/* Two-line header. Line 1 is identity + actions; line 2 is status
           (dots + count, no textual labels) and doubles as the expand toggle,
           so no chevron takes up horizontal space. */}
+      {/* Header is a plain clickable container like MeshItem's (issue #735):
+          tabIndex -1 keeps it out of the natural Tab order, and it carries no
+          role so the bar/dots/drift/sync/spawn buttons nested inside are
+          valid interactive descendants. Keyboard users drive those buttons
+          directly; the dots line below toggles expansion. */}
       <div
-        role="button"
-        tabIndex={0}
-        aria-label={`${mesh.name}, ${dotSummary}`}
+        tabIndex={-1}
         onClick={() => onSelectMesh(mesh.id)}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            onSelectMesh(mesh.id);
-          }
-        }}
         className={`rounded-lg px-1.5 pt-1.5 pb-1 cursor-pointer transition-colors ${
           isSelected ? 'bg-bg-card' : 'hover:bg-bg-card-hover/60'
         }`}
@@ -241,9 +257,15 @@ function CompactMeshItemView({
               listeners?.onPointerDown?.(e);
               pressPos.current = { x: e.clientX, y: e.clientY };
             }}
+            onPointerUp={clearPress}
+            onPointerCancel={clearPress}
             onClick={handleBarClick}
             title={`Drag to reorder ${mesh.name} · click to change mesh colour`}
             aria-label={`Change mesh colour for ${mesh.name} — drag to reorder`}
+            // Issue #727, same documented trade as MeshItem's handle: announce
+            // the bar as "sortable" (a positional item that can be reordered)
+            // rather than dnd-kit's default "draggable".
+            aria-roledescription="sortable"
             className="group/bar flex w-[24px] shrink-0 cursor-grab active:cursor-grabbing items-center justify-center rounded-md hover:bg-bg-card-hover self-stretch"
           >
             <span
@@ -298,7 +320,7 @@ function CompactMeshItemView({
                 toggles expansion. */}
             <button
               type="button"
-              onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
+              onClick={(e) => { e.stopPropagation(); toggleExpanded(); }}
               aria-expanded={expanded}
               aria-label={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}
               title={expanded ? `Hide agents for ${mesh.name}` : `Show agents for ${mesh.name}`}

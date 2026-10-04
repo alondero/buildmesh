@@ -27,10 +27,16 @@ import { CompactMeshItem } from './CompactMeshItem';
 // PROTOTYPE (variant L, "bordered compact") — dev-only preview of the winning
 // sidebar direction. Enabled via `?sidebar=compact` or
 // `localStorage["bm.sidebar"] === "compact"`; default path is untouched.
+// MUST NOT SHIP: the flag has no UI escape hatch (remove the key + reload to
+// exit) and exists only until the fold-in replaces MeshItem outright.
 const COMPACT_SIDEBAR =
   typeof window !== 'undefined' &&
   (new URLSearchParams(window.location.search).get('sidebar') === 'compact' ||
     window.localStorage.getItem('bm.sidebar') === 'compact');
+
+if (COMPACT_SIDEBAR && typeof console !== 'undefined') {
+  console.warn('[prototype] compact sidebar active — dev preview only, must not ship.');
+}
 import { dropdownId } from '../../lib/dropdownId';
 import { useSidebarResize } from './useSidebarResize';
 import { useClickOutside } from '../../hooks/useClickOutside';

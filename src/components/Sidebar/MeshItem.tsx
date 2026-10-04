@@ -26,8 +26,9 @@ import type { SpawnOption } from '../../lib/groups';
 /// Build the tooltip text for the sidebar drift `!` badge. Lists the
 /// reasons in priority order — hostage first (it blocks a restore), then
 /// drift, then dirty / unpushed. Mirrors the issue spec's "what to fix
-/// first" priority.
-function buildDriftTooltip(health: MeshHealth): string {
+/// first" priority. Exported for the compact prototype row so the two
+/// renderings cannot drift apart before the fold-in unifies them.
+export function buildDriftTooltip(health: MeshHealth): string {
   const lines: string[] = [];
   if (health.base_branch_holder) {
     const h = health.base_branch_holder;
@@ -123,7 +124,11 @@ function sameClusterLists(left: NodeActivityCluster[], right: NodeActivityCluste
   });
 }
 
-function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
+/// The #1748 memo contract: Sidebar hands every row a fresh nodeClusters
+/// array on any unrelated store update, so the default shallow compare would
+/// re-render every row on every tick. Exported so the compact prototype row
+/// (same props, same data flow) honors the identical contract.
+export function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): boolean {
   return (
     previous.mesh === next.mesh
     && previous.isSelected === next.isSelected
