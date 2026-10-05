@@ -76,10 +76,6 @@ export function scopeNodesForMode(
   mode: NonSingleViewMode,
   agentNodes: AgentNode[],
   selectedMeshId: number | null,
-  // Retained for call-shape compatibility (resolveSingleNode and the other
-  // callers pass it positionally) — but no scope reads it now that the
-  // Mesh fallback chain is gone (#2071).
-  _activeNodeId: number | null,
   controls: FilterControls = NO_FILTERS,
 ): AgentNode[] {
   switch (mode) {
@@ -100,6 +96,52 @@ export function scopeNodesForMode(
 export interface ScopeMesh {
   id: number;
   name: string | null;
+}
+
+/**
+ * Whether the scope is anchored to a Mesh (#2071's `isMeshScoped`, shared).
+ *
+ * Single reports the grid scope it was entered from, so a solo out of a Mesh
+ * grid is Mesh-anchored too — the SCOPE decides, not the View Mode label.
+ * Exported because more than one surface asks this exact question and must
+ * not answer it separately: `deriveScope` (which every scope consumer reads),
+ * the scope-change notice, and any future predicate. `scopeNotices` used to
+ * restate these three inputs and call `deriveScope` with a fabricated empty
+ * node list to read this one boolean — correct only for as long as nothing
+ * here consulted the node list.
+ */
+export function isMeshScopedView(
+  viewMode: ViewMode,
+  lastNonSingleMode: NonSingleViewMode,
+  selectedMeshId: number | null,
+): boolean {
+  const gridMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
+  return gridMode === 'mesh' && selectedMeshId !== null;
+}
+
+/**
+ * The Mesh a selection-following destination targets — the Probe context
+ * resolver is the consumer today (#2070 named it one of the four readers of
+ * the scope).
+ *
+ * This is deliberately NOT the grid scope (`mesh` above). Pinned, Filtered and
+ * All have no grid Mesh by construction, yet a Mesh-lens destination still
+ * acts on a Mesh, and #2073 deleted the pins that could hold one the user had
+ * not chosen. So the rule is: an explicitly selected Mesh wins, and the
+ * focused Agent Node's Mesh stands in only when nothing is selected (in
+ * Single the soloed node outranks the selection, because there the solo IS
+ * the canvas). It never names a Mesh the user did not choose — that ruling
+ * (#2071) is about the canvas scope, and this predicate cannot widen the grid:
+ * nothing here feeds `scopeNodesForMode`.
+ */
+export function selectionMeshId(
+  viewMode: ViewMode,
+  selectedMeshId: number | null,
+  focusedNodeMeshId: number | null,
+): number | null {
+  return viewMode === 'single'
+    ? focusedNodeMeshId ?? selectedMeshId
+    : selectedMeshId ?? focusedNodeMeshId;
 }
 
 /** Everything the scope is derived from. `lastNonSingleMode` is the grid
@@ -161,7 +203,7 @@ export function deriveScope(input: ScopeInput): DerivedScope {
   const { viewMode, lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId } = input;
   const meshes = input.meshes ?? [];
   const gridMode: NonSingleViewMode = viewMode === 'single' ? lastNonSingleMode : viewMode;
-  const scopedNodes = scopeNodesForMode(gridMode, agentNodes, selectedMeshId, activeNodeId);
+  const scopedNodes = scopeNodesForMode(gridMode, agentNodes, selectedMeshId);
   // The scope above is deliberately un-narrowed, so the empty state can
   // tell "nothing is in scope" from "the filters excluded everything".
   // Only 'filtered' narrows, and it narrows through the same shared
@@ -170,14 +212,15 @@ export function deriveScope(input: ScopeInput): DerivedScope {
   const visibleNodes = gridMode === 'filtered'
     ? scopedNodes.filter(n => matchesGridControls(n, input.controls ?? NO_FILTERS))
     : scopedNodes;
-  const meshId = gridMode === 'mesh' ? selectedMeshId : null;
+  const meshScoped = isMeshScopedView(viewMode, lastNonSingleMode, selectedMeshId);
+  const meshId = meshScoped ? selectedMeshId : null;
   const focusedMeshId = agentNodes.find(n => n.id === activeNodeId)?.mesh_id ?? null;
   const meshOf = (id: number): ScopeMesh => ({ id, name: meshes.find(m => m.id === id)?.name ?? null });
   return {
     viewMode,
     gridMode,
     mesh: meshId === null ? null : meshOf(meshId),
-    isMeshScoped: meshId !== null,
+    isMeshScoped: meshScoped,
     visibleNodes,
     visibleNodeCount: visibleNodes.length,
     scopedNodeCount: scopedNodes.length,
@@ -207,7 +250,7 @@ export function resolveSingleNode(
   const active = agentNodes.find(n => n.id === activeNodeId);
   if (active) return active;
   return (
-    scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId, controls)[0]
+    scopeNodesForMode(lastNonSingleMode, agentNodes, selectedMeshId, controls)[0]
     ?? agentNodes[0]
     ?? null
   );

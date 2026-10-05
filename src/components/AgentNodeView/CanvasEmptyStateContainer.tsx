@@ -24,11 +24,10 @@
  * reactive pollution.
  *
  * The container still has all the props it strictly needs (the parent's
- * already-subscribed-to values — `viewMode`, `selectedMeshId`,
- * `agentNodes`, plus the `scope` the parent derived for this render)
- * so the input shape and classifier behavior stay identical to the
- * pre-encapsulation inline form. The container just owns the empty-
- * state-only subscriptions.
+ * already-subscribed-to values — `selectedMeshId`, `agentNodes`, plus the
+ * `scope` the parent derived for this render) so the input shape and
+ * classifier behavior stay identical to the pre-encapsulation inline form.
+ * The container just owns the empty-state-only subscriptions.
  *
  * The pure `CanvasEmptyState` component (this file's sibling) remains
  * trivially unit-testable — its contract is the input-shape-to-branch
@@ -37,7 +36,6 @@
  */
 import { useMemo } from 'react';
 import type { AgentNode } from '../../stores/agentNodeStore';
-import type { ViewMode } from '../../stores/uiStore';
 import { useMeshStore } from '../../stores/meshStore';
 import { useNodeActivityStore } from '../../stores/nodeActivityStore';
 import { ReadinessSteps } from './ReadinessSteps';
@@ -49,17 +47,17 @@ import { hasSpawnableAgent } from '../../lib/groups';
 import { CanvasEmptyState } from './CanvasEmptyState';
 
 interface CanvasEmptyStateContainerProps {
-  viewMode: ViewMode;
   selectedMeshId: number | null;
   agentNodes: AgentNode[];
   /** The scope `AgentNodeView` already derived for this render (#2071).
-   *  The counts below come straight from it, so the empty state can never
-   *  count a different scope than the grid rendered. */
+   *  Everything the classifier needs about the active View Mode and the Mesh
+   *  in scope comes from here, so this container passes no raw
+   *  `viewMode`/`selectedMeshId` pair alongside it for a second surface to
+   *  re-derive from (#2070 review). */
   scope: DerivedScope;
 }
 
 export function CanvasEmptyStateContainer({
-  viewMode,
   selectedMeshId,
   agentNodes,
   scope,
@@ -76,27 +74,25 @@ export function CanvasEmptyStateContainer({
   const openAppSettings = useUIStore((s) => s.openAppSettings);
   const setViewMode = useUIStore((s) => s.setViewMode);
 
-  // #2071 — the two counts the classifier needs, straight off the derived
-  // scope: how many nodes the scope holds before the controls narrow it,
-  // and how many survive. `scopeNodesForMode` is no longer called here —
-  // this surface never re-derives scope of its own (#2071).
+  // #2071 — the scope and the two counts the classifier needs, straight off
+  // the derived scope: how many nodes the scope holds before the controls
+  // narrow it, and how many survive. `scopeNodesForMode` is no longer called
+  // here — this surface never re-derives scope of its own (#2071), which is
+  // also why it no longer takes `viewMode` as a prop of its own (#2070
+  // review).
   const input = useMemo(
     () => ({
       meshCount: meshesCount,
       totalNodeCount: agentNodes.length,
       scopedCount: scope.scopedNodeCount,
       filteredCount: scope.visibleNodeCount,
-      viewMode,
-      selectedMeshId,
+      scope,
       harnessReady,
     }),
     [
       meshesCount,
       agentNodes.length,
-      scope.scopedNodeCount,
-      scope.visibleNodeCount,
-      viewMode,
-      selectedMeshId,
+      scope,
       harnessReady,
     ],
   );
@@ -140,7 +136,7 @@ export function CanvasEmptyStateContainer({
     [openCreateMesh, openCanvasSpawnMenu, resetGridControls, openAppSettings, setViewMode, selectedMeshId],
   );
 
-  if (meshesCount > 0 && scope.scopedNodeCount === 0 && viewMode !== 'pinned') {
+  if (meshesCount > 0 && scope.scopedNodeCount === 0 && scope.viewMode !== 'pinned') {
     return <div className="flex-1 min-h-0 overflow-y-auto flex flex-col p-4">
       <div className="m-auto w-full max-w-sm"><CanvasEmptyState input={input} callbacks={callbacks} />
         <ReadinessSteps repositoryReady harnessReady={harnessReady} callbacks={callbacks} />

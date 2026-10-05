@@ -1,4 +1,5 @@
 import type { ViewMode } from '../stores/uiStore';
+import { selectionMeshId } from './viewModes';
 import { getNodeGitPath } from './paths';
 
 // Tabs the Probe Panel can show. Kept as a string-literal union (not a
@@ -8,7 +9,10 @@ import { getNodeGitPath } from './paths';
 // meter icon in the sidebar header. `circuits` was added for the Circuit
 // configure + monitor surface (spec #1205 / issue #1206).
 // Lives here (not in the store) so pure domain modules — probeWorkingSet,
-// this file — never import from `stores/`; `uiStore` re-exports it.
+// this file — never import from `stores/`; `uiStore` re-exports it. The one
+// runtime import is `./viewModes`, which is itself store-free (its `stores/`
+// imports are types) — the resolver reads the scope rule from the same pure
+// module `deriveScope` uses instead of keeping a second copy of it.
 export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'circuits' | 'issues' | 'pulls' | 'sessions' | 'worktrees' | 'scratchpad';
 
 /**
@@ -258,11 +262,14 @@ function currentSelectionMeshId(
   activeNode: ProbeContextNode | null,
   viewMode: ViewMode,
 ): number | null {
-  // Single mode is an explicit Agent lens for the canvas. Preserve that
-  // behavior when a destination resolves its selection context; the other
-  // modes keep an explicitly selected Mesh authoritative.
-  if (viewMode === 'single') return activeNode?.mesh_id ?? selectedMeshId;
-  return selectedMeshId ?? activeNode?.mesh_id ?? null;
+  // #2070 review — this used to be a local copy of the chain, including the
+  // View Mode special case, which made the resolver a second scope
+  // derivation that could drift from the one `deriveScope` serves. The rule
+  // now lives with that derivation (`selectionMeshId`); Single keeps its
+  // explicit-Agent-lens precedence because the soloed node IS the canvas
+  // there, and every other mode keeps an explicitly selected Mesh
+  // authoritative.
+  return selectionMeshId(viewMode, selectedMeshId, activeNode?.mesh_id ?? null);
 }
 
 export function resolveProbeContext({

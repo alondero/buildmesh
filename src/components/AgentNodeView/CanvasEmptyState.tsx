@@ -26,7 +26,7 @@
  * over the legacy `meshStore.addMesh()` direct call).
  */
 import { ReadinessSteps } from './ReadinessSteps';
-import type { ViewMode } from '../../stores/uiStore';
+import type { DerivedScope } from '../../lib/viewModes';
 
 /** The shape the empty state needs to pick a branch. Each field is
  *  computed by the owning UI from the live stores — `CanvasEmptyState`
@@ -50,13 +50,14 @@ export interface CanvasEmptyStateInput {
   /** Nodes the active scope actually shows. 0 while `scopedCount` > 0
    *  drives `filters-exclude-all`. */
   filteredCount: number;
-  /** The active view mode. */
-  viewMode: ViewMode;
-  /** The sidebar's selected mesh id, or `null` when none is selected.
-   *  Required (not assumed!) — the classifier reads this field explicitly
-   *  to tell `selected-empty` (a chosen Mesh with no agents) from
-   *  `no-mesh-selected` (#2071: Mesh Grid with nothing chosen). */
-  selectedMeshId: number | null;
+  /** The scope `AgentNodeView` already derived for this render (#2071).
+   *  The Mesh identity the Mesh branches key off comes from HERE, not from
+   *  a re-test of `viewMode === 'mesh'` against `selectedMeshId` — that
+   *  re-test was the fourth place deriving scope for itself (#2070 review).
+   *  `viewMode` is deliberately read off it rather than `gridMode`: in
+   *  Single the grid scope can still be a Mesh while the canvas shows one
+   *  soloed node, and calling that Mesh empty would be a lie. */
+  scope: DerivedScope;
   /** Whether ANY non-terminal harness is reachable (issue #822).
    *  Drives the "Setup" routing when the user has no usable agent. */
   harnessReady: boolean;
@@ -137,10 +138,13 @@ interface CanvasEmptyStateProps {
  */
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
   if (input.meshCount === 0) return { branch: 'no-meshes' };
-  if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
-  if (input.viewMode === 'mesh' && input.selectedMeshId === null) return { branch: 'no-mesh-selected' };
-  if (input.viewMode === 'mesh' && input.scopedCount === 0 && input.selectedMeshId !== null) {
-    return { branch: 'selected-empty', meshId: input.selectedMeshId };
+  if (input.scope.viewMode === 'pinned') return { branch: 'pinned-empty' };
+  // `isMeshScoped` is the scope's own answer to "is there a Mesh in scope?",
+  // so Mesh Grid with nothing chosen and Mesh Grid with a chosen-but-empty
+  // Mesh cannot be told apart by re-deriving anything (#2070 review).
+  if (input.scope.viewMode === 'mesh' && !input.scope.isMeshScoped) return { branch: 'no-mesh-selected' };
+  if (input.scope.viewMode === 'mesh' && input.scopedCount === 0 && input.scope.mesh !== null) {
+    return { branch: 'selected-empty', meshId: input.scope.mesh.id };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
   if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };

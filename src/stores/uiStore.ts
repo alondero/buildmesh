@@ -774,14 +774,14 @@ export const useUIStore = create<UIState>((set, get) => {
     enterFilteredFromSearch: () => {
       const { viewMode, lastNonSingleMode } = get();
       // Read BEFORE the flip: after it, every scope is cross-Mesh and the
-      // escape would be invisible. `searchEscapeNotice` decides from the
-      // derived scope (#2071), so Single over a Mesh grid counts and a
-      // Filtered re-click does not.
-      const notice = searchEscapeNotice({
+      // escape would be invisible. `searchEscapeNotice` decides from the same
+      // scope predicate `deriveScope` answers with (#2071), so Single over a
+      // Mesh grid counts and a Filtered re-click does not.
+      const notice = searchEscapeNotice(
         viewMode,
         lastNonSingleMode,
-        selectedMeshId: useMeshStore.getState().selectedMeshId,
-      });
+        useMeshStore.getState().selectedMeshId,
+      );
       if (get().viewMode !== 'filtered') get().setViewMode('filtered');
       // Re-arms on every press, including a re-click from Filtered: the
       // user's intent is "get me to the search box" (#1609).
