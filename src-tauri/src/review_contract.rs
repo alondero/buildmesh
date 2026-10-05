@@ -23,8 +23,31 @@ pub(crate) const RE_REVIEW_DELIVERY: &str = "The author has addressed your previ
 /// an empty argument lets `gh` resolve the pull request for the current branch.
 pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
     format!(
-        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). If the PR branch is behind the base branch or the merge is blocked as out-of-date, bring it up to date first (`gh pr update-branch{pr_argument}`, or rebase onto the base branch and push), resolving only sync conflicts without changing what the PR does; then wait for its required checks to pass (`gh pr checks{pr_argument} --watch`) and squash-merge it (`gh pr merge{pr_argument} --squash`). Do not start new work or change what the PR does — sync operations (update, rebase, push) needed to merge are expected and allowed. If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
+        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). \
+        Then check whether the PR branch is behind the base branch (`gh pr view{pr_argument} --json mergeStateStatus,mergeable`). \
+        Only if it reports behind or out-of-date, bring it up to date with `gh pr update-branch{pr_argument}` — prefer update-branch over rebasing, because rebasing rewrites the approved commits and can dismiss the approving review. \
+        Do not start new work or change what the PR does; updating the branch is expected, and report any merge-conflict resolution you had to perform. \
+        Then wait for the required checks on the pushed commit: find the workflow run for that commit (`gh run list --commit <sha>`) and poll that run's jobs until they complete — do not use `gh pr checks --watch`, which aggregates superseded runs and can report stale pending entries. \
+        Then squash-merge it (`gh pr merge{pr_argument} --squash`). \
+        If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. \
+        Report the merge result. The Circuit has finished and will not send further prompts to this session."
     )
+}
+
+/// The pre-branch-sync merge hand-off, kept verbatim so the stock-text
+/// startup upgrade can recognize stored graphs that still carry it.
+/// New graphs use [`merge_approved_pr`]; user-edited prompts never equal
+/// this text and are left intact.
+pub(crate) const LEGACY_MERGE_TEMPLATE: &str = "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`); wait for its required checks to pass (`gh pr checks{pr_argument} --watch`); then squash-merge it (`gh pr merge{pr_argument} --squash`). Do not make further changes. If a required check fails or the merge is blocked, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session.";
+
+/// Render [`LEGACY_MERGE_TEMPLATE`] for one of the two stock merge nodes:
+/// the local-review loop (`"your pull request for this work"`, `""`) or
+/// the issue-review blueprint (`"PR #{{pr.number}} ({{pr.url}})"`,
+/// `" {{pr.number}}"`).
+pub(crate) fn legacy_merge_prompt(subject: &str, pr_argument: &str) -> String {
+    LEGACY_MERGE_TEMPLATE
+        .replace("{subject}", subject)
+        .replace("{pr_argument}", pr_argument)
 }
 
 /// The reviewer stays open between rounds and re-reviews the published
@@ -63,8 +86,40 @@ mod tests {
             "merge prompt must authorize bringing the branch up to date, was: {prompt:?}"
         );
         assert!(
-            !prompt.contains("Do not make further changes"),
-            "blanket no-changes ban stops agents from rebasing an outdated branch, was: {prompt:?}"
+            prompt.contains("mergeStateStatus"),
+            "merge prompt must gate the sync on the machine-readable merge state, was: {prompt:?}"
         );
+        assert!(
+            prompt.contains("prefer update-branch over rebasing"),
+            "merge prompt must steer away from history rewrites that dismiss approval, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("gh run list --commit"),
+            "merge prompt must wait on the pushed commit's own workflow run, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("genuinely fails on the code"),
+            "merge prompt must keep the stop condition for real check failures, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("report any merge-conflict resolution"),
+            "merge prompt must require reporting manual conflict resolution, was: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("Do not make further changes"),
+            "blanket no-changes ban stops agents from updating an outdated branch, was: {prompt:?}"
+        );
+    }
+
+    #[test]
+    fn legacy_merge_template_renders_both_stock_merge_nodes() {
+        assert_eq!(
+            legacy_merge_prompt("your pull request for this work", ""),
+            "The independent reviewer approved your pull request for this work. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready`); wait for its required checks to pass (`gh pr checks --watch`); then squash-merge it (`gh pr merge --squash`). Do not make further changes. If a required check fails or the merge is blocked, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
+        );
+        let issue_prompt = legacy_merge_prompt("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}");
+        assert!(!issue_prompt.contains("gh pr update-branch"));
+        assert!(issue_prompt.contains("Do not make further changes"));
+        assert!(issue_prompt.contains("gh pr merge {{pr.number}} --squash"));
     }
 }
