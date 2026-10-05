@@ -179,6 +179,14 @@ pub struct Sample {
     pub vitals: ProcessVitals,
     pub watchers: usize,
     pub pty_sessions: usize,
+    /// PTY input queue depth and buffered bytes across every live agent
+    /// (issue #1530). Together with the writer bounds (64 messages,
+    /// `PTY_INPUT_QUEUE_BYTE_CAPACITY` bytes) these are what make a refused
+    /// prompt diagnosable after the fact: a `pty_qbytes` that climbs and then
+    /// returns to zero is a transient stall, one that stays high is a wedged
+    /// writer, and a non-zero baseline with no refusals logged is a counter bug.
+    pub pty_queue_messages: usize,
+    pub pty_queue_bytes: u64,
     pub git_changed_total: u64,
     pub git_changed_delta: u64,
     /// **Measured** wall-clock seconds since the previous sample, used to turn
@@ -205,7 +213,7 @@ pub fn format_line(s: &Sample) -> String {
     };
     format!(
         "DIAG uptime_s={} rss_mb={} priv_mb={} handles={} threads={} child_procs={} \
-         watchers={} pty={} git_changed={}(+{}/{:.1}ps) \
+         watchers={} pty={} pty_qmsg={} pty_qbytes={} git_changed={}(+{}/{:.1}ps) \
          bg_sync=att:{}/adv:{}/fail:{}/last_ms:{} git_timeouts={}",
         s.uptime_secs,
         s.vitals.working_set_bytes / (1024 * 1024),
@@ -215,6 +223,8 @@ pub fn format_line(s: &Sample) -> String {
         s.vitals.child_process_count,
         s.watchers,
         s.pty_sessions,
+        s.pty_queue_messages,
+        s.pty_queue_bytes,
         s.git_changed_total,
         s.git_changed_delta,
         rate,
@@ -300,12 +310,16 @@ fn run_sampler(log_dir: std::path::PathBuf, interval: Duration) {
         prev_sample_at = now;
 
         let git_changed_total = GIT_CHANGED_EMITS.load(Ordering::Relaxed);
+        let (pty_queue_messages, pty_queue_bytes) =
+            crate::agent::process::PROCESS_REGISTRY.input_queue_totals();
         let sample = Sample {
             uptime_secs: start.elapsed().as_secs(),
             vitals: sample_vitals(),
             // Live gauges, read directly at sample time (no counter plumbing).
             watchers: crate::commands::file_watcher::active_watcher_count(),
             pty_sessions: crate::agent::process::PROCESS_REGISTRY.len(),
+            pty_queue_messages,
+            pty_queue_bytes,
             git_changed_total,
             git_changed_delta: git_changed_total.saturating_sub(prev_git_changed),
             elapsed_secs,

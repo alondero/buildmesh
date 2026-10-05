@@ -468,3 +468,55 @@ fn attention_hook_stop_entry_omits_matcher() {
          ignores matchers on Stop with a warning); got {stop_group:#}"
     );
 }
+
+/// Issue #1530 review finding 6 — a writer thread that bails on an I/O error
+/// must not strand the byte accounting for buffers still in the channel.
+///
+/// The reader thread reaps the session, so the registry entry (and its gauge)
+/// outlives the writer thread by a long way. Without a reset on the error path,
+/// whatever was still buffered stays counted as a permanent phantom backlog on
+/// the `DIAG` line.
+#[test]
+fn a_writer_thread_that_errors_releases_the_remaining_queue_accounting() {
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "conpty gone"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let queue = std::sync::Arc::new(crate::agent::process::InputQueueGauge::default());
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    // Two buffers, accounted for as the enqueue side would: the first is
+    // released as the thread takes it off the channel, the second is still
+    // queued when the thread bails out of the first write.
+    tx.try_send(vec![1u8; 10]).unwrap();
+    tx.try_send(vec![2u8; 20]).unwrap();
+    queue.reserve(10);
+    queue.reserve(20);
+    assert_eq!(queue.snapshot(), (2, 30), "fixture must start fully accounted");
+
+    super::process::pty_writer_thread(7_777, Box::new(FailingWriter), rx, std::sync::Arc::clone(&queue));
+
+    assert_eq!(
+        queue.snapshot(),
+        (0, 0),
+        "an I/O error must not strand the remaining bytes on the DIAG line"
+    );
+}
+
+/// The clean-exit path must zero the gauge too, so a normally closed session
+/// does not report a backlog either.
+#[test]
+fn a_writer_thread_that_exits_cleanly_also_zeroes_the_gauge() {
+    let queue = std::sync::Arc::new(crate::agent::process::InputQueueGauge::default());
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+    tx.try_send(vec![3u8; 7]).unwrap();
+    queue.reserve(7);
+    drop(tx); // the `close_input` shape
+    super::process::pty_writer_thread(7_778, Box::new(std::io::sink()), rx, std::sync::Arc::clone(&queue));
+    assert_eq!(queue.snapshot(), (0, 0));
+}

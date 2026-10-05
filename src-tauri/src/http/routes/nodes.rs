@@ -220,6 +220,12 @@ pub(crate) const INPUT_BODY_MAX_BYTES: usize = 1024;
 ///     the time we write the response
 ///   * `forward_mobile_input` is reused so the attention autoclear (a CR/LF
 ///     in the payload) runs through the same code path the WS does
+///
+/// That "200 OK is the delivery proof" claim stopped being true when a full
+/// PTY input queue dropped the bytes and still reported success, so the body
+/// now carries the typed disposition and a refusal is a distinct status
+/// (issue #1530). A backpressured write is *transient*: the same bytes can be
+/// re-sent, and `Retry-After` says so.
 pub async fn post_input(req: &ParsedRequest) -> Response {
     let node_id = req.id0();
 
@@ -265,25 +271,60 @@ pub async fn post_input(req: &ParsedRequest) -> Response {
     let seq = parsed.seq.clone();
     let write_result = crate::commands::run_blocking(
         "http_input_write_bytes",
-        move || -> Result<(), String> {
+        move || -> Result<crate::agent::process::InputOutcome, String> {
             let registry: &dyn ProcessRegistryApi = &**PROCESS_REGISTRY;
             crate::http::ws::write_mobile_input(registry, node_id, &seq)
         },
     )
     .await;
 
-    match write_result {
-        Ok(()) => Response::json("200 OK", r#"{"ok":true}"#),
+    input_write_response(write_result)
+}
+
+/// Map a PTY input write to its HTTP response.
+///
+/// Split out from the handler so the status/body contract is testable without
+/// a DB row, a live registry, or a socket — the handler's remaining job is
+/// validation and the node lookup, neither of which is where the risk lives
+/// (issue #1530).
+///
+/// The contract: only `Accepted` is a success. A `Backpressured` write was
+/// never queued, so re-sending the identical `seq` is safe and the response
+/// says so with `Retry-After`; a `Closed`/hard failure is terminal. Pre-fix
+/// both of the first two answered `200 {"ok":true}`, which is how a dropped
+/// prompt came back looking delivered.
+fn input_write_response(write: Result<crate::agent::process::InputOutcome, String>) -> Response {
+    use crate::agent::process::InputDisposition;
+    match write {
+        Ok(outcome) if outcome.disposition == InputDisposition::Accepted => {
+            // `accepted` is explicit rather than a bare `{"ok":true}` so a
+            // client can assert on the disposition it is relying on instead of
+            // inferring delivery from a status code (issue #1530).
+            Response::json("200 OK", r#"{"ok":true,"disposition":"accepted"}"#)
+        }
+        // Issue #1530: the queue refused the bytes. They were never queued, so
+        // the tap is safe to repeat — 503 plus `Retry-After`, distinct from the
+        // `{"ok":true}` the pre-fix route returned for a dropped write.
+        Ok(outcome) if outcome.disposition == InputDisposition::Backpressured => Response::json(
+            "503 Service Unavailable",
+            r#"{"error":"input_backpressured: the agent is not reading its input; retry the same seq"}"#,
+        )
+        .with_header("Retry-After", "1"),
+        // A closed queue is terminal — the writer thread is gone, so the same
+        // seq can never be delivered however long the client waits. It gets the
+        // same 503 but *without* `Retry-After`, so a client following that hint
+        // does not spin on a dead process.
+        Ok(_) => Response::json(
+            "503 Service Unavailable",
+            r#"{"error":"input_closed: the agent is no longer running; this tap cannot be delivered"}"#,
+        ),
         Err(e) => {
             // PTY not running (process killed, spawn failed) or the offload
             // task itself failed — surface as 503 so the SPA knows the
             // keystroke never reached the agent. The WS path logs and
             // continues; a one-shot HTTP tap can't recover by retrying the
             // same socket.
-            Response::json_error(
-                "503 Service Unavailable",
-                &format!("PTY not running: {}", e),
-            )
+            Response::json_error("503 Service Unavailable", &format!("PTY not running: {}", e))
         }
     }
 }
@@ -301,8 +342,76 @@ mod tests {
     //! not open sockets. The PTY-down 503 path lives behind a real
     //! `ProcessRegistry` and is covered by `ws::tests::
     //! forward_mobile_input_handles_registry_error`.
+    //!
+    //! Issue #1530 adds the disposition → status contract, which is pinned
+    //! through `input_write_response` — the pure mapping the handler delegates
+    //! to — because that is where a dropped write used to masquerade as a 200.
     use super::*;
     use crate::http::router::ParsedRequest;
+
+    fn outcome(disposition: crate::agent::process::InputDisposition) -> crate::agent::process::InputOutcome {
+        crate::agent::process::InputOutcome { disposition, activity: Default::default() }
+    }
+
+    /// The encoded wire bytes, so a header assertion proves the value actually
+    /// reaches the client rather than sitting in an unasserted struct field.
+    fn wire(resp: &Response) -> String {
+        String::from_utf8_lossy(&resp.encode()).to_string()
+    }
+
+    #[test]
+    fn an_accepted_input_write_is_a_200_carrying_its_disposition() {
+        let resp = input_write_response(Ok(outcome(
+            crate::agent::process::InputDisposition::Accepted,
+        )));
+        assert_eq!(resp.status_code(), 200);
+        let text = String::from_utf8_lossy(resp.body());
+        assert!(text.contains("\"disposition\":\"accepted\""), "got: {text}");
+        assert!(!wire(&resp).contains("Retry-After"), "a delivered tap needs no retry hint");
+    }
+
+    /// Issue #1530's mobile half: a full PTY input queue must not answer
+    /// `{"ok":true}`. The pre-fix route returned exactly that for a dropped
+    /// write, so the phone rendered a tap as delivered while the agent never
+    /// saw it.
+    #[test]
+    fn a_backpressured_input_write_is_a_retryable_503_not_a_success() {
+        let resp = input_write_response(Ok(outcome(
+            crate::agent::process::InputDisposition::Backpressured,
+        )));
+        assert_eq!(resp.status_code(), 503, "a refused write must not be a 200");
+        let text = String::from_utf8_lossy(resp.body());
+        assert!(text.contains("input_backpressured"), "the client needs to know why: {text}");
+        assert!(!text.contains("\"ok\":true"), "a refusal must never claim delivery: {text}");
+        assert!(
+            wire(&resp).contains("Retry-After: 1"),
+            "the bytes were never queued, so repeating the same seq is safe: {}",
+            wire(&resp)
+        );
+    }
+
+    /// A closed queue is terminal — the writer thread is gone — so the response
+    /// must not invite a retry the agent cannot honour.
+    #[test]
+    fn a_closed_input_write_is_a_503_without_a_retry_hint() {
+        let resp = input_write_response(Ok(outcome(crate::agent::process::InputDisposition::Closed)));
+        assert_eq!(resp.status_code(), 503);
+        let text = String::from_utf8_lossy(resp.body());
+        assert!(text.contains("input_closed"), "got: {text}");
+        assert!(
+            !wire(&resp).contains("Retry-After"),
+            "a dead PTY is not a retryable stall: {}",
+            wire(&resp)
+        );
+    }
+
+    #[test]
+    fn a_hard_write_failure_is_a_503_naming_the_pty() {
+        let resp = input_write_response(Err("Agent not running".to_string()));
+        assert_eq!(resp.status_code(), 503);
+        let text = String::from_utf8_lossy(resp.body());
+        assert!(text.contains("PTY not running"), "got: {text}");
+    }
 
     #[test]
     fn configuration_resolution_keeps_validation_and_storage_errors_typed() {

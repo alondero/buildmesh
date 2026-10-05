@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 use super::evaluator;
-use crate::agent::process::AgentProcessRegistry;
+use crate::agent::process::{AgentProcessRegistry, InputDisposition, InputWriteError};
 
 const SUBMIT_POLL: Duration = Duration::from_millis(250);
 
@@ -130,19 +130,64 @@ fn stage_prompt_write(
     ensure_prompt_target_alive(registry, node_id)?;
     let readiness = paste_readiness(node_id, text)?;
     let guarded = if let Some(expected) = expected_input {
-        let Some(next) = registry.write_bytes_if_current(
-            node_id,
-            injection_payload(text).as_bytes(),
-            expected,
-        )? else {
+        // `Ok(None)` is only ever "the guard was lost" — the draft now belongs
+        // to someone else. Backpressure arrives as an `Err` and is retried by
+        // `retry_backpressured` instead, so a momentarily full queue can never
+        // be misread as lost draft ownership and silently discard the prompt
+        // (issue #1530).
+        let Some(next) = retry_backpressured(|| {
+            registry.write_bytes_if_current(
+                node_id,
+                injection_payload(text).as_bytes(),
+                expected,
+            )
+        })?
+        else {
             return Ok(None);
         };
         Some(next)
     } else {
-        registry.write_bytes(node_id, injection_payload(text).as_bytes())?;
+        retry_backpressured(|| match registry.write_bytes(node_id, injection_payload(text).as_bytes()) {
+            Ok(outcome) if outcome.is_accepted() => Ok(()),
+            // A closed queue is terminal, so it must not consume the retry
+            // budget: retrying a dead writer is pure latency before the same
+            // error. The unguarded path has no `write_bytes_if_current` twin, so
+            // the disposition is checked here rather than being flattened into
+            // an `Option` alongside the guard-lost signal.
+            Ok(outcome) if outcome.disposition == InputDisposition::Closed => {
+                Err(InputWriteError::Closed)
+            }
+            Ok(_) => Err(InputWriteError::Backpressured),
+            Err(_) => Err(InputWriteError::Closed),
+        })?;
         None
     };
     Ok(Some((guarded, readiness)))
+}
+
+/// Retry an input write while the PTY input queue is refusing it.
+///
+/// A `Backpressured` write was *never queued* — the decoder did not advance and
+/// no telemetry fired — so re-issuing the identical bytes cannot duplicate a
+/// paste. That makes a bounded retry both safe and necessary here: the circuit
+/// already blocks for up to [`RENDERED_PASTE_TOTAL_BUDGET`] (and
+/// [`ENTER_ACK_WINDOW`] per Enter attempt), so a few hundred milliseconds of
+/// backoff is free, while giving up surfaces through the existing error arm
+/// that calls `mark_attention` — the loud path, rather than a prompt left
+/// staged in the agent's input box forever (issue #1530).
+fn retry_backpressured<T>(mut write: impl FnMut() -> Result<T, InputWriteError>) -> Result<T, String> {
+    const ATTEMPTS: u32 = 5;
+    const BACKOFF: Duration = Duration::from_millis(40);
+    for attempt in 0..ATTEMPTS {
+        match write() {
+            Ok(value) => return Ok(value),
+            Err(InputWriteError::Backpressured) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(BACKOFF * (attempt + 1));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("PTY input queue did not drain".to_string())
 }
 
 /// The background half of [`write_prompt_to_pty`]: settle, Enter, verify.
@@ -349,10 +394,28 @@ fn press_enter_until_output_guarded(
         };
         let sent_at = Instant::now();
         if let Some(expected) = guard.as_deref() {
-            let Some(next) = registry.write_bytes_if_current(node_id, b"\r", expected)? else { return Ok(None); };
+            // A backpressured Enter is retried, not treated as a lost guard.
+            // Pre-#1530 a refused Enter returned `Ok(None)`, which
+            // `press_enter_until_output_guarded` reported as "new input owns the
+            // draft" — leaving the prompt staged in the agent's input box
+            // forever with no `mark_attention` and no error anywhere.
+            let Some(next) = retry_backpressured(|| {
+                registry.write_bytes_if_current(node_id, b"\r", expected)
+            })?
+            else {
+                return Ok(None);
+            };
             guard = Some(next);
         } else {
-            registry.write_bytes(node_id, b"\r")?;
+            retry_backpressured(|| match registry.write_bytes(node_id, b"\r") {
+                Ok(outcome) if outcome.is_accepted() => Ok(()),
+                // Terminal: no point spending the retry budget on a dead writer.
+                Ok(outcome) if outcome.disposition == InputDisposition::Closed => {
+                    Err(InputWriteError::Closed)
+                }
+                Ok(_) => Err(InputWriteError::Backpressured),
+                Err(_) => Err(InputWriteError::Closed),
+            })?;
         }
         if !verifiable {
             return Ok(Some(attempt));

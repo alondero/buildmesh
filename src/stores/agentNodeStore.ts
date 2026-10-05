@@ -31,6 +31,9 @@ import { attachAgentNodeListeners } from './agentNodeListeners';
 import type { AgentNode } from '../types/generated/AgentNode';
 import type { CircuitAgentOwnership } from '../types/generated/CircuitAgentOwnership';
 import type { SemanticTurnPayload } from '../types/generated/SemanticTurnPayload';
+// Issue #1530 — the shape the transport's ordered retry buffer reports when it
+// is holding a session's input rather than delivering it.
+import type { InputStall } from '../lib/terminalInputQueue';
 import type { SpawnAgentIntent } from '../types/generated/SpawnAgentIntent';
 export type { AgentNode };
 
@@ -329,6 +332,14 @@ interface AgentNodeState {
   // the row, so we flag the node here the instant the user clicks and let
   // NodeItem show a spinner instead of looking frozen.
   closingNodeIds: Set<number>;
+  // Issue #1530 — sessions whose PTY input the transport's ordered retry
+  // buffer is holding rather than delivering, keyed by node id. A *record*, not
+  // a single slot: Buildmesh runs many agents in parallel, so two nodes can be
+  // stalled at the same time, and with one shared slot the first node to recover
+  // would withdraw a badge that another, still-wedged node still needs. Entries
+  // exist only while a node is actually stalled, so the map is empty in the
+  // normal case and the UI footprint is unchanged.
+  stalledInputs: Record<number, InputStall>;
   // Pending "send input at time T" schedules (issue #785), keyed by node ID.
   // One active schedule per node — a new `scheduleInput` cancels the prior
   // timer, and `deleteAgentNode` cancels the schedule outright so a stray
@@ -458,6 +469,10 @@ interface AgentNodeState {
   /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
   refreshCircuitOwnerships: () => Promise<void>;
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
+  /// Issue #1530 — publish (or clear) one session's stalled-input state, as
+  /// reported by the transport's ordered retry buffer. Scoped by `nodeId` so
+  /// parallel agents cannot withdraw each other's badges.
+  setStalledInput: (nodeId: number, stall: InputStall | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   /// Issue #1054 — attach the store's Tauri event listeners; a one-line
   /// delegate to `agentNodeListeners.attachAgentNodeListeners`.
@@ -466,6 +481,10 @@ interface AgentNodeState {
   /// The promise is shared by concurrent callers, so exactly one
   /// attachment is ever in flight.
   initAttentionListeners: () => Promise<void>;
+  /// Issue #1530 — begin mirroring the transport's ordered retry buffer's
+  /// stalled-input reports into [`stalledInput`]. Idempotent, and called by
+  /// `initAttentionListeners` so the app's existing init path is enough.
+  initTerminalInputWatch: () => void;
   /// Schedule `message` (or a bare Enter if empty) to be sent to `nodeId`
   /// after `delayMs`. Replaces any existing schedule for the node — only one
   /// pending send per node at a time (issue #785).
@@ -694,6 +713,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   loading: false,
   error: null,
   closingNodeIds: new Set(),
+  stalledInputs: {},
   schedules: {},
 
   getAgentNodes: () => {
@@ -774,6 +794,14 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     let attachment: 'idle' | 'attaching' | 'attached' = 'idle';
     let attachPromise: Promise<void> | null = null;
 
+    // Issue #1530 - the transport stalled-input watch is a separate concern
+    // from the lifecycle bus, so it gets its own one-way latch rather than
+    // a slot in the attachment state machine: it cannot fail, has no
+    // teardown, and must not be rolled back by (or block a retry of) a
+    // failed lifecycle attach. Independent by design, so the two never
+    // entangle.
+    let stallWatchAttached = false;
+
     // Issue #1524 — hand the reset to the module-level test seam below, the
     // same shape as `setWorktreeCloseActionResolverForTests`. The state is a
     // `create()` closure, so it is per test *file*; without a reset a test
@@ -781,10 +809,24 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     resetAgentNodeListenerAttachment = () => {
       attachment = 'idle';
       attachPromise = null;
+      stallWatchAttached = false;
     };
 
     return {
+      // Issue #1530 - mirror the transport ordered retry buffer into the
+      // store. This is the transport *subscribing* to a UI concern, so the
+      // dependency arrow still points store -> transport; nothing in
+      // `lib/` reaches back into a store.
+      initTerminalInputWatch: () => {
+        if (stallWatchAttached) return;
+        stallWatchAttached = true;
+        api.subscribeTerminalInputStall((nodeId, stall) => get().setStalledInput(nodeId, stall));
+      },
       initAttentionListeners: () => {
+        // Wire the input watch on the first attempt whatever the lifecycle
+        // bus goes on to do, so a failed attach can be retried without
+        // leaving a user typing into a terminal whose stall is never shown.
+        get().initTerminalInputWatch();
         if (attachment === 'attached') return Promise.resolve();
         if (attachPromise) return attachPromise;
 
@@ -972,8 +1014,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // a kill_agent rejection skip delete_agent_node, or the node would vanish
     // from the UI while its row and worktree survive and resurrect on the
     // next fetch.
+    //
+    // Issue #1530: this calls `api.killAgent` directly, so it does not pass
+    // through the `killAgent` action that releases the transport's retry lane.
+    // Release it here, next to the kill that makes the buffered bytes
+    // undeliverable. Deliberately *not* at the top of this function: the
+    // worktree-safety prompt above can still be cancelled, and dropping a live
+    // node's in-flight keystrokes because the user opened a close dialog would
+    // trade one silent loss for another.
     try {
       await api.killAgent(id);
+      api.cancelTerminalInput(id);
     } catch (e) {
       console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
     }
@@ -1260,6 +1311,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   killAgent: async (nodeId) => {
     try {
       await api.killAgent(nodeId);
+      // Issue #1530 — the agent's PTY is gone, so anything the transport's
+      // retry buffer is still holding for it can never be delivered. Cancel the
+      // lane instead of leaving it to retry against a dead process: the
+      // keystrokes settle as `closed` and the lane is released.
+      api.cancelTerminalInput(nodeId);
       await get().fetchAgentNodes();
     } catch (e) {
       set({ error: formatError(e) });
@@ -1300,6 +1356,30 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       if (turn) semanticTurns[id] = turn;
       else delete semanticTurns[id];
       return { semanticTurns };
+    });
+  },
+
+  setStalledInput: (nodeId, stall) => {
+    // The invariant lives here, not in the callers: each node owns its own
+    // entry, so the transport, the terminal registry and any future entrypoint
+    // cannot desynchronize a badge from the buffer that owns those bytes
+    // (issue #1002's rule, applied to this state). Critically, a `null` removes
+    // only `nodeId`'s entry — withdrawing one node's stall must never clear
+    // another node's, which a single shared slot could not express.
+    set((state) => {
+      const current = state.stalledInputs[nodeId];
+      if (stall === null) {
+        if (current === undefined) return {};
+        const next = { ...state.stalledInputs };
+        delete next[nodeId];
+        return { stalledInputs: next };
+      }
+      // The buffer re-notifies as the backlog grows, so this comparison is what
+      // keeps an unchanged stall from re-rendering every node header.
+      if (current && current.pendingBytes === stall.pendingBytes && current.attempts === stall.attempts) {
+        return {};
+      }
+      return { stalledInputs: { ...state.stalledInputs, [nodeId]: stall } };
     });
   },
 
