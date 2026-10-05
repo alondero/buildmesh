@@ -763,8 +763,13 @@ mod tests {
         "\x1b[38;2;90;160;255;49mhigh\x1b[38;2;138;144;152;49m \u{b7} Auto-review\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
     );
 
+    /// Create a muse node in this test's own database and return its id.
+    ///
+    /// The caller installs the database with `db::test_support::isolated()` and
+    /// holds that guard for the rest of the test (issue #2048): a helper that
+    /// installed it and dropped the guard on return would leave the rest of the
+    /// test reading the process-global database.
     fn muse_publisher_node(label: &str) -> i64 {
-        crate::db::test_support::ensure_db_for_tests();
         let path = std::env::temp_dir().join(label);
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh(label, &path).unwrap();
@@ -803,6 +808,7 @@ mod tests {
 
     #[test]
     fn muse_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
+        let _db = crate::db::test_support::isolated();
         let id = muse_publisher_node("muse-midsize-paste");
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
@@ -829,6 +835,7 @@ mod tests {
 
     #[test]
     fn muse_midsize_paste_is_not_confirmed_until_its_tail_is_drawn() {
+        let _db = crate::db::test_support::isolated();
         let id = muse_publisher_node("muse-midsize-partial-paste");
         evaluator::register(id);
         let PasteReadiness::RenderedMultiline { chars, normalized_chars, content, .. } =
