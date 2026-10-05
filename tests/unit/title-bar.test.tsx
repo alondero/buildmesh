@@ -95,7 +95,6 @@ beforeEach(() => {
     probeOpen: false,
     probeTab: 'files',
     activeDiffFile: null,
-    probeContextPins: {},
     appSettingsOpen: false,
     appSettingsTab: 'general',
     remoteAccessOpen: false,

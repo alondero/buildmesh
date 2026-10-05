@@ -21,7 +21,15 @@ export type ProbeTab = 'files' | 'review' | 'usage' | 'properties' | 'circuits' 
  */
 export type ProbeLens = 'host' | 'mesh' | 'agent';
 
-export type ProbeContextMode = 'fixed' | 'following' | 'pinned';
+/**
+ * How a destination resolves its subject: `fixed` for a Host-owned
+ * destination that reads the machine rather than the selection, and
+ * `following` for a Mesh/Agent destination that tracks the sidebar selection.
+ * There is no third, captured mode — issue #2073 removed Probe Context Pins,
+ * so a destination can no longer hold a subject that disagrees with the
+ * sidebar selection.
+ */
+export type ProbeContextMode = 'fixed' | 'following';
 
 /** Baseline or data ownership that a destination presents. */
 export type ProbeBaseline = 'host' | 'mesh' | 'head' | 'node-base';
@@ -33,10 +41,8 @@ export interface ProbeTabDefinition {
   tooltip?: string;
   /** The primary ownership lens this destination uses. */
   lens: ProbeLens;
-  /** Whether an unpinned destination follows the current UI selection. */
+  /** Whether this destination follows the current UI selection. */
   followsSelection: boolean;
-  /** Whether the current subject can be captured as a per-tab pin. */
-  pinnable: boolean;
   /** The baseline/data family that makes the ownership decision concrete. */
   baseline: ProbeBaseline;
   /** True when the destination contains edits or other stateful actions. */
@@ -57,7 +63,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     label: 'Project Files',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'head',
     stateful: false,
     mixedOwnership:
@@ -67,7 +72,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     label: 'Agent Changes',
     lens: 'agent',
     followsSelection: true,
-    pinnable: true,
     baseline: 'node-base',
     stateful: false,
   },
@@ -76,7 +80,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     tooltip: 'Provider usage meters',
     lens: 'host',
     followsSelection: false,
-    pinnable: false,
     baseline: 'host',
     stateful: false,
   },
@@ -91,7 +94,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     tooltip: 'Repository health, recovery, and cleanup',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
     mixedOwnership:
@@ -108,7 +110,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     tooltip: 'Project identity, agent defaults, commands, and worktree strategy',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
   },
@@ -116,7 +117,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     label: 'Circuits',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
   },
@@ -126,7 +126,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     label: 'GitHub Issues',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
   },
@@ -134,7 +133,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     label: 'Pull Requests',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
   },
@@ -146,7 +144,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     tooltip: 'Completed, archived, failed, and resumable agent work',
     lens: 'host',
     followsSelection: false,
-    pinnable: false,
     baseline: 'host',
     stateful: true,
     mixedOwnership:
@@ -159,7 +156,6 @@ export const PROBE_TAB_DEFINITIONS: Record<ProbeTab, ProbeTabDefinition> = {
     tooltip: 'Scratch Pad',
     lens: 'mesh',
     followsSelection: true,
-    pinnable: true,
     baseline: 'mesh',
     stateful: true,
   },
@@ -181,19 +177,6 @@ export const PROBE_TAB_ORDER: readonly ProbeTab[] = [
   'sessions',
   'scratchpad',
 ];
-
-/**
- * A pin is intentionally keyed by destination. Pinning Agent Changes must not
- * make GitHub Issues silently operate on that same mesh after the user changes
- * tabs; each destination gets an independent context decision.
- */
-export interface ProbeContextPin {
-  tab: ProbeTab;
-  lens: Exclude<ProbeLens, 'host'>;
-  meshId: number;
-  /** Required for an Agent lens; optional for the mixed Project Files view. */
-  nodeId: number | null;
-}
 
 export interface ProbeContextMesh {
   id: number;
@@ -224,18 +207,12 @@ export interface ProbeContext {
   subject: ProbeSubject;
   /** Formatted subject, e.g. `Host`, `Mesh: buildmesh`, or `Agent: node-a`. */
   subjectLabel: string;
-  /** Whether this destination follows live selection or a captured pin. */
+  /** Whether this destination is Host-fixed or follows live selection. */
   mode: ProbeContextMode;
-  /** True only while an unpinned, selection-following context is active. */
+  /** True while a selection-following context is active. */
   followsSelection: boolean;
-  /** The destination permits pinning, and a pin/unpin control can be shown. */
-  pinnable: boolean;
   /** True when a valid target is available for this destination. */
   hasRequiredContext: boolean;
-  /** Whether the header should offer a pin or unpin action. */
-  canPin: boolean;
-  /** Candidate captured by the pin button while following selection. */
-  pinCandidate: ProbeContextPin | null;
   /** Parent Mesh name for Agent lenses, when the Mesh row is available. */
   activeMeshName: string | null;
   /**
@@ -261,7 +238,6 @@ interface ResolveProbeContextInput {
   activeNodeId: number | null;
   nodesById: Readonly<Record<number, ProbeContextNode | undefined>>;
   viewMode: ViewMode;
-  pin: ProbeContextPin | null;
 }
 
 function lensLabel(lens: ProbeLens): string {
@@ -283,23 +259,10 @@ function currentSelectionMeshId(
   viewMode: ViewMode,
 ): number | null {
   // Single mode is an explicit Agent lens for the canvas. Preserve that
-  // behavior when a destination resolves its unpinned selection context; the
-  // other modes keep an explicitly selected Mesh authoritative.
+  // behavior when a destination resolves its selection context; the other
+  // modes keep an explicitly selected Mesh authoritative.
   if (viewMode === 'single') return activeNode?.mesh_id ?? selectedMeshId;
   return selectedMeshId ?? activeNode?.mesh_id ?? null;
-}
-
-function pinApplies(
-  pin: ProbeContextPin | null,
-  tab: ProbeTab,
-  definition: ProbeTabDefinition,
-): pin is ProbeContextPin {
-  return (
-    pin !== null
-    && pin.tab === tab
-    && pin.lens === definition.lens
-    && definition.pinnable
-  );
 }
 
 export function resolveProbeContext({
@@ -309,7 +272,6 @@ export function resolveProbeContext({
   activeNodeId,
   nodesById,
   viewMode,
-  pin,
 }: ResolveProbeContextInput): ProbeContext {
   const definition = PROBE_TAB_DEFINITIONS[tab];
   const selectedNode = activeNodeId === null
@@ -320,12 +282,9 @@ export function resolveProbeContext({
     selectedNode,
     viewMode,
   );
-  const pinned = pinApplies(pin, tab, definition);
   const mode: ProbeContextMode = definition.lens === 'host'
     ? 'fixed'
-    : pinned
-      ? 'pinned'
-      : 'following';
+    : 'following';
 
   if (definition.lens === 'host') {
     const subject: ProbeSubject = {
@@ -340,10 +299,7 @@ export function resolveProbeContext({
       subjectLabel: formatProbeSubject(subject),
       mode,
       followsSelection: false,
-      pinnable: false,
       hasRequiredContext: true,
-      canPin: false,
-      pinCandidate: null,
       activeMeshName: null,
       detailLabel: null,
       activeMeshId: null,
@@ -354,11 +310,11 @@ export function resolveProbeContext({
     };
   }
 
-  const targetMeshId = pinned ? pin.meshId : selectedMeshIdForContext;
+  const targetMeshId = selectedMeshIdForContext;
   const mesh = targetMeshId === null ? null : meshesById.get(targetMeshId) ?? null;
 
   if (definition.lens === 'agent') {
-    const targetNodeId = pinned ? pin.nodeId : activeNodeId;
+    const targetNodeId = activeNodeId;
     const node = targetNodeId === null ? null : nodesById[targetNodeId] ?? null;
     const agentMeshId = node?.mesh_id ?? targetMeshId;
     const agentMesh = agentMeshId === null ? null : meshesById.get(agentMeshId) ?? null;
@@ -368,25 +324,14 @@ export function resolveProbeContext({
       name: node?.name ?? null,
       available: node !== null,
     };
-    const pinCandidate = node === null || agentMeshId === null
-      ? null
-      : {
-          tab,
-          lens: 'agent' as const,
-          meshId: agentMeshId,
-          nodeId: node.id,
-        };
 
     return {
       lens: 'agent',
       subject,
       subjectLabel: formatProbeSubject(subject),
       mode,
-      followsSelection: mode === 'following' && definition.followsSelection,
-      pinnable: definition.pinnable,
+      followsSelection: definition.followsSelection,
       hasRequiredContext: subject.available,
-      canPin: mode === 'pinned' || pinCandidate !== null,
-      pinCandidate,
       activeMeshName: agentMesh?.name ?? null,
       detailLabel: agentMesh ? `Mesh: ${agentMesh.name}` : null,
       activeMeshId: agentMeshId,
@@ -403,59 +348,38 @@ export function resolveProbeContext({
   // selection so their target cannot drift with an unrelated card.
   const meshNodeId = tab !== 'files'
     ? null
-    : pinned
-      ? pin.nodeId
-      : selectedNode?.mesh_id === targetMeshId
-        ? selectedNode.id
-        : null;
+    : selectedNode?.mesh_id === targetMeshId
+      ? selectedNode.id
+      : null;
   const candidateMeshNode = meshNodeId === null ? null : nodesById[meshNodeId] ?? null;
   const meshNode = candidateMeshNode?.mesh_id === targetMeshId ? candidateMeshNode : null;
-  const pinnedFilesNodeUnavailable = pinned
-    && tab === 'files'
-    && pin.nodeId !== null
-    && meshNode === null;
   const subject: ProbeSubject = {
     lens: 'mesh',
     id: targetMeshId,
     name: mesh?.name ?? null,
     available: mesh !== null,
   };
-  const pinCandidate = targetMeshId === null || mesh === null
-    ? null
-    : {
-        tab,
-        lens: 'mesh' as const,
-        meshId: targetMeshId,
-        nodeId: tab === 'files' ? meshNode?.id ?? null : null,
-      };
 
   return {
     lens: 'mesh',
     subject,
     subjectLabel: formatProbeSubject(subject),
     mode,
-    followsSelection: mode === 'following' && definition.followsSelection,
-    pinnable: definition.pinnable,
-    hasRequiredContext: subject.available && !pinnedFilesNodeUnavailable,
-    canPin: mode === 'pinned' || pinCandidate !== null,
-    pinCandidate,
+    followsSelection: definition.followsSelection,
+    hasRequiredContext: subject.available,
     activeMeshName: mesh?.name ?? null,
     detailLabel: mesh === null
       ? null
-      : pinnedFilesNodeUnavailable
-        ? 'Pinned working tree unavailable'
-        : tab === 'files'
-          ? meshNode
-            ? `Working tree: ${meshNode.name}`
-            : 'Repository root'
-          : null,
+      : tab === 'files'
+        ? meshNode
+          ? `Working tree: ${meshNode.name}`
+          : 'Repository root'
+        : null,
     activeMeshId: targetMeshId,
     activeNodeId: meshNode?.id ?? null,
-    activePath: pinnedFilesNodeUnavailable
-      ? null
-      : meshNode
-        ? getNodeGitPath(meshNode)
-        : mesh?.path ?? null,
+    activePath: meshNode
+      ? getNodeGitPath(meshNode)
+      : mesh?.path ?? null,
     activeMeshPath: mesh?.path ?? null,
     activeNodeName: meshNode?.name ?? null,
   };

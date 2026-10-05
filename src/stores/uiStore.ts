@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
-import type { ProbeContextPin, ProbeTab } from '../lib/probeContext';
+import type { ProbeTab } from '../lib/probeContext';
 import { rememberProbeSubview, restoredProbeSubview } from '../lib/probeGroups';
 import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } from '../lib/probeWorkingSet';
 
@@ -305,13 +305,6 @@ interface UIState extends GridControls {
   // records visits transitively) and by `toggleProbe` when it opens the
   // panel; session-only — never persisted.
   probeWorkingSet: ProbeWorkingSet;
-  // Destination-local context captures (issue #1456). Host-lens tabs do
-  // not use these. Mesh/Agent tabs follow selection until the user pins the
-  // current stable id; the resolver keeps a missing pin visible instead of
-  // silently falling back to a newly selected subject. Keeping one slot per
-  // destination means pinning a second tab cannot erase the first tab's
-  // protection when the user returns to it.
-  probeContextPins: Partial<Record<ProbeTab, ProbeContextPin>>;
   // The single file currently shown in the Center Workspace Diff Overlay
   // (issue #379), or null when the overlay is closed. Independent of
   // `probeTab` — the overlay floats over the terminal grid and survives Probe
@@ -321,13 +314,6 @@ interface UIState extends GridControls {
   activeDiffFile: DiffContext | null;
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
-  pinProbeContext: (pin: ProbeContextPin) => void;
-  // Clears the pin for `tab` (default: the current tab) so the destination
-  // returns to following selection. The palette's mesh-scoped probe entries
-  // ("Open <Destination> in <Mesh>") clear the target tab's stale pin
-  // before selecting the mesh — otherwise a pin to another mesh would keep
-  // winning over the requested scope and the command would appear broken.
-  clearProbeContextPin: (tab?: ProbeTab) => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
   // click handler — this is a pure "make the tab visible" action.
@@ -483,7 +469,6 @@ export const useUIStore = create<UIState>((set, get) => {
     // Matches the default `probeTab` so the rail is never empty and the
     // body's aria-labelledby always resolves, from boot onward.
     probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, initialProbeTab),
-    probeContextPins: {},
     activeDiffFile: null,
 
     toggleProbe: () => {
@@ -514,23 +499,6 @@ export const useUIStore = create<UIState>((set, get) => {
         probeTab: tab,
         probeWorkingSet: pushProbeWorkingSet(state.probeWorkingSet, tab),
       }));
-    },
-
-    pinProbeContext: (pin) => {
-      set((state) => ({
-        probeContextPins: {
-          ...state.probeContextPins,
-          [pin.tab]: pin,
-        },
-      }));
-    },
-
-    clearProbeContextPin: (tab) => {
-      const target = tab ?? get().probeTab;
-      if (get().probeContextPins[target] === undefined) return;
-      const probeContextPins = { ...get().probeContextPins };
-      delete probeContextPins[target];
-      set({ probeContextPins });
     },
 
     openDiff: (ctx: DiffContext) => {

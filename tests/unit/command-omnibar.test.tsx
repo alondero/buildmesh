@@ -647,16 +647,13 @@ describe('CommandOmnibar — command execution routing', () => {
     });
   });
 
-  it('routes a mesh-scoped probe item to its mesh, clears the stale pin, and opens the tab', () => {
+  it('routes a mesh-scoped probe item to its mesh and opens the tab', () => {
     // "Open GitHub Issues in ProjectY": the Probe's GitHub tabs read the
     // selected mesh, so the router must select the item's mesh (2, not the
-    // currently selected 1). A stale per-tab pin to mesh 1 would keep
-    // winning over the fresh selection, so it is cleared first.
+    // currently selected 1) — that selection is the whole retargeting now
+    // that issue #2073 removed the per-tab pin.
     const projectY = { ...mesh, id: 2, name: 'ProjectY' };
     useMeshStore.setState({ selectedMeshId: 1 });
-    useUIStore.setState({
-      probeContextPins: { issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null } },
-    });
     const openProbeTab = vi.fn();
     executeOmnibarItem('probe-in-mesh:issues:2', {
       meshes: [mesh, projectY],
@@ -665,7 +662,6 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
-    expect(useUIStore.getState().probeContextPins.issues).toBeUndefined();
     expect(openProbeTab).toHaveBeenCalledWith('issues');
   });
 
@@ -673,7 +669,7 @@ describe('CommandOmnibar — command execution routing', () => {
     // No selection change, so the sidebar sync cannot fire — the router
     // exits non-mesh modes itself (mirrors the `issue:`/`pull:` branch).
     useMeshStore.setState({ selectedMeshId: 1 });
-    useUIStore.setState({ viewMode: 'pinned', probeContextPins: {} });
+    useUIStore.setState({ viewMode: 'pinned' });
     const openProbeTab = vi.fn();
     executeOmnibarItem('probe-in-mesh:issues:1', {
       meshes: [mesh],
