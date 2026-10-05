@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useToastStore } from '../../src/stores/toastStore';
-import { SCOPE_NOTICE_PROVIDER, meshDeletedScopeNotice } from '../../src/lib/scopeNotices';
+import { SCOPE_NOTICE_PROVIDER } from '../../src/lib/scopeNotices';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 
 const DELETED_MESH: Mesh = {
@@ -320,7 +320,7 @@ describe('useMeshStore', () => {
       const toasts = useToastStore.getState().toasts;
       expect(toasts).toHaveLength(1);
       expect(toasts[0].provider).toBe(SCOPE_NOTICE_PROVIDER);
-      expect(toasts[0].message).toBe(meshDeletedScopeNotice('doomed'));
+      expect(toasts[0].message).toBe('Mesh “doomed” was deleted — the canvas moved to All Nodes.');
       expect(toasts[0].severity).toBe('info');
       // The live path is untouched by the notice: the delete committed and
       // the selection cleared.
