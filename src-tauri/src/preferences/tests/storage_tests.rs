@@ -43,7 +43,14 @@ fn failed_update_does_not_publish_candidate_to_cache() {
     assert_eq!(loaded.default_provider, None);
     let error = update(|prefs| prefs.default_provider = Some("must-not-leak".into()))
         .unwrap_err();
-    assert!(error.contains("app data dir") || error.contains("temporary preferences"));
+    // The gate refuses an I/O failure too, but as a plain I/O error — not as
+    // the issue-#1523 corruption refusal, which would tell the user their
+    // file was damaged when it was not. The point of the assertion is that
+    // the two are distinguishable and nothing reached the cache.
+    assert!(
+        !error.contains("PREFERENCES_CORRUPT"),
+        "an unreadable file is not a corrupt one, got {error:?}"
+    );
     assert_eq!(load().unwrap().default_provider, None);
 
     reset_for_tests();
@@ -96,8 +103,13 @@ fn reviewer_provider_helper_strips_blank_strings() {
     });
 }
 
+/// A malformed file still yields defaults to a *reader* — spawn routing, the
+/// circuit classifier, and the usage panel all keep working rather than
+/// failing closed on a file the user can still repair. Those defaults are
+/// not published to the writable cache, and no ordinary write can land on
+/// top of the file; the refusal matrix lives in `recovery_tests`.
 #[test]
-fn malformed_json_falls_back_to_default() {
+fn malformed_json_read_falls_back_to_defaults_without_touching_the_file() {
     with_temp_dir(|tmp| {
         let original = "{not valid json";
         std::fs::write(tmp.join("preferences.json"), original).unwrap();

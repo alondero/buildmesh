@@ -44,9 +44,12 @@ export function reorderIds(ids: string[], activeId: string, overId: string): str
   return arrayMove(ids, from, to);
 }
 
-function HarnessRow({ provider }: { provider: ProviderInfo }) {
+function HarnessRow({ provider, disabled }: { provider: ProviderInfo; disabled: boolean }) {
+  // Issue #1523 — `disabled` on `useSortable` is what actually blocks the
+  // drag; without it the handle still looks live and dnd-kit still fires a
+  // reorder that the backend would refuse (preferences.json is corrupt).
   const { setNodeRef, transform, transition, isDragging, attributes, listeners } =
-    useSortable({ id: provider.id });
+    useSortable({ id: provider.id, disabled });
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -72,9 +75,10 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
         tabIndex={0}
         role="button"
         aria-roledescription="sortable"
+        aria-disabled={disabled || undefined}
         aria-label={`Reorder ${provider.label}`}
-        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm"
-        title="Drag to reorder"
+        className="text-text-muted hover:text-text-secondary cursor-grab active:cursor-grabbing text-2xs select-none focus:outline-none focus-visible:ring-1 focus-visible:ring-accent-cyan rounded-sm disabled:opacity-50"
+        title={disabled ? 'Settings must be recovered before the order can change' : 'Drag to reorder'}
       >
         ⋮⋮
       </span>
@@ -87,9 +91,14 @@ function HarnessRow({ provider }: { provider: ProviderInfo }) {
 export function HarnessOrderList({
   providers,
   onReorder,
+  disabled = false,
 }: {
   providers: ProviderInfo[];
   onReorder: (order: string[]) => void;
+  /** Issue #1523 — reordering persists `harness_order` in
+   *  `preferences.json`, which the backend refuses while the file is
+   *  corrupt. */
+  disabled?: boolean;
 }) {
   // Issue #575: only native Agent Harnesses are orderable. Proxied
   // Providers (`is_proxied: true`, ids like `claude:minimax`) cluster
@@ -124,6 +133,7 @@ export function HarnessOrderList({
   if (rows.length < 2) return null;
 
   const handleDragEnd = (event: DragEndEvent) => {
+    if (disabled) return;
     const { active, over } = event;
     if (!over || active.id === over.id) return;
     const next = reorderIds(rows.map(p => p.id), active.id as string, over.id as string);
@@ -135,7 +145,7 @@ export function HarnessOrderList({
       <SortableContext items={rows.map(p => p.id)} strategy={verticalListSortingStrategy}>
         <div className="space-y-2">
           {rows.map(p => (
-            <HarnessRow key={p.id} provider={p} />
+            <HarnessRow key={p.id} provider={p} disabled={disabled} />
           ))}
         </div>
       </SortableContext>

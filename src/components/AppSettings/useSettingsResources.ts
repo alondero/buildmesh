@@ -97,6 +97,11 @@ export interface SettingsResourceCallbacks {
 
 export interface UseSettingsResources extends SettingsResourceCallbacks {
   resources: Record<ResourceKey, ResourceState>;
+  /** Issue #1523 — set when `preferences.json` exists but could not be read.
+   *  Non-null means the preferences on screen are stand-ins: every
+   *  preference-backed control must stay disabled and the recovery panel
+   *  must be offered. See `PreferencesCorruptionPanel`. */
+  preferencesCorruption: api.CorruptionInfo | null;
   setResource: (key: ResourceKey, next: ResourceState) => void;
   loadPreferences: () => Promise<api.AppPreferences | null>;
   loadRouting: () => Promise<api.ProviderInfo[] | null>;
@@ -125,6 +130,14 @@ export function useSettingsResources(
 ): UseSettingsResources {
   const [resources, setResourcesState] = useState<Record<ResourceKey, ResourceState>>(
     INITIAL_RESOURCES,
+  );
+
+  /** Issue #1523 — non-null when the on-disk `preferences.json` exists but
+   *  could not be read. The preferences *load* still succeeds (the backend
+   *  serves defaults so read-only surfaces keep working), so this cannot
+   *  live in `ResourceState`; it is a property of the file, not the load. */
+  const [preferencesCorruption, setPreferencesCorruption] = useState<api.CorruptionInfo | null>(
+    null,
   );
 
   /** Stash callbacks + helpers in a ref so the loaders don't need
@@ -211,9 +224,28 @@ export function useSettingsResources(
   }, []);
 
   const loadPreferences = useCallback(
-    () => withResourceLoad('preferences', () => readPreferences(), (prefs) => {
-      callbacksRef.current.onPreferencesLoaded?.(prefs);
-    }),
+    async () => {
+      const result = await withResourceLoad('preferences', () => readPreferences(), (prefs) => {
+        callbacksRef.current.onPreferencesLoaded?.(prefs);
+      });
+      // A superseded or failed read leaves the current value alone — a newer
+      // request, or the failure banner, is already telling the user what
+      // happened.
+      if (result === null) return null;
+
+      // Issue #1523 — the health probe is what distinguishes "these are your
+      // real settings" from "these are defaults standing in for a file we
+      // could not read". It is deliberately NOT part of `ResourceState`:
+      // corruption is a property of the *file*, not of the load — the load
+      // genuinely succeeded. It is a separate command precisely so a
+      // corruption is not an IPC failure, and it is best-effort, because a
+      // failed probe must not turn a perfectly readable preferences file
+      // into a failed resource. The backend refuses every write to a corrupt
+      // file, so a missed probe costs a disabled control, never a lost file.
+      const health = await api.getPreferencesHealth().catch(() => null);
+      setPreferencesCorruption(health?.corruption ?? null);
+      return result;
+    },
     [withResourceLoad, readPreferences],
   );
 
@@ -400,6 +432,7 @@ export function useSettingsResources(
 
   return {
     resources,
+    preferencesCorruption,
     setResource,
     loadPreferences,
     loadRouting,

@@ -87,6 +87,7 @@ export function HarnessConfigList({
   onVerify = async () => {},
   onReorderProxied,
   onDirtyChange,
+  disabled = false,
 }: {
   harnesses: ProxyHarness[];
   compatibleByHarness: Record<string, ProviderAccount[]>;
@@ -112,6 +113,11 @@ export function HarnessConfigList({
   onVerify?: (harnessId: string, providerId: string, envType: api.EnvType) => Promise<void>;
   onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   onDirtyChange?: (harnessId: string, dirty: boolean) => void;
+  /** Issue #1523 — every attach / edit / detach here writes
+   *  `provider_pairings` in `preferences.json`, which the backend refuses
+   *  while the file is corrupt. Folded into `busy` so the whole list — rows
+   *  and the attach form — locks from one gate. */
+  disabled?: boolean;
 }) {
   const accountName = (id: string) => accounts.find((a) => a.id === id)?.name ?? id;
   const isKeyed = (id: string) => {
@@ -152,6 +158,7 @@ export function HarnessConfigList({
           onVerify={onVerify}
           onReorderProxied={onReorderProxied}
           onDirtyChange={onDirtyChange ? (d) => onDirtyChange(harness.id, d) : undefined}
+          disabled={disabled}
         />
       ))}
     </div>
@@ -173,6 +180,7 @@ function HarnessCard({
   onVerify,
   onReorderProxied,
   onDirtyChange,
+  disabled = false,
 }: {
   harness: ProxyHarness;
   compatible: ProviderAccount[];
@@ -199,6 +207,10 @@ function HarnessCard({
   onVerify: (harnessId: string, providerId: string, envType: api.EnvType) => Promise<void>;
   onReorderProxied?: (harnessId: string, providerIds: string[]) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Issue #1523 — relayed from `HarnessConfigList`; folds into this card's
+   *  `busy` so the attach form, every pairing row, and the reorder drag all
+   *  lock from one gate. */
+  disabled?: boolean;
 }) {
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState('');
@@ -206,7 +218,9 @@ function HarnessCard({
   const [baseUrl, setBaseUrl] = useState('');
   const [tiers, setTiers] = useState<ModelTiers>(EMPTY_TIERS);
   const [surface, setSurface] = useState<ApiSurface | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Issue #1523 — see the `disabled` prop: one gate, every control below.
+  const [submitting, setBusy] = useState(false);
+  const busy = submitting || disabled;
   const [editingId, setEditingId] = useState<string | null>(null);
 
   const attachedIds = new Set(pairings.map((p) => p.provider_id));
@@ -454,7 +468,7 @@ function HarnessCard({
                   }
                   className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
                 >
-                  {busy ? 'Attaching…' : 'Attach'}
+                  {submitting ? 'Attaching…' : 'Attach'}
                 </button>
                 <button
                   onClick={reset}
@@ -509,7 +523,7 @@ function ProxiedChildRow({
   busy: boolean;
 }) {
   const { setNodeRef, transform, transition, isDragging, attributes, listeners } =
-    useSortable({ id: pairing.provider_id, disabled: !detachable || editing });
+    useSortable({ id: pairing.provider_id, disabled: !detachable || editing || busy });
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -518,7 +532,10 @@ function ProxiedChildRow({
 
   const [editUrl, setEditUrl] = useState(pairing.base_url ?? '');
   const [editTiers, setEditTiers] = useState<ModelTiers>(pairing.model_tiers ?? EMPTY_TIERS);
-  const [saving, setSaving] = useState(false);
+  // `busy` is the parent's gate (which now folds in the issue-#1523
+  // corruption lock), so the row's own Save follows the same lock.
+  const [savingEdit, setSaving] = useState(false);
+  const saving = savingEdit || busy;
   const [verifying, setVerifying] = useState<api.EnvType | null>(null);
 
   useEffect(() => {
@@ -699,7 +716,7 @@ function ProxiedChildRow({
               disabled={saving || !editUrl.trim() || !editTiers.default?.trim()}
               className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
-              {saving ? 'Saving…' : 'Save'}
+              {savingEdit ? 'Saving…' : 'Save'}
             </button>
             <button
               onClick={onCancelEdit}

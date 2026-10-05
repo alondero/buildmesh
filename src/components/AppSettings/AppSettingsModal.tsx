@@ -33,6 +33,7 @@ import { currentTheme, setTheme, type ThemeName } from '../../lib/theme';
 import { isSelfAuthId, isFirstClassId, KEYED_FIRST_CLASS_IDS } from '../../lib/providerClassification';
 import { isWindows } from '../../lib/platform';
 import { useSettingsResources, type ResourceKey, type ResourceState } from './useSettingsResources';
+import { PreferencesCorruptionPanel } from './PreferencesCorruptionPanel';
 import { blocksReviewCircuit } from '../Circuits/harnessCapabilities';
 
 interface AppSettingsModalProps {
@@ -128,6 +129,7 @@ export function AccountCard({
   onSave,
   onRemove,
   onDirtyChange,
+  disabled = false,
 }: {
   account: ProviderAccount;
   onSave: (account: ProviderAccount) => Promise<boolean>;
@@ -142,6 +144,12 @@ export function AccountCard({
    * it trapped users with the discard banner after removing a dirty card.
    */
   onDirtyChange?: (dirty: boolean) => void;
+  /** Issue #1523 — set while `preferences.json` exists but cannot be read.
+   *  Every control here writes `provider_accounts`, which the backend
+   *  refuses while the file is corrupt, so a live card would let the user
+   *  type a credential only to have the save rejected. Same contract as
+   *  `HarnessDefaultsSection` / `ProbeSpawnPromptsSection`. */
+  disabled?: boolean;
 }) {
   // Issue #1535 (round 4, PR #1636 review round 3): per-field overrides
   // replace the round-3 nullable snapshot. isDirty is derived purely from
@@ -151,7 +159,11 @@ export function AccountCard({
   // not touch overrides, so it cannot erase typed edits (Finding 1).
   const [overrides, setOverrides] = useState<EditOverrides>({});
   const [showCreds, setShowCreds] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // Issue #1523: folding the parent's `disabled` into `busy` keeps every
+  // existing per-control `disabled={busy}` correct without adding a prop to
+  // each of them — a locked card simply has no live control.
+  const [saving, setBusy] = useState(false);
+  const busy = saving || disabled;
   const [confirmingRemove, setConfirmingRemove] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -406,7 +418,7 @@ export function AccountCard({
               disabled={busy}
               className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
-              {busy ? 'Saving...' : 'Save'}
+              {saving ? 'Saving...' : 'Save'}
             </button>
           </div>
           {error && (
@@ -439,17 +451,24 @@ export function AddProviderForm({
   onAddGeneric,
   onCancel,
   onDirtyChange,
+  disabled = false,
 }: {
   catalog: ProviderAccount[];
   onAddCatalog: (template: ProviderAccount) => Promise<void>;
   onAddGeneric: (name: string, apiKey: string) => Promise<void>;
   onCancel: () => void;
   onDirtyChange?: (dirty: boolean) => void;
+  /** Issue #1523 — adding a provider writes `provider_accounts`, which the
+   *  backend refuses while the file is corrupt. */
+  disabled?: boolean;
 }) {
   const [mode, setMode] = useState<'pick' | 'generic'>('pick');
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [busy, setBusy] = useState(false);
+  // Issue #1523 — see `AccountCard`: folding the gate into `busy` keeps
+  // every existing `disabled={busy}` correct.
+  const [submitting, setBusy] = useState(false);
+  const busy = submitting || disabled;
 
   const isDirty =
     mode === 'generic'
@@ -552,7 +571,7 @@ export function AddProviderForm({
               disabled={busy || !name.trim() || !apiKey.trim()}
               className="px-5 py-2 bg-bg-selection border border-accent-cyan font-medium text-text-primary text-base rounded-md hover:bg-bg-card-hover disabled:opacity-50"
             >
-              {busy ? 'Adding...' : 'Add provider'}
+              {submitting ? 'Adding...' : 'Add provider'}
             </button>
             <button
               onClick={() => {
@@ -728,6 +747,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
   // loaders commit data through the modal's setters.
   const {
     resources,
+    preferencesCorruption,
     loadPreferences,
     loadRouting,
     loadProviders,
@@ -794,7 +814,15 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
   // `loading`, and `failed` all disable, so a placeholder initial value
   // (`false` / `[]` / `{}`) can never be written to the backend as if
   // it were the real persisted state.
-  const prefsLoaded = resources.preferences.status === 'loaded';
+  //
+  // Issue #1523: a corrupt `preferences.json` reads *successfully* (the
+  // backend serves defaults so read-only surfaces keep working), so status
+  // alone would leave every control enabled — and every one of them would
+  // then fail on save, because the backend refuses to write over a file it
+  // could not read. Gate on the corruption flag too, so one boolean
+  // disables every preference-backed control in every pane.
+  const prefsLoaded =
+    resources.preferences.status === 'loaded' && !preferencesCorruption;
   const providersLoaded = resources.providers.status === 'loaded';
   const routingLoaded = resources.routing.status === 'loaded';
   const routingChoices = providersLoaded ? providers : routingProviders;
@@ -1821,6 +1849,32 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
         </nav>
 
         <div className="flex-1 min-w-0 overflow-y-auto px-8 pb-10 pt-6">
+        {/* Issue #1523 — the corrupt-preferences recovery panel. Above the
+            panes rather than inside one, because the condition is app-wide:
+            the settings it protects (accounts, keys, pairings, harness
+            defaults) are spread across every tab, and the user has to be
+            able to recover without first finding the right pane. */}
+        {preferencesCorruption && (
+          <PreferencesCorruptionPanel
+            corruption={preferencesCorruption}
+            onRecovered={() => {
+              // Re-read every surface the recovered file can change — not
+              // just preferences itself. `accounts` covers both the stored
+              // accounts and the keyed catalog; `pairings` the stored
+              // pairings; and `providers` is *derived* from the two, so
+              // leaving it stale would show the pre-recovery provider list
+              // in every routing dropdown and the harness-order list until a
+              // restart. `routing` is the fallback list the dropdowns use
+              // when `providers` hasn't loaded, so it must move together.
+              retryResource('preferences');
+              retryResource('accounts');
+              retryResource('pairings');
+              retryResource('providers');
+              retryResource('routing');
+            }}
+          />
+        )}
+
         {/* Shared error surface — outside the panes so a failed save is
             visible no matter which pane the user is looking at. */}
         {error && (
@@ -2063,7 +2117,11 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
             <p className="pb-2 text-sm text-text-muted">
               Drag to reorder how harnesses appear in every spawn menu. Terminal stays pinned last.
             </p>
-            <HarnessOrderList providers={providers} onReorder={handleReorderHarnesses} />
+            <HarnessOrderList
+              providers={providers}
+              onReorder={handleReorderHarnesses}
+              disabled={!prefsLoaded}
+            />
           </SettingsSection>
         )}
 
@@ -2124,6 +2182,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
               onVerify={handleVerifyPairing}
               onReorderProxied={handleReorderProxiedProviders}
               onDirtyChange={(site, d) => siteDirtyChange(`harness-${site}`, d)}
+              disabled={!prefsLoaded}
             />
           )}
         </SettingsSection>
@@ -2333,6 +2392,7 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
                   onSave={handleSaveAccount}
                   onRemove={handleRemoveAccount}
                   onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}
+                  disabled={!prefsLoaded}
                 />
               ))}
             </div>
@@ -2352,11 +2412,13 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
                 setAddingProvider(false);
               }}
               onDirtyChange={d => siteDirtyChange('add-custom-form', d)}
+              disabled={!prefsLoaded}
             />
           ) : (
             <button
               onClick={() => setAddingProvider(true)}
-              className="mt-4 text-base text-text-secondary hover:text-text-primary"
+              disabled={!prefsLoaded}
+              className="mt-4 text-base text-text-secondary hover:text-text-primary disabled:opacity-50"
             >
               + Add provider
             </button>

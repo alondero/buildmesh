@@ -519,6 +519,34 @@ and remain unavailable until verified. Failed checks keep a **Retry** action;
 defaults stay disabled if preferences failed to load, so a failed read cannot
 overwrite saved choices.
 
+## When Buildmesh cannot read your settings
+
+If `preferences.json` is damaged, empty, truncated, or holds a field this
+version does not understand, Settings opens with a warning panel instead of
+silently showing defaults. Nothing is lost at that point: Buildmesh leaves
+the file exactly as it found it and refuses to write over it, so your
+provider accounts, API keys, provider pairings, harness defaults, and
+Autopilot settings are still on disk. Settings controls stay disabled until
+you choose one of three actions:
+
+- **Restore last-known-good** puts back the settings Buildmesh last saved
+  successfully. A copy of the unreadable file is kept either way. Offered
+  only when such a backup exists; it is a plain file named
+  `preferences.json.bak` next to `preferences.json`.
+- **Open file location** opens the folder in Explorer or Finder, so you can
+  copy the file somewhere safe or repair it in a text editor. Restart
+  Buildmesh afterwards — Settings re-checks the file each time it opens, so
+  a repaired file is picked up without touching anything else.
+- **Reset to defaults…** replaces the file with defaults. It asks for
+  confirmation first and names what is lost, and it also keeps a copy of the
+  unreadable file (named `preferences.json.corrupt-<timestamp>`) in the same
+  folder.
+
+The most common cause is an interrupted write — a crash or a full disk during
+a save. A file written by a *newer* Buildmesh can also fail to load if that
+version changed the type of a field; **Restore last-known-good** is the right
+answer there too.
+
 | Settings area | Use it for |
 |---|---|
 | General | Appearance, quit confirmation, global Circuit agent capacity, the default worktree directory, and the Probe spawn prompts |

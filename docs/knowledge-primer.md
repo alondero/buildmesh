@@ -203,6 +203,22 @@ returning `Err` ⇒ keep the on-disk file intact rather than `unwrap_or_default(
 which previously overwrote a partially-unknown prefs file with defaults — a
 silent data-loss path).
 
+**A read failure is not a licence to write defaults.** `preferences.json` holds
+credentials, so an unreadable file must never be replaced by
+`AppPreferences::default()`. `preferences::storage` owns that rule: it classifies
+the file into `LoadState::{Missing, Healthy, Corrupt}` on every read, publishes
+only `Missing` and `Healthy` to the writable cache, and re-checks the file on
+every write rather than latching a flag that can disagree with the disk. A
+corrupt read still *serves* defaults so read-only callers (spawn routing, the
+circuit classifier, the usage panel) keep working; the defaults simply never
+reach the disk. `preferences::recovery` owns the bytes: `classify` is pure and
+returns a content-free `CorruptionInfo` (a corrupt file holds plaintext API
+keys, so no diagnostic may echo a value), every successful write refreshes an
+owner-only `preferences.json.bak`, and `restore_backup` / `reset_to_defaults`
+archive the current bytes before replacing them. Surface the state as a
+*successful* `get_preferences_health` call — never as an `Err` string the UI
+has to pattern-match, and never as a `failed` resource status, because the
+read itself did succeed.
 **The Settings Harnesses pane does not depend on the Spawn Menu — and neither
 does its retry.** The attach picker ("Add proxied provider") resolves its whole
 `harness_id → compatible accounts` map in one backend call,

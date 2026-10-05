@@ -541,8 +541,8 @@ impl Default for AppPreferences {
         // `confirm_before_quit = true` (issue #1501), which a
         // `#[derive(Default)]` would wrongly give as `false`. A future field
         // without a serde default fails loudly here (and in the
-        // `malformed_json_falls_back_to_default` test) instead of silently
-        // compiling with a divergent default.
+        // `malformed_json_read_falls_back_to_defaults_without_touching_the_file`
+        // test) instead of silently compiling with a divergent default.
         serde_json::from_value(serde_json::json!({})).expect(
             "AppPreferences must deserialize from {}: every field needs a serde default",
         )
