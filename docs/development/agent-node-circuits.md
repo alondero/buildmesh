@@ -89,8 +89,23 @@ with `gh pr update-branch` (never a rebase, which would rewrite the approved
 commits), waits for the pushed commit's own workflow run, and only then
 squash-merges. The run completes once that prompt is delivered: it does
 not wait for the merge.
+
+The issue-driven blueprint then verifies the merge instead of trusting the
+report: `merge_wait` classifies the implementer's turn and `merge_verify`
+(`GithubAction::ConfirmPrMerged`) reads the pull request from GitHub. Only a PR
+GitHub reports as merged reaches `close_implementer`, the one place the
+implementation agent is closed, and even then a worktree with uncommitted changes
+keeps it open with a warning. A blocked report, an unmerged or closed PR, or an
+unreadable PR ends the run with a notification, records why in
+`merge.unconfirmed_reason` and leaves the agent open. Blueprints saved before this
+are upgraded at startup only when they still have the exact stock topology and
+prompts. The title-bar review preset keeps the merge hand-off without
+verification, because its source agent is the user's own node and is never
+closed by the circuit.
+
 A completed run retires only the agents its graph closed, so the implementation
-agent stays open, and the circuit stops observing every agent it referenced.
+agent stays open otherwise, and the circuit stops observing every agent it
+referenced.
 A failed or cancelled run retires only its helper agents (the reviewer, which
 was launched for another agent). The implementation agent is never retired by
 the circuit: it stays open so its work, terminal and worktree are not lost. The
@@ -195,6 +210,31 @@ history. Unknown GitHub effects are never automatically replayed.
 
 The complete action-by-action journal, provider contract, cancellation, and
 restart inventory is in the [Circuit effect recovery contract](circuit-effect-recovery.md).
+
+A run that needs a person says so on its card, outside the history. The card
+names the run after its implementation agent (falling back to the issue or PR
+title once that node is closed), shows when Autopilot started, finished and how
+long it ran (queue time excluded, wall-clock times), and a **What to do next** box
+explains what happened in plain words with the raw error behind a disclosure. Its
+data comes from the lightweight `circuit_run_attention` command, which carries the
+unverified steps with their allowed actions and, for a failed run, the recovery
+options below.
+
+A failed run can be reopened at its failed step with `recover_failed_circuit_run`:
+**Retry this step** runs it again as a new attempt, and **I've done this —
+continue** records an operator attestation (a note is required) and moves on. One
+eligibility decision (`db::circuit::step_recovery::build_recovery`) feeds both the
+buttons and the command, so a button is shown only when the command accepts it. A
+review verdict, a pull-request lookup, a merge check or a spawn can never be
+attested; a closed agent blocks retry until it is resumed from Archive. The run
+re-enters the admission queue (flagged `operator.recovered`, so a disabled circuit
+does not park it), steps cancelled by the failure sweep are recreated, and earlier
+history is kept. A review that simply did not approve keeps its own **Review
+again**.
+
+Circuit Run History opens on the key events only (run state, steps that failed or
+need a person, operator actions, waits); observations, wait windows and effect
+bookkeeping are behind **Show technical detail (N more)**.
 
 Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
 the observation window without sending the original prompt or requesting an

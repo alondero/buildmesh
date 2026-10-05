@@ -677,6 +677,37 @@ fn terminal_cleanup_injected_kill_or_archive_failure_keeps_notifications_quiet()
     assert_recovery(&archive_conn);
 }
 
+fn safety(has_uncommitted: bool) -> crate::git::worktree::WorktreeCloseSafety {
+    crate::git::worktree::WorktreeCloseSafety {
+        worktree_path: Some("/repo".into()),
+        has_uncommitted,
+        has_unpushed: true,
+        is_detached: false,
+    }
+}
+
+#[test]
+fn a_close_never_deletes_an_implementation_worktree_with_uncommitted_changes() {
+    let blocker = close_blocker(false, &Ok(safety(true))).expect("dirty work is protected");
+    assert!(blocker.contains("uncommitted changes"), "{blocker}");
+
+    // A clean worktree closes, whatever its commits' push state: after a
+    // squash-merge the branch's own commits never appear in the base.
+    assert_eq!(close_blocker(false, &Ok(safety(false))), None);
+}
+
+#[test]
+fn an_unreadable_implementation_worktree_is_left_open_rather_than_assumed_clean() {
+    let blocker = close_blocker(false, &Err("git status failed".into())).expect("fails closed");
+    assert!(blocker.contains("could not be inspected") && blocker.contains("git status failed"));
+}
+
+#[test]
+fn a_helper_agent_is_closed_regardless_of_its_worktree() {
+    assert_eq!(close_blocker(true, &Ok(safety(true))), None);
+    assert_eq!(close_blocker(true, &Err("unreadable".into())), None);
+}
+
 #[test]
 fn notification_severity_does_not_call_unapproved_findings_success() {
     assert_eq!(

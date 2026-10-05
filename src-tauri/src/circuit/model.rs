@@ -303,6 +303,11 @@ pub enum GithubActionKind {
     PostComment,
     OpenPr,
     CloseIssue,
+    /// Read-only check that the run's pull request was squash-merged on
+    /// GitHub. It mutates nothing, so a result is safe to re-read. A PR that
+    /// is not merged is a routed `Failed` outcome rather than a failed run, so
+    /// a blueprint can leave work open and say why.
+    ConfirmPrMerged,
 }
 
 /// How an OpenPr action reconciles the remote pull request.
@@ -1321,6 +1326,41 @@ impl CircuitGraph {
                         target_node_id: Some("implementer".to_string()),
                     },
                 ),
+                // The implementation agent is closed only after GitHub confirms
+                // the squash-merge. Every other ending leaves it open.
+                node(
+                    "merge_wait",
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "merge_verify",
+                    CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::ConfirmPrMerged,
+                        open_pr_policy: None,
+                        label: None,
+                        comment: None,
+                    },
+                ),
+                node(
+                    "close_implementer",
+                    CircuitNodeKind::CloseAgentNode {
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
+                node(
+                    "merge_blocked",
+                    CircuitNodeKind::Notify {
+                        message: Self::MERGE_BLOCKED_MESSAGE.to_string(),
+                    },
+                ),
+                node(
+                    "merge_unconfirmed",
+                    CircuitNodeKind::Notify {
+                        message: Self::MERGE_UNCONFIRMED_MESSAGE.to_string(),
+                    },
+                ),
                 node("review_exhausted", CircuitNodeKind::Notify {
                     message: "Review limit reached for PR #{{pr.number}}. Latest fixes have not been approved. Resume the saved implementation session and request a fresh review.".to_string(),
                 }),
@@ -1330,7 +1370,7 @@ impl CircuitGraph {
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
-                        message: Self::PR_APPROVED_MESSAGE.to_string(),
+                        message: Self::PR_MERGED_MESSAGE.to_string(),
                     },
                 ),
             ],
@@ -1352,7 +1392,12 @@ impl CircuitGraph {
                 outcome("review_classifier", "close_approved", Completed),
                 outcome("review_classifier", "review_blocked", StepOutcome::Blocked),
                 edge("close_approved", "merge"),
-                edge("merge", "complete"),
+                edge("merge", "merge_wait"),
+                outcome("merge_wait", "merge_verify", Completed),
+                outcome("merge_wait", "merge_blocked", StepOutcome::Blocked),
+                outcome("merge_verify", "close_implementer", Completed),
+                outcome("merge_verify", "merge_unconfirmed", StepOutcome::Failed),
+                edge("close_implementer", "complete"),
                 edge("follow_feedback", "feedback_classifier"),
                 outcome("feedback_classifier", "review_retry", Completed),
                 // A RetryLimit re-enters through its first child: later
@@ -1365,6 +1410,20 @@ impl CircuitGraph {
     }
 
     pub const PR_APPROVED_MESSAGE: &'static str = "Review approved for PR #{{pr.number}} ({{issue.title}}). The implementation agent was asked to squash-merge it and has been handed back to you.";
+    /// What the run says once the PR was verified merged and the implementer closed.
+    pub const PR_MERGED_MESSAGE: &'static str = "Review approved for PR #{{pr.number}} ({{issue.title}}) and it was squash-merged. The implementation agent has been closed.";
+    /// The implementer reported it could not finish the merge. It stays open.
+    pub const MERGE_BLOCKED_MESSAGE: &'static str = "Merge needs attention for PR #{{pr.number}} ({{issue.title}}): the implementation agent reported that it could not complete the squash-merge. It was left open so you can finish it.";
+    /// GitHub did not report the PR as merged. The implementer stays open.
+    pub const MERGE_UNCONFIRMED_MESSAGE: &'static str = "Merge needs attention for PR #{{pr.number}} ({{issue.title}}): the squash-merge was not confirmed ({{merge.unconfirmed_reason}}). The implementation agent was left open so you can finish it.";
+    /// The nodes that verify a merge before the implementer is closed.
+    pub(crate) const MERGE_VERIFICATION_NODES: [&'static str; 5] = [
+        "merge_wait",
+        "merge_verify",
+        "close_implementer",
+        "merge_blocked",
+        "merge_unconfirmed",
+    ];
     pub(crate) const LEGACY_PR_APPROVED_MESSAGE: &'static str = "Review approved for PR #{{pr.number}} ({{issue.title}}). Check the current PR head and required checks before merging.";
 
     /// Later review rounds re-prompt the same reviewer. The policy is repeated
@@ -1431,11 +1490,82 @@ impl CircuitGraph {
             Self::LEGACY_PR_APPROVED_MESSAGE,
             Self::PR_APPROVED_MESSAGE,
         );
+        if !upgraded.has_review_topology_of(&Self::publication_flow_template()) {
+            return false;
+        }
+        // Continue to today's shape: the publication flow is not a place to stop.
+        upgraded.upgrade_issue_review_merge_verification();
+        *self = upgraded;
+        true
+    }
+
+    /// The stock issue-review topology shipped before merge verification:
+    /// approval handed the PR to the implementer and the run completed as soon
+    /// as the prompt was delivered.
+    pub(crate) fn publication_flow_template() -> Self {
+        let mut graph = Self::issue_driven_autopilot_review("");
+        graph
+            .nodes
+            .retain(|node| !Self::MERGE_VERIFICATION_NODES.contains(&node.id.as_str()));
+        graph.edges.retain(|edge| {
+            edge.from != "merge" && !Self::MERGE_VERIFICATION_NODES.contains(&edge.from.as_str())
+        });
+        graph.edges.push(CircuitEdge {
+            from: "merge".into(),
+            to: "complete".into(),
+            condition: EdgeCondition::Always,
+        });
+        graph.replace_stock_text("complete", Self::PR_MERGED_MESSAGE, Self::PR_APPROVED_MESSAGE);
+        graph
+    }
+
+    /// Move a stored issue-review graph from "asked the implementer to merge,
+    /// done" to verifying the merge on GitHub and closing the implementer only
+    /// then. Only the exact stock publication-flow topology is rewritten, and a
+    /// customized prompt or message is kept; anything else is left untouched.
+    pub(crate) fn upgrade_issue_review_merge_verification(&mut self) -> bool {
+        if !self.is_issue_driven_autopilot_review()
+            || self.node("merge_wait").is_some()
+            || !self.has_review_topology_of(&Self::publication_flow_template())
+        {
+            return false;
+        }
+        let canonical = Self::issue_driven_autopilot_review("");
+        let mut upgraded = self.clone();
+        upgraded.remove_edge("merge", "complete");
+        for id in Self::MERGE_VERIFICATION_NODES {
+            upgraded
+                .nodes
+                .push(canonical.node(id).expect("canonical merge node").clone());
+        }
+        for edge in &canonical.edges {
+            if !upgraded.edges.contains(edge) {
+                upgraded.edges.push(edge.clone());
+            }
+        }
+        upgraded.replace_stock_text("complete", Self::PR_APPROVED_MESSAGE, Self::PR_MERGED_MESSAGE);
         if !upgraded.has_review_topology_of(&canonical) {
             return false;
         }
         *self = upgraded;
         true
+    }
+
+    /// Replace the stock merge hand-off text with the one that updates an
+    /// out-of-date branch first. A customized merge prompt is never rewritten.
+    pub(crate) fn upgrade_merge_prompt(&mut self) -> bool {
+        let (subject, argument) = if self.is_issue_driven_autopilot_review() {
+            ("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}")
+        } else {
+            ("your pull request for this work", "")
+        };
+        let before = self.clone();
+        self.replace_stock_text(
+            "merge",
+            &crate::review_contract::legacy_merge_approved_pr(subject, argument),
+            &crate::review_contract::merge_approved_pr(subject, argument),
+        );
+        *self != before
     }
 
     /// Point the first `from -> to` edge at `new_to`, keeping its position so
@@ -1902,13 +2032,14 @@ mod tests {
         assert!(is_executable(&CircuitNodeKind::RetryLimit {
             max_retries: 3
         }));
-        // Milestone 3 (issue #1208): all five GitHub actions execute.
+        // Milestone 3 (issue #1208): every GitHub action executes.
         for action in [
             GithubActionKind::AddLabel,
             GithubActionKind::RemoveLabel,
             GithubActionKind::PostComment,
             GithubActionKind::OpenPr,
             GithubActionKind::CloseIssue,
+            GithubActionKind::ConfirmPrMerged,
         ] {
             assert!(
                 is_executable(&CircuitNodeKind::GithubAction {
@@ -2604,10 +2735,146 @@ mod tests {
             "review retry must re-enter by re-prompting the reviewer"
         );
         assert_eq!(g.children("close_approved"), vec!["merge".to_string()]);
-        assert_eq!(g.children("merge"), vec!["complete".to_string()]);
+        assert_eq!(g.children("merge"), vec!["merge_wait".to_string()]);
+        assert_eq!(g.children("close_implementer"), vec!["complete".to_string()]);
+        assert!(matches!(
+            g.node("complete").map(|n| &n.kind),
+            Some(CircuitNodeKind::Notify { message }) if message.contains("squash-merged")
+        ));
 
         let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
         assert_eq!(parsed, g);
+    }
+
+    /// Where the implementation agent can be closed from. The implementer is the
+    /// user's work: only a squash-merge that GitHub confirmed may close it.
+    #[test]
+    fn issue_review_closes_the_implementer_only_after_a_verified_merge() {
+        let g = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let closers: Vec<&str> = g
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(&node.kind, CircuitNodeKind::CloseAgentNode { target_node_id }
+                    if target_node_id.as_deref() == Some("implementer"))
+            })
+            .map(|node| node.id.as_str())
+            .collect();
+        assert_eq!(closers, vec!["close_implementer"], "one close, nowhere else");
+
+        let into_close: Vec<_> = g.edges.iter().filter(|e| e.to == "close_implementer").collect();
+        assert_eq!(into_close.len(), 1);
+        assert_eq!(into_close[0].from, "merge_verify");
+        assert_eq!(
+            into_close[0].condition,
+            EdgeCondition::OnOutcome(StepOutcome::Completed),
+            "only a confirmed merge reaches the close"
+        );
+        assert!(matches!(
+            g.node("merge_verify").map(|n| &n.kind),
+            Some(CircuitNodeKind::GithubAction { action: GithubActionKind::ConfirmPrMerged, .. })
+        ));
+
+        // The unhappy endings never reach the close and say the agent stays open.
+        for id in ["merge_blocked", "merge_unconfirmed"] {
+            assert!(g.children(id).is_empty(), "{id} ends the run");
+            assert!(matches!(
+                g.node(id).map(|n| &n.kind),
+                Some(CircuitNodeKind::Notify { message }) if message.contains("left open")
+            ));
+        }
+        let routed = |from: &str, to: &str, outcome: StepOutcome| {
+            g.edges.iter().any(|e| {
+                e.from == from && e.to == to && e.condition == EdgeCondition::OnOutcome(outcome)
+            })
+        };
+        assert!(routed("merge_wait", "merge_blocked", StepOutcome::Blocked));
+        assert!(routed("merge_verify", "merge_unconfirmed", StepOutcome::Failed));
+    }
+
+    #[test]
+    fn stock_publication_flow_issue_review_upgrades_to_verified_merge_and_keeps_customizations() {
+        let mut stored = crate::circuit::test_support::publication_flow_issue_review();
+        assert!(stored.node("merge_wait").is_none());
+        let canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+
+        assert!(stored.upgrade_issue_review_merge_verification());
+        stored.validate().unwrap();
+        assert!(stored.has_review_topology_of(&canonical));
+        assert!(matches!(
+            stored.node("complete").map(|n| &n.kind),
+            Some(CircuitNodeKind::Notify { message }) if message == CircuitGraph::PR_MERGED_MESSAGE
+        ));
+        assert!(
+            !stored.upgrade_issue_review_merge_verification(),
+            "the upgrade is idempotent"
+        );
+
+        // A customized completion message survives.
+        let mut custom = crate::circuit::test_support::publication_flow_issue_review();
+        if let Some(CircuitNode { kind: CircuitNodeKind::Notify { message }, .. }) =
+            custom.nodes.iter_mut().find(|node| node.id == "complete")
+        {
+            *message = "Shipped!".into();
+        }
+        assert!(custom.upgrade_issue_review_merge_verification());
+        assert!(matches!(
+            custom.node("complete").map(|n| &n.kind),
+            Some(CircuitNodeKind::Notify { message }) if message == "Shipped!"
+        ));
+
+        // A customized topology is left exactly as it was.
+        let mut extra = crate::circuit::test_support::publication_flow_issue_review();
+        extra.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify { message: "custom".into() },
+        });
+        extra.edges.push(CircuitEdge {
+            from: "complete".into(),
+            to: "announce".into(),
+            condition: EdgeCondition::Always,
+        });
+        let before = extra.clone();
+        assert!(!extra.upgrade_issue_review_merge_verification());
+        assert_eq!(extra, before);
+    }
+
+    #[test]
+    fn stock_merge_prompt_upgrades_for_both_review_graphs_but_a_custom_one_is_kept() {
+        let mut issue = crate::circuit::test_support::publication_flow_issue_review();
+        assert!(issue.upgrade_merge_prompt());
+        assert!(matches!(
+            issue.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch {{pr.number}}")
+        ));
+        assert!(!issue.upgrade_merge_prompt(), "idempotent");
+
+        let mut local = crate::circuit::test_support::pre_publication_local_review(3);
+        assert!(local.upgrade_local_review_publication_flow());
+        // The publication-flow upgrade already writes the current prompt, so
+        // put the previous stock text back to model a graph saved before it.
+        local.replace_stock_text(
+            "merge",
+            &crate::review_contract::merge_approved_pr("your pull request for this work", ""),
+            &crate::review_contract::legacy_merge_approved_pr("your pull request for this work", ""),
+        );
+        assert!(local.upgrade_merge_prompt());
+        assert!(matches!(
+            local.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+        ));
+
+        let mut custom = crate::circuit::test_support::publication_flow_issue_review();
+        custom.replace_stock_text(
+            "merge",
+            &crate::review_contract::legacy_merge_approved_pr("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}"),
+            "Merge it however you like.",
+        );
+        assert!(!custom.upgrade_merge_prompt());
+        assert!(matches!(
+            custom.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt == "Merge it however you like."
+        ));
     }
 
     #[test]

@@ -53,6 +53,33 @@ pub fn record_circuit_outcome(app: AppHandle, request: crate::db::circuit::evide
     Ok(())
 }
 
+/// What the run card shows a person who has to act: the steps awaiting a
+/// decision, how a failed run can be recovered, and the revision to act against.
+/// Cheap by design: unlike the history it carries no log.
+#[command]
+pub fn circuit_run_attention(run_id: i64) -> Result<crate::db::circuit::evidence::CircuitRunAttention, String> {
+    crate::db::circuit::evidence::attention(run_id)
+}
+
+/// Retry a failed run's failed step, or record that the person finished it, and
+/// reopen the run. The worker is woken so it re-enters the queue promptly.
+#[command]
+pub fn recover_failed_circuit_run(
+    app: AppHandle,
+    request: crate::db::circuit::step_recovery::RecoveryRequest,
+) -> Result<(), String> {
+    crate::db::circuit::step_recovery::recover_failed_run(&request)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id: request.run_id,
+            state: "pending".into(),
+        },
+    );
+    Ok(())
+}
+
 /// One pending Circuit Run in the mesh-wide admission queue. `queue_rank` is
 /// presentation-friendly (1 = next to start); the mutable storage position
 /// stays private to the database.

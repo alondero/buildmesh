@@ -64,6 +64,54 @@ pub(super) fn determine_github_target(
     }
 }
 
+/// Decide whether the run's pull request was merged, from an injected GitHub
+/// read so the decision is testable without a network.
+///
+/// Every answer is a `GithubActionResult`: merged is `success`, anything else
+/// is a failure the blueprint routes (the work is left open), never a guess.
+/// "Could not read the PR" and "the PR is not merged" are both failures, but the
+/// reason says which, so the person reading it knows whether to look at GitHub.
+pub(super) fn confirm_pr_merged(
+    view: &RunView,
+    node_id: &str,
+    lookup: impl FnOnce(i64) -> Result<crate::services::github::PullRequestMergeState, String>,
+) -> CircuitEvent {
+    let failure = |error: String| CircuitEvent::GithubActionResult {
+        node_id: node_id.to_string(),
+        success: false,
+        pr_number: None,
+        pr_url: None,
+        pr_head_ref: None,
+        pr_title: None,
+        error: Some(error),
+    };
+    let Some(number) = view
+        .context
+        .get("pr.number")
+        .and_then(|n| n.parse::<i64>().ok())
+    else {
+        return failure("no pull request number is recorded for this run".into());
+    };
+    match lookup(number) {
+        Err(error) => failure(format!(
+            "GitHub could not confirm the merge of PR #{number}: {error}"
+        )),
+        Ok(state) if state.merged => CircuitEvent::GithubActionResult {
+            node_id: node_id.to_string(),
+            success: true,
+            pr_number: Some(number),
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: None,
+        },
+        Ok(state) if state.state == "closed" => {
+            failure(format!("PR #{number} was closed without being merged"))
+        }
+        Ok(_) => failure(format!("PR #{number} is still open and has not been merged")),
+    }
+}
+
 /// Reconcile the implementation branch with GitHub before emitting the durable
 /// result. Inject the external observations so replay and lookup failures can
 /// be exercised without a process-wide database or GitHub writes.
@@ -390,6 +438,11 @@ pub(super) fn call_github_effect(
                 error: None,
             })
         }
+        GithubActionKind::ConfirmPrMerged => Ok(confirm_pr_merged(view, node_id, |number| {
+            client
+                .pull_request_merge_state(&owner, &repo, number)
+                .map_err(|e| e.to_string())
+        })),
         GithubActionKind::OpenPr => {
             let body = resolved_comment.unwrap_or_default();
             let mut target_revision = None;
@@ -497,6 +550,97 @@ mod tests {
             "head": { "ref": head_ref }
         }))
         .unwrap()
+    }
+
+    fn merge_state(state: &str, merged: bool) -> crate::services::github::PullRequestMergeState {
+        crate::services::github::PullRequestMergeState {
+            merged,
+            state: state.into(),
+            merged_at: merged.then(|| "2026-10-05T20:00:00Z".into()),
+        }
+    }
+
+    fn view_with_pr(pr: Option<&str>) -> RunView {
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph, stepper::RunState};
+        let mut context = CircuitContext::new();
+        if let Some(pr) = pr {
+            context.set("pr.number", pr);
+        }
+        RunView {
+            run_id: 1,
+            graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+            state: RunState::Running,
+            context,
+            steps: vec![],
+        }
+    }
+
+    fn outcome(event: CircuitEvent) -> (bool, Option<i64>, Option<String>) {
+        match event {
+            CircuitEvent::GithubActionResult {
+                success,
+                pr_number,
+                error,
+                ..
+            } => (success, pr_number, error),
+            other => panic!("expected a GitHub action result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confirm_merged_succeeds_only_when_github_says_the_pr_merged() {
+        let seen = RefCell::new(None);
+        let event = confirm_pr_merged(&view_with_pr(Some("314")), "merge_verify", |number| {
+            *seen.borrow_mut() = Some(number);
+            Ok(merge_state("closed", true))
+        });
+        assert_eq!(*seen.borrow(), Some(314), "asks about the run's own PR");
+        assert_eq!(outcome(event), (true, Some(314), None));
+    }
+
+    #[test]
+    fn confirm_merged_reports_an_open_pr_as_not_merged() {
+        let (success, _, error) = outcome(confirm_pr_merged(
+            &view_with_pr(Some("314")),
+            "merge_verify",
+            |_| Ok(merge_state("open", false)),
+        ));
+        assert!(!success);
+        assert!(error.unwrap().contains("still open"));
+    }
+
+    #[test]
+    fn confirm_merged_does_not_mistake_a_closed_unmerged_pr_for_a_merge() {
+        let (success, _, error) = outcome(confirm_pr_merged(
+            &view_with_pr(Some("314")),
+            "merge_verify",
+            |_| Ok(merge_state("closed", false)),
+        ));
+        assert!(!success);
+        assert!(error.unwrap().contains("closed without being merged"));
+    }
+
+    #[test]
+    fn confirm_merged_treats_an_unreadable_pr_as_unconfirmed_never_as_merged() {
+        let (success, _, error) = outcome(confirm_pr_merged(
+            &view_with_pr(Some("314")),
+            "merge_verify",
+            |_| Err("network unreachable".into()),
+        ));
+        assert!(!success);
+        let error = error.unwrap();
+        assert!(error.contains("could not confirm") && error.contains("network unreachable"));
+    }
+
+    #[test]
+    fn confirm_merged_never_calls_github_without_a_recorded_pr() {
+        let (success, _, error) = outcome(confirm_pr_merged(
+            &view_with_pr(None),
+            "merge_verify",
+            |_| panic!("no PR number means no GitHub request"),
+        ));
+        assert!(!success);
+        assert!(error.unwrap().contains("no pull request number"));
     }
 
     #[test]

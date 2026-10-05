@@ -775,6 +775,22 @@ fn cancelling_a_run_leaves_the_implementation_agent_open() {
 }
 
 #[test]
+fn a_helper_agent_is_told_apart_from_the_implementation_agent() {
+    let conn = isolated_test_conn();
+    implementer_and_reviewer_run(&conn, "running");
+
+    assert!(super::circuit::agent_is_circuit_helper_inner(&conn, 2).unwrap());
+    assert!(
+        !super::circuit::agent_is_circuit_helper_inner(&conn, 1).unwrap(),
+        "the implementation agent has no parent"
+    );
+    assert!(
+        !super::circuit::agent_is_circuit_helper_inner(&conn, 999).unwrap(),
+        "an agent no circuit step knows is not a helper"
+    );
+}
+
+#[test]
 fn a_cleanup_request_recorded_for_an_implementation_agent_is_never_actioned_and_is_cleared() {
     let conn = isolated_test_conn();
     implementer_and_reviewer_run(&conn, "failed");

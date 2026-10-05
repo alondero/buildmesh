@@ -168,7 +168,7 @@ pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
     Ok(view)
 }
 
-fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::circuit::stepper::RunView, String> {
+pub(super) fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::circuit::stepper::RunView, String> {
     use crate::circuit::{context::CircuitContext, model::StepOutcome, stepper::{RunState, RunView, StepStatus, StepView}};
     let steps = super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
     Ok(RunView { run_id:run.id, graph:run_graph(db, run.id)?, state:RunState::from_db_str(&run.state),
@@ -176,6 +176,68 @@ fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> R
         steps:steps.into_iter().map(|step| StepView { node_id:step.node_id, attempt:step.attempt,
             status:StepStatus::from_db_str(&step.status), outcome:step.outcome.as_deref().and_then(StepOutcome::from_db_str),
             error:step.error_message, agent_node_id:step.agent_node_id }).collect() })
+}
+
+/// What a person may record against one Unverified step. Shared by the history
+/// view and the run card's attention query so both offer the same actions.
+fn checkpoint_actions(
+    db: &Connection,
+    run_id: i64,
+    graph: &crate::circuit::model::CircuitGraph,
+    view: &crate::circuit::stepper::RunView,
+    step: &crate::models::AutopilotCircuitRunStep,
+) -> Result<Vec<CheckpointAction>, String> {
+    use crate::circuit::model::CircuitNodeKind;
+    let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
+        Some(
+            kind @ (CircuitNodeKind::GithubAction { .. }
+            | CircuitNodeKind::InjectPty { .. }),
+        ) => {
+            let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
+                params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let mut actions = vec![CheckpointAction::NotPerformed];
+            if matches!(
+                kind,
+                CircuitNodeKind::GithubAction {
+                    action: crate::circuit::model::GithubActionKind::OpenPr,
+                    ..
+                }
+            ) {
+                let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
+                    .map_err(|error| error.to_string())?;
+                if has_target {
+                    actions.insert(0, CheckpointAction::Recheck);
+                }
+            } else {
+                actions.insert(0, CheckpointAction::Completed);
+            }
+            if not_performed {
+                actions.push(CheckpointAction::Retry);
+            }
+            actions
+        }
+        Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => {
+            let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='spawn' AND state='not_performed')",
+                params![run_id,step.node_id,step.attempt], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let mut actions = vec![CheckpointAction::Recheck, CheckpointAction::NotPerformed];
+            if not_performed { actions.push(CheckpointAction::Retry); }
+            actions
+        }
+        Some(
+            CircuitNodeKind::LlmTurnClassifier { .. }
+            | CircuitNodeKind::ReviewVerdict { .. }
+            | CircuitNodeKind::AwaitAgentTurn { .. }
+            | CircuitNodeKind::SpawnAgentNode { .. },
+        ) => {
+            let mut actions = vec![CheckpointAction::Recheck];
+            if view.can_attest_completion(&step.node_id) {
+                actions.push(CheckpointAction::Completed);
+            }
+            actions
+        },
+        _ => vec![],
+    };
+    Ok(actions)
 }
 
 fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceView, String> {
@@ -210,56 +272,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
             if run.state != "running" || step.status != "unverified" {
                 continue;
             }
-            use crate::circuit::model::CircuitNodeKind;
-            let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
-                Some(
-                    kind @ (CircuitNodeKind::GithubAction { .. }
-                    | CircuitNodeKind::InjectPty { .. }),
-                ) => {
-                    let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
-                        params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
-                    let mut actions = vec![CheckpointAction::NotPerformed];
-                    if matches!(
-                        kind,
-                        CircuitNodeKind::GithubAction {
-                            action: crate::circuit::model::GithubActionKind::OpenPr,
-                            ..
-                        }
-                    ) {
-                        let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
-                            .map_err(|error| error.to_string())?;
-                        if has_target {
-                            actions.insert(0, CheckpointAction::Recheck);
-                        }
-                    } else {
-                        actions.insert(0, CheckpointAction::Completed);
-                    }
-                    if not_performed {
-                        actions.push(CheckpointAction::Retry);
-                    }
-                    actions
-                }
-                Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => {
-                    let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='spawn' AND state='not_performed')",
-                        params![run_id,step.node_id,step.attempt], |row| row.get(0)).map_err(|e| e.to_string())?;
-                    let mut actions = vec![CheckpointAction::Recheck, CheckpointAction::NotPerformed];
-                    if not_performed { actions.push(CheckpointAction::Retry); }
-                    actions
-                }
-                Some(
-                    CircuitNodeKind::LlmTurnClassifier { .. }
-                    | CircuitNodeKind::ReviewVerdict { .. }
-                    | CircuitNodeKind::AwaitAgentTurn { .. }
-                    | CircuitNodeKind::SpawnAgentNode { .. },
-                ) => {
-                    let mut actions = vec![CheckpointAction::Recheck];
-                    if view.can_attest_completion(&step.node_id) {
-                        actions.push(CheckpointAction::Completed);
-                    }
-                    actions
-                },
-                _ => vec![],
-            };
+            let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id,
                 attempt: step.attempt,
@@ -271,6 +284,52 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
         entries,
         checkpoints,
         coverage,
+    })
+}
+
+/// Everything the run card needs to tell a person what to do next, without the
+/// (potentially very long) history: the unverified steps with their allowed
+/// actions, how a failed run can be recovered, and the revision to act against.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitRunAttention.ts")]
+pub struct CircuitRunAttention {
+    #[ts(as = "i32")]
+    pub revision: i64,
+    pub checkpoints: Vec<CircuitCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery: Option<super::step_recovery::RunRecovery>,
+}
+
+pub fn attention(run_id: i64) -> Result<CircuitRunAttention, String> {
+    let db = crate::db::read_conn();
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let view = attention_inner(&tx, run_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(view)
+}
+
+pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRunAttention, String> {
+    let run = super::ledger::get_circuit_run_inner(db, run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Run no longer exists.")?;
+    let graph = run_graph(db, run_id)?;
+    let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
+    let mut checkpoints = Vec::new();
+    if run.state == "running" {
+        let view = recovery_view(db, &run)?;
+        for step in steps.iter().filter(|step| step.status == "unverified") {
+            checkpoints.push(CircuitCheckpoint {
+                node_id: step.node_id.clone(),
+                attempt: step.attempt,
+                actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
+            });
+        }
+    }
+    Ok(CircuitRunAttention {
+        revision: revision_inner(db, run_id).map_err(|e| e.to_string())?,
+        checkpoints,
+        recovery: super::step_recovery::build_recovery(db, &run, &graph, &steps)?,
     })
 }
 

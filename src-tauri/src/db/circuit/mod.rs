@@ -17,6 +17,7 @@ pub mod queue;
 pub mod leases;
 pub mod recovery;
 pub mod evidence;
+pub mod step_recovery;
 
 pub use ledger::*;
 pub use queue::*;
@@ -26,6 +27,7 @@ pub(crate) use ledger::delete_circuits_for_mesh_inner;
 
 #[cfg(test)]
 pub(crate) use leases::{
+    agent_is_circuit_helper_inner,
     archive_circuit_agent_inner,
     circuit_agent_slots_reserved_inner,
     circuit_agent_spawn_claim_inner,

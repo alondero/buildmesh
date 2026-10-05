@@ -204,6 +204,25 @@ pub fn list_failed_circuit_agents_for_cleanup() -> SqlResult<Vec<i64>> {
     failed_circuit_agents_for_cleanup_inner(&crate::db::write_conn())
 }
 
+/// Whether any circuit step launched this agent to help another agent.
+/// Autopilot only tears down helpers on its own; the implementation agent is
+/// closed by an explicit step after a verified merge, and even then only if it
+/// holds no uncommitted work.
+pub fn agent_is_circuit_helper(node_id: i64) -> SqlResult<bool> {
+    agent_is_circuit_helper_inner(&crate::db::read_conn(), node_id)
+}
+
+pub(crate) fn agent_is_circuit_helper_inner(conn: &Connection, node_id: i64) -> SqlResult<bool> {
+    conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s
+             WHERE s.agent_node_id = ?1 AND {RETIRABLE_STEP_AGENT})"
+        ),
+        params![node_id],
+        |row| row.get(0),
+    )
+}
+
 fn lifecycle_generation(node_id: i64, prefix: &str) -> String {
     format!("{prefix}:{}:{node_id}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default())
 }

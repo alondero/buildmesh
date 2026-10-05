@@ -506,9 +506,15 @@ fn run_pass(app: &AppHandle) {
             && !should_drive_circuit_run(
                 active.circuit_enabled,
                 &active.run.trigger_identity,
+                // A review extension or an operator's recovery is explicit work
+                // on a run that already started, so a disabled circuit must not
+                // park it as if it were new background work.
                 CircuitContext::from_json(&active.run.context_json)
                     .ok()
-                    .is_some_and(|context| context.get("review.extended") == Some("1")),
+                    .is_some_and(|context| {
+                        context.get("review.extended") == Some("1")
+                            || context.get("operator.recovered") == Some("1")
+                    }),
             )
         {
             record_queue_wait(
@@ -1039,6 +1045,28 @@ impl TransitionPersistFailure {
             Self::FreshnessRejected(message) | Self::Other(message) => message,
             Self::AgentStatusEffectRejected { message, .. } => message,
         }
+    }
+}
+
+/// Why a circuit close must leave a node open, when it must.
+///
+/// A helper (the reviewer) is always closed. The implementation agent is the
+/// user's work: even after a merge GitHub confirmed, a close must not delete a
+/// worktree that still holds uncommitted changes. An unreadable worktree reads
+/// as "has changes" for the same reason.
+pub(super) fn close_blocker(
+    is_helper: bool,
+    safety: &Result<crate::git::worktree::WorktreeCloseSafety, String>,
+) -> Option<String> {
+    if is_helper {
+        return None;
+    }
+    match safety {
+        Ok(safety) if safety.has_uncommitted => {
+            Some("its worktree has uncommitted changes".to_string())
+        }
+        Ok(_) => None,
+        Err(error) => Some(format!("its worktree could not be inspected ({error})")),
     }
 }
 
@@ -2132,8 +2160,41 @@ pub(super) fn execute_effects(
                 // close step but before the effect was retried.
                 match db::get_agent_node_by_id(target) {
                     Ok(_) => {
-                        crate::services::agent_node::delete(target, true)
-                            .map_err(|e| format!("agent node close failed: {}", e))?;
+                        // An agent no step identifies as a helper is treated as
+                        // the user's work, the safer reading.
+                        let is_helper = db::circuit::agent_is_circuit_helper(target).unwrap_or(false);
+                        let safety = if is_helper {
+                            Ok(crate::git::worktree::WorktreeCloseSafety {
+                                worktree_path: None,
+                                has_uncommitted: false,
+                                has_unpushed: false,
+                                is_detached: false,
+                            })
+                        } else {
+                            crate::services::agent_node::get_worktree_close_safety(target)
+                                .map_err(|error| error.to_string())
+                        };
+                        if let Some(reason) = close_blocker(is_helper, &safety) {
+                            tracing::warn!(
+                                "circuits: run {} left agent {} open instead of closing it: {}",
+                                active.run.id,
+                                target,
+                                reason
+                            );
+                            let _ = app.emit(
+                                "circuit-notification",
+                                CircuitNotificationPayload {
+                                    run_id: active.run.id,
+                                    message: format!(
+                                        "The implementation agent was left open instead of being closed: {reason}."
+                                    ),
+                                    severity: "warning".into(),
+                                },
+                            );
+                        } else {
+                            crate::services::agent_node::delete(target, true)
+                                .map_err(|e| format!("agent node close failed: {}", e))?;
+                        }
                     }
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => {
