@@ -161,7 +161,13 @@ function mockBackend(overrides: {
 async function openPane() {
   render(<AppSettingsModal open onClose={() => {}} />);
   await openSettingsPane('Data & Diagnostics');
-  return screen.findByTestId('settings-data-recovery');
+  // The pane is `React.lazy` (it is kept out of the entry chunk so the
+  // desktop bundle stays under the issue #1568 budget), so opening its tab
+  // resolves a dynamic import before the pane's root element exists. On a
+  // cold vitest module graph that transform can outrun the 1s default, and
+  // whether it does depends on which test happened to pull the module in
+  // first — hence the explicit headroom rather than relying on file order.
+  return screen.findByTestId('settings-data-recovery', undefined, { timeout: 5000 });
 }
 
 describe('Settings > Data & Diagnostics (issue #1537)', () => {
