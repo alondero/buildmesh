@@ -24,9 +24,16 @@ const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
 /// to 90 seconds here. This bounded delay in surfacing Unverified is accepted
 /// to recover an already staged paste without risking a duplicate prompt.
 const RENDERED_PASTE_TOTAL_BUDGET: Duration = Duration::from_secs(90);
-/// Complete visible text is useful for short drafts. Long drafts may be
-/// collapsed or scrolled out of the TUI; they require Codex's paste marker.
+/// Complete visible text is useful for short drafts. Longer drafts may be
+/// collapsed or scrolled out of the TUI; unless the harness has a tail rule
+/// (see [`MUSE_TAIL_ANCHOR_CHARS`]) they require the harness's paste marker.
 const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
+/// Muse draws a mid-size paste in full and collapses only the largest into a
+/// marker (probed in a real PTY: 839 chars drawn, 1,509 collapsed), so a draft
+/// past [`VISIBLE_PASTE_TEXT_LIMIT`] is confirmed by its last 64 normalized
+/// characters instead. Run 343 waited out the whole budget for a marker Muse
+/// never printed. Counted after `normalize_for_match`, not in display columns.
+const MUSE_TAIL_ANCHOR_CHARS: usize = 64;
 
 /// After an Enter keystroke, PTY output must appear within this window for
 /// the submit to count as acknowledged.
@@ -244,12 +251,30 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
         let content = crate::circuit::launch::normalize_for_match(text);
         readiness.paste = PasteReadiness::RenderedMultiline {
             chars: text.chars().count(), normalized_chars: text.replace("\r\n", "\n").chars().count(),
-            content: if content.len() <= VISIBLE_PASTE_TEXT_LIMIT { content } else { String::new() },
+            content: visible_paste_proof(harness, content),
             output_cursor: evaluator::output_cursor(node_id)
                 .ok_or_else(|| format!("node {node_id} has no PTY output buffer"))?,
         };
     }
     Ok(readiness)
+}
+
+/// The normalized text whose presence in fresh output proves a multiline paste
+/// landed, or empty when only the paste marker can.
+///
+/// The paste is read in order, so the draft's tail appearing means the text
+/// before it was accepted; a composer that scrolls keeps the tail in view. It
+/// cannot tell a fresh redraw from a stale one that repaints an earlier prompt
+/// with an identical ending, which the quiet-output gate only narrows.
+fn visible_paste_proof(harness: &str, normalized: String) -> String {
+    if normalized.len() <= VISIBLE_PASTE_TEXT_LIMIT {
+        return normalized;
+    }
+    if harness != "muse" {
+        return String::new();
+    }
+    let skip = normalized.chars().count().saturating_sub(MUSE_TAIL_ANCHOR_CHARS);
+    normalized.chars().skip(skip).collect()
 }
 
 fn rendered_paste_visible(output: &str, chars: usize, normalized_chars: usize, content: &str) -> bool {
@@ -265,7 +290,8 @@ fn rendered_paste_visible(output: &str, chars: usize, normalized_chars: usize, c
 /// Wait for the staged paste to land at an idle input box without writing input.
 ///
 /// Codex/Muse multiline pastes require a complete matching paste echo (a marker,
-/// or full visible text for short drafts) and a quiet redraw within one
+/// full visible text for short drafts, or for Muse the draft's tail — see
+/// [`visible_paste_proof`]) and a quiet redraw within one
 /// RENDERED_PASTE_TOTAL_BUDGET (90 seconds in production).
 /// Polling rechecks liveness and guard every SUBMIT_POLL; progress is logged at
 /// each third of the budget. rendered_paste_budget is injected so tests can
@@ -667,6 +693,128 @@ mod tests {
         evaluator::unregister(node.id);
         assert!(matches!(paste_readiness(node.id, "Manual\nfollow-up").unwrap().paste, PasteReadiness::Generic),
             "ordinary unbuffered nodes retain their existing submission path");
+    }
+
+    /// Stand-in for run 343's 831-character `publish` prompt (that run's own text
+    /// was not retained): a 600-character multiline draft in the same size band.
+    /// Muse Code 1.3.0 draws such a paste in full with no `[Pasted Content N
+    /// chars]` marker, and the gate used to demand the marker past the
+    /// visible-text limit, so the staged prompt sat unsent for the 90 s budget.
+    const MUSE_MIDSIZE_PROMPT: &str = concat!(
+        "Publish the work from this session as a pull request.\n",
+        "\n",
+        "- Push the current branch to origin and open a PR against `main`.\n",
+        "- Title it with a Conventional Commit summary of the change.\n",
+        "- In the body, explain what changed and why, list the checks you ran, and\n",
+        "  link the issue with a `Closes #1234` line if one exists.\n",
+        "- Do not merge the PR; a reviewer will pick it up next.\n",
+        "\n",
+        "When the PR is open, reply with its URL and a one-paragraph summary of what\n",
+        "you verified, so the reviewer knows what has already been covered. If any gate\n",
+        "is red, say so plainly instead of opening the PR and explain the failure.",
+    );
+
+    /// The final composer redraw from a real Muse Code 1.3.0 capture of
+    /// `MUSE_MIDSIZE_PROMPT` in a 79x57 Windows ConPTY (box rules and status
+    /// line abbreviated): wrapped mid-sentence ("If any" / "gate"), indented,
+    /// positioned with cursor escapes, and carrying no paste marker.
+    const MUSE_MIDSIZE_COMPOSER_FRAME: &str = concat!(
+        "\x1b[8;1H\x1b[J\x1b[8;1H\x1b[2m\x1b[38;2;103;108;116;49m\u{2500}\u{2500} \x1b[22m",
+        "\x1b[38;2;138;144;152;49mVoice input (Alt+V to start)\x1b[2m\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\x1b[9;1H\x1b[22m\x1b[38;2;90;160;255;49m\u{276f} \x1b[38;2;204;211;219;49m",
+        "Publish the work from this session as a pull request.",
+        "\x1b[10;1H\x1b[38;2;103;108;116;49m  ",
+        "\x1b[11;1H  \x1b[38;2;204;211;219;49m- Push the current branch to origin and open a PR against `main`.",
+        "\x1b[12;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49m- Title it with a Conventional Commit summary of the change.",
+        "\x1b[13;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49m- In the body, explain what changed and why, list the checks you ran, and",
+        "\x1b[14;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49m  link the issue with a `Closes #1234` line if one exists.",
+        "\x1b[15;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49m- Do not merge the PR; a reviewer will pick it up next.",
+        "\x1b[16;1H\x1b[38;2;103;108;116;49m  ",
+        "\x1b[17;1H  \x1b[38;2;204;211;219;49mWhen the PR is open, reply with its URL and a one-paragraph summary of what",
+        "\x1b[18;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49myou verified, so the reviewer knows what has already been covered. If any ",
+        "\x1b[19;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49mgate",
+        "\x1b[20;1H\x1b[38;2;103;108;116;49m  \x1b[38;2;204;211;219;49mis red, say so plainly instead of opening the PR and explain the failure.",
+        "\x1b[21;1H\x1b[2m\x1b[38;2;103;108;116;49m\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        "\x1b[22;1H\x1b[22m  \x1b[38;2;90;160;255;49mmuse-spark-1.3-contributor\x1b[38;2;138;144;152;49m \u{b7} ",
+        "\x1b[38;2;90;160;255;49mhigh\x1b[38;2;138;144;152;49m \u{b7} Auto-review\x1b[39m\x1b[49m\x1b[59m\x1b[0m",
+    );
+
+    fn muse_publisher_node(label: &str) -> i64 {
+        crate::db::test_support::ensure_db_for_tests();
+        let path = std::env::temp_dir().join(label);
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh(label, &path).unwrap();
+        crate::db::create_agent_node(
+            mesh.id, "publisher", &path, "main", crate::models::EnvType::Windows,
+            "muse", None, None, None, None, false, None, None, None,
+        ).unwrap().id
+    }
+
+    #[test]
+    fn only_muse_confirms_a_long_draft_by_its_tail() {
+        let long = "word".repeat(100);
+        let tail = |harness| visible_paste_proof(harness, long.clone());
+        assert_eq!(tail("muse"), "word".repeat(MUSE_TAIL_ANCHOR_CHARS / 4));
+        assert_eq!(tail("codex"), "", "Codex keeps its marker-only rule until its mid-size rendering is captured");
+        // Under the limit every harness still requires the complete text.
+        assert_eq!(visible_paste_proof("muse", "short draft".into()), "short draft");
+        assert_eq!(visible_paste_proof("codex", "short draft".into()), "short draft");
+        // The cut is by character, so a multi-byte tail is never split mid-codepoint.
+        let accented = "é".repeat(VISIBLE_PASTE_TEXT_LIMIT + 1);
+        assert_eq!(visible_paste_proof("muse", accented), "é".repeat(MUSE_TAIL_ANCHOR_CHARS));
+    }
+
+    #[test]
+    fn muse_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
+        let id = muse_publisher_node("muse-midsize-paste");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        assert!(
+            crate::circuit::launch::normalize_for_match(MUSE_MIDSIZE_PROMPT).len() > VISIBLE_PASTE_TEXT_LIMIT,
+            "fixture precondition: past the full-text limit, where only a marker used to be accepted"
+        );
+        let (_, readiness) = stage_prompt_write(&registry, id, MUSE_MIDSIZE_PROMPT, None).unwrap().unwrap();
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), injection_payload(MUSE_MIDSIZE_PROMPT).into_bytes());
+
+        let registry_for_wait = Arc::clone(&registry);
+        let wait = std::thread::spawn(move || settle_after_paste(
+            &registry_for_wait, id, &readiness.paste, None, Duration::from_secs(5),
+        ));
+        evaluator::on_output(id, MUSE_MIDSIZE_COMPOSER_FRAME);
+        assert!(
+            wait.join().unwrap().expect("a prompt Muse rendered in full must be confirmed, not time out"),
+            "the staged prompt is ready for Enter"
+        );
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "confirming the paste must not write anything");
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn muse_midsize_paste_is_not_confirmed_until_its_tail_is_drawn() {
+        let id = muse_publisher_node("muse-midsize-partial-paste");
+        evaluator::register(id);
+        let PasteReadiness::RenderedMultiline { chars, normalized_chars, content, .. } =
+            paste_readiness(id, MUSE_MIDSIZE_PROMPT).unwrap().paste
+        else {
+            panic!("a multiline Muse prompt must use the rendered paste gate");
+        };
+        // Read each frame back as production does: output since a cursor, escapes stripped.
+        let confirmed_by = |frame: &str| {
+            let cursor = evaluator::output_cursor(id).unwrap();
+            evaluator::on_output(id, frame);
+            rendered_paste_visible(&evaluator::cleaned_output_since(id, cursor), chars, normalized_chars, &content)
+        };
+        assert!(confirmed_by(MUSE_MIDSIZE_COMPOSER_FRAME));
+        // Everything but the last row: the head of the draft is drawn, the paste is not complete.
+        let partial = MUSE_MIDSIZE_COMPOSER_FRAME.split("\x1b[20;1H").next().unwrap();
+        assert!(
+            !confirmed_by(partial),
+            "a head-only redraw must not acknowledge a paste that is still arriving"
+        );
+        // A different draft with the same opening is not this paste either.
+        assert!(!confirmed_by(&MUSE_MIDSIZE_COMPOSER_FRAME.replace("explain the failure", "do something else")));
+        evaluator::unregister(id);
     }
 
     #[test]
