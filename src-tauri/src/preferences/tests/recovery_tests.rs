@@ -634,6 +634,34 @@ fn an_unreadable_file_is_refused_rather_than_replaced_by_defaults() {
     });
 }
 
+#[test]
+fn a_missing_path_component_is_missing_on_every_platform() {
+    // `std::fs::read` reports a path under a non-directory differently per
+    // platform: Windows returns ERROR_PATH_NOT_FOUND (`NotFound`) and Linux
+    // returns ENOTDIR (`NotADirectory`). Both mean "there is no
+    // preferences.json and never was", so both must classify as `Missing` —
+    // otherwise the classification silently differs by OS. CI caught this as
+    // a Linux-only failure in a Windows-authored test.
+    let file_instead_of_dir = test_dir();
+    let sentinel = b"not a directory";
+    std::fs::write(&file_instead_of_dir, sentinel).unwrap();
+    init_for_tests(file_instead_of_dir.clone());
+
+    assert!(
+        matches!(read_state().unwrap(), LoadState::Missing),
+        "a path under a non-directory is Missing, not an I/O error"
+    );
+    // Reads still work and yield defaults; the cache is publishable because
+    // there is genuinely nothing to preserve.
+    assert_eq!(load().unwrap(), AppPreferences::default());
+
+    let after = std::fs::read(&file_instead_of_dir).expect("the sentinel still exists");
+    assert_eq!(after, sentinel, "a read must not modify the path");
+
+    reset_for_tests();
+    let _ = std::fs::remove_file(&file_instead_of_dir);
+}
+
 // ---------------------------------------------------------------------------
 // Isolation guard
 // ---------------------------------------------------------------------------

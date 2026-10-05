@@ -190,7 +190,21 @@ pub(crate) fn read_state() -> Result<LoadState, String> {
     let path = preferences_path()?;
     let raw = match std::fs::read(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LoadState::Missing),
+        // `NotADirectory` counts as "no file" alongside `NotFound`: a path
+        // component that is not a directory means there is no
+        // preferences.json and never was — unlike a permission or I/O error,
+        // which says nothing about the file's existence. Without this the
+        // classification is platform-dependent, because Windows reports the
+        // same shape as ERROR_PATH_NOT_FOUND (`NotFound`) while Linux reports
+        // ENOTDIR.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(LoadState::Missing)
+        }
         Err(e) => return Err(format!("failed to read preferences.json: {}", e)),
     };
     match recovery::classify(&raw) {
