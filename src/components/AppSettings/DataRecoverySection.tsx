@@ -40,6 +40,20 @@ import type {
 
 type Busy = 'none' | 'quick' | 'full' | 'snapshot' | 'export' | 'inspect' | 'stage' | 'cancel' | 'open';
 
+// ## Tolerant reads
+//
+// The Tauri UI mock resolves any command it has no fixture for as `null`, on
+// purpose, so a screen reading a command it does not know "renders empty
+// instead of throwing" (see scripts/ui-mock/tauri-mock.mjs). Honouring that
+// contract matters beyond the harness: `Promise.all` over a pane's initial
+// reads resolves to `null` for anything unmocked, and a bare
+// `snapshots.length` on that value takes down the whole Settings modal
+// through the app's error boundary — losing the dialog, not just the pane.
+// `coerceSnapshots` keeps a bad read to an empty list; `info` is read through
+// optional chaining already.
+const coerceSnapshots = (value: unknown): StateSnapshot[] =>
+  Array.isArray(value) ? value : [];
+
 export function DataRecoverySection() {
   const [info, setInfo] = useState<StateRecoveryInfo | null>(null);
   const [snapshots, setSnapshots] = useState<StateSnapshot[]>([]);
@@ -58,8 +72,8 @@ export function DataRecoverySection() {
       api.getStateRecoveryInfo(),
       api.listStateSnapshots(),
     ]);
-    setInfo(nextInfo);
-    setSnapshots(nextSnapshots);
+    setInfo(nextInfo ?? null);
+    setSnapshots(coerceSnapshots(nextSnapshots));
   }, []);
 
   useEffect(() => {
@@ -71,8 +85,8 @@ export function DataRecoverySection() {
           api.listStateSnapshots(),
         ]);
         if (cancelled) return;
-        setInfo(nextInfo);
-        setSnapshots(nextSnapshots);
+        setInfo(nextInfo ?? null);
+        setSnapshots(coerceSnapshots(nextSnapshots));
       } catch (e) {
         if (!cancelled) setError(describe(e));
       }

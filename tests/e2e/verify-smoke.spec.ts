@@ -68,6 +68,36 @@ const SMOKE_MESH_NAME = 'verify-smoke';
 const SMOKE_NODE_NAME = 'smoke-node';
 
 const SMOKE_FIXTURES = {
+  // State recovery (issue #1537). Fixtured rather than left to the mock's
+  // unmocked-command fallback so the smoke run actually renders the Data &
+  // Diagnostics pane — a pane that renders empty proves far less than one
+  // that renders with real content at every viewport and theme.
+  get_state_recovery_info: {
+    app_data_dir: 'C:/temp/verify-smoke-profile',
+    snapshot_dir: 'C:/temp/verify-smoke-profile/snapshots',
+    schema_version: 46,
+    snapshot_count: 1,
+    retention: 3,
+    pending_restore: false,
+    notice: null,
+  },
+  list_state_snapshots: [
+    {
+      path: 'C:/temp/verify-smoke-profile/snapshots/20260717T000000Z-manual.bmsnap',
+      file_name: '20260717T000000Z-manual.bmsnap',
+      kind: 'manual',
+      created_at: '2026-07-17T00:00:00Z',
+      schema_version: 46,
+      size_bytes: 2048,
+      redacted: false,
+    },
+  ],
+  check_state_integrity: {
+    ok: true,
+    scope: 'quick',
+    checked_at: '2026-07-17T00:00:00Z',
+    message: 'The database passed a quick check.',
+  },
   list_meshes: [
     {
       id: SMOKE_MESH_ID,
