@@ -169,6 +169,33 @@ export function stepVerdict(
   }
 }
 
+/** Written onto every sibling step the stepper cancels when a run fails. It
+ *  explains nothing about why, so it must never be mistaken for the cause. */
+const SIBLING_SWEEP_NOTE = 'Cancelled because the circuit run';
+
+const hasText = (value: string | null): value is string => value !== null && value.trim() !== '';
+
+/**
+ * The step that says why a run failed. A leftover note on a step that finished
+ * fine, a wait explanation on a blocked or unverified step, and the generic
+ * "cancelled because the run failed" sweep text are none of them a failure
+ * reason, so they never headline the card.
+ */
+export function runFailureStep<T extends Pick<AutopilotCircuitRunStep, 'status' | 'error_message'>>(
+  steps: ReadonlyArray<T>,
+): T | null {
+  const failed = steps.find((step) => step.status === 'failed' && hasText(step.error_message));
+  if (failed !== undefined) return failed;
+  return (
+    steps.find(
+      (step) =>
+        step.status === 'cancelled' &&
+        hasText(step.error_message) &&
+        !step.error_message.startsWith(SIBLING_SWEEP_NOTE),
+    ) ?? null
+  );
+}
+
 /** `pass 2` once a node has been retried; `null` on the first pass so the
  *  common case stays quiet. */
 export function stepPassLabel(

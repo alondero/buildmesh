@@ -35,6 +35,7 @@ import type { CircuitRunDetail } from '../../src/types/generated/CircuitRunDetai
 import type { CircuitQueueEntry } from '../../src/types/generated/CircuitQueueEntry';
 import type { CircuitHistoryEntry } from '../../src/types/generated/CircuitHistoryEntry';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { formatWallClock } from '../../src/components/Circuits/runIdentity';
 import { openProbeDestination } from './helpers/openProbeDestination';
 // Direct wrapper access for the IPC-contract block below.
 import {
@@ -1230,6 +1231,146 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     expect(screen.getByTestId('run-step-verdict-28-retry').textContent).toBe('LIMIT REACHED');
   });
 
+  describe('run identity and timing', () => {
+    const ISSUE_GRAPH = {
+      version: 3,
+      nodes: [
+        { id: 'trigger', type: { type: 'github_issue_label', label: 'buildmesh:run' } },
+        {
+          id: 'implementer',
+          type: {
+            type: 'spawn_agent_node', prompt: '', name: null, provider: null,
+            model: null, effort: null, extra_args: null, timeout_seconds: null,
+          },
+        },
+        {
+          id: 'reviewer',
+          type: {
+            type: 'spawn_agent_node', prompt: '', name: null, provider: null,
+            model: null, effort: null, extra_args: null, timeout_seconds: null,
+          },
+        },
+        { id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+      ],
+      edges: [],
+    };
+    const agent = (id: number, name: string): AgentNode => ({
+      id, mesh_id: 42, name, path: '/repo', branch: 'main', env: null,
+      provider: 'claude', status: 'running', use_worktree: false, position: 0,
+      created_at: '2026-08-22 10:00:00', scratchpad: '', sandbox: false, is_pinned: false,
+    });
+
+    it('names the run after its implementation node, never the reviewer or the run id', async () => {
+      seedAgentNodes([agent(900, 'ai-loading-spinner'), agent(901, 'ebony-unhelpful-cudgel')]);
+      const RUN: CircuitRunDetail = {
+        run: { ...RUN_DONE.run, id: 41, state: 'running', trigger_identity: 'issue:2041:buildmesh:run' },
+        steps: [
+          step({ node_id: 'implementer', status: 'completed', outcome: 'completed', agent_node_id: 900,
+            started_at: '2026-08-22 10:05:00', completed_at: '2026-08-22 10:30:00' }),
+          // The reviewer is the active step, which used to win the link.
+          step({ node_id: 'reviewer', status: 'running', agent_node_id: 901, started_at: '2026-08-22 10:31:00' }),
+        ],
+      };
+      mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(ISSUE_GRAPH) }], runs: [RUN] });
+      openProbeDestination('circuits');
+
+      expect((await screen.findByTestId('run-subject-41')).textContent).toBe('ai-loading-spinner');
+      // The run id is still there, but as a small tag, not the headline.
+      expect(screen.getByTestId('run-id-41').textContent).toBe('#41');
+      expect(screen.getByTestId('run-agent-41').textContent).toContain('ai-loading-spinner');
+    });
+
+    it('keeps a recognisable name once the implementation node has been closed', async () => {
+      seedAgentNodes([]);
+      const RUN: CircuitRunDetail = {
+        run: {
+          ...RUN_DONE.run, id: 42, state: 'completed',
+          context_json: JSON.stringify({ 'issue.number': '2041', 'issue.title': 'Spinner overlaps the log' }),
+        },
+        steps: [step({ node_id: 'implementer', status: 'completed', outcome: 'completed', agent_node_id: 900 })],
+      };
+      mockBackend({ circuits: [{ ...CIRCUIT, graph_json: JSON.stringify(ISSUE_GRAPH) }], runs: [RUN] });
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+      expect((await screen.findByTestId('run-subject-42')).textContent).toBe('#2041 Spinner overlaps the log');
+    });
+
+    it('falls back to the run number when nothing identifies the work', async () => {
+      mockBackend({ runs: [{ ...RUN_DONE, run: { ...RUN_DONE.run, id: 43, state: 'completed' }, steps: [] }] });
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      expect((await screen.findByTestId('run-subject-43')).textContent).toBe('Run #43');
+    });
+
+    it('shows wall-clock start and finish, measured from when Autopilot began rather than from queueing', async () => {
+      const RUN: CircuitRunDetail = {
+        run: {
+          ...RUN_DONE.run, id: 44, state: 'completed',
+          created_at: '2026-08-22 09:20:00', // minted, then queued for 45 minutes
+          updated_at: '2026-08-22 10:20:11',
+        },
+        steps: [
+          step({ node_id: 'trigger', status: 'completed', outcome: 'completed',
+            started_at: '2026-08-22 10:05:00', completed_at: '2026-08-22 10:05:00' }),
+          step({ node_id: 'spawn', status: 'completed', outcome: 'completed',
+            started_at: '2026-08-22 10:05:00', completed_at: '2026-08-22 10:20:11' }),
+        ],
+      };
+      mockBackend({ runs: [RUN] });
+      const user = userEvent.setup();
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+
+      const times = (await screen.findByTestId('run-times-44')).textContent ?? '';
+      const now = new Date();
+      const wall = (iso: string) => formatWallClock(Date.parse(iso), now);
+      expect(times).toContain(`Started ${wall('2026-08-22T10:05:00Z')}`);
+      expect(times).toContain(`finished ${wall('2026-08-22T10:20:11Z')}`);
+      // 10:05:00 to 10:20:11, not 09:20:00 to 10:20:11.
+      expect(times).toContain('took 15m 11s');
+      expect(times).not.toContain('1h');
+
+      // Each step carries its own start and finish wall-clock times.
+      await user.click(screen.getByTestId('run-toggle-44'));
+      const spawn = screen.getByTestId('run-step-times-44-spawn').textContent ?? '';
+      expect(spawn).toContain(wall('2026-08-22T10:05:00Z'));
+      expect(spawn).toContain(wall('2026-08-22T10:20:11Z'));
+    });
+
+    it('says a run never started instead of inventing a duration', async () => {
+      const RUN: CircuitRunDetail = {
+        run: { ...RUN_DONE.run, id: 45, state: 'cancelled' },
+        steps: [],
+      };
+      mockBackend({ runs: [RUN] });
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      expect((await screen.findByTestId('run-times-45')).textContent).toBe('Never started');
+    });
+
+    it('tucks a leftover note on a finished step away instead of showing it like an error', async () => {
+      const RUN: CircuitRunDetail = {
+        run: { ...RUN_DONE.run, id: 46, state: 'completed' },
+        steps: [step({
+          node_id: 'confirm_publish', status: 'completed', outcome: 'completed',
+          error_message: 'Waiting for your approval. This gate does not expire while you are away.',
+        })],
+      };
+      mockBackend({ runs: [RUN] });
+      const user = userEvent.setup();
+      openProbeDestination('circuits');
+      fireEvent.click(await screen.findByTestId('circuits-view-history'));
+      await user.click(await screen.findByTestId('run-toggle-46'));
+
+      const note = screen.getByTestId('run-step-note-46-confirm_publish');
+      expect(note.tagName).toBe('DETAILS');
+      expect((note as HTMLDetailsElement).open).toBe(false);
+      // It is not promoted to the card headline as a failure either.
+      expect(screen.queryByTestId('run-error-46')).toBeNull();
+    });
+  });
+
   it('links a run to its Agent Node and focuses it on the canvas', async () => {
     const agent: AgentNode = {
       id: 900, mesh_id: 42, name: 'impl-agent', path: '/repo', branch: 'main', env: null,
@@ -1457,10 +1598,11 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
           ...RUN_DONE.run,
           id: 30,
           state: 'running',
-          created_at: '2026-09-01 12:00:00',
+          // Queued for 40 minutes before a slot freed: that wait is not run time.
+          created_at: '2026-09-01 11:20:00',
           updated_at: '2026-09-01 12:00:00',
         },
-        steps: [step({ node_id: 'implementer', status: 'running' })],
+        steps: [step({ node_id: 'implementer', status: 'running', started_at: '2026-09-01 12:00:00' })],
       };
       mockBackend({ runs: [RUN_LIVE] });
       openProbeDestination('circuits');
@@ -1470,6 +1612,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       });
 
       expect(screen.getByTestId('run-card-30').textContent).toContain('10.0s');
+      expect(screen.getByTestId('run-card-30').textContent).not.toContain('50m');
       expect(vi.getTimerCount(), 'the 1s tick must be registered').toBeGreaterThan(0);
 
       // Five seconds of wall clock, zero backend events. `advanceTimersByTime`

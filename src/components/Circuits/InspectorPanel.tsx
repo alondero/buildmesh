@@ -550,8 +550,16 @@ export function InspectorPanel(props: InspectorPanelProps) {
               <option value="post_comment">Post comment</option>
               <option value="open_pr">Open PR</option>
               <option value="close_issue">Close issue</option>
+              <option value="confirm_pr_merged">Confirm PR merged</option>
             </select>
           </Field>
+          {kind.action === 'confirm_pr_merged' && (
+            <p className="text-2xs text-text-muted" data-testid="inspector-confirm-merged-help">
+              Reads the pull request on GitHub; nothing is changed. Route the Completed
+              outcome to what should follow a merge, and the Failed outcome to what should
+              happen when GitHub does not report it as merged.
+            </p>
+          )}
           {kind.action === 'open_pr' && (
             <Field label="PR policy">
               <select

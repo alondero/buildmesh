@@ -104,6 +104,33 @@ describe('run diagnostics', () => {
       const historical = { ...handedOff, steps: [step('review_classifier')] };
       expect(reviewResult(historical, reviewCircuit)?.detail).toBe('Check the current PR head and required checks before merging.');
     });
+    it('distinguishes a verified merge from an unconfirmed one on an approved issue review', () => {
+      const graph = { version: 3, nodes: [
+        { id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } },
+        { id: 'merge', type: { type: 'inject_pty', prompt: 'Squash and merge', target_node_id: 'implementer' } },
+      ], edges: [] };
+      const reviewCircuit = reviewCircuitMetadata({ graph_json: JSON.stringify(graph) });
+      const step = (node_id: string) => ({ id: 1, run_id: 60, node_id, agent_node_id: null,
+        parent_agent_node_id: null, status: 'completed', attempt: 2, outcome: 'completed',
+        error_message: null, started_at: null, completed_at: null });
+      const base = [step('review_classifier'), step('merge')];
+
+      const verified = { ...detail(60, 'completed'), steps: [...base, step('merge_verify'), step('close_implementer')] };
+      expect(reviewResult(verified, reviewCircuit)).toMatchObject({ label: 'Review approved', needsAttention: false });
+      expect(reviewResult(verified, reviewCircuit)?.detail).toContain('GitHub confirmed the squash-merge');
+      expect(reviewResult(verified, reviewCircuit)?.detail).toContain('closed');
+
+      for (const ending of ['merge_unconfirmed', 'merge_blocked']) {
+        const unconfirmed = { ...detail(61, 'completed'), steps: [...base, step(ending)] };
+        const result = reviewResult(unconfirmed, reviewCircuit);
+        expect(result?.label, ending).toBe('Merge needs attention');
+        expect(result?.needsAttention, ending).toBe(true);
+        expect(result?.detail, ending).toContain('left open');
+        // It surfaces in History's attention filter, not as a quiet success.
+        expect(runNeedsAttention(unconfirmed, reviewCircuit), ending).toBe(true);
+      }
+    });
     it('keeps historically completed but exhausted reviews in History (not Activity) for recovery', () => {
       const run = detail(48, 'completed');
       const step = (node_id: string, outcome: string) => ({ id: 1, run_id: 48, node_id,

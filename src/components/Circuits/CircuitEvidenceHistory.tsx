@@ -8,19 +8,15 @@ import type { CheckpointAction } from '../../types/generated/CheckpointAction';
 import type { RecordedObservation } from '../../types/generated/RecordedCircuitObservation';
 import type { RecordedClassification } from '../../types/generated/RecordedClassification';
 import type { ObservedWorkFact } from '../../types/generated/ObservedWorkFact';
+import { ledgerTimestampMs } from './circuitGraphModel';
+import { historyTitle, splitHistory, stepReference } from './historyPresentation';
+import { formatWallClock } from './runIdentity';
 
-const labels: Record<string, string> = {
-  continuation_effect: 'Continuation prompt', step_capacity_wait: 'Step capacity wait changed', queue_wait: 'Waiting for admission', configuration_pinned: 'Pinned run configuration', evidence_window_changed: 'Evidence wait changed',
-  review_continuation: 'Continued a failed review', observation_readiness: 'Session observation',
-  review_extension: 'Review rounds added',
-  run_transition: 'Run state', step_transition: 'Step state', effect_intent: 'Action intended',
-  effect_possible_dispatch: 'Action may have been sent', effect_result: 'Action result',
-  effect_reconciled: 'Action reconciled by read-only check', effect_target: 'Action target recorded',
-  operator_attestation: 'Operator-recorded outcome (attestation)',
-  checkpoint_reason: 'Checkpoint explanation',
-  observation: 'Observed evidence', evidence_recheck: 'Evidence recheck requested',
-  native_hook_received: 'Native evidence received', classification: 'Report interpretation',
-};
+/** Wall-clock time of one entry; the raw stamp stays on the element's `title`. */
+function entryTime(observedAt: string, now: Date): string {
+  const ms = ledgerTimestampMs(observedAt);
+  return Number.isFinite(ms) ? formatWallClock(ms, now) : observedAt;
+}
 
 /** Parse a history `detail` payload, or `null` when it is not JSON. */
 function parseDetail<T>(detail: string): T | null {
@@ -190,10 +186,13 @@ function HistoryDetail({ entry }: { entry: CircuitHistoryEntry }) {
   </div>;
 }
 
-export function CircuitEvidenceHistory({ runId, updatedAt }: {
+export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
   runId: number; updatedAt: string;
+  /** A circuit node id in the card's own words (`Review`), when the blueprint is known. */
+  nodeLabel?: (nodeId: string) => string;
 }) {
   const [open, setOpen] = useState(false);
+  const [showTechnical, setShowTechnical] = useState(false);
   const [rows, setRows] = useState<CircuitHistoryEntry[] | null>(null);
   const [checkpoints, setCheckpoints] = useState<CircuitCheckpoint[]>([]);
   const [coverage, setCoverage] = useState<CircuitStepObservationCoverage[]>([]);
@@ -239,6 +238,9 @@ export function CircuitEvidenceHistory({ runId, updatedAt }: {
     finally { setPending(false); }
   }
 
+  const now = new Date();
+  const { shown, hiddenCount } = splitHistory(rows ?? [], showTechnical);
+
   return <details className="mt-2 text-2xs min-w-0" onToggle={(event) => setOpen(event.currentTarget.open)}>
     <summary className="cursor-pointer text-accent-cyan">Circuit Run History</summary>
     {open && <div className="mt-1 space-y-2">
@@ -282,18 +284,33 @@ export function CircuitEvidenceHistory({ runId, updatedAt }: {
           </li>)}
         </ul>
       </details>}
-      <ol className="space-y-2">
-        {rows?.map((entry) => <li key={entry.id} className="break-words" data-testid={`history-entry-${entry.id}`}
-          data-history-kind={entry.kind} data-disposition={entry.disposition ?? undefined}>
-          <div className="text-text-primary">{labels[entry.kind] ?? entry.kind}</div>
-          <div className="text-text-muted">{entry.observed_at}{entry.node_id && ` · ${entry.node_id}`}{entry.attempt !== null && ` · attempt ${entry.attempt}`}</div>
-          {/* Uniform provenance (issue #1909). Observations already render a
-              richer source/disposition line inside their own block. */}
-          {entry.source && entry.kind !== 'observation' && <div className="text-text-muted break-words" data-testid={`history-provenance-${entry.id}`}>
-            Source: {entry.source}{entry.disposition ? ` · ${entry.disposition.replace(/_/g, ' ')}` : ''}
-          </div>}
-          <HistoryDetail entry={entry} />
-        </li>)}
+      {rows !== null && rows.length > 0 && (hiddenCount > 0 || showTechnical) && <button type="button"
+        aria-pressed={showTechnical} data-testid="history-technical-toggle" className="text-accent-cyan"
+        onClick={() => setShowTechnical((value) => !value)}>
+        {showTechnical ? 'Hide technical detail' : `Show technical detail (${hiddenCount} more)`}
+      </button>}
+      <ol className="space-y-1.5">
+        {shown.map((entry) => {
+          const reference = stepReference(entry, nodeLabel);
+          // A transition's detail is just its state, which the title already says.
+          const showBody = entry.kind !== 'run_transition' && entry.kind !== 'step_transition';
+          return <li key={entry.id} className="break-words" data-testid={`history-entry-${entry.id}`}
+            data-history-kind={entry.kind} data-disposition={entry.disposition ?? undefined}>
+            <div className="flex items-baseline gap-1.5 flex-wrap">
+              <time dateTime={entry.observed_at} title={entry.observed_at} className="font-mono text-text-muted shrink-0">
+                {entryTime(entry.observed_at, now)}
+              </time>
+              <span className="text-text-primary">{historyTitle(entry)}</span>
+              {reference !== null && <span className="text-text-muted">· {reference}</span>}
+            </div>
+            {/* Uniform provenance (issue #1909). Observations already render a
+                richer source/disposition line inside their own block. */}
+            {entry.source && entry.kind !== 'observation' && <div className="text-text-muted break-words" data-testid={`history-provenance-${entry.id}`}>
+              Source: {entry.source}{entry.disposition ? ` · ${entry.disposition.replace(/_/g, ' ')}` : ''}
+            </div>}
+            {showBody && <HistoryDetail entry={entry} />}
+          </li>;
+        })}
       </ol>
 
     </div>}

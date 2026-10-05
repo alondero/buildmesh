@@ -16,7 +16,8 @@ import { useMemo } from 'react';
 import { CircuitEvidenceHistory } from './CircuitEvidenceHistory';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import type { CircuitGraph } from '../../types/generated/CircuitGraph';
-import { formatDurationMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
+import { formatDurationMs, ledgerTimestampMs, statusTextClass, stepDurationMs } from './circuitGraphModel';
+import { formatWallClock, runStartedMs } from './runIdentity';
 import { runStateLabel, stepStatusLabel } from './runDiagnostics';
 import {
   indexNodes,
@@ -54,7 +55,9 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
         {runs.length === 0 && (
           <li className="px-3 py-2 text-2xs text-text-muted">No runs yet.</li>
         )}
-        {runs.map(({ run }) => (
+        {runs.map(({ run, steps }) => {
+          const started = runStartedMs(steps);
+          return (
           <li key={run.id}>
             <button
               type="button"
@@ -70,14 +73,22 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
               >
                 {runStateLabel(run.state)}
               </span>
-              <span className="ml-1 text-2xs text-text-muted">{run.created_at}</span>
+              <span className="ml-1 text-2xs text-text-muted" data-testid={`history-run-start-${run.id}`}>
+                {started === null ? 'not started' : `started ${formatWallClock(started, new Date())}`}
+              </span>
             </button>
           </li>
-        ))}
+          );
+        })}
       </ul>
       {selected && (
         <div className="flex-1 overflow-y-auto p-2" data-testid={`run-steps-${selected.run.id}`}>
-          <CircuitEvidenceHistory key={selected.run.id} runId={selected.run.id} updatedAt={selected.run.updated_at} />
+          <CircuitEvidenceHistory
+            key={selected.run.id}
+            runId={selected.run.id}
+            updatedAt={selected.run.updated_at}
+            nodeLabel={(nodeId) => nodeRoleLabel(nodeId, nodeIndex.get(nodeId)?.type)}
+          />
           {selected.steps.length === 0 && (
             <p className="text-2xs text-text-muted px-1">No steps recorded.</p>
           )}
@@ -108,8 +119,14 @@ export function RunHistoryDrawer({ runs, selectedRunId, onSelectRun, graph }: Ru
                   </span>
                 </div>
                 <div className="text-text-muted mt-0.5 font-mono break-words">{s.node_id}</div>
-                {duration !== null && (
-                  <div className="text-text-muted mt-0.5">duration {formatDurationMs(duration)}</div>
+                {s.started_at !== null && Number.isFinite(ledgerTimestampMs(s.started_at)) && (
+                  <div className="text-text-muted mt-0.5">
+                    {formatWallClock(ledgerTimestampMs(s.started_at), new Date())}
+                    {s.completed_at !== null && Number.isFinite(ledgerTimestampMs(s.completed_at))
+                      ? ` → ${formatWallClock(ledgerTimestampMs(s.completed_at), new Date())}`
+                      : ''}
+                    {duration !== null ? ` · ${formatDurationMs(duration)}` : ''}
+                  </div>
                 )}
                 {s.agent_node_id !== null && (
                   <div className="text-text-muted mt-0.5">agent node #{s.agent_node_id}</div>
