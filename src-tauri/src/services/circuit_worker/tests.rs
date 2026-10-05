@@ -882,7 +882,7 @@ fn circuit_old_close_cannot_retire_next_review_round() {
                 error: None,
             },
             StepView {
-                node_id: "close_reviewer".into(),
+                node_id: "close_approved".into(),
                 agent_node_id: None,
                 attempt: 1,
                 status: StepStatus::Completed,
@@ -954,6 +954,84 @@ fn circuit_restart_restores_completed_spawn_ownership_at_every_downstream_gate()
         );
     }
     evaluator::unregister(id);
+}
+
+/// The reviewer reaches its verdict gate through the `review_round` join that
+/// also collects later re-review prompts; its report is still a hand-off.
+#[test]
+fn reviewer_report_hands_off_through_the_review_round_join() {
+    for graph in [
+        CircuitGraph::agent_review(None, None, 3),
+        CircuitGraph::issue_driven_autopilot_review("ready-for-agent"),
+    ] {
+        let mut view = RunView {
+            run_id: 1,
+            graph,
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        assert!(spawn_hands_off_report(&view, "reviewer"));
+        assert!(
+            !spawn_hands_off_report(&view, "review_round"),
+            "only a spawn hands off its report"
+        );
+        // A join that also feeds a non-judging step is not a hand-off path.
+        let notify = view
+            .graph
+            .nodes
+            .iter()
+            .find(|node| matches!(node.kind, CircuitNodeKind::Notify { .. }))
+            .unwrap()
+            .id
+            .clone();
+        view.graph.edges.push(crate::circuit::model::CircuitEdge {
+            from: "review_round".into(),
+            to: notify,
+            condition: Default::default(),
+        });
+        assert!(!spawn_hands_off_report(&view, "reviewer"));
+    }
+}
+
+/// An approved review hands its implementation agent back open; the circuit
+/// must stop piloting it (and the reviewer and borrowed source) once terminal.
+#[test]
+fn terminal_run_stops_piloting_every_agent_it_hands_back() {
+    use crate::circuit::evaluator;
+    let (implementer, reviewer, source) = (910_041, 910_042, 910_043);
+    let attached = |node_id: &str, agent: i64| StepView {
+        node_id: node_id.into(),
+        agent_node_id: Some(agent),
+        attempt: 1,
+        status: StepStatus::Completed,
+        outcome: Some(StepOutcome::Completed),
+        error: None,
+    };
+    let mut view = RunView {
+        run_id: 41,
+        graph: CircuitGraph::issue_driven_autopilot_review("ready-for-agent"),
+        state: RunState::Running,
+        context: CircuitContext::new(),
+        steps: vec![
+            attached("implementer", implementer),
+            attached("reviewer", reviewer),
+        ],
+    };
+    view.context.set("source.agent_id", source.to_string());
+    restore_run_evaluators(&view);
+    assert!([implementer, reviewer, source]
+        .iter()
+        .all(|id| evaluator::is_circuit_piloted(*id)));
+
+    view.state = RunState::Completed;
+    release_run_evaluators(&view);
+    for id in [implementer, reviewer, source] {
+        assert!(
+            !evaluator::is_circuit_piloted(id),
+            "agent {id} is still piloted after the run ended"
+        );
+    }
 }
 
 fn report_gate_view() -> RunView {
@@ -1332,12 +1410,51 @@ fn review_handoff_clean_turn_does_not_require_task_completion_or_classifier() {
             output: Some(report.into()),
         },
     );
+    // The source then publishes; a clean publication turn is a hand-off
+    // in its own right and needs no task classifier either.
+    let publish = advance(&mut view, &CircuitEvent::Tick(capacity));
+    assert!(!publish
+        .effects
+        .iter()
+        .any(|e| matches!(e, Effect::SpawnAgentNode { .. })));
+    advance(
+        &mut view,
+        &CircuitEvent::AgentReady {
+            node_id: "publish".into(),
+        },
+    );
+    let attempt = view.step("publish").unwrap().attempt;
+    advance(
+        &mut view,
+        &CircuitEvent::PromptDelivered {
+            node_id: "publish".into(),
+            attempt,
+        },
+    );
+    let published = "Opened https://github.com/example/repo/pull/7.";
+    let classification = classify_gate_report(
+        &view,
+        "await_publish",
+        SessionStatus::Ready,
+        published,
+        |_| None,
+    );
+    assert_eq!(classification, Some(Classification::Completed));
+    advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "await_publish".into(),
+            classification,
+            output: Some(published.into()),
+        },
+    );
     let transition = advance(&mut view, &CircuitEvent::Tick(capacity));
     assert!(transition
         .effects
         .iter()
         .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
-    assert_eq!(view.context.get("source.output"), Some(report));
+    assert_eq!(view.context.get("source.output"), Some(published));
     // Persisted presets used LlmTurnClassifier for fixes. They must gain
     // the same behavior without rewriting an active graph's ledger.
     view.graph
@@ -2176,6 +2293,23 @@ fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_pre
             circuit_free_slots: 2,
             agent_free_slots: 1,
         };
+        let deliver = |view: &mut RunView, node: &str| {
+            let dispatched = advance(
+                view,
+                &CircuitEvent::AgentReady {
+                    node_id: node.into(),
+                },
+            );
+            let attempt = view.step(node).unwrap().attempt;
+            let delivered = advance(
+                view,
+                &CircuitEvent::PromptDelivered {
+                    node_id: node.into(),
+                    attempt,
+                },
+            );
+            (dispatched.effects, delivered.effects)
+        };
         advance(&mut view, &CircuitEvent::Triggered);
         advance(&mut view, &CircuitEvent::Tick(capacity));
         let mut tracker = crate::services::commandcode_watcher::TurnTracker::default();
@@ -2205,30 +2339,58 @@ fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_pre
                 output: Some("Implementation report".into()),
             },
         );
+        advance(&mut view, &CircuitEvent::Tick(capacity));
+        let (publish, _) = deliver(&mut view, "publish");
+        assert!(publish.iter().any(|e| matches!(e,
+            Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+                if target == "$source" && prompt.contains("gh pr create"))));
+        let published = "Opened https://github.com/example/repo/pull/7.";
+        let classification = classify_gate_report(
+            &view,
+            "await_publish",
+            SessionStatus::Ready,
+            published,
+            |_| None,
+        );
+        advance_with_report_evidence(
+            &mut view,
+            &CircuitEvent::TurnClassified {
+                binding: None,
+                node_id: "await_publish".into(),
+                classification,
+                output: Some(published.into()),
+            },
+        );
         let mut scheduled = advance(&mut view, &CircuitEvent::Tick(capacity));
+        let reviewer_id = 4001;
         for round in 1..=3 {
-            assert_eq!(
-                scheduled
-                    .effects
-                    .iter()
-                    .filter(
-                        |e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
-                    )
-                    .count(),
-                1
-            );
-            assert_eq!(view.step("reviewer").unwrap().attempt, round);
-            let (provider, config) = resolve_review_spawn_inputs(
-                &view,
-                "reviewer",
-                None,
-                ExplicitSpawnOverrides::default(),
-                None,
-            );
-            assert_eq!(provider.as_deref(), Some("agy"));
-            assert_eq!(config.model, None);
-            let reviewer_id = 4000 + i64::from(round);
-            view.attach_agent_node("reviewer", reviewer_id);
+            let spawns = scheduled
+                .effects
+                .iter()
+                .filter(
+                    |e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer"),
+                )
+                .count();
+            if round == 1 {
+                assert_eq!(spawns, 1);
+                let (provider, config) = resolve_review_spawn_inputs(
+                    &view,
+                    "reviewer",
+                    None,
+                    ExplicitSpawnOverrides::default(),
+                    None,
+                );
+                assert_eq!(provider.as_deref(), Some("agy"));
+                assert_eq!(config.model, None);
+                view.attach_agent_node("reviewer", reviewer_id);
+            } else {
+                assert_eq!(spawns, 0, "round {round} re-prompts the open reviewer");
+                let (reprompt, _) = deliver(&mut view, "re_review");
+                assert!(reprompt.iter().any(|e| matches!(e,
+                    Effect::InjectPty { target_node_id: Some(target), .. } if target == "reviewer")));
+                assert_eq!(view.resolve_target_agent("re_review"), Some(reviewer_id));
+            }
+            assert_eq!(view.step("reviewer").unwrap().attempt, 1);
             let report = format!(
                 "Round {round}: {}",
                 if round == 3 {
@@ -2237,15 +2399,18 @@ fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_pre
                     "Changes requested: add regression tests"
                 }
             );
-            crate::circuit::test_support::advance_with_completion_evidence(
-                &mut view,
-                &CircuitEvent::AgentFinished {
-                    agent_node_id: reviewer_id,
-                    success: true,
-                    output: Some(report.clone()),
-                },
-            );
+            if round == 1 {
+                crate::circuit::test_support::advance_with_completion_evidence(
+                    &mut view,
+                    &CircuitEvent::AgentFinished {
+                        agent_node_id: reviewer_id,
+                        success: true,
+                        output: Some(report.clone()),
+                    },
+                );
+            }
             advance(&mut view, &CircuitEvent::Tick(capacity));
+            assert_eq!(view.step("verdict").unwrap().attempt, round);
             let classification =
                 classify_gate_report(&view, "verdict", SessionStatus::Ready, &report, |_| {
                     Some(if round == 3 {
@@ -2267,43 +2432,35 @@ fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_pre
                 verdict
                     .effects
                     .extend(advance(&mut view, &CircuitEvent::Tick(capacity)).effects);
+                assert_eq!(
+                    view.state,
+                    RunState::Running,
+                    "the merge request is still to be delivered"
+                );
+                let (merge, delivered) = deliver(&mut view, "merge");
+                verdict.effects.extend(merge);
+                verdict.effects.extend(delivered);
                 assert_eq!(view.state, RunState::Completed);
-                assert!(verdict.effects.iter().all(|e| !matches!(
-                    e,
-                    Effect::InjectPty { .. } | Effect::SpawnAgentNode { .. }
-                )));
+                assert!(verdict
+                    .effects
+                    .iter()
+                    .all(|e| !matches!(e, Effect::SpawnAgentNode { .. })));
+                assert!(verdict.effects.iter().any(|e| matches!(e,
+                    Effect::InjectPty { node_id, target_node_id: Some(target), .. }
+                        if node_id == "merge" && target == "$source")));
                 break;
             }
             assert_eq!(view.state, RunState::Running);
-            let feedback = advance(
-                &mut view,
-                &CircuitEvent::AgentReady {
-                    node_id: "feedback".into(),
-                },
-            );
+            let (feedback, delivered) = deliver(&mut view, "feedback");
             assert_eq!(view.resolve_target_agent("feedback"), Some(3759));
-            assert!(feedback.effects.iter().any(
+            assert!(feedback.iter().any(
                 |e| matches!(e, Effect::InjectPty { prompt, .. } if prompt.contains(&report))
             ));
             assert!(feedback
-                .effects
                 .iter()
+                .chain(&delivered)
                 .all(|e| !matches!(e, Effect::CloseAgentNode { .. })));
-            let attempt = view.step("feedback").unwrap().attempt;
-            let delivered = advance(
-                &mut view,
-                &CircuitEvent::PromptDelivered {
-                    node_id: "feedback".into(),
-                    attempt,
-                },
-            );
-            assert!(delivered
-                .effects
-                .iter()
-                .any(|e| matches!(e, Effect::CloseAgentNode { .. })));
-            // Model acknowledged reviewer cleanup and restart of the
-            // durable context between delivery and the next report.
-            view.step_mut("reviewer").unwrap().agent_node_id = None;
+            // Restart of the durable context between delivery and the next report.
             view.context = CircuitContext::from_json(&view.context.to_json().unwrap()).unwrap();
             advance(&mut view, &CircuitEvent::Tick(capacity));
             let fixes = "Fixes made; some optional tests remain.";
@@ -3076,7 +3233,7 @@ fn close_agent_retry_is_not_observed_after_close_clears_spawn_association() {
                 attempt: 1,
             },
             StepView {
-                node_id: "close_reviewer".into(),
+                node_id: "close_approved".into(),
                 status: StepStatus::Completed,
                 outcome: Some(GraphStepOutcome::Completed),
                 error: None,
@@ -3091,12 +3248,12 @@ fn close_agent_retry_is_not_observed_after_close_clears_spawn_association() {
     assert_eq!(events.len(), 1);
     assert!(matches!(
         &events[0],
-        CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_reviewer"
+        CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_approved"
     ));
 
     // This is the in-memory half of the real CloseAgentNode effect. The
     // database half clears the same `reviewer` spawn step below it.
-    let spawn_step_id = close_target_spawn_step_id(&view, "close_reviewer", Some("reviewer"), 701);
+    let spawn_step_id = close_target_spawn_step_id(&view, "close_approved", Some("reviewer"), 701);
     assert_eq!(spawn_step_id, "reviewer");
     view.step_mut(&spawn_step_id).unwrap().agent_node_id = None;
 
@@ -3627,10 +3784,35 @@ fn watchdog_run_104_background_report_does_not_publish_a_turn() {
                 binding: None,
                 node_id: "await_source".into(),
                 classification: Some(Classification::Completed),
+                output: Some("Implementation done".into()),
+            },
+        );
+        advance(&mut view, &CircuitEvent::Tick(capacity));
+        advance(
+            &mut view,
+            &CircuitEvent::AgentReady {
+                node_id: "publish".into(),
+            },
+        );
+        let attempt = view.step("publish").unwrap().attempt;
+        advance(
+            &mut view,
+            &CircuitEvent::PromptDelivered {
+                node_id: "publish".into(),
+                attempt,
+            },
+        );
+        advance_with_report_evidence(
+            &mut view,
+            &CircuitEvent::TurnClassified {
+                binding: None,
+                node_id: "await_publish".into(),
+                classification: Some(Classification::Completed),
                 output: Some("PR opened".into()),
             },
         );
         advance(&mut view, &CircuitEvent::Tick(capacity));
+        assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running);
         view.attach_agent_node("reviewer", 3923);
         recover_quiet_turn(
             report,
@@ -4066,7 +4248,7 @@ fn review_blueprint_close_retry_observer_stops_after_target_clears() {
                 attempt: 1,
             },
             StepView {
-                node_id: "close_reviewer".into(),
+                node_id: "close_approved".into(),
                 status: StepStatus::Completed,
                 outcome: Some(GraphStepOutcome::Completed),
                 error: None,
@@ -4080,11 +4262,11 @@ fn review_blueprint_close_retry_observer_stops_after_target_clears() {
     assert_eq!(
         events.len(),
         1,
-        "review blueprint's close_reviewer MUST emit one retry while its target agent is attached"
+        "review blueprint's close_approved MUST emit one retry while its target agent is attached"
     );
     assert!(
-        matches!(&events[0], CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_reviewer"),
-        "emitted retry must be for close_reviewer: got {:?}",
+        matches!(&events[0], CircuitEvent::CloseAgentRetry { node_id } if node_id == "close_approved"),
+        "emitted retry must be for close_approved: got {:?}",
         events[0]
     );
 

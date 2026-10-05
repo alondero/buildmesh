@@ -188,6 +188,20 @@ Issue-driven review flows prepare a draft pull request. Customize prompts and
 publication steps in the Circuit editor. The shared wrap-up template is stored in
 `circuits/finish.md` under the application data directory.
 
+A review started from the title bar's **Start review or circuit** control and an
+issue-driven review flow run the same loop:
+
+1. The implementation agent commits, pushes and opens a pull request before any
+   review starts. An issue-driven flow does this in its wrap-up.
+2. One reviewer agent reviews the work. When it requests changes, its findings go
+   to the implementation agent, which commits and pushes fixes. The same reviewer,
+   still open, is then asked to review again, up to the round limit.
+3. On approval the reviewer is closed and the implementation agent is asked to
+   squash and merge the pull request. It marks a draft ready and waits for
+   required checks first, and stops and reports instead of merging if a check
+   fails or the merge is blocked. The circuit then finishes and hands the agent
+   back to you. The agent stays open, so read its report to confirm the merge.
+
 Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
 retained, and the previous global agent cap and custom wrap-up template are carried
 forward. Old mesh-level Autopilot settings have no effect on Circuit launches.

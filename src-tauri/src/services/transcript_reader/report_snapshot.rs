@@ -1,13 +1,26 @@
 //! A stable report read for Circuit interpretation, not proof of task ownership.
 
+use super::readers::opencode::{
+    opencode_resolve, parse_opencode_messages, read_opencode_message_rows, OPENCODE_DIGEST_WINDOW,
+};
 use super::*;
-use std::{fs, io::{BufRead, BufReader, Read, Seek, SeekFrom}};
-use super::readers::opencode::{opencode_resolve, read_opencode_message_rows, parse_opencode_messages, OPENCODE_DIGEST_WINDOW};
+use std::{
+    fs,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 enum ReportSource {
-    File { path: PathBuf, length: u64, modified: std::time::SystemTime },
-    OpenCode { path: PathBuf, session_id: String, rows: Vec<(String, serde_json::Value)> },
+    File {
+        path: PathBuf,
+        length: u64,
+        modified: std::time::SystemTime,
+    },
+    OpenCode {
+        path: PathBuf,
+        session_id: String,
+        rows: Vec<(String, serde_json::Value)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,19 +37,38 @@ pub(crate) struct ReportSnapshot {
 impl ReportSnapshot {
     pub(crate) fn is_current(&self) -> bool {
         match &self.source {
-            ReportSource::File { path, length, modified } => fs::metadata(path).is_ok_and(|metadata|
-                metadata.len() == *length && metadata.modified().ok() == Some(*modified)),
-            ReportSource::OpenCode { path, session_id, rows } =>
-                read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).as_ref() == Some(rows),
+            ReportSource::File {
+                path,
+                length,
+                modified,
+            } => fs::metadata(path).is_ok_and(|metadata| {
+                metadata.len() == *length && metadata.modified().ok() == Some(*modified)
+            }),
+            ReportSource::OpenCode {
+                path,
+                session_id,
+                rows,
+            } => {
+                read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).as_ref()
+                    == Some(rows)
+            }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportReadError {
-    Unsupported, NoSession, NoTranscript, Unreadable, PartialPublication,
-    MalformedRecord, NoReport, WorkInProgress, NoNativeCompletion,
-    NoTimestamp, ChangedDuringRead,
+    Unsupported,
+    NoSession,
+    NoTranscript,
+    Unreadable,
+    PartialPublication,
+    MalformedRecord,
+    NoReport,
+    WorkInProgress,
+    NoNativeCompletion,
+    NoTimestamp,
+    ChangedDuringRead,
 }
 
 impl ReportReadError {
@@ -57,13 +89,18 @@ impl ReportReadError {
     }
 }
 
-pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) -> Result<ReportSnapshot, ReportReadError> {
+pub(crate) fn read(
+    format: TranscriptFormat,
+    session_id: &str,
+    node_path: &str,
+) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
     if format == TranscriptFormat::OpenCode {
         // Resolve the env-aware SQLite store, then read it. The resolve/read
         // split mirrors `read_opencode_tail` and lets the store-backed read be
         // exercised against a temporary DB without touching `$HOME`.
-        let (path, session_id) = opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
+        let (path, session_id) =
+            opencode_resolve(Some(session_id), node_path).map_err(|_| E::NoTranscript)?;
         return read_opencode_file(&path, session_id);
     }
     if format == TranscriptFormat::Cline {
@@ -81,7 +118,10 @@ pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) 
         // continues on its `agent_end` receipt instead of being walled off.
         return Err(E::Unsupported);
     }
-    read_file(&locate_transcript(format, session_id, node_path).ok_or(E::NoTranscript)?, format)
+    read_file(
+        &locate_transcript(format, session_id, node_path).ok_or(E::NoTranscript)?,
+        format,
+    )
 }
 
 /// Read an OpenCode session's report from its SQLite store. The store is the
@@ -90,9 +130,18 @@ pub(crate) fn read(format: TranscriptFormat, session_id: &str, node_path: &str) 
 /// masquerading as "no report yet".
 fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, ReportReadError> {
     use ReportReadError as E;
-    let rows = read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).ok_or(E::Unreadable)?;
-    let parsed = parse_opencode_messages(&rows.iter().map(|(_, value)| value.clone()).collect::<Vec<_>>(), 1);
-    if parsed.saw_malformed { return Err(E::MalformedRecord); }
+    let rows = read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW)
+        .ok_or(E::Unreadable)?;
+    let parsed = parse_opencode_messages(
+        &rows
+            .iter()
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>(),
+        1,
+    );
+    if parsed.saw_malformed {
+        return Err(E::MalformedRecord);
+    }
     let (id, message) = rows.last().ok_or(E::NoReport)?;
     if message.pointer("/info/role").and_then(|role| role.as_str()) != Some("assistant") {
         return Err(E::WorkInProgress);
@@ -101,17 +150,38 @@ fn read_opencode_file(path: &Path, session_id: &str) -> Result<ReportSnapshot, R
     // an older final answer borrow the newer message's completion timestamp.
     let latest = parse_opencode_messages(std::slice::from_ref(message), 1);
     let last = latest.turns.last().ok_or(E::WorkInProgress)?;
-    if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
-    let published_at_ms = message.pointer("/info/time/completed")
-        .and_then(|time| time.as_i64()).ok_or(E::WorkInProgress)?;
-    let text = adapters::opencode::parse_opencode_messages_with_text_limit(std::slice::from_ref(message), 1, usize::MAX)
-        .last_assistant_message.ok_or(E::NoReport)?;
+    if last.role != "assistant" || !last.tool_calls.is_empty() {
+        return Err(E::WorkInProgress);
+    }
+    let published_at_ms = message
+        .pointer("/info/time/completed")
+        .and_then(|time| time.as_i64())
+        .ok_or(E::WorkInProgress)?;
+    let text = adapters::opencode::parse_opencode_messages_with_text_limit(
+        std::slice::from_ref(message),
+        1,
+        usize::MAX,
+    )
+    .last_assistant_message
+    .ok_or(E::NoReport)?;
     let revision = assistant_revision(id, &last.text, &text);
-    let snapshot = ReportSnapshot { text: crate::secret_scrubber::SecretScrubber::scrub(&text), revision, published_at_ms,
+    let snapshot = ReportSnapshot {
+        text: crate::secret_scrubber::SecretScrubber::scrub(&text),
+        revision,
+        published_at_ms,
         // Message completion is not a native session-idle boundary.
         turn_finished: false,
-        source: ReportSource::OpenCode { path: path.into(), session_id: session_id.into(), rows } };
-    if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) }
+        source: ReportSource::OpenCode {
+            path: path.into(),
+            session_id: session_id.into(),
+            rows,
+        },
+    };
+    if snapshot.is_current() {
+        Ok(snapshot)
+    } else {
+        Err(E::ChangedDuringRead)
+    }
 }
 
 #[cfg(test)]
@@ -123,74 +193,123 @@ fn read_file(path: &Path, format: TranscriptFormat) -> Result<ReportSnapshot, Re
     use ReportReadError as E;
     let metadata = fs::metadata(path).map_err(|_| E::Unreadable)?;
     let mut file = fs::File::open(path).map_err(|_| E::Unreadable)?;
-    if metadata.len() == 0 { return Err(E::NoReport); }
+    if metadata.len() == 0 {
+        return Err(E::NoReport);
+    }
     file.seek(SeekFrom::End(-1)).map_err(|_| E::Unreadable)?;
     let mut last_byte = [0];
     file.read_exact(&mut last_byte).map_err(|_| E::Unreadable)?;
-    if last_byte[0] != b'\n' { return Err(E::PartialPublication); }
+    if last_byte[0] != b'\n' {
+        return Err(E::PartialPublication);
+    }
     let start = metadata.len().saturating_sub(256 * 1024);
-    file.seek(SeekFrom::Start(start)).map_err(|_| E::Unreadable)?;
+    file.seek(SeekFrom::Start(start))
+        .map_err(|_| E::Unreadable)?;
     let mut reader = BufReader::new(file.take(metadata.len() - start));
-    if start > 0 { reader.read_until(b'\n', &mut Vec::new()).map_err(|_| E::Unreadable)?; }
-    let lines = reader.lines().collect::<Result<Vec<_>, _>>().map_err(|_| E::Unreadable)?;
+    if start > 0 {
+        reader
+            .read_until(b'\n', &mut Vec::new())
+            .map_err(|_| E::Unreadable)?;
+    }
+    let lines = reader
+        .lines()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| E::Unreadable)?;
     let mut last = None;
     let mut published_at_ms = None;
     for line in &lines {
-        if line.trim().is_empty() { continue; }
-        let value = serde_json::from_str::<serde_json::Value>(line).map_err(|_| E::MalformedRecord)?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value =
+            serde_json::from_str::<serde_json::Value>(line).map_err(|_| E::MalformedRecord)?;
         // Only the last dialogue record decides readiness; full-turn parsing
         // coalesces earlier tool calls with a later final answer.
         let parsed = parse_transcript(format, std::iter::once(line.clone()), 1);
-        if parsed.saw_malformed { return Err(E::MalformedRecord); }
+        if parsed.saw_malformed {
+            return Err(E::MalformedRecord);
+        }
         if let Some(turn) = parsed.turns.into_iter().last() {
             published_at_ms = record_time(format, &value);
             last = Some(turn);
         }
     }
     let last = last.ok_or(E::NoReport)?;
-    if last.role != "assistant" || !last.tool_calls.is_empty() { return Err(E::WorkInProgress); }
+    if last.role != "assistant" || !last.tool_calls.is_empty() {
+        return Err(E::WorkInProgress);
+    }
     let turn_finished = match format {
         TranscriptFormat::Codex => {
-            let completion = adapter::dispatch("codex").and_then(|adapter| adapter.completed_turn(&lines.join("\n")))
+            let completion = adapter::dispatch("codex")
+                .and_then(|adapter| adapter.completed_turn(&lines.join("\n")))
                 .ok_or(E::NoNativeCompletion)?;
             published_at_ms = Some(completion.completed_at_ms);
             true
         }
         TranscriptFormat::Muse => {
-            if !crate::services::muse_watcher::report_turn_finished(&lines) { return Err(E::NoNativeCompletion); }
+            if !crate::services::muse_watcher::report_turn_finished(&lines) {
+                return Err(E::NoNativeCompletion);
+            }
             true
         }
         TranscriptFormat::CommandCode => {
-            if !crate::services::commandcode_watcher::report_turn_finished(&lines) { return Err(E::NoNativeCompletion); }
+            if !crate::services::commandcode_watcher::report_turn_finished(&lines) {
+                return Err(E::NoNativeCompletion);
+            }
             true
         }
         _ => false,
     };
     let report = assistant_report_from_file(path, format).ok_or(E::NoReport)?;
     let snapshot = ReportSnapshot {
-        text: crate::secret_scrubber::SecretScrubber::scrub(&report.text), revision: report.revision,
-        published_at_ms: published_at_ms.ok_or(E::NoTimestamp)?, turn_finished,
-        source: ReportSource::File { path: path.into(), length: metadata.len(), modified: metadata.modified().map_err(|_| E::Unreadable)? },
+        text: crate::secret_scrubber::SecretScrubber::scrub(&report.text),
+        revision: report.revision,
+        published_at_ms: published_at_ms.ok_or(E::NoTimestamp)?,
+        turn_finished,
+        source: ReportSource::File {
+            path: path.into(),
+            length: metadata.len(),
+            modified: metadata.modified().map_err(|_| E::Unreadable)?,
+        },
     };
-    if snapshot.is_current() { Ok(snapshot) } else { Err(E::ChangedDuringRead) }
+    if snapshot.is_current() {
+        Ok(snapshot)
+    } else {
+        Err(E::ChangedDuringRead)
+    }
 }
 
 fn record_time(format: TranscriptFormat, value: &serde_json::Value) -> Option<i64> {
-    if format == TranscriptFormat::Muse { return value.get("recorded_at")?.as_i64().map(|micros| micros / 1000); }
+    if format == TranscriptFormat::Muse {
+        return value
+            .get("recorded_at")?
+            .as_i64()
+            .map(|micros| micros / 1000);
+    }
     let timestamp = match format {
         TranscriptFormat::Mcode => value.pointer("/message/timestamp"),
         TranscriptFormat::Agy => value.get("created_at"),
-        TranscriptFormat::CommandCode => value.get("timestamp").or_else(|| value.pointer("/message/meta/createdAt")),
+        TranscriptFormat::CommandCode => value
+            .get("timestamp")
+            .or_else(|| value.pointer("/message/meta/createdAt")),
         _ => value.get("timestamp"),
     }?;
-    timestamp.as_i64().or_else(|| chrono::DateTime::parse_from_rfc3339(timestamp.as_str()?).ok().map(|time| time.timestamp_millis()))
+    timestamp.as_i64().or_else(|| {
+        chrono::DateTime::parse_from_rfc3339(timestamp.as_str()?)
+            .ok()
+            .map(|time| time.timestamp_millis())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNode, CircuitNodeKind, CircuitEdge},
-        observation::{ObservationIdentity, WorkEvidence}, stepper::*};
+    use crate::circuit::{
+        context::CircuitContext,
+        model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind},
+        observation::{ObservationIdentity, WorkEvidence},
+        stepper::*,
+    };
 
     #[test]
     fn circuit_report_preserves_long_review_verdict_and_tail_revision() {
@@ -207,21 +326,36 @@ mod tests {
         };
         let expected = write("Approve");
         let approved = read_file(&path, TranscriptFormat::ClaudeCode).unwrap();
-        assert_eq!(approved.text, expected, "a circuit must classify the verdict, not a display preview");
+        assert_eq!(
+            approved.text, expected,
+            "a circuit must classify the verdict, not a display preview"
+        );
         let expected = write("Decline");
         let rejected = read_file(&path, TranscriptFormat::ClaudeCode).unwrap();
         assert_eq!(rejected.text, expected);
         assert_ne!(approved.revision, rejected.revision);
-        assert_eq!(approved.revision.split(':').next(), rejected.revision.split(':').next(),
-            "equal-length edits exercise content hashing, not just record position");
+        assert_eq!(
+            approved.revision.split(':').next(),
+            rejected.revision.split(':').next(),
+            "equal-length edits exercise content hashing, not just record position"
+        );
         let legacy = approved.revision.rsplit_once(':').unwrap().0;
         assert!(same_assistant_revision(&approved.revision, legacy));
-        assert!(same_assistant_revision(&rejected.revision, legacy),
-            "old preview-only boundaries cannot authorize unseen tail edits in the same record");
-        assert!(!same_assistant_revision(&rejected.revision, &approved.revision));
-        let TranscriptTail::Available { last_assistant_message: Some(preview), .. } =
-            read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode)
-        else { panic!("expected a display preview"); };
+        assert!(
+            same_assistant_revision(&rejected.revision, legacy),
+            "old preview-only boundaries cannot authorize unseen tail edits in the same record"
+        );
+        assert!(!same_assistant_revision(
+            &rejected.revision,
+            &approved.revision
+        ));
+        let TranscriptTail::Available {
+            last_assistant_message: Some(preview),
+            ..
+        } = read_last_assistant_message_from_file(&path, TranscriptFormat::ClaudeCode)
+        else {
+            panic!("expected a display preview");
+        };
         assert!(preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8());
     }
 
@@ -236,15 +370,28 @@ mod tests {
     ///    `Unsupported`, and never resolves a path.
     #[test]
     fn cline_document_is_never_read_as_a_line_oriented_report() {
-        let path = crate::services::transcript_reader::test_support::fixture("cline", "cline_messages.json");
+        let path = crate::services::transcript_reader::test_support::fixture(
+            "cline",
+            "cline_messages.json",
+        );
         // The fixture is a genuinely valid Cline document (a single JSON
         // object), not a malformed stand-in.
         let document = fs::read_to_string(&path).expect("checked-in Cline fixture");
-        assert!(serde_json::from_str::<serde_json::Value>(&document).is_ok(),
-            "the fixture must be a valid Cline document for this test to mean anything");
-        assert!(parse_transcript(TranscriptFormat::Cline, document.split('\n').map(str::to_string), 4)
-            .turns.iter().any(|turn| turn.role == "assistant"),
-            "the digest reader must find real turns in it");
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&document).is_ok(),
+            "the fixture must be a valid Cline document for this test to mean anything"
+        );
+        assert!(
+            parse_transcript(
+                TranscriptFormat::Cline,
+                document.split('\n').map(str::to_string),
+                4
+            )
+            .turns
+            .iter()
+            .any(|turn| turn.role == "assistant"),
+            "the digest reader must find real turns in it"
+        );
 
         // (1) What the line-oriented reader would claim, and why each reason is
         // a lie for a complete Cline document. Both trailing-newline shapes
@@ -287,41 +434,131 @@ mod tests {
     fn cline_report_reason_stays_in_the_hook_native_admitted_set() {
         let reason = read(TranscriptFormat::Cline, "session_1790003303940_9ouga", ".").unwrap_err();
         assert_eq!(reason, ReportReadError::Unsupported);
-        assert!(matches!(
-            reason,
-            ReportReadError::Unsupported | ReportReadError::NoTranscript | ReportReadError::Unreadable
-        ), "reason {reason:?} must stay in the set that admits hook-native evidence");
+        assert!(
+            matches!(
+                reason,
+                ReportReadError::Unsupported
+                    | ReportReadError::NoTranscript
+                    | ReportReadError::Unreadable
+            ),
+            "reason {reason:?} must stay in the set that admits hook-native evidence"
+        );
         // The reasons the guard exists to avoid are all *outside* that set.
-        for outside in [ReportReadError::NoReport, ReportReadError::PartialPublication] {
-            assert!(!matches!(
-                outside,
-                ReportReadError::Unsupported | ReportReadError::NoTranscript | ReportReadError::Unreadable
-            ), "{outside:?} must not be the reason a Cline circuit sees");
+        for outside in [
+            ReportReadError::NoReport,
+            ReportReadError::PartialPublication,
+        ] {
+            assert!(
+                !matches!(
+                    outside,
+                    ReportReadError::Unsupported
+                        | ReportReadError::NoTranscript
+                        | ReportReadError::Unreadable
+                ),
+                "{outside:?} must not be the reason a Cline circuit sees"
+            );
         }
+    }
+
+    /// The review preset publishes before spawning its reviewer: deliver the
+    /// publish prompt and hand off the source's publication report.
+    fn publish_for_review(run: &mut RunView, source_event: &CircuitEvent) {
+        advance(
+            run,
+            &CircuitEvent::AgentReady {
+                node_id: "publish".into(),
+            },
+        );
+        let attempt = run.step("publish").unwrap().attempt;
+        advance(
+            run,
+            &CircuitEvent::PromptDelivered {
+                node_id: "publish".into(),
+                attempt,
+            },
+        );
+        let mut event = source_event.clone();
+        let CircuitEvent::TurnClassified {
+            node_id,
+            binding: Some(binding),
+            ..
+        } = &mut event
+        else {
+            panic!("classification fixture");
+        };
+        *node_id = "await_publish".into();
+        binding.owner.step_id = "await_publish".into();
+        advance(run, &event);
+        assert_eq!(
+            run.step("await_publish").unwrap().status,
+            StepStatus::Completed
+        );
     }
 
     fn classified_run(snapshot: ReportSnapshot) -> (RunView, CircuitEvent) {
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "900");
-        let run = RunView { run_id: 42, state: RunState::Running, context,
-            graph: CircuitGraph { version: 1, blueprint: None, edges: vec![CircuitEdge {
-                from: "await_source".into(), to: "done".into(), condition: Default::default(),
-            }], nodes: vec![CircuitNode {
-                id: "await_source".into(), kind: CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) },
-            }, CircuitNode { id: "done".into(), kind: CircuitNodeKind::Notify { message: "Finished".into() } }] },
-            steps: vec![StepView { node_id: "await_source".into(), status: StepStatus::Unverified, attempt: 1,
-                outcome: None, error: Some("Missing ownership adapter".into()), agent_node_id: None }],
+        let run = RunView {
+            run_id: 42,
+            state: RunState::Running,
+            context,
+            graph: CircuitGraph {
+                version: 1,
+                blueprint: None,
+                edges: vec![CircuitEdge {
+                    from: "await_source".into(),
+                    to: "done".into(),
+                    condition: Default::default(),
+                }],
+                nodes: vec![
+                    CircuitNode {
+                        id: "await_source".into(),
+                        kind: CircuitNodeKind::AwaitAgentTurn {
+                            target_node_id: Some("$source".into()),
+                        },
+                    },
+                    CircuitNode {
+                        id: "done".into(),
+                        kind: CircuitNodeKind::Notify {
+                            message: "Finished".into(),
+                        },
+                    },
+                ],
+            },
+            steps: vec![StepView {
+                node_id: "await_source".into(),
+                status: StepStatus::Unverified,
+                attempt: 1,
+                outcome: None,
+                error: Some("Missing ownership adapter".into()),
+                agent_node_id: None,
+            }],
         };
-        let event = CircuitEvent::TurnClassified { node_id: "await_source".into(),
-            classification: Some(crate::circuit::evaluator::Classification::Completed), output: Some(snapshot.text.clone()),
+        let event = CircuitEvent::TurnClassified {
+            node_id: "await_source".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Completed),
+            output: Some(snapshot.text.clone()),
             binding: Some(ClassificationBinding {
-                owner: ObservationIdentity { run_id: 42, step_id: "await_source".into(), attempt: 1, agent_node_id: 900,
-                    session_incarnation: Some("100".into()), session_id: Some("session".into()), turn_id: None,
-                    report_revision: Some(snapshot.revision.clone()) },
+                owner: ObservationIdentity {
+                    run_id: 42,
+                    step_id: "await_source".into(),
+                    attempt: 1,
+                    agent_node_id: 900,
+                    session_incarnation: Some("100".into()),
+                    session_id: Some("session".into()),
+                    turn_id: None,
+                    report_revision: Some(snapshot.revision.clone()),
+                },
                 report_revision: snapshot.revision.clone(),
-                input_guard: ObservationInputFence { transcript_guard: None, report_guard: Some(snapshot.clone()),
-                    agent_node_id: 900, input_stamp: "1:0".into(), observed_at_ms: snapshot.published_at_ms,
-                    session_id: "session".into(), session_incarnation: "100".into() },
+                input_guard: ObservationInputFence {
+                    transcript_guard: None,
+                    report_guard: Some(snapshot.clone()),
+                    agent_node_id: 900,
+                    input_stamp: "1:0".into(),
+                    observed_at_ms: snapshot.published_at_ms,
+                    session_id: "session".into(),
+                    session_incarnation: "100".into(),
+                },
             }),
         };
         (run, event)
@@ -329,35 +566,58 @@ mod tests {
 
     #[test]
     fn explicit_mcode_handoff_recovers_running_without_claiming_native_completion() {
-        use crate::services::circuit_worker::readiness;
-        use crate::models::{AgentNode, SessionStatus};
         use crate::agent::process::InputUnavailable;
         use crate::circuit::observation::CircuitObservationBlocker as B;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("messages.jsonl");
-        let lines = format!("{}\n{}\n", serde_json::json!({
-            "message_id":"final", "turn_id":"fixes", "message": {"role":"assistant",
-            "timestamp":1790718598978i64, "content":[{"type":"text",
-            "text":"Both blocking findings fixed; 3582 tests passed.\nBUILDMESH_HANDOFF_V1: READY"}]}
-        }), serde_json::json!({"message_id":"settlement", "turn_id":"fixes",
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "message_id":"final", "turn_id":"fixes", "message": {"role":"assistant",
+                "timestamp":1790718598978i64, "content":[{"type":"text",
+                "text":"Both blocking findings fixed; 3582 tests passed.\nBUILDMESH_HANDOFF_V1: READY"}]}
+            }),
+            serde_json::json!({"message_id":"settlement", "turn_id":"fixes",
             "message":{"role":"custom", "customType":"background_task_read_settlement",
-            "content":"", "timestamp":1790718611791i64}}));
+            "content":"", "timestamp":1790718611791i64}})
+        );
         fs::write(&path, &lines).unwrap();
         let snapshot = read_file(&path, TranscriptFormat::Mcode).unwrap();
         assert!(!snapshot.turn_finished);
         let (mut run, _) = classified_run(snapshot.clone());
         run.context.set("source.review_preset", "1");
-        let agent = AgentNode { id:900, provider:"mcode".into(), cli_session_id:Some("session".into()),
-            status:SessionStatus::Running, ..Default::default() };
+        let agent = AgentNode {
+            id: 900,
+            provider: "mcode".into(),
+            cli_session_id: Some("session".into()),
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
         for status in [StepStatus::Running, StepStatus::Unverified] {
             run.steps[0].status = status;
-            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
-                Ok("1:0".into()), Ok(snapshot.clone())).unwrap().expect("explicit handoff");
+            let candidate = readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone()),
+            )
+            .unwrap()
+            .expect("explicit handoff");
             assert_eq!(candidate.status, SessionStatus::Ready);
             let mut routed = run.clone();
-            let transition = advance(&mut routed, &CircuitEvent::TurnClassified {
-                node_id:"await_source".into(), classification:Some(crate::circuit::evaluator::Classification::Completed),
-                output:Some(candidate.output), binding:Some(candidate.binding) });
+            let transition = advance(
+                &mut routed,
+                &CircuitEvent::TurnClassified {
+                    node_id: "await_source".into(),
+                    classification: Some(crate::circuit::evaluator::Classification::Completed),
+                    output: Some(candidate.output),
+                    binding: Some(candidate.binding),
+                },
+            );
             assert_eq!(routed.state, RunState::Completed);
             assert!(!transition.classifications[0].lifecycle_verified);
             // Exercise the durable boundary too: a stale Running projection
@@ -370,40 +630,114 @@ mod tests {
                 INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
                 INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(42,1,1,'running');").unwrap();
             crate::db::circuit::evidence::commit_transition_locked(
-                &mut db, 42, Some("completed"), &routed.context.to_json().unwrap(), &[],
+                &mut db,
+                42,
+                Some("completed"),
+                &routed.context.to_json().unwrap(),
+                &[],
                 crate::db::circuit::evidence::EvidenceWrite {
                     input_guard: transition.input_guard.as_ref(),
                     classifications: &transition.classifications,
                     ..Default::default()
                 },
-            ).expect("the admitted report must commit despite a stale Running display");
+            )
+            .expect("the admitted report must commit despite a stale Running display");
         }
-        for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft),
-            (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {
-            assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
-                Err(input), Ok(snapshot.clone())).err(), Some(blocker));
+        for (input, blocker) in [
+            (InputUnavailable::Draft, B::InputDraft),
+            (InputUnavailable::UnknownInput, B::InputUncertain),
+            (InputUnavailable::Paste, B::InputPaste),
+        ] {
+            assert_eq!(
+                readiness::prepare(
+                    &run,
+                    "await_source",
+                    &agent,
+                    Some("100:projection"),
+                    Err(input),
+                    Ok(snapshot.clone())
+                )
+                .err(),
+                Some(blocker)
+            );
         }
         let mut waiting = run.clone();
         waiting.context.set("node.await_source.human_wait", "1");
-        assert_eq!(readiness::prepare(&waiting, "await_source", &agent, Some("100:projection"),
-            Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(B::HumanResponseRequired));
+        assert_eq!(
+            readiness::prepare(
+                &waiting,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone())
+            )
+            .err(),
+            Some(B::HumanResponseRequired)
+        );
         for (evidence, blocker) in [
-            (WorkEvidence { conflicted:true, ..Default::default() }, B::EvidenceConflict),
-            (WorkEvidence { children: [("child".into(), false)].into_iter().collect(), ..Default::default() }, B::KnownWorkOutstanding),
+            (
+                WorkEvidence {
+                    conflicted: true,
+                    ..Default::default()
+                },
+                B::EvidenceConflict,
+            ),
+            (
+                WorkEvidence {
+                    children: [("child".into(), false)].into_iter().collect(),
+                    ..Default::default()
+                },
+                B::KnownWorkOutstanding,
+            ),
         ] {
             let mut blocked = run.clone();
-            blocked.context.set("node.await_source.evidence.1", serde_json::to_string(&evidence).unwrap());
-            assert_eq!(readiness::prepare(&blocked, "await_source", &agent, Some("100:projection"),
-                Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(blocker));
+            blocked.context.set(
+                "node.await_source.evidence.1",
+                serde_json::to_string(&evidence).unwrap(),
+            );
+            assert_eq!(
+                readiness::prepare(
+                    &blocked,
+                    "await_source",
+                    &agent,
+                    Some("100:projection"),
+                    Ok("1:0".into()),
+                    Ok(snapshot.clone())
+                )
+                .err(),
+                Some(blocker)
+            );
         }
-        run.context.set("agent.900.previous_report_revision", &snapshot.revision);
-        assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
-            Ok("1:0".into()), Ok(snapshot.clone())).err(), Some(B::ReportSuperseded));
-        fs::write(&path, format!("{lines}{}\n", serde_json::json!({"message_id":"new-work", "turn_id":"next",
+        run.context
+            .set("agent.900.previous_report_revision", &snapshot.revision);
+        assert_eq!(
+            readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone())
+            )
+            .err(),
+            Some(B::ReportSuperseded)
+        );
+        fs::write(
+            &path,
+            format!(
+                "{lines}{}\n",
+                serde_json::json!({"message_id":"new-work", "turn_id":"next",
             "message":{"role":"assistant", "timestamp":1790718612000i64, "content":[
-                {"type":"toolCall", "id":"call", "name":"bash", "arguments":{}}]}}))).unwrap();
+                {"type":"toolCall", "id":"call", "name":"bash", "arguments":{}}]}})
+            ),
+        )
+        .unwrap();
         assert!(!snapshot.is_current());
-        assert_eq!(read_file(&path, TranscriptFormat::Mcode).unwrap_err(), ReportReadError::WorkInProgress);
+        assert_eq!(
+            read_file(&path, TranscriptFormat::Mcode).unwrap_err(),
+            ReportReadError::WorkInProgress
+        );
     }
 
     #[test]
@@ -416,12 +750,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let text = "Implementation and verification finished.\nBUILDMESH_HANDOFF_V1: READY";
-        let lines = format!("{}\n{}\n", serde_json::json!({
-            "message_id":"final", "turn_id":"implementation", "message":{"role":"assistant",
-            "timestamp":1790856000000i64, "content":[{"type":"text", "text":text}]}
-        }), serde_json::json!({"message_id":"settlement", "turn_id":"implementation",
+        let lines = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "message_id":"final", "turn_id":"implementation", "message":{"role":"assistant",
+                "timestamp":1790856000000i64, "content":[{"type":"text", "text":text}]}
+            }),
+            serde_json::json!({"message_id":"settlement", "turn_id":"implementation",
             "message":{"role":"custom", "customType":"background_task_read_settlement",
-            "content":"", "timestamp":1790856001000i64}}));
+            "content":"", "timestamp":1790856001000i64}})
+        );
         fs::write(&path, lines).unwrap();
         let snapshot = read_file(&path, TranscriptFormat::Mcode).unwrap();
         assert!(!snapshot.turn_finished);
@@ -429,45 +767,98 @@ mod tests {
         run.graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
         run.steps[0].node_id = "implementation_classifier".into();
         run.steps[0].status = StepStatus::Running;
-        run.steps.push(StepView { node_id:"implementer".into(), status:StepStatus::Completed,
-            agent_node_id:Some(900), attempt:1, outcome:Some(crate::circuit::model::StepOutcome::Completed), error:None });
-        let mut agent = AgentNode { id:900, cli_session_id:Some("session".into()),
-            status:SessionStatus::Running, ..Default::default() };
-        let prepare = |run: &RunView, agent: &AgentNode, stamp, input| readiness::prepare(
-            run, "implementation_classifier", agent, stamp, input, Ok(snapshot.clone()));
+        run.steps.push(StepView {
+            node_id: "implementer".into(),
+            status: StepStatus::Completed,
+            agent_node_id: Some(900),
+            attempt: 1,
+            outcome: Some(crate::circuit::model::StepOutcome::Completed),
+            error: None,
+        });
+        let mut agent = AgentNode {
+            id: 900,
+            cli_session_id: Some("session".into()),
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
+        let prepare = |run: &RunView, agent: &AgentNode, stamp, input| {
+            readiness::prepare(
+                run,
+                "implementation_classifier",
+                agent,
+                stamp,
+                input,
+                Ok(snapshot.clone()),
+            )
+        };
         let candidate = prepare(&run, &agent, Some("100:projection"), Ok("1:0".into()))
-            .unwrap().expect("explicit final phase report");
+            .unwrap()
+            .expect("explicit final phase report");
         assert_eq!(candidate.status, SessionStatus::Ready);
         assert_eq!(candidate.output, text);
         let mut routed = run.clone();
-        let transition = advance(&mut routed, &CircuitEvent::TurnClassified {
-            node_id:"implementation_classifier".into(), classification:Some(crate::circuit::evaluator::Classification::Completed),
-            output:Some(candidate.output), binding:Some(candidate.binding) });
-        assert_eq!(routed.step("implementation_classifier").unwrap().status, StepStatus::Completed);
+        let transition = advance(
+            &mut routed,
+            &CircuitEvent::TurnClassified {
+                node_id: "implementation_classifier".into(),
+                classification: Some(crate::circuit::evaluator::Classification::Completed),
+                output: Some(candidate.output),
+                binding: Some(candidate.binding),
+            },
+        );
+        assert_eq!(
+            routed.step("implementation_classifier").unwrap().status,
+            StepStatus::Completed
+        );
         assert_eq!(routed.step("finish").unwrap().status, StepStatus::Running);
         assert!(!transition.classifications[0].lifecycle_verified);
 
-        assert_eq!(prepare(&run, &agent, Some("100:projection"), Err(InputUnavailable::Draft)).err(), Some(B::InputDraft));
+        assert_eq!(
+            prepare(
+                &run,
+                &agent,
+                Some("100:projection"),
+                Err(InputUnavailable::Draft)
+            )
+            .err(),
+            Some(B::InputDraft)
+        );
         agent.cli_session_id = None;
-        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::SessionIdentityUnavailable));
+        assert_eq!(
+            prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(),
+            Some(B::SessionIdentityUnavailable)
+        );
         agent.cli_session_id = Some("session".into());
         let next_incarnation = format!("{}:projection", snapshot.published_at_ms + 1);
-        assert_eq!(prepare(&run, &agent, Some(&next_incarnation), Ok("1:0".into())).err(), Some(B::ReportSuperseded));
-        run.context.set("agent.900.previous_report_revision", &snapshot.revision);
-        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::ReportSuperseded));
+        assert_eq!(
+            prepare(&run, &agent, Some(&next_incarnation), Ok("1:0".into())).err(),
+            Some(B::ReportSuperseded)
+        );
+        run.context
+            .set("agent.900.previous_report_revision", &snapshot.revision);
+        assert_eq!(
+            prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(),
+            Some(B::ReportSuperseded)
+        );
         run.context.set("agent.900.previous_report_revision", "");
         let mut evidence = WorkEvidence::default();
         evidence.children.insert("background-task".into(), false);
-        run.context.set("node.implementation_classifier.evidence.1", serde_json::to_string(&evidence).unwrap());
-        assert_eq!(prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(), Some(B::KnownWorkOutstanding));
+        run.context.set(
+            "node.implementation_classifier.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        assert_eq!(
+            prepare(&run, &agent, Some("100:projection"), Ok("1:0".into())).err(),
+            Some(B::KnownWorkOutstanding)
+        );
     }
 
     #[test]
     fn native_report_preflight_recovers_running_projection_and_unverified_checkpoint() {
-        use crate::services::circuit_worker::readiness;
-        use crate::models::{AgentNode, SessionStatus};
         use crate::agent::process::InputUnavailable;
         use crate::circuit::observation::CircuitObservationBlocker as B;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("rollout.jsonl");
         // Minimal replay of run 239's native final-answer/task_complete pair.
@@ -479,51 +870,151 @@ mod tests {
         let report = read_file(&path, TranscriptFormat::Codex).unwrap();
         assert!(report.turn_finished);
         let (mut run, _) = classified_run(report.clone());
-        let agent = AgentNode { id: 900, provider: "codex".into(), cli_session_id: Some("session".into()),
-            status: SessionStatus::Running, ..Default::default() };
+        let agent = AgentNode {
+            id: 900,
+            provider: "codex".into(),
+            cli_session_id: Some("session".into()),
+            status: SessionStatus::Running,
+            ..Default::default()
+        };
         for status in [StepStatus::Running, StepStatus::Unverified] {
             run.step_mut("await_source").unwrap().status = status;
-            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(report.clone())).unwrap().unwrap();
+            let candidate = readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(report.clone()),
+            )
+            .unwrap()
+            .unwrap();
             assert_eq!(candidate.status, SessionStatus::Ready);
             let mut recovered = run.clone();
-            let transition = advance(&mut recovered, &CircuitEvent::TurnClassified {
-                node_id: "await_source".into(), classification: Some(crate::circuit::evaluator::Classification::Completed),
-                output: Some(candidate.output), binding: Some(candidate.binding),
-            });
+            let transition = advance(
+                &mut recovered,
+                &CircuitEvent::TurnClassified {
+                    node_id: "await_source".into(),
+                    classification: Some(crate::circuit::evaluator::Classification::Completed),
+                    output: Some(candidate.output),
+                    binding: Some(candidate.binding),
+                },
+            );
             assert_eq!(recovered.state, RunState::Completed);
-            assert!(!transition.classifications[0].lifecycle_verified, "report handoff must not fabricate owned-work proof");
+            assert!(
+                !transition.classifications[0].lifecycle_verified,
+                "report handoff must not fabricate owned-work proof"
+            );
         }
-        for (input, blocker) in [(InputUnavailable::Draft, B::InputDraft), (InputUnavailable::UnknownInput, B::InputUncertain), (InputUnavailable::Paste, B::InputPaste)] {
-            assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Err(input), Ok(report.clone())).err(), Some(blocker));
+        for (input, blocker) in [
+            (InputUnavailable::Draft, B::InputDraft),
+            (InputUnavailable::UnknownInput, B::InputUncertain),
+            (InputUnavailable::Paste, B::InputPaste),
+        ] {
+            assert_eq!(
+                readiness::prepare(
+                    &run,
+                    "await_source",
+                    &agent,
+                    Some("100:projection"),
+                    Err(input),
+                    Ok(report.clone())
+                )
+                .err(),
+                Some(blocker)
+            );
         }
-        let suspended = AgentNode { status: SessionStatus::Suspended, cli_session_id: None, ..agent.clone() };
-        assert_eq!(readiness::prepare(&run, "await_source", &suspended, Some("100:projection"),
-            Err(InputUnavailable::MissingProcess), Err(ReportReadError::NoTranscript)).err(), Some(B::ProcessUnavailable));
+        let suspended = AgentNode {
+            status: SessionStatus::Suspended,
+            cli_session_id: None,
+            ..agent.clone()
+        };
+        assert_eq!(
+            readiness::prepare(
+                &run,
+                "await_source",
+                &suspended,
+                Some("100:projection"),
+                Err(InputUnavailable::MissingProcess),
+                Err(ReportReadError::NoTranscript)
+            )
+            .err(),
+            Some(B::ProcessUnavailable)
+        );
 
         // A resumed process replaces a status-only identity without weakening
         // the report/session/input fences used by the production handoff.
         use crate::circuit::observation::{CircuitObservation, ObservedWorkFact};
-        let owner = ObservationIdentity { run_id: 42, step_id: "await_source".into(), attempt: 1,
-            agent_node_id: 900, session_incarnation: Some("50".into()), session_id: Some("session".into()),
-            turn_id: None, report_revision: None };
+        let owner = ObservationIdentity {
+            run_id: 42,
+            step_id: "await_source".into(),
+            attempt: 1,
+            agent_node_id: 900,
+            session_incarnation: Some("50".into()),
+            session_id: Some("session".into()),
+            turn_id: None,
+            report_revision: None,
+        };
         for incarnation in ["50", "100"] {
-            let expected = ObservationIdentity { session_incarnation: Some(incarnation.into()), ..owner.clone() };
-            advance(&mut run, &CircuitEvent::Observed { expected: expected.clone(), observation: Box::new(CircuitObservation {
-                identity: expected, source: "agent_status_projection".into(), source_id: Some(incarnation.into()),
-                observed_at_ms: incarnation.parse().unwrap(), authoritative: false, fact: ObservedWorkFact::Working,
-            }) });
+            let expected = ObservationIdentity {
+                session_incarnation: Some(incarnation.into()),
+                ..owner.clone()
+            };
+            advance(
+                &mut run,
+                &CircuitEvent::Observed {
+                    expected: expected.clone(),
+                    observation: Box::new(CircuitObservation {
+                        identity: expected,
+                        source: "agent_status_projection".into(),
+                        source_id: Some(incarnation.into()),
+                        observed_at_ms: incarnation.parse().unwrap(),
+                        authoritative: false,
+                        fact: ObservedWorkFact::Working,
+                    }),
+                },
+            );
         }
-        let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
-            Ok("1:0".into()), Ok(report.clone())).unwrap().unwrap();
+        let candidate = readiness::prepare(
+            &run,
+            "await_source",
+            &agent,
+            Some("100:projection"),
+            Ok("1:0".into()),
+            Ok(report.clone()),
+        )
+        .unwrap()
+        .unwrap();
         let mut resumed = run.clone();
-        advance(&mut resumed, &CircuitEvent::TurnClassified { node_id: "await_source".into(),
-            classification: Some(crate::circuit::evaluator::Classification::Completed),
-            output: Some(candidate.output), binding: Some(candidate.binding) });
+        advance(
+            &mut resumed,
+            &CircuitEvent::TurnClassified {
+                node_id: "await_source".into(),
+                classification: Some(crate::circuit::evaluator::Classification::Completed),
+                output: Some(candidate.output),
+                binding: Some(candidate.binding),
+            },
+        );
         assert_eq!(resumed.state, RunState::Completed);
-        run.context.set("agent.900.previous_report_revision", &report.revision);
-        assert_eq!(readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(report)).err(), Some(B::ReportSuperseded));
+        run.context
+            .set("agent.900.previous_report_revision", &report.revision);
+        assert_eq!(
+            readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(report)
+            )
+            .err(),
+            Some(B::ReportSuperseded)
+        );
         fs::write(&path, format!("{lines}{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"task_started\",\"turn_id\":\"next\"}}}}\n")).unwrap();
-        assert_eq!(read_file(&path, TranscriptFormat::Codex).unwrap_err(), ReportReadError::NoNativeCompletion);
+        assert_eq!(
+            read_file(&path, TranscriptFormat::Codex).unwrap_err(),
+            ReportReadError::NoNativeCompletion
+        );
     }
 
     #[test]
@@ -549,16 +1040,36 @@ mod tests {
         let snapshot = from_file(&path, TranscriptFormat::CommandCode).unwrap();
         let (mut run, event) = classified_run(snapshot);
         let transition = advance(&mut run, &event);
-        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Completed);
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Completed
+        );
         assert_eq!(run.state, RunState::Completed);
         assert!(!transition.classifications[0].lifecycle_verified);
-        assert!(transition.input_guard.as_ref().unwrap().report_guard.is_some());
+        assert!(transition
+            .input_guard
+            .as_ref()
+            .unwrap()
+            .report_guard
+            .is_some());
         assert!(run.context.get("node.await_source.evidence.1").is_none());
-        assert_eq!(run.context.get("source.output"), Some("Finished implementation and checks."));
+        assert_eq!(
+            run.context.get("source.output"),
+            Some("Finished implementation and checks.")
+        );
 
         fs::write(&path, "{\"type\":\"message\",\"timestamp\":\"2026-09-25T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"New task\"}}\n").unwrap();
-        let error = crate::db::circuit::evidence::commit_transition(42, Some("completed"), "{}", &[],
-            crate::db::circuit::evidence::EvidenceWrite { input_guard: transition.input_guard.as_ref(), ..Default::default() }).unwrap_err();
+        let error = crate::db::circuit::evidence::commit_transition(
+            42,
+            Some("completed"),
+            "{}",
+            &[],
+            crate::db::circuit::evidence::EvidenceWrite {
+                input_guard: transition.input_guard.as_ref(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
         assert!(crate::db::circuit::evidence::is_observation_freshness_rejection(&error));
     }
 
@@ -571,15 +1082,30 @@ mod tests {
         let (mut run, event) = classified_run(snapshot.clone());
         let mut evidence = WorkEvidence::default();
         evidence.children.insert("background-task".into(), false);
-        run.context.set("node.await_source.evidence.1", serde_json::to_string(&evidence).unwrap());
+        run.context.set(
+            "node.await_source.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
         let transition = advance(&mut run, &event);
-        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified);
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Unverified
+        );
         assert!(transition.effects.is_empty());
 
         let (mut run, mut event) = classified_run(snapshot);
-        if let CircuitEvent::TurnClassified { binding: Some(binding), .. } = &mut event { binding.owner.attempt = 2; }
+        if let CircuitEvent::TurnClassified {
+            binding: Some(binding),
+            ..
+        } = &mut event
+        {
+            binding.owner.attempt = 2;
+        }
         advance(&mut run, &event);
-        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified);
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Unverified
+        );
     }
 
     #[test]
@@ -624,33 +1150,79 @@ mod tests {
         assert_eq!(snapshot.text, "PR #327 is open against master.");
         assert_eq!(snapshot.published_at_ms, 1_790_932_115_632);
         assert!(snapshot.turn_finished);
-        let parsed = parse_transcript(TranscriptFormat::Codex, report.lines().map(str::to_owned), 10);
+        let parsed = parse_transcript(
+            TranscriptFormat::Codex,
+            report.lines().map(str::to_owned),
+            10,
+        );
         assert!(!parsed.saw_malformed);
-        assert_eq!(parsed.turns.len(), 2, "context instructions are not dialogue turns");
+        assert_eq!(
+            parsed.turns.len(),
+            2,
+            "context instructions are not dialogue turns"
+        );
 
         let (mut run, _) = classified_run(snapshot.clone());
         run.graph = CircuitGraph::agent_review(None, None, 3);
         run.steps.clear();
         run.state = RunState::Pending;
         advance(&mut run, &CircuitEvent::Triggered);
-        let tick = CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 1 });
-        advance(&mut run, &tick);
-        advance(&mut run, &CircuitEvent::ObservationDeferred { node_id: "await_source".into(), attempt: 1, agent_node_id: 900,
-            blocker: crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
-                reason: ReportReadError::MalformedRecord.reason().into(),
-            } });
-        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified);
-        let agent = AgentNode { id: 900, provider: "codex".into(), cli_session_id: Some("session".into()),
-            status: SessionStatus::Ready, ..Default::default() };
-        let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"),
-            Ok("1:0".into()), Ok(snapshot.clone())).unwrap().expect("completed source report");
-        let transition = advance(&mut run, &CircuitEvent::TurnClassified {
-            node_id: "await_source".into(), classification: Some(crate::circuit::evaluator::Classification::Completed),
-            output: Some(candidate.output), binding: Some(candidate.binding),
+        let tick = CircuitEvent::Tick(Capacity {
+            circuit_free_slots: 2,
+            agent_free_slots: 1,
         });
-        assert_eq!(run.step("await_source").unwrap().status, StepStatus::Completed);
-        assert_eq!(run.context.get("node.await_source.observation_blocker"), Some(""));
+        advance(&mut run, &tick);
+        advance(
+            &mut run,
+            &CircuitEvent::ObservationDeferred {
+                node_id: "await_source".into(),
+                attempt: 1,
+                agent_node_id: 900,
+                blocker:
+                    crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
+                        reason: ReportReadError::MalformedRecord.reason().into(),
+                    },
+            },
+        );
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Unverified
+        );
+        let agent = AgentNode {
+            id: 900,
+            provider: "codex".into(),
+            cli_session_id: Some("session".into()),
+            status: SessionStatus::Ready,
+            ..Default::default()
+        };
+        let candidate = readiness::prepare(
+            &run,
+            "await_source",
+            &agent,
+            Some("100:projection"),
+            Ok("1:0".into()),
+            Ok(snapshot.clone()),
+        )
+        .unwrap()
+        .expect("completed source report");
+        let source_event = CircuitEvent::TurnClassified {
+            node_id: "await_source".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Completed),
+            output: Some(candidate.output),
+            binding: Some(candidate.binding),
+        };
+        let transition = advance(&mut run, &source_event);
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(
+            run.context.get("node.await_source.observation_blocker"),
+            Some("")
+        );
         assert!(!transition.classifications[0].lifecycle_verified);
+        advance(&mut run, &tick);
+        publish_for_review(&mut run, &source_event);
         advance(&mut run, &tick);
         assert_eq!(run.step("reviewer").unwrap().status, StepStatus::Running);
 
@@ -660,7 +1232,10 @@ mod tests {
                 "payload":{"type":"message", "role":role, "content":[{"type":"input_text", "text":"New instructions."}]}});
             fs::write(&path, format!("{report}{context}\n")).unwrap();
             assert!(!snapshot.is_current());
-            assert!(read_file(&path, TranscriptFormat::Codex).is_err(), "post-completion {role} cannot reuse the report");
+            assert!(
+                read_file(&path, TranscriptFormat::Codex).is_err(),
+                "post-completion {role} cannot reuse the report"
+            );
         }
     }
 
@@ -676,7 +1251,10 @@ mod tests {
             let complete = serde_json::json!({"type":"event_msg", "timestamp":"2026-10-02T09:08:35.632Z",
                 "payload":{"type":"task_complete", "turn_id":"turn", "last_agent_message":"Done."}});
             fs::write(&path, format!("{malformed}\n{report}\n{complete}\n")).unwrap();
-            assert_eq!(read_file(&path, TranscriptFormat::Codex).unwrap_err(), ReportReadError::MalformedRecord);
+            assert_eq!(
+                read_file(&path, TranscriptFormat::Codex).unwrap_err(),
+                ReportReadError::MalformedRecord
+            );
         }
     }
 
@@ -687,9 +1265,16 @@ mod tests {
         let report = serde_json::json!({"type":"response_item","timestamp":"2026-09-25T12:00:00Z",
             "payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done."}]}}).to_string() + "\n";
         let complete = serde_json::json!({"type":"event_msg","timestamp":"2026-09-25T12:00:01Z",
-            "payload":{"type":"task_complete","turn_id":"turn","last_agent_message":"Done."}}).to_string() + "\n";
+            "payload":{"type":"task_complete","turn_id":"turn","last_agent_message":"Done."}})
+        .to_string()
+            + "\n";
         fs::write(&path, format!("{report}{complete}")).unwrap();
-        assert_eq!(from_file(&path, TranscriptFormat::Codex).unwrap().published_at_ms, 1790337601000);
+        assert_eq!(
+            from_file(&path, TranscriptFormat::Codex)
+                .unwrap()
+                .published_at_ms,
+            1790337601000
+        );
         for suffix in [
             serde_json::json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"next"}}),
             serde_json::json!({"type":"response_item","payload":{"type":"reasoning","summary":[]}}),
@@ -708,23 +1293,65 @@ mod tests {
         let muse_terminal = serde_json::json!({"payload_type":"runtime.session","recorded_at":1790337601000000_i64,
             "payload":{"kind":"run","run_id":"run","event":{"kind":"terminal","terminal":"completed"}}});
         for (format, lines) in [
-            (TranscriptFormat::CommandCode, vec![serde_json::json!({"type":"message","timestamp":"2026-09-25T12:00:00Z","message":{"role":"assistant","content":"Done."}})]),
-            (TranscriptFormat::CommandCode, vec![serde_json::json!({"type":"message","id":"final","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"meta":{"source":"model","createdAt":1790337600000_i64,"messageId":"model-final"}}})]),
-            (TranscriptFormat::Muse, vec![muse_report.clone(), muse_terminal.clone()]),
-            (TranscriptFormat::Mcode, vec![serde_json::json!({"message_id":"message","turn_id":"turn","message":{"role":"assistant","timestamp":1790337600000_i64,"content":[{"type":"text","text":"Done."}]}})]),
-            (TranscriptFormat::Agy, vec![serde_json::json!({"source":"MODEL","created_at":"2026-09-25T12:00:00Z","content":"Done.","status":"DONE"})]),
+            (
+                TranscriptFormat::CommandCode,
+                vec![
+                    serde_json::json!({"type":"message","timestamp":"2026-09-25T12:00:00Z","message":{"role":"assistant","content":"Done."}}),
+                ],
+            ),
+            (
+                TranscriptFormat::CommandCode,
+                vec![
+                    serde_json::json!({"type":"message","id":"final","message":{"role":"assistant","content":[{"type":"text","text":"Done."}],"meta":{"source":"model","createdAt":1790337600000_i64,"messageId":"model-final"}}}),
+                ],
+            ),
+            (
+                TranscriptFormat::Muse,
+                vec![muse_report.clone(), muse_terminal.clone()],
+            ),
+            (
+                TranscriptFormat::Mcode,
+                vec![
+                    serde_json::json!({"message_id":"message","turn_id":"turn","message":{"role":"assistant","timestamp":1790337600000_i64,"content":[{"type":"text","text":"Done."}]}}),
+                ],
+            ),
+            (
+                TranscriptFormat::Agy,
+                vec![
+                    serde_json::json!({"source":"MODEL","created_at":"2026-09-25T12:00:00Z","content":"Done.","status":"DONE"}),
+                ],
+            ),
         ] {
-            fs::write(&path, lines.iter().map(|line| format!("{line}\n")).collect::<String>()).unwrap();
-            let snapshot = from_file(&path, format).unwrap_or_else(|| panic!("missing report for {format:?}"));
+            fs::write(
+                &path,
+                lines
+                    .iter()
+                    .map(|line| format!("{line}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let snapshot =
+                from_file(&path, format).unwrap_or_else(|| panic!("missing report for {format:?}"));
             assert_eq!(snapshot.text, "Done.");
             assert_eq!(snapshot.published_at_ms, 1790337600000);
         }
         let started = serde_json::json!({"payload_type":"runtime.session","recorded_at":1790337602000000_i64,
             "payload":{"kind":"run","run_id":"next","event":{"kind":"started"}}});
-        fs::write(&path, format!("{muse_report}\n{muse_terminal}\n{started}\n")).unwrap();
+        fs::write(
+            &path,
+            format!("{muse_report}\n{muse_terminal}\n{started}\n"),
+        )
+        .unwrap();
         assert!(from_file(&path, TranscriptFormat::Muse).is_none());
-        fs::write(&path, format!("{muse_report}\n{muse_terminal}\n{started}\n{muse_terminal}\n")).unwrap();
-        assert!(from_file(&path, TranscriptFormat::Muse).is_none(), "a duplicate old terminal cannot finish the newer run");
+        fs::write(
+            &path,
+            format!("{muse_report}\n{muse_terminal}\n{started}\n{muse_terminal}\n"),
+        )
+        .unwrap();
+        assert!(
+            from_file(&path, TranscriptFormat::Muse).is_none(),
+            "a duplicate old terminal cannot finish the newer run"
+        );
     }
 
     #[test]
@@ -738,15 +1365,27 @@ mod tests {
         run.steps.clear();
         run.state = RunState::Pending;
         advance(&mut run, &CircuitEvent::Triggered);
-        let tick = CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 1 });
+        let tick = CircuitEvent::Tick(Capacity {
+            circuit_free_slots: 2,
+            agent_free_slots: 1,
+        });
         advance(&mut run, &tick);
         advance(&mut run, &source_event);
+        advance(&mut run, &tick);
+        publish_for_review(&mut run, &source_event);
         advance(&mut run, &tick);
         assert_eq!(run.step("reviewer").unwrap().status, StepStatus::Running);
         run.attach_agent_node("reviewer", 901);
         for step_id in ["reviewer", "verdict"] {
             let mut event = source_event.clone();
-            let CircuitEvent::TurnClassified { node_id, binding: Some(binding), .. } = &mut event else { panic!("classification fixture"); };
+            let CircuitEvent::TurnClassified {
+                node_id,
+                binding: Some(binding),
+                ..
+            } = &mut event
+            else {
+                panic!("classification fixture");
+            };
             *node_id = step_id.into();
             binding.owner.step_id = step_id.into();
             binding.owner.agent_node_id = 901;
@@ -756,7 +1395,24 @@ mod tests {
             assert!(!transition.classifications[0].lifecycle_verified);
             advance(&mut run, &tick);
         }
-        assert_eq!(run.context.get("node.verdict.review_verdict"), Some("approved"));
+        assert_eq!(
+            run.context.get("node.verdict.review_verdict"),
+            Some("approved")
+        );
+        advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "merge".into(),
+            },
+        );
+        let attempt = run.step("merge").unwrap().attempt;
+        advance(
+            &mut run,
+            &CircuitEvent::PromptDelivered {
+                node_id: "merge".into(),
+                attempt,
+            },
+        );
         assert_eq!(run.step("approved").unwrap().status, StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
     }
@@ -865,13 +1521,23 @@ mod tests {
         lines.iter().map(|line| format!("{line}\n")).collect()
     }
 
-    fn opencode_db(dir: &std::path::Path, session_id: &str, rows: &[(&str, i64, serde_json::Value)]) -> std::path::PathBuf {
+    fn opencode_db(
+        dir: &std::path::Path,
+        session_id: &str,
+        rows: &[(&str, i64, serde_json::Value)],
+    ) -> std::path::PathBuf {
         let db_path = dir.join("opencode.db");
         let _ = std::fs::remove_file(&db_path);
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         adapters::opencode::test_support::create_store(&conn);
         for (id, created, data) in rows {
-            adapters::opencode::test_support::insert_message(&conn, id, session_id, *created, &data.to_string());
+            adapters::opencode::test_support::insert_message(
+                &conn,
+                id,
+                session_id,
+                *created,
+                &data.to_string(),
+            );
         }
         db_path
     }
@@ -890,29 +1556,65 @@ mod tests {
         let session = "ses_run284";
         // OpenCode 1.18.3 persists MessageV2.Info directly; export envelopes
         // are assembled from the separate part table, never stored in data.
-        conn.execute("INSERT INTO message VALUES ('msg-final', ?1, 1790888777798, ?2)",
-            rusqlite::params![session, serde_json::json!({"role":"assistant", "parentID":"msg-user",
-                "time":{"created":1790888777798_i64,"completed":1790888790838_i64},"finish":"stop"}).to_string()]).unwrap();
-        conn.execute("INSERT INTO part VALUES ('prt-final', 'msg-final', ?1, 1790888786696, ?2)",
-            rusqlite::params![session, serde_json::json!({"type":"text","text":"Implementation complete; PR raised."}).to_string()]).unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('msg-final', ?1, 1790888777798, ?2)",
+            rusqlite::params![
+                session,
+                serde_json::json!({"role":"assistant", "parentID":"msg-user",
+                "time":{"created":1790888777798_i64,"completed":1790888790838_i64},"finish":"stop"})
+                .to_string()
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('prt-final', 'msg-final', ?1, 1790888786696, ?2)",
+            rusqlite::params![
+                session,
+                serde_json::json!({"type":"text","text":"Implementation complete; PR raised."})
+                    .to_string()
+            ],
+        )
+        .unwrap();
         drop(conn);
 
         let snapshot = read_opencode_file(&path, session).unwrap();
         assert_eq!(snapshot.text, "Implementation complete; PR raised.");
         assert_eq!(snapshot.published_at_ms, 1790888790838);
-        assert!(!snapshot.turn_finished, "message completion is not a native session-idle receipt");
+        assert!(
+            !snapshot.turn_finished,
+            "message completion is not a native session-idle receipt"
+        );
         assert!(snapshot.is_current());
         let (run, _) = classified_run(snapshot.clone());
-        let agent = crate::models::AgentNode { id: 900, provider: "opencode".into(),
-            cli_session_id: Some("session".into()), status: crate::models::SessionStatus::Ready, ..Default::default() };
-        assert!(crate::services::circuit_worker::readiness::prepare(&run, "await_source", &agent,
-            Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone())).unwrap().is_some());
+        let agent = crate::models::AgentNode {
+            id: 900,
+            provider: "opencode".into(),
+            cli_session_id: Some("session".into()),
+            status: crate::models::SessionStatus::Ready,
+            ..Default::default()
+        };
+        assert!(crate::services::circuit_worker::readiness::prepare(
+            &run,
+            "await_source",
+            &agent,
+            Some("100:projection"),
+            Ok("1:0".into()),
+            Ok(snapshot.clone())
+        )
+        .unwrap()
+        .is_some());
 
         // A part edit must invalidate the immutable report even without a
         // message-row update; the next read must bind the revised text.
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute("UPDATE part SET data=?1 WHERE id='prt-final'",
-            [serde_json::json!({"type":"text","text":"Implementation still needs work."}).to_string()]).unwrap();
+        conn.execute(
+            "UPDATE part SET data=?1 WHERE id='prt-final'",
+            [
+                serde_json::json!({"type":"text","text":"Implementation still needs work."})
+                    .to_string(),
+            ],
+        )
+        .unwrap();
         assert!(!snapshot.is_current());
         let updated = read_opencode_file(&path, session).unwrap();
         assert_eq!(updated.text, "Implementation still needs work.");
@@ -930,11 +1632,23 @@ mod tests {
             serde_json::json!({"info":{"role":"assistant","time":{"completed":300}}, "parts":[{"type":"reasoning","text":"Thinking"}]}),
             serde_json::json!({"info":{"role":"assistant","time":{"completed":300}}, "parts":[{"type":"tool","tool":"bash","state":{"status":"running","input":{}}}]}),
         ] {
-            let path = opencode_db(dir.path(), session, &[
-                ("msg-old", 100, opencode_assistant_value("Old final answer", 150)),
-                ("msg-new", 200, latest.clone()),
-            ]);
-            assert_eq!(read_opencode_file(&path, session).unwrap_err(), ReportReadError::WorkInProgress, "{latest}");
+            let path = opencode_db(
+                dir.path(),
+                session,
+                &[
+                    (
+                        "msg-old",
+                        100,
+                        opencode_assistant_value("Old final answer", 150),
+                    ),
+                    ("msg-new", 200, latest.clone()),
+                ],
+            );
+            assert_eq!(
+                read_opencode_file(&path, session).unwrap_err(),
+                ReportReadError::WorkInProgress,
+                "{latest}"
+            );
         }
     }
 
@@ -943,14 +1657,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = "ses_corrupt";
         for table in ["message", "part"] {
-            let path = opencode_db(dir.path(), session, &[("msg-final", 100, opencode_assistant_value("Done", 150))]);
+            let path = opencode_db(
+                dir.path(),
+                session,
+                &[("msg-final", 100, opencode_assistant_value("Done", 150))],
+            );
             let conn = rusqlite::Connection::open(&path).unwrap();
             if table == "message" {
-                conn.execute("INSERT INTO message VALUES ('msg-new', ?1, 200, 'not JSON')", [session]).unwrap();
+                conn.execute(
+                    "INSERT INTO message VALUES ('msg-new', ?1, 200, 'not JSON')",
+                    [session],
+                )
+                .unwrap();
             } else {
-                conn.execute("INSERT INTO part VALUES ('prt-new', 'msg-final', ?1, 200, 'not JSON')", [session]).unwrap();
+                conn.execute(
+                    "INSERT INTO part VALUES ('prt-new', 'msg-final', ?1, 200, 'not JSON')",
+                    [session],
+                )
+                .unwrap();
             }
-            assert_eq!(read_opencode_file(&path, session).unwrap_err(), ReportReadError::MalformedRecord, "{table}");
+            assert_eq!(
+                read_opencode_file(&path, session).unwrap_err(),
+                ReportReadError::MalformedRecord,
+                "{table}"
+            );
         }
     }
 
@@ -958,26 +1688,52 @@ mod tests {
     fn opencode_native_join_limits_messages_and_orders_parts_and_timestamp_ties() {
         let dir = tempfile::tempdir().unwrap();
         let session = "ses_order";
-        let path = opencode_db(dir.path(), session, &[
-            ("msg-c", 100, opencode_assistant_value("Newest", 150)),
-            ("msg-b", 100, opencode_assistant_value("Middle", 150)),
-            ("msg-a", 100, opencode_assistant_value("Oldest", 150)),
-        ]);
+        let path = opencode_db(
+            dir.path(),
+            session,
+            &[
+                ("msg-c", 100, opencode_assistant_value("Newest", 150)),
+                ("msg-b", 100, opencode_assistant_value("Middle", 150)),
+                ("msg-a", 100, opencode_assistant_value("Oldest", 150)),
+            ],
+        );
         let conn = rusqlite::Connection::open(&path).unwrap();
         for (id, text) in [("prt-z", "Last part"), ("prt-a", "Second part")] {
-            conn.execute("INSERT INTO part VALUES (?1, 'msg-c', ?2, 100, ?3)",
-                rusqlite::params![id, session, serde_json::json!({"type":"text","text":text}).to_string()]).unwrap();
+            conn.execute(
+                "INSERT INTO part VALUES (?1, 'msg-c', ?2, 100, ?3)",
+                rusqlite::params![
+                    id,
+                    session,
+                    serde_json::json!({"type":"text","text":text}).to_string()
+                ],
+            )
+            .unwrap();
         }
         // A foreign-session part with the same message id must not leak.
-        conn.execute("INSERT INTO part VALUES ('prt-foreign', 'msg-c', 'ses-other', 100, ?1)",
-            [serde_json::json!({"type":"text","text":"Foreign"}).to_string()]).unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('prt-foreign', 'msg-c', 'ses-other', 100, ?1)",
+            [serde_json::json!({"type":"text","text":"Foreign"}).to_string()],
+        )
+        .unwrap();
         let rows = read_opencode_message_rows(&path, session, 2).unwrap();
-        assert_eq!(rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["msg-b", "msg-c"]);
+        assert_eq!(
+            rows.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["msg-b", "msg-c"]
+        );
         let snapshot = read_opencode_file(&path, session).unwrap();
         assert_eq!(snapshot.text, "Newest\nSecond part\nLast part");
-        conn.execute("INSERT INTO part VALUES ('prt-new', 'msg-c', ?1, 200, ?2)",
-            rusqlite::params![session, serde_json::json!({"type":"text","text":"Added"}).to_string()]).unwrap();
-        assert!(!snapshot.is_current(), "part insertion must invalidate a report");
+        conn.execute(
+            "INSERT INTO part VALUES ('prt-new', 'msg-c', ?1, 200, ?2)",
+            rusqlite::params![
+                session,
+                serde_json::json!({"type":"text","text":"Added"}).to_string()
+            ],
+        )
+        .unwrap();
+        assert!(
+            !snapshot.is_current(),
+            "part insertion must invalidate a report"
+        );
     }
 
     /// Every wired report adapter's valid fixture, read through the real
@@ -988,13 +1744,24 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("session.jsonl");
             fs::write(&path, valid_lines(&case.valid)).unwrap();
-            let snapshot = read_file(&path, case.format)
-                .unwrap_or_else(|error| panic!("{} ({}) valid report failed: {error:?}", case.harness, case.shape));
+            let snapshot = read_file(&path, case.format).unwrap_or_else(|error| {
+                panic!(
+                    "{} ({}) valid report failed: {error:?}",
+                    case.harness, case.shape
+                )
+            });
             snapshots.push((case.harness, dir, snapshot));
         }
         let dir = tempfile::tempdir().unwrap();
-        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
-            &[("msg-1", 1, opencode_assistant_value("Done.", 1_790_337_600_000))]);
+        let db_path = opencode_db(
+            dir.path(),
+            "ses_000000000000000000000000",
+            &[(
+                "msg-1",
+                1,
+                opencode_assistant_value("Done.", 1_790_337_600_000),
+            )],
+        );
         let snapshot = read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap();
         snapshots.push(("opencode", dir, snapshot));
         snapshots
@@ -1006,46 +1773,99 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("session.jsonl");
             fs::write(&path, valid_lines(&case.valid)).unwrap();
-            let report = read_file(&path, case.format)
-                .unwrap_or_else(|error| panic!("{} ({}) valid report failed: {error:?}", case.harness, case.shape));
+            let report = read_file(&path, case.format).unwrap_or_else(|error| {
+                panic!(
+                    "{} ({}) valid report failed: {error:?}",
+                    case.harness, case.shape
+                )
+            });
             assert_eq!(report.text, case.text, "{} text", case.harness);
-            assert!(!report.revision.is_empty(), "{} must carry a report revision", case.harness);
-            assert_eq!(report.published_at_ms, case.published_at_ms, "{} publication time", case.harness);
-            assert_eq!(report.turn_finished, case.turn_finished, "{} native turn boundary", case.harness);
+            assert!(
+                !report.revision.is_empty(),
+                "{} must carry a report revision",
+                case.harness
+            );
+            assert_eq!(
+                report.published_at_ms, case.published_at_ms,
+                "{} publication time",
+                case.harness
+            );
+            assert_eq!(
+                report.turn_finished, case.turn_finished,
+                "{} native turn boundary",
+                case.harness
+            );
         }
         // OpenCode is SQLite-backed: its report read is the store seam.
         let dir = tempfile::tempdir().unwrap();
-        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
-            &[("msg-1", 1, opencode_assistant_value("Done.", 1_790_337_600_000))]);
+        let db_path = opencode_db(
+            dir.path(),
+            "ses_000000000000000000000000",
+            &[(
+                "msg-1",
+                1,
+                opencode_assistant_value("Done.", 1_790_337_600_000),
+            )],
+        );
         let snapshot = read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap();
         assert_eq!(snapshot.text, "Done.");
-        assert!(snapshot.revision.starts_with("msg-1:"), "opencode revision is message-id + content hash");
+        assert!(
+            snapshot.revision.starts_with("msg-1:"),
+            "opencode revision is message-id + content hash"
+        );
         assert_eq!(snapshot.published_at_ms, 1_790_337_600_000);
-        assert!(!snapshot.turn_finished, "message completion is not a native session-idle boundary");
+        assert!(
+            !snapshot.turn_finished,
+            "message completion is not a native session-idle boundary"
+        );
     }
 
     #[test]
     fn every_wired_report_adapter_preserves_long_reports_but_bounds_previews() {
-        let text = format!("{}\nVerdict: Request changes", "Reviewed requirement and test. ".repeat(220));
+        let text = format!(
+            "{}\nVerdict: Request changes",
+            "Reviewed requirement and test. ".repeat(220)
+        );
         for case in file_report_cases() {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("session.jsonl");
             let lines = valid_lines(&case.valid).replace(
-                &serde_json::to_string(case.text).unwrap(), &serde_json::to_string(&text).unwrap(),
+                &serde_json::to_string(case.text).unwrap(),
+                &serde_json::to_string(&text).unwrap(),
             );
             fs::write(&path, lines).unwrap();
             let report = read_file(&path, case.format)
                 .unwrap_or_else(|error| panic!("{}: {error:?}", case.harness));
             assert_eq!(report.text, text, "{} complete report", case.harness);
-            let TranscriptTail::Available { last_assistant_message: Some(preview), .. } =
-                read_last_assistant_message_from_file(&path, case.format)
-            else { panic!("{} missing preview", case.harness); };
-            assert!(preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8(), "{} preview", case.harness);
+            let TranscriptTail::Available {
+                last_assistant_message: Some(preview),
+                ..
+            } = read_last_assistant_message_from_file(&path, case.format)
+            else {
+                panic!("{} missing preview", case.harness);
+            };
+            assert!(
+                preview.len() <= types::MAX_TURN_TEXT + '…'.len_utf8(),
+                "{} preview",
+                case.harness
+            );
         }
         let dir = tempfile::tempdir().unwrap();
-        let db_path = opencode_db(dir.path(), "ses_000000000000000000000000",
-            &[("msg-1", 1, opencode_assistant_value(&text, 1_790_337_600_000))]);
-        assert_eq!(read_opencode_file(&db_path, "ses_000000000000000000000000").unwrap().text, text);
+        let db_path = opencode_db(
+            dir.path(),
+            "ses_000000000000000000000000",
+            &[(
+                "msg-1",
+                1,
+                opencode_assistant_value(&text, 1_790_337_600_000),
+            )],
+        );
+        assert_eq!(
+            read_opencode_file(&db_path, "ses_000000000000000000000000")
+                .unwrap()
+                .text,
+            text
+        );
     }
 
     #[test]
@@ -1055,16 +1875,46 @@ mod tests {
             let path = dir.path().join("session.jsonl");
             let valid = valid_lines(&case.valid);
             fs::write(&path, format!("{valid}not json\n")).unwrap();
-            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::MalformedRecord, "{} malformed json", case.harness);
+            assert_eq!(
+                read_file(&path, case.format).unwrap_err(),
+                ReportReadError::MalformedRecord,
+                "{} malformed json",
+                case.harness
+            );
             fs::write(&path, format!("{valid}{}\n", case.shape_changed)).unwrap();
-            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::MalformedRecord, "{} shape change", case.harness);
+            assert_eq!(
+                read_file(&path, case.format).unwrap_err(),
+                ReportReadError::MalformedRecord,
+                "{} shape change",
+                case.harness
+            );
             fs::write(&path, format!("{valid}{{\"type\":\"message\"")).unwrap();
-            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::PartialPublication, "{} partial publication", case.harness);
+            assert_eq!(
+                read_file(&path, case.format).unwrap_err(),
+                ReportReadError::PartialPublication,
+                "{} partial publication",
+                case.harness
+            );
             fs::write(&path, format!("{valid}{}\n", case.unfinished)).unwrap();
-            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::WorkInProgress, "{} unfinished turn", case.harness);
+            assert_eq!(
+                read_file(&path, case.format).unwrap_err(),
+                ReportReadError::WorkInProgress,
+                "{} unfinished turn",
+                case.harness
+            );
             fs::write(&path, String::new()).unwrap();
-            assert_eq!(read_file(&path, case.format).unwrap_err(), ReportReadError::NoReport, "{} quiet transcript", case.harness);
-            assert_eq!(read_file(&dir.path().join("missing.jsonl"), case.format).unwrap_err(), ReportReadError::Unreadable, "{} missing transcript", case.harness);
+            assert_eq!(
+                read_file(&path, case.format).unwrap_err(),
+                ReportReadError::NoReport,
+                "{} quiet transcript",
+                case.harness
+            );
+            assert_eq!(
+                read_file(&dir.path().join("missing.jsonl"), case.format).unwrap_err(),
+                ReportReadError::Unreadable,
+                "{} missing transcript",
+                case.harness
+            );
         }
     }
 
@@ -1073,41 +1923,108 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = "ses_000000000000000000000000";
         // Malformed: a recognised message envelope with no role.
-        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"author":"assistant"},"parts":[]}))]);
-        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::MalformedRecord);
+        let db_path = opencode_db(
+            dir.path(),
+            session,
+            &[(
+                "msg-1",
+                1,
+                serde_json::json!({"info":{"author":"assistant"},"parts":[]}),
+            )],
+        );
+        assert_eq!(
+            read_opencode_file(&db_path, session).unwrap_err(),
+            ReportReadError::MalformedRecord
+        );
         // Unfinished: the newest turn is a user prompt, then an in-flight tool call.
-        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"role":"user"},"parts":[{"type":"text","text":"keep going"}]}))]);
-        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::WorkInProgress);
-        let db_path = opencode_db(dir.path(), session, &[("msg-1", 1, serde_json::json!({"info":{"role":"assistant"},"parts":[{"type":"tool","state":{"title":"read","input":{}}}]}))]);
-        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::WorkInProgress);
+        let db_path = opencode_db(
+            dir.path(),
+            session,
+            &[(
+                "msg-1",
+                1,
+                serde_json::json!({"info":{"role":"user"},"parts":[{"type":"text","text":"keep going"}]}),
+            )],
+        );
+        assert_eq!(
+            read_opencode_file(&db_path, session).unwrap_err(),
+            ReportReadError::WorkInProgress
+        );
+        let db_path = opencode_db(
+            dir.path(),
+            session,
+            &[(
+                "msg-1",
+                1,
+                serde_json::json!({"info":{"role":"assistant"},"parts":[{"type":"tool","state":{"title":"read","input":{}}}]}),
+            )],
+        );
+        assert_eq!(
+            read_opencode_file(&db_path, session).unwrap_err(),
+            ReportReadError::WorkInProgress
+        );
         // Unavailable: no messages at all, then no store on disk.
         let db_path = opencode_db(dir.path(), session, &[]);
-        assert_eq!(read_opencode_file(&db_path, session).unwrap_err(), ReportReadError::NoReport);
-        assert_eq!(read_opencode_file(&dir.path().join("missing.db"), session).unwrap_err(), ReportReadError::Unreadable);
+        assert_eq!(
+            read_opencode_file(&db_path, session).unwrap_err(),
+            ReportReadError::NoReport
+        );
+        assert_eq!(
+            read_opencode_file(&dir.path().join("missing.db"), session).unwrap_err(),
+            ReportReadError::Unreadable
+        );
     }
 
     #[test]
     fn every_wired_report_adapter_binds_exact_identity_into_the_classification_envelope() {
-        use crate::services::circuit_worker::readiness;
         use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
         for (harness, _dir, snapshot) in wired_report_snapshots() {
             let (run, _) = classified_run(snapshot.clone());
-            let agent = AgentNode { id: 900, provider: harness.into(), cli_session_id: Some("session".into()),
-                status: SessionStatus::Ready, ..Default::default() };
-            let candidate = readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone()))
-                .unwrap_or_else(|blocker| panic!("{harness} report blocked: {blocker:?}"))
-                .unwrap_or_else(|| panic!("{harness} report produced no candidate"));
+            let agent = AgentNode {
+                id: 900,
+                provider: harness.into(),
+                cli_session_id: Some("session".into()),
+                status: SessionStatus::Ready,
+                ..Default::default()
+            };
+            let candidate = readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:projection"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone()),
+            )
+            .unwrap_or_else(|blocker| panic!("{harness} report blocked: {blocker:?}"))
+            .unwrap_or_else(|| panic!("{harness} report produced no candidate"));
             let binding = candidate.binding;
             assert_eq!(binding.owner.run_id, 42, "{harness}");
             assert_eq!(binding.owner.step_id, "await_source", "{harness}");
             assert_eq!(binding.owner.attempt, 1, "{harness}");
             assert_eq!(binding.owner.agent_node_id, 900, "{harness}");
-            assert_eq!(binding.owner.session_id.as_deref(), Some("session"), "{harness}");
-            assert_eq!(binding.owner.session_incarnation.as_deref(), Some("100"), "{harness}");
-            assert_eq!(binding.owner.report_revision.as_deref(), Some(snapshot.revision.as_str()), "{harness} source revision");
+            assert_eq!(
+                binding.owner.session_id.as_deref(),
+                Some("session"),
+                "{harness}"
+            );
+            assert_eq!(
+                binding.owner.session_incarnation.as_deref(),
+                Some("100"),
+                "{harness}"
+            );
+            assert_eq!(
+                binding.owner.report_revision.as_deref(),
+                Some(snapshot.revision.as_str()),
+                "{harness} source revision"
+            );
             assert_eq!(binding.report_revision, snapshot.revision, "{harness}");
             let guard = binding.input_guard;
-            assert_eq!(guard.report_guard.as_ref(), Some(&snapshot), "{harness} immutable envelope");
+            assert_eq!(
+                guard.report_guard.as_ref(),
+                Some(&snapshot),
+                "{harness} immutable envelope"
+            );
             assert_eq!(guard.agent_node_id, 900, "{harness}");
             assert_eq!(guard.input_stamp, "1:0", "{harness}");
             assert_eq!(guard.session_id, "session", "{harness}");
@@ -1118,23 +2035,45 @@ mod tests {
 
     #[test]
     fn superseded_and_stale_reports_cannot_bind_for_any_harness() {
-        use crate::services::circuit_worker::readiness;
-        use crate::models::{AgentNode, SessionStatus};
         use crate::circuit::observation::CircuitObservationBlocker as B;
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
         for (harness, _dir, snapshot) in wired_report_snapshots() {
-            let agent = AgentNode { id: 900, provider: harness.into(), cli_session_id: Some("session".into()),
-                status: SessionStatus::Ready, ..Default::default() };
+            let agent = AgentNode {
+                id: 900,
+                provider: harness.into(),
+                cli_session_id: Some("session".into()),
+                status: SessionStatus::Ready,
+                ..Default::default()
+            };
             let (mut run, _) = classified_run(snapshot.clone());
-            run.context.set("agent.900.previous_report_revision", &snapshot.revision);
+            run.context
+                .set("agent.900.previous_report_revision", &snapshot.revision);
             assert_eq!(
-                readiness::prepare(&run, "await_source", &agent, Some("100:projection"), Ok("1:0".into()), Ok(snapshot.clone())).err(),
+                readiness::prepare(
+                    &run,
+                    "await_source",
+                    &agent,
+                    Some("100:projection"),
+                    Ok("1:0".into()),
+                    Ok(snapshot.clone())
+                )
+                .err(),
                 Some(B::ReportSuperseded),
                 "{harness} a superseded report must not bind"
             );
             let (run, _) = classified_run(snapshot.clone());
             let incarnation = snapshot.published_at_ms + 1_000;
             assert_eq!(
-                readiness::prepare(&run, "await_source", &agent, Some(&format!("{incarnation}:projection")), Ok("1:0".into()), Ok(snapshot.clone())).err(),
+                readiness::prepare(
+                    &run,
+                    "await_source",
+                    &agent,
+                    Some(&format!("{incarnation}:projection")),
+                    Ok("1:0".into()),
+                    Ok(snapshot.clone())
+                )
+                .err(),
                 Some(B::ReportSuperseded),
                 "{harness} a report published before the bound session incarnation must not bind"
             );
@@ -1146,19 +2085,36 @@ mod tests {
         for (harness, _dir, snapshot) in wired_report_snapshots() {
             type BindingMutation = fn(&mut ClassificationBinding);
             let mutations: [(&str, BindingMutation); 4] = [
-                ("session", |binding| binding.owner.session_id = Some("other-session".into())),
+                ("session", |binding| {
+                    binding.owner.session_id = Some("other-session".into())
+                }),
                 ("attempt", |binding| binding.owner.attempt = 2),
                 ("agent", |binding| binding.owner.agent_node_id = 901),
-                ("report_revision", |binding| binding.owner.report_revision = Some("other:0".into())),
+                ("report_revision", |binding| {
+                    binding.owner.report_revision = Some("other:0".into())
+                }),
             ];
             for (label, mutate) in mutations {
                 let (mut run, mut event) = classified_run(snapshot.clone());
-                let CircuitEvent::TurnClassified { binding: Some(binding), .. } = &mut event else { panic!("classification fixture") };
+                let CircuitEvent::TurnClassified {
+                    binding: Some(binding),
+                    ..
+                } = &mut event
+                else {
+                    panic!("classification fixture")
+                };
                 mutate(binding);
                 advance(&mut run, &event);
-                assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified, "{harness} {label} must not complete");
+                assert_eq!(
+                    run.step("await_source").unwrap().status,
+                    StepStatus::Unverified,
+                    "{harness} {label} must not complete"
+                );
                 assert_eq!(run.state, RunState::Running, "{harness} {label}");
-                assert!(run.context.get("source.output").is_none(), "{harness} {label} must not publish the report");
+                assert!(
+                    run.context.get("source.output").is_none(),
+                    "{harness} {label} must not publish the report"
+                );
             }
         }
     }
@@ -1169,9 +2125,16 @@ mod tests {
             let (mut run, event) = classified_run(snapshot);
             run.context.set("node.await_source.human_wait", "1");
             let transition = advance(&mut run, &event);
-            assert_eq!(run.step("await_source").unwrap().status, StepStatus::Unverified, "{harness}");
+            assert_eq!(
+                run.step("await_source").unwrap().status,
+                StepStatus::Unverified,
+                "{harness}"
+            );
             assert_eq!(run.state, RunState::Running, "{harness}");
-            assert!(transition.effects.is_empty(), "{harness} a report must not emit an effect over a human wait");
+            assert!(
+                transition.effects.is_empty(),
+                "{harness} a report must not emit an effect over a human wait"
+            );
             assert!(run.context.get("source.output").is_none(), "{harness}");
         }
     }
@@ -1182,13 +2145,25 @@ mod tests {
         for (harness, _dir, snapshot) in wired_report_snapshots() {
             let (mut run, event) = classified_run(snapshot);
             let transition = advance(&mut run, &event);
-            assert_eq!(run.step("await_source").unwrap().status, StepStatus::Completed, "{harness}");
+            assert_eq!(
+                run.step("await_source").unwrap().status,
+                StepStatus::Completed,
+                "{harness}"
+            );
             assert_eq!(run.state, RunState::Completed, "{harness}");
             let recorded = &transition.classifications[0];
-            assert!(!recorded.lifecycle_verified, "{harness} a report cannot prove native lifecycle");
-            assert!(matches!(recorded.report_completeness, ReportCompleteness::Partial),
-                "{harness} an unproven-completeness report is Partial, not Complete");
-            assert!(transition.input_guard.is_some(), "{harness} the immutable envelope must survive the handoff");
+            assert!(
+                !recorded.lifecycle_verified,
+                "{harness} a report cannot prove native lifecycle"
+            );
+            assert!(
+                matches!(recorded.report_completeness, ReportCompleteness::Partial),
+                "{harness} an unproven-completeness report is Partial, not Complete"
+            );
+            assert!(
+                transition.input_guard.is_some(),
+                "{harness} the immutable envelope must survive the handoff"
+            );
         }
     }
 }

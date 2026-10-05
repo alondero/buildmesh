@@ -14,6 +14,18 @@ pub(super) fn restore_run_evaluators(view: &RunView) {
     }
 }
 
+/// A terminal run stops piloting every agent it still references, including
+/// agents a completed run hands back open. Another active run that borrows the
+/// same agent restores its own ownership on its next drive.
+pub(super) fn release_run_evaluators(view: &RunView) {
+    for id in view.steps.iter().filter_map(|step| step.agent_node_id) {
+        crate::circuit::evaluator::unregister(id);
+    }
+    if let Some(source) = view.context.source_agent_id() {
+        crate::circuit::evaluator::unregister(source);
+    }
+}
+
 /// The passive turn watcher a recovered, already-live node must (re)attach.
 ///
 /// Command Code (issue #1407) and Muse (issue #1709) both deliver their turn

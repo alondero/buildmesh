@@ -1,13 +1,14 @@
 //! Explicit report decisions, consumed only after the normal evidence preflight.
 
-use super::*;
 use super::turn_classify::{awaits_review_turn, is_reviewer_verdict_gate};
+use super::*;
 use crate::circuit::evaluator::Classification;
 
 const REVIEW: &str = "BUILDMESH_REVIEW_V1: ";
 const HANDOFF: &str = "BUILDMESH_HANDOFF_V1: ";
 const REVIEW_PROMPT: &str = "Circuit result contract: finish your final review report with exactly one plain-text line: BUILDMESH_REVIEW_V1: APPROVE or BUILDMESH_REVIEW_V1: REQUEST_CHANGES or BUILDMESH_REVIEW_V1: BLOCKED (choose one). APPROVE means no actionable findings remain; REQUEST_CHANGES means actionable findings remain; BLOCKED means you cannot finish the review without help. Put findings, reviewed revision, and verification before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates. Emit it only after your review and all delegated/background work have finished, or you are blocked on a person. Review completion is not approval.";
 const HANDOFF_PROMPT: &str = "Circuit result contract: finish your final fixes report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means this fix round and all delegated/background work have finished and are ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Explain changes, verification, disagreements or blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
+const PUBLISH_PROMPT: &str = "Circuit result contract: finish your final publication report with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means your work is committed and pushed and has an open pull request, ready for independent review; it does not mean approved. BLOCKED means you need a person to proceed. Give the pull request URL or the blocker before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates.";
 const ISSUE_HANDOFF_PROMPT: &str = "Circuit result contract: finish your final report for this assigned phase (implementation, wrap-up/publication, or review fixes) with exactly one plain-text line: BUILDMESH_HANDOFF_V1: READY or BUILDMESH_HANDOFF_V1: BLOCKED (choose one). READY means all instructions for this phase and all delegated/background work have finished; the next circuit gate may proceed. It does not mean independently reviewed or approved. BLOCKED means you need a person to proceed. Explain changes, verification and any blockers before that line. Do not quote or repeat the result line in examples, code blocks, or progress updates. Emit it only in the final report.";
 
 fn is_review(view: &RunView, node_id: &str) -> bool {
@@ -36,13 +37,26 @@ fn is_issue_handoff(view: &RunView, node_id: &str) -> bool {
     }
 }
 
+/// A later review round prompts the reviewer that is already open; its next
+/// report is judged by the same verdict gate as its first.
+fn reprompts_reviewer(view: &RunView, node_id: &str) -> bool {
+    matches!(
+        view.graph.node(node_id).map(|node| &node.kind),
+        Some(CircuitNodeKind::InjectPty { target_node_id: Some(target), .. })
+            if spawn::is_review_spawn_step(view, target)
+    )
+}
+
 /// Append at dispatch so saved/custom prompts get the same transport contract
 /// without rewriting their review instructions or pinned graph.
 pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
-    let suffix = if spawn::is_review_spawn_step(view, node_id) {
+    let suffix = if spawn::is_review_spawn_step(view, node_id) || reprompts_reviewer(view, node_id)
+    {
         Some(REVIEW_PROMPT)
     } else if node_id == "feedback" && awaits_review_turn(view, "await_fixes") {
         Some(HANDOFF_PROMPT)
+    } else if node_id == "publish" && awaits_review_turn(view, "await_publish") {
+        Some(PUBLISH_PROMPT)
     } else if is_issue_handoff(view, node_id) && !prompt.trim().is_empty() {
         Some(ISSUE_HANDOFF_PROMPT)
     } else {
@@ -280,6 +294,72 @@ mod tests {
         ] {
             assert!(parse(report, REVIEW).is_err(), "{report}");
         }
+    }
+
+    #[test]
+    fn publication_flow_prompts_carry_the_contract_their_gate_reads() {
+        for (graph, verdict) in [
+            (CircuitGraph::agent_review(None, None, 3), "verdict"),
+            (
+                CircuitGraph::issue_driven_autopilot_review("ready-for-agent"),
+                "review_classifier",
+            ),
+        ] {
+            let mut view = RunView {
+                run_id: 1,
+                state: RunState::Running,
+                graph,
+                context: CircuitContext::new(),
+                steps: vec![],
+            };
+            view.context.set("source.review_preset", "1");
+            let rereview = prompt(&view, "re_review", "Review again");
+            assert!(rereview.starts_with("Review again\n\n"), "{verdict}");
+            assert!(
+                rereview.contains("BUILDMESH_REVIEW_V1: REQUEST_CHANGES"),
+                "{verdict}"
+            );
+            assert_eq!(
+                interpretation(&view, verdict, "Findings.\nBUILDMESH_REVIEW_V1: APPROVE"),
+                Some(Classification::Completed)
+            );
+            // Nothing waits on the merge turn, so it carries no contract.
+            assert_eq!(
+                prompt(&view, "merge", "Squash and merge"),
+                "Squash and merge",
+                "{verdict}"
+            );
+        }
+
+        let mut local = RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph: CircuitGraph::agent_review(None, None, 3),
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        local.context.set("source.review_preset", "1");
+        let publish = prompt(&local, "publish", "Publish your work");
+        assert!(publish.starts_with("Publish your work\n\n"));
+        assert!(
+            publish.contains("BUILDMESH_HANDOFF_V1: READY") && publish.contains("pull request")
+        );
+        assert_eq!(
+            interpretation(
+                &local,
+                "await_publish",
+                "PR #7 opened.\nBUILDMESH_HANDOFF_V1: READY"
+            ),
+            Some(Classification::Completed)
+        );
+        assert_eq!(
+            interpretation(
+                &local,
+                "await_publish",
+                "No GitHub access.\nBUILDMESH_HANDOFF_V1: BLOCKED"
+            ),
+            Some(Classification::Blocked)
+        );
     }
 
     #[test]

@@ -72,7 +72,7 @@ mod zombie_sweep;
 use admission::{global_agent_reservation_fits, may_admit_run, required_agent_slots};
 use observation::{agent_lookup_for_observation, observe};
 pub use restart::startup_reconcile_pass;
-use restart::{recover_run_observers, restore_run_evaluators};
+use restart::{recover_run_observers, release_run_evaluators, restore_run_evaluators};
 use turn_classify::{quiet_turn_is_current, QuietClassifierFailure, QuietTurnEvidence};
 #[cfg(test)]
 mod observe_parity_tests;
@@ -932,8 +932,9 @@ fn drive_run(app: &AppHandle, active: &db::ActiveCircuitRun) -> Result<(), Strin
             );
         }
 
-        // Terminal review runs release processes while retaining recovery
-        // checkpoints. Ordinary completed graphs opt out via cleanup intent.
+        // Failed and cancelled runs retire their owned processes while
+        // retaining recovery checkpoints; every terminal run stops piloting
+        // the agents it hands back.
         if view.state.is_terminal() {
             close_run_agents(&view);
             // The one terminal emit, after `close_run_agents` has archived the
@@ -1388,8 +1389,8 @@ fn close_run_agents(view: &RunView) {
                 error
             ),
         }
-        crate::circuit::evaluator::unregister(agent_node_id);
     }
+    release_run_evaluators(view);
 }
 
 /// Load this run's committed steps into the stepper's view shape.

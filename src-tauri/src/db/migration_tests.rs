@@ -12,10 +12,17 @@ mod tests {
     fn lifecycle_snapshot_upgrade_preserves_existing_nodes_and_repeats() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','awaiting_input')", []).unwrap();
-        conn.execute_batch("ALTER TABLE agent_nodes DROP COLUMN lifecycle_snapshot;
-            UPDATE app_settings SET value='45' WHERE key='schema_version';").unwrap();
+        conn.execute_batch(
+            "ALTER TABLE agent_nodes DROP COLUMN lifecycle_snapshot;
+            UPDATE app_settings SET value='45' WHERE key='schema_version';",
+        )
+        .unwrap();
         for _ in 0..2 {
             crate::db::init_schema(&conn).unwrap();
             let node = crate::db::agent_node::get_agent_node_by_id_inner(&conn, 1).unwrap();
@@ -38,8 +45,11 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("ALTER TABLE agent_nodes DROP COLUMN spawn_configuration", [])
-            .unwrap();
+        conn.execute(
+            "ALTER TABLE agent_nodes DROP COLUMN spawn_configuration",
+            [],
+        )
+        .unwrap();
         crate::db::init_schema(&conn).unwrap();
         let row: (String, Option<String>) = conn
             .query_row(
@@ -68,57 +78,118 @@ mod tests {
 
     #[test]
     fn saved_issue_review_contract_upgrades_stock_preserves_custom_and_defers_active_runs() {
-        use crate::circuit::model::{CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome};
+        use crate::circuit::model::{
+            CircuitGraph, CircuitNodeKind as K, EdgeCondition, StepOutcome,
+        };
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id, name, path) VALUES (1, 'review', 'C:/review')", []).unwrap();
-        let fixture: CircuitGraph = serde_json::from_str(include_str!("../../tests/fixtures/legacy-issue-review-circuit.json")).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'review', 'C:/review')",
+            [],
+        )
+        .unwrap();
+        let fixture: CircuitGraph = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-issue-review-circuit.json"
+        ))
+        .unwrap();
         // Keep the recovery/topology migration separate from this prompt
         // migration test by using the current graph with the historically
         // shipped reviewer and feedback text.
         let mut legacy = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         for id in ["reviewer", "follow_feedback"] {
             let previous = &fixture.node(id).unwrap().kind;
-            legacy.nodes.iter_mut().find(|node| node.id == id).unwrap().kind = previous.clone();
+            legacy
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == id)
+                .unwrap()
+                .kind = previous.clone();
         }
         legacy.validate().unwrap();
         let mut configured = legacy.clone();
-        if let K::SpawnAgentNode { provider, model, .. } = &mut configured.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
+        if let K::SpawnAgentNode {
+            provider, model, ..
+        } = &mut configured
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "reviewer")
+            .unwrap()
+            .kind
+        {
             *provider = Some("codex".into());
             *model = Some("review-model".into());
         }
-        if let K::RetryLimit { max_retries } = &mut configured.nodes.iter_mut().find(|n| n.id == "review_retry").unwrap().kind {
+        if let K::RetryLimit { max_retries } = &mut configured
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "review_retry")
+            .unwrap()
+            .kind
+        {
             *max_retries = 5;
         }
         let mut custom_prompt = legacy.clone();
-        if let K::SpawnAgentNode { prompt, .. } = &mut custom_prompt.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind {
+        if let K::SpawnAgentNode { prompt, .. } = &mut custom_prompt
+            .nodes
+            .iter_mut()
+            .find(|n| n.id == "reviewer")
+            .unwrap()
+            .kind
+        {
             *prompt = "My custom review".into();
         }
         let mut custom_edges = legacy.clone();
         custom_edges.edges.retain(|e| e.to != "close_reviewer");
-        for (id, graph) in [(1, &configured), (2, &custom_prompt), (3, &custom_edges), (4, &legacy)] {
+        for (id, graph) in [
+            (1, &configured),
+            (2, &custom_prompt),
+            (3, &custom_edges),
+            (4, &legacy),
+        ] {
             conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (?1, 1, 'review', ?2)",
                 rusqlite::params![id, graph.to_json().unwrap()]).unwrap();
         }
         conn.execute("INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 4, 1, 'paused')", []).unwrap();
         let read = |id: i64| -> CircuitGraph {
-            let json: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id=?1", [id], |r| r.get(0)).unwrap();
+            let json: String = conn
+                .query_row(
+                    "SELECT graph_json FROM autopilot_circuits WHERE id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
             CircuitGraph::from_json(&json).unwrap()
         };
         crate::db::init_schema(&conn).unwrap();
         let upgraded = read(1);
         upgraded.validate().unwrap();
-        assert!(matches!(&upgraded.node("review_classifier").unwrap().kind, K::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some("reviewer")));
-        assert!(upgraded.edges.iter().any(|e| e.from == "review_classifier" && e.to == "follow_feedback" && e.condition == EdgeCondition::OnOutcome(StepOutcome::Working)));
+        assert!(
+            matches!(&upgraded.node("review_classifier").unwrap().kind, K::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some("reviewer"))
+        );
+        assert!(upgraded.edges.iter().any(|e| e.from == "review_classifier"
+            && e.to == "follow_feedback"
+            && e.condition == EdgeCondition::OnOutcome(StepOutcome::Working)));
         assert!(upgraded.node("close_approved").is_some());
         assert!(upgraded.node("review_exhausted").is_some());
         assert!(upgraded.node("review_blocked").is_some());
-        assert!(matches!(&upgraded.node("reviewer").unwrap().kind, K::SpawnAgentNode { provider, model, prompt, .. } if provider.as_deref() == Some("codex") && model.as_deref() == Some("review-model") && prompt == &CircuitGraph::pr_review_prompt()));
-        assert!(matches!(&upgraded.node("review_retry").unwrap().kind, K::RetryLimit { max_retries: 5 }));
-        assert_eq!(read(2).node("reviewer").unwrap().kind, custom_prompt.node("reviewer").unwrap().kind);
+        assert!(
+            matches!(&upgraded.node("reviewer").unwrap().kind, K::SpawnAgentNode { provider, model, prompt, .. } if provider.as_deref() == Some("codex") && model.as_deref() == Some("review-model") && prompt == &CircuitGraph::pr_review_prompt())
+        );
+        assert!(matches!(
+            &upgraded.node("review_retry").unwrap().kind,
+            K::RetryLimit { max_retries: 5 }
+        ));
+        assert_eq!(
+            read(2).node("reviewer").unwrap().kind,
+            custom_prompt.node("reviewer").unwrap().kind
+        );
         assert_eq!(read(3).edges, custom_edges.edges);
         assert_eq!(read(4), legacy);
-        conn.execute("UPDATE autopilot_circuit_runs SET state='completed' WHERE id=10", []).unwrap();
+        conn.execute(
+            "UPDATE autopilot_circuit_runs SET state='completed' WHERE id=10",
+            [],
+        )
+        .unwrap();
         crate::db::init_schema(&conn).unwrap();
         let completed = read(4);
         let canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
@@ -138,6 +209,97 @@ mod tests {
     }
 
     #[test]
+    fn review_publication_flow_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        use crate::circuit::test_support::{
+            pre_publication_issue_review, pre_publication_local_review,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'publication', 'C:/publication')",
+            [],
+        )
+        .unwrap();
+
+        let preset = pre_publication_local_review(3).to_json().unwrap();
+        let issue = pre_publication_issue_review().to_json().unwrap();
+        // A Review-derived copy is user-owned, and a customized issue graph
+        // has extra obligations: neither is rewritten.
+        let copy = pre_publication_local_review(3).to_json().unwrap();
+        let mut customized = pre_publication_issue_review();
+        customized.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        let customized = customized.to_json().unwrap();
+        for (id, graph, is_preset) in [
+            (1, &preset, 1),
+            (2, &issue, 0),
+            (3, &copy, 0),
+            (4, &customized, 0),
+        ] {
+            conn.execute(
+                "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (?1, 1, 'c', ?2, ?3)",
+                rusqlite::params![id, graph, is_preset],
+            ).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
+                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');
+             DELETE FROM app_settings WHERE key = 'review_publication_flow_upgrade_v1';",
+        ).unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let read = |id: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let upgraded_preset = CircuitGraph::from_json(&read(1)).unwrap();
+        assert!(upgraded_preset.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
+        let upgraded_issue = CircuitGraph::from_json(&read(2)).unwrap();
+        assert!(upgraded_issue.has_review_topology_of(
+            &CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
+        ));
+        assert_eq!(read(3), copy);
+        assert_eq!(read(4), customized);
+
+        let snapshot = |run: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            snapshot(10),
+            issue,
+            "an active run keeps executing the graph it started with"
+        );
+        assert_eq!(
+            snapshot(11),
+            preset,
+            "a failed run keeps its graph for Review again"
+        );
+
+        // The flag makes the scan one-shot.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
+            [&issue],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(read(2), issue);
+    }
+
+    #[test]
     fn review_contract_upgrade_skips_active_rows_retries_and_preserves_custom_prompts() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -146,36 +308,72 @@ mod tests {
             [],
         ).unwrap();
 
-        let mut legacy = crate::circuit::model::CircuitGraph::agent_review_with_provider(Some("codex"), None, None, 3);
+        let mut legacy = crate::circuit::model::CircuitGraph::agent_review_with_provider(
+            Some("codex"),
+            None,
+            None,
+            3,
+        );
         let reviewer_prompt = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
         let feedback_prompt = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
         for node in &mut legacy.nodes {
             match &mut node.kind {
-                crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } if node.id == "reviewer" => *prompt = reviewer_prompt.to_string(),
-                crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } if node.id == "feedback" => *prompt = feedback_prompt.to_string(),
+                crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. }
+                    if node.id == "reviewer" =>
+                {
+                    *prompt = reviewer_prompt.to_string()
+                }
+                crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "feedback" =>
+                {
+                    *prompt = feedback_prompt.to_string()
+                }
                 _ => {}
             }
         }
         let legacy_json = legacy.to_json().unwrap();
         let mut custom = legacy.clone();
         for node in &mut custom.nodes {
-            if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
-                if node.id == "reviewer" { *prompt = "custom reviewer prompt".to_string(); }
+            if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } =
+                &mut node.kind
+            {
+                if node.id == "reviewer" {
+                    *prompt = "custom reviewer prompt".to_string();
+                }
             }
-            if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
-                if node.id == "feedback" { *prompt = "custom feedback".to_string(); }
+            if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind
+            {
+                if node.id == "feedback" {
+                    *prompt = "custom feedback".to_string();
+                }
             }
         }
         let custom_json = custom.to_json().unwrap();
         conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'legacy', ?1, 1)", [legacy_json.clone()]).unwrap();
         conn.execute("INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (2, 2, 'custom', ?1, 1)", [custom_json.clone()]).unwrap();
         conn.execute("INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, state) VALUES (10, 1, 1, 'running')", []).unwrap();
-        conn.execute("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)", [crate::db::migrations::SCHEMA_VERSION.to_string()]).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
+            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
-        let unchanged_active: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        let unchanged_active: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(unchanged_active, legacy_json);
-        let unchanged_custom: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
+        let unchanged_custom: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(unchanged_custom, custom_json);
         assert_eq!(
             conn.query_row(
@@ -188,11 +386,31 @@ mod tests {
             "an active legacy circuit must defer completion so it can be retried"
         );
 
-        conn.execute("UPDATE autopilot_circuit_runs SET state = 'completed' WHERE id = 10", []).unwrap();
+        conn.execute(
+            "UPDATE autopilot_circuit_runs SET state = 'completed' WHERE id = 10",
+            [],
+        )
+        .unwrap();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
-        let upgraded: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        let upgraded: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let graph = crate::circuit::model::CircuitGraph::from_json(&upgraded).unwrap();
-        assert_eq!(graph.node("reviewer").and_then(|n| match &n.kind { crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::circuit::model::CircuitGraph::local_review_prompt());
+        assert_eq!(
+            graph
+                .node("reviewer")
+                .and_then(|n| match &n.kind {
+                    crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } =>
+                        Some(prompt),
+                    _ => None,
+                })
+                .unwrap(),
+            &crate::circuit::model::CircuitGraph::local_review_prompt()
+        );
         assert_eq!(
             conn.query_row(
                 "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
@@ -212,11 +430,33 @@ mod tests {
         .unwrap();
         let second = upgraded.clone();
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
-        let third: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 1", [], |row| row.get(0)).unwrap();
+        let third: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(second, third);
-        let late_legacy: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id = 2", [], |row| row.get(0)).unwrap();
+        let late_legacy: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let late_graph = crate::circuit::model::CircuitGraph::from_json(&late_legacy).unwrap();
-        assert_eq!(late_graph.node("reviewer").and_then(|n| match &n.kind { crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } => Some(prompt), _ => None }).unwrap(), &crate::circuit::model::CircuitGraph::local_review_prompt());
+        assert_eq!(
+            late_graph
+                .node("reviewer")
+                .and_then(|n| match &n.kind {
+                    crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } =>
+                        Some(prompt),
+                    _ => None,
+                })
+                .unwrap(),
+            &crate::circuit::model::CircuitGraph::local_review_prompt()
+        );
     }
 
     #[test]
@@ -262,9 +502,8 @@ mod tests {
         )
         .unwrap();
 
-        let stale = crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
-            "buildmesh:run",
-        );
+        let stale =
+            crate::circuit::model::CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
         let mut raw: serde_json::Value = serde_json::from_str(&stale.to_json().unwrap()).unwrap();
         raw["nodes"]
             .as_array_mut()
@@ -278,14 +517,15 @@ mod tests {
         let stale_json = serde_json::to_string(&raw).unwrap();
 
         // An explicitly authored policy must survive the migration unchanged.
-        let mut explicit_graph = crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
-            "buildmesh:other",
-        );
-        if let Some(node) = explicit_graph.nodes.iter_mut().find(|node| node.id == "open_pr") {
-            if let crate::circuit::model::CircuitNodeKind::GithubAction {
-                open_pr_policy,
-                ..
-            } = &mut node.kind
+        let mut explicit_graph =
+            crate::circuit::model::CircuitGraph::issue_driven_autopilot_review("buildmesh:other");
+        if let Some(node) = explicit_graph
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "open_pr")
+        {
+            if let crate::circuit::model::CircuitNodeKind::GithubAction { open_pr_policy, .. } =
+                &mut node.kind
             {
                 *open_pr_policy = Some(crate::circuit::model::OpenPrPolicy::CreateIfMissing);
             }
@@ -331,7 +571,8 @@ mod tests {
                 ..
             })
         ));
-        let explicit_graph = crate::circuit::model::CircuitGraph::from_json(&graph_json(2)).unwrap();
+        let explicit_graph =
+            crate::circuit::model::CircuitGraph::from_json(&graph_json(2)).unwrap();
         assert!(matches!(
             explicit_graph.node("open_pr").map(|node| &node.kind),
             Some(crate::circuit::model::CircuitNodeKind::GithubAction {
@@ -351,7 +592,11 @@ mod tests {
             "1"
         );
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
-        assert_eq!(graph_json(1), first_json, "second initializer pass is idempotent");
+        assert_eq!(
+            graph_json(1),
+            first_json,
+            "second initializer pass is idempotent"
+        );
     }
 
     fn canonical_index_names(conn: &Connection) -> Vec<String> {
@@ -409,7 +654,7 @@ mod tests {
             );
 
             CREATE INDEX IF NOT EXISTS idx_agent_nodes_mesh ON agent_nodes(mesh_id);
-            "
+            ",
         )?;
         Ok(())
     }
@@ -421,11 +666,13 @@ mod tests {
     /// Returns the number of columns added (0 if already migrated).
     fn migrate_projects_layout(conn: &Connection) -> SqlResult<usize> {
         // Check if layout column exists
-        let has_layout: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(false);
+        let has_layout: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
 
         if has_layout {
             return Ok(0);
@@ -465,50 +712,69 @@ mod tests {
         create_v2_schema(&conn).unwrap();
 
         // Verify v2: layout column does NOT exist
-        let has_layout_before: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert!(!has_layout_before, "layout column should NOT exist in v2 schema");
+        let has_layout_before: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !has_layout_before,
+            "layout column should NOT exist in v2 schema"
+        );
 
         // Insert a test project before migration
         conn.execute(
             "INSERT INTO meshes (name, path) VALUES ('test-project', '/tmp/test')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Act: run incremental migration
         migrate_projects_layout(&conn).unwrap();
         set_schema_version(&conn, SCHEMA_VERSION).unwrap();
 
         // Assert: layout column now exists
-        let has_layout_after: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let has_layout_after: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('meshes') WHERE name = 'layout'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(has_layout_after, "layout column MUST exist after migration");
 
         // Assert: existing project got default 'grid' value
-        let layout_value: String = conn.query_row(
-            "SELECT layout FROM meshes WHERE name = 'test-project'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(layout_value, "grid", "existing project should get default 'grid' layout");
+        let layout_value: String = conn
+            .query_row(
+                "SELECT layout FROM meshes WHERE name = 'test-project'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            layout_value, "grid",
+            "existing project should get default 'grid' layout"
+        );
 
         // Assert: new projects can override the default
         conn.execute(
             "INSERT INTO meshes (name, path, layout) VALUES ('another', '/tmp/another', 'single')",
             [],
-        ).unwrap();
-        let single_layout: String = conn.query_row(
-            "SELECT layout FROM meshes WHERE name = 'another'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(single_layout, "single", "explicit layout value should be respected");
+        )
+        .unwrap();
+        let single_layout: String = conn
+            .query_row(
+                "SELECT layout FROM meshes WHERE name = 'another'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            single_layout, "single",
+            "explicit layout value should be respected"
+        );
 
         // Cleanup
         drop(conn);
@@ -540,29 +806,34 @@ mod tests {
                 (1, 'm1-a', '/a', '2020-01-01T00:00:00Z'),
                 (1, 'm1-c', '/c', '2020-01-03T00:00:00Z'),
                 (2, 'm2-b', '/e', '2020-01-02T00:00:00Z');
-            "
-        ).unwrap();
-
-        // Precondition: no position column yet.
-        let has_before: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'position'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert!(!has_before, "PRECONDITION: position column must not exist in v12 schema");
-
-        // Act
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
+            ",
         )
         .unwrap();
+
+        // Precondition: no position column yet.
+        let has_before: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'position'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !has_before,
+            "PRECONDITION: position column must not exist in v12 schema"
+        );
+
+        // Act
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         // Assert: column exists and ranks are per-mesh, ordered by created_at.
         let pos = |name: &str| -> i64 {
             conn.query_row(
                 "SELECT position FROM agent_nodes WHERE name = ?1",
-                [name], |row| row.get(0),
-            ).unwrap()
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap()
         };
         assert_eq!(pos("m1-a"), 0, "mesh 1, earliest");
         assert_eq!(pos("m1-b"), 1, "mesh 1, middle");
@@ -571,11 +842,7 @@ mod tests {
         assert_eq!(pos("m2-b"), 1, "mesh 2, second");
 
         // Idempotent: a second call (column present) must not renumber anything.
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
         assert_eq!(pos("m1-c"), 2, "second call must be a no-op");
     }
 
@@ -614,35 +881,41 @@ mod tests {
             -- and the row must remain queryable.
             INSERT INTO agent_nodes (mesh_id, name, path, source_pr, created_at)
                 VALUES (1, 'preexisting', '/p', 420, '2020-01-01T00:00:00Z');
-            "
-        ).unwrap();
+            ",
+        )
+        .unwrap();
 
         // Precondition: column does not exist yet.
         let has_before: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
             [], |row| row.get(0),
         ).unwrap();
-        assert!(!has_before, "PRECONDITION: source_pr_pinned_sha must not exist in v15 schema");
+        assert!(
+            !has_before,
+            "PRECONDITION: source_pr_pinned_sha must not exist in v15 schema"
+        );
 
         // Act — first call adds the column.
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         // Assert: column now exists and is nullable (no NOT NULL constraint).
         let has_after: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
             [], |row| row.get(0),
         ).unwrap();
-        assert!(has_after, "source_pr_pinned_sha column must exist after safety-net call");
+        assert!(
+            has_after,
+            "source_pr_pinned_sha column must exist after safety-net call"
+        );
 
         let notnull: i64 = conn.query_row(
             "SELECT \"notnull\" FROM pragma_table_info('agent_nodes') WHERE name = 'source_pr_pinned_sha'",
             [], |row| row.get(0),
         ).unwrap();
-        assert_eq!(notnull, 0, "source_pr_pinned_sha must be NULLable — backfill of pre-existing rows is impossible");
+        assert_eq!(
+            notnull, 0,
+            "source_pr_pinned_sha must be NULLable — backfill of pre-existing rows is impossible"
+        );
 
         // Pre-existing v15 row survives: source_pr is intact, SHA defaults to NULL.
         let (source_pr, source_pr_pinned_sha): (Option<i64>, Option<String>) = conn.query_row(
@@ -650,7 +923,10 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!(source_pr, Some(420), "pre-existing source_pr must survive");
-        assert_eq!(source_pr_pinned_sha, None, "new column must default to NULL for v15 rows");
+        assert_eq!(
+            source_pr_pinned_sha, None,
+            "new column must default to NULL for v15 rows"
+        );
 
         // A new row can store a SHA. Issue #444 — the SHA is the exact-pinning
         // handle that the spawn path verifies against `origin/<head_ref>`.
@@ -659,26 +935,34 @@ mod tests {
              VALUES (1, 'pinned', '/p2', 421, '0123456789abcdef0123456789abcdef01234567', '2020-01-02T00:00:00Z')",
             [],
         ).unwrap();
-        let sha: Option<String> = conn.query_row(
-            "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(sha.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"));
+        let sha: Option<String> = conn
+            .query_row(
+                "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sha.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567")
+        );
 
         // Idempotent: a second call must not error (the column already exists).
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         // The pinned row is still queryable after the second call.
-        let sha_after: Option<String> = conn.query_row(
-            "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(sha_after.as_deref(), Some("0123456789abcdef0123456789abcdef01234567"),
-            "second safety-net call must not corrupt existing data");
+        let sha_after: Option<String> = conn
+            .query_row(
+                "SELECT source_pr_pinned_sha FROM agent_nodes WHERE name = 'pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            sha_after.as_deref(),
+            Some("0123456789abcdef0123456789abcdef01234567"),
+            "second safety-net call must not corrupt existing data"
+        );
     }
 
     #[test]
@@ -704,8 +988,9 @@ mod tests {
                 layout TEXT NOT NULL DEFAULT 'grid',
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
-            "
-        ).unwrap();
+            ",
+        )
+        .unwrap();
 
         // Act: run migration twice
         let first = migrate_projects_layout(&conn).unwrap();
@@ -720,149 +1005,134 @@ mod tests {
     }
 
     /// Issue #456 (post-#249 reformulation): the runner's always-pass
-/// column walk must (a) add a missing column with the requested
-/// type/default, (b) be a no-op on a second call (column already
-/// present), and (c) be a no-op when the table itself is missing
-/// (mirrors the table-exists guard the shared `ensure_column` helper
-/// used to provide). The helper is now private to `db::migrations`;
-/// this test pins the runner-level invariant by exercising a fresh
-/// connection against a non-registry table (so the always-pass walk
-/// can't accidentally mutate it) and a registry table (so the walk
-/// adds the column).
-#[test]
-fn evolve_to_column_walk_is_idempotent_and_table_aware() {
-    // --- Case 1: a fresh in-memory connection with a non-registry
-    // table. The runner's always-pass walk must NOT touch the table
-    // (no entry for it in the registry) and must NOT error on a
-    // missing-table situation when its own walks hit a registry entry
-    // whose table isn't present.
-    let conn = Connection::open_in_memory().unwrap();
-    conn.execute_batch(
-        "CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
-    )
-    .unwrap();
-
-    // Pre-state: only the inline CREATE columns are present.
-    let before: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    assert_eq!(
-        before,
-        vec!["id".to_string(), "name".to_string()],
-        "PRECONDITION: widgets has only its inline columns before evolve_to"
-    );
-
-    // Act: call evolve_to. The always-pass walk runs every entry in
-    // the column registry; none of them target `widgets`, so the
-    // table is untouched. The walk also hits registry entries for
-    // tables that don't exist (e.g. `autopilot_runs`) — the
-    // `table_present` guard makes those a no-op rather than an error.
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
-
-    // Assert: `widgets` is still untouched (the runner must not
-    // mutate tables that aren't in the registry).
-    let after_first: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    assert_eq!(
-        after_first,
-        vec!["id".to_string(), "name".to_string()],
-        "evolve_to must not mutate tables outside its column registry"
-    );
-
-    // --- Case 2: idempotent — a second call must not error and must
-    // not change anything. (Every column ALTER is gated on
-    // `pragma_table_info`; every backfill on its app_settings flag;
-    // every AlwaysStep is naturally idempotent.)
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
-    let after_second: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    assert_eq!(
-        after_second, after_first,
-        "second evolve_to call must be a no-op"
-    );
-
-    // Pre-existing semantics on the un-touched table: a fresh INSERT
-    // reads back the inserted value (the runner's no-mutation
-    // guarantee is end-to-end, not just for the column-projection).
-    conn.execute(
-        "INSERT INTO widgets (name) VALUES ('alpha')",
-        [],
-    )
-    .unwrap();
-    let name: String = conn
-        .query_row("SELECT name FROM widgets WHERE name = 'alpha'", [], |row| {
-            row.get(0)
-        })
+    /// column walk must (a) add a missing column with the requested
+    /// type/default, (b) be a no-op on a second call (column already
+    /// present), and (c) be a no-op when the table itself is missing
+    /// (mirrors the table-exists guard the shared `ensure_column` helper
+    /// used to provide). The helper is now private to `db::migrations`;
+    /// this test pins the runner-level invariant by exercising a fresh
+    /// connection against a non-registry table (so the always-pass walk
+    /// can't accidentally mutate it) and a registry table (so the walk
+    /// adds the column).
+    #[test]
+    fn evolve_to_column_walk_is_idempotent_and_table_aware() {
+        // --- Case 1: a fresh in-memory connection with a non-registry
+        // table. The runner's always-pass walk must NOT touch the table
+        // (no entry for it in the registry) and must NOT error on a
+        // missing-table situation when its own walks hit a registry entry
+        // whose table isn't present.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE widgets (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);",
+        )
         .unwrap();
-    assert_eq!(name, "alpha");
 
-    // --- Case 3: a registry target. Stamp `mesh_id` on `widgets`
-    // (a registry column for `meshes`) so we can prove the walk
-    // adds it when the table exists — closes the loop with the
-    // shared `ensure_column` "added on present table" property the
-    // pre-#249 helper covered.
-    // `evolve_to` now materialises baseline tables first (#1565), so the
-    // earlier call already created a full `meshes`. Drop it and
-    // recreate the skinny shape the walk is supposed to thicken.
-    conn.execute("DROP TABLE IF EXISTS meshes", []).unwrap();
-    conn.execute(
-        "CREATE TABLE meshes (
+        // Pre-state: only the inline CREATE columns are present.
+        let before: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            before,
+            vec!["id".to_string(), "name".to_string()],
+            "PRECONDITION: widgets has only its inline columns before evolve_to"
+        );
+
+        // Act: call evolve_to. The always-pass walk runs every entry in
+        // the column registry; none of them target `widgets`, so the
+        // table is untouched. The walk also hits registry entries for
+        // tables that don't exist (e.g. `autopilot_runs`) — the
+        // `table_present` guard makes those a no-op rather than an error.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        // Assert: `widgets` is still untouched (the runner must not
+        // mutate tables that aren't in the registry).
+        let after_first: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            after_first,
+            vec!["id".to_string(), "name".to_string()],
+            "evolve_to must not mutate tables outside its column registry"
+        );
+
+        // --- Case 2: idempotent — a second call must not error and must
+        // not change anything. (Every column ALTER is gated on
+        // `pragma_table_info`; every backfill on its app_settings flag;
+        // every AlwaysStep is naturally idempotent.)
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let after_second: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('widgets') ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            after_second, after_first,
+            "second evolve_to call must be a no-op"
+        );
+
+        // Pre-existing semantics on the un-touched table: a fresh INSERT
+        // reads back the inserted value (the runner's no-mutation
+        // guarantee is end-to-end, not just for the column-projection).
+        conn.execute("INSERT INTO widgets (name) VALUES ('alpha')", [])
+            .unwrap();
+        let name: String = conn
+            .query_row("SELECT name FROM widgets WHERE name = 'alpha'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(name, "alpha");
+
+        // --- Case 3: a registry target. Stamp `mesh_id` on `widgets`
+        // (a registry column for `meshes`) so we can prove the walk
+        // adds it when the table exists — closes the loop with the
+        // shared `ensure_column` "added on present table" property the
+        // pre-#249 helper covered.
+        // `evolve_to` now materialises baseline tables first (#1565), so the
+        // earlier call already created a full `meshes`. Drop it and
+        // recreate the skinny shape the walk is supposed to thicken.
+        conn.execute("DROP TABLE IF EXISTS meshes", []).unwrap();
+        conn.execute(
+            "CREATE TABLE meshes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
             path TEXT NOT NULL UNIQUE
          );",
-        [],
-    )
-    .unwrap();
-    crate::db::migrations::evolve_to(
-        crate::db::migrations::SCHEMA_VERSION,
-        &conn,
-    )
-    .unwrap();
-    let meshes_cols: Vec<String> = conn
-        .prepare("SELECT name FROM pragma_table_info('meshes') ORDER BY name")
-        .unwrap()
-        .query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
-    // Every registry entry for `meshes` must now be present (the
-    // fresh-table CREATE above deliberately omitted the
-    // registry-only columns so the walk has work to do).
-    let registry_cols: Vec<String> = crate::db::migrations::mesh_column_specs()
-        .iter()
-        .map(|c| c.column.to_string())
-        .collect();
-    for col in &registry_cols {
-        assert!(
-            meshes_cols.contains(col),
-            "registry column {col} must exist on meshes after evolve_to (got: {:?})",
-            meshes_cols
-        );
+            [],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let meshes_cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('meshes') ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // Every registry entry for `meshes` must now be present (the
+        // fresh-table CREATE above deliberately omitted the
+        // registry-only columns so the walk has work to do).
+        let registry_cols: Vec<String> = crate::db::migrations::mesh_column_specs()
+            .iter()
+            .map(|c| c.column.to_string())
+            .collect();
+        for col in &registry_cols {
+            assert!(
+                meshes_cols.contains(col),
+                "registry column {col} must exist on meshes after evolve_to (got: {:?})",
+                meshes_cols
+            );
+        }
     }
-}
 
     /// Issue #495 (post-#249 reformulation): a DB created before token
     /// hashing stores the coordinator tokens as 32-char cleartext.
@@ -877,7 +1147,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        ).unwrap();
+        )
+        .unwrap();
         // Pre-hashing shape: 32-char cleartext tokens.
         let raw_read = "0123456789abcdef0123456789abcdef";
         let raw_drive = "fedcba9876543210fedcba9876543210";
@@ -888,25 +1159,41 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 ('coordinator_drive_token', ?2),
                 ('remote_access_token', ?3)",
             rusqlite::params![raw_read, raw_drive, raw_root],
-        ).unwrap();
-
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
         )
         .unwrap();
 
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
         let stored = |key: &str| -> String {
-            conn.query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |r| r.get(0)).unwrap()
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                [key],
+                |r| r.get(0),
+            )
+            .unwrap()
         };
 
         // Both coordinator tokens are now their SHA-256 hash.
-        assert_eq!(stored("coordinator_read_token"), crate::db::hash_token(raw_read));
-        assert_eq!(stored("coordinator_drive_token"), crate::db::hash_token(raw_drive));
-        assert_ne!(stored("coordinator_read_token"), raw_read, "cleartext must be gone");
+        assert_eq!(
+            stored("coordinator_read_token"),
+            crate::db::hash_token(raw_read)
+        );
+        assert_eq!(
+            stored("coordinator_drive_token"),
+            crate::db::hash_token(raw_drive)
+        );
+        assert_ne!(
+            stored("coordinator_read_token"),
+            raw_read,
+            "cleartext must be gone"
+        );
 
         // The root token is intentionally NOT hashed (Option 3, issue #495).
-        assert_eq!(stored("remote_access_token"), raw_root, "root token stays cleartext");
+        assert_eq!(
+            stored("remote_access_token"),
+            raw_root,
+            "root token stays cleartext"
+        );
 
         // The raw token the user already configured still validates after migration.
         crate::db::set_coordinator_api_enabled_inner(&conn, true).unwrap();
@@ -914,12 +1201,12 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
 
         // Idempotent: a second run must not hash the hash.
         let after_first = stored("coordinator_read_token");
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
-        assert_eq!(stored("coordinator_read_token"), after_first, "must not double-hash");
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(
+            stored("coordinator_read_token"),
+            after_first,
+            "must not double-hash"
+        );
     }
 
     /// LAN exposure (issue #496) must default OFF so a fresh install binds only
@@ -929,7 +1216,8 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Unset key → loopback-only default.
         assert!(!crate::db::lan_exposure_enabled_inner(&conn).unwrap());
@@ -1023,7 +1311,10 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         let (node, mesh_name, _status_changed_at) = rows.into_iter().next().unwrap();
 
         assert_eq!(mesh_name, "m", "JOIN-read mesh name must survive");
-        assert_eq!(node.name, "legacy", "row must read under post-retirement projection");
+        assert_eq!(
+            node.name, "legacy",
+            "row must read under post-retirement projection"
+        );
         assert_eq!(node.id, 1, "id column must read");
 
         // The wire shape must omit `pr_url`, even though the underlying row
@@ -1085,40 +1376,54 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
             [], |row| row.get(0),
         ).unwrap();
-        assert!(!has_before, "PRECONDITION: is_pinned must not exist in v28 schema");
+        assert!(
+            !has_before,
+            "PRECONDITION: is_pinned must not exist in v28 schema"
+        );
 
         // Act — first call adds the column.
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
         // Assert: column now exists and is NOT NULL with default 0.
         let has_after: bool = conn.query_row(
             "SELECT COUNT(*) > 0 FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
             [], |row| row.get(0),
         ).unwrap();
-        assert!(has_after, "is_pinned column must exist after safety-net call");
+        assert!(
+            has_after,
+            "is_pinned column must exist after safety-net call"
+        );
 
-        let notnull: i64 = conn.query_row(
-            "SELECT \"notnull\" FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(notnull, 1, "is_pinned must be NOT NULL — pinning is a known boolean state");
+        let notnull: i64 = conn
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            notnull, 1,
+            "is_pinned must be NOT NULL — pinning is a known boolean state"
+        );
 
         let default_value: Option<String> = conn.query_row(
             "SELECT \"dflt_value\" FROM pragma_table_info('agent_nodes') WHERE name = 'is_pinned'",
             [], |row| row.get(0),
         ).unwrap();
-        assert_eq!(default_value.as_deref(), Some("0"),
-            "is_pinned default must be 0 so pre-v29 rows read back as unpinned");
+        assert_eq!(
+            default_value.as_deref(),
+            Some("0"),
+            "is_pinned default must be 0 so pre-v29 rows read back as unpinned"
+        );
 
         // Pre-existing v28 row survives and reads back as unpinned.
-        let pinned_existing: i64 = conn.query_row(
-            "SELECT is_pinned FROM agent_nodes WHERE name = 'preexisting'",
-            [], |row| row.get(0),
-        ).unwrap();
+        let pinned_existing: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM agent_nodes WHERE name = 'preexisting'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(pinned_existing, 0, "v28 row must default to is_pinned = 0");
 
         // A new row can be pinned explicitly via the column writer (ticket
@@ -1127,25 +1432,31 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             "INSERT INTO agent_nodes (mesh_id, name, path, is_pinned, created_at)
              VALUES (1, 'pinned', '/p2', 1, '2020-01-02T00:00:00Z')",
             [],
-        ).unwrap();
-        let pinned: i64 = conn.query_row(
-            "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
-            [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let pinned: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(pinned, 1, "explicit is_pinned = 1 must persist");
 
         // Idempotent: a second call must not error (the column already
         // exists) and must not corrupt existing data.
-        crate::db::migrations::evolve_to(
-            crate::db::migrations::SCHEMA_VERSION,
-            &conn,
-        )
-        .unwrap();
-        let pinned_after: i64 = conn.query_row(
-            "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(pinned_after, 1, "second safety-net call must not flip existing data");
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let pinned_after: i64 = conn
+            .query_row(
+                "SELECT is_pinned FROM agent_nodes WHERE name = 'pinned'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pinned_after, 1,
+            "second safety-net call must not flip existing data"
+        );
     }
 
     /// `set_agent_node_pinned` must (a) flip the column, (b) round-trip
@@ -1186,14 +1497,20 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
             ",
-        ).unwrap();
-        let id: i64 = conn.query_row(
-            "SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
 
         // Pin → returns 1, node reads back as pinned.
         let updated = crate::db::set_agent_node_pinned_inner(&conn, id, true).unwrap();
-        assert_eq!(updated, 1, "set_agent_node_pinned must report 1 row updated");
+        assert_eq!(
+            updated, 1,
+            "set_agent_node_pinned must report 1 row updated"
+        );
         let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
         assert!(node.is_pinned, "post-write is_pinned must be true");
 
@@ -1251,10 +1568,13 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             INSERT INTO agent_nodes (mesh_id, name, path, created_at)
                 VALUES (1, 'n', '/n', '2020-01-01T00:00:00Z');
             ",
-        ).unwrap();
-        let id: i64 = conn.query_row(
-            "SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| row.get(0),
-        ).unwrap();
+        )
+        .unwrap();
+        let id: i64 = conn
+            .query_row("SELECT id FROM agent_nodes WHERE name = 'n'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
 
         // First toggle: 0 → 1, returns Some(true).
         let after_first = crate::db::toggle_agent_node_pinned_inner(&conn, id).unwrap();
@@ -1264,14 +1584,24 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
 
         // Second toggle: 1 → 0, returns Some(false).
         let after_second = crate::db::toggle_agent_node_pinned_inner(&conn, id).unwrap();
-        assert_eq!(after_second, Some(false), "second toggle must flip back to false");
+        assert_eq!(
+            after_second,
+            Some(false),
+            "second toggle must flip back to false"
+        );
         let node = crate::db::get_agent_node_by_id_inner(&conn, id).unwrap();
-        assert!(!node.is_pinned, "post-second-toggle row must read as unpinned");
+        assert!(
+            !node.is_pinned,
+            "post-second-toggle row must read as unpinned"
+        );
 
         // Unknown id → None. The `#[command]` wrapper surfaces this as
         // an error string rather than fabricating a flip.
         let after_unknown = crate::db::toggle_agent_node_pinned_inner(&conn, 99999).unwrap();
-        assert_eq!(after_unknown, None, "unknown id must return None, not Some(false)");
+        assert_eq!(
+            after_unknown, None,
+            "unknown id must return None, not Some(false)"
+        );
     }
 
     /// v35 — `agent_nodes.signal_health` (issue #1364 §3): a v34-shaped DB
@@ -1316,7 +1646,10 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
             [], |row| row.get(0),
         )
         .unwrap();
-        assert!(!has_before, "PRECONDITION: signal_health must not exist in v34 schema");
+        assert!(
+            !has_before,
+            "PRECONDITION: signal_health must not exist in v34 schema"
+        );
 
         // Act — the always-run column walk adds it.
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
@@ -1330,28 +1663,41 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
 
         // A pre-v35 row reads back as None (no provisioning outcome yet).
         let node = crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap();
-        assert_eq!(node.signal_health, None, "pre-v35 row must read as None health");
+        assert_eq!(
+            node.signal_health, None,
+            "pre-v35 row must read as None health"
+        );
 
         // The writer round-trips ok/degraded/unavailable and clears to None.
         use crate::agent::session_lifecycle::SignalHealth;
         crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Ok)).unwrap();
         assert_eq!(
-            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            crate::db::get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .signal_health,
             Some(SignalHealth::Ok)
         );
-        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Degraded)).unwrap();
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Degraded))
+            .unwrap();
         assert_eq!(
-            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            crate::db::get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .signal_health,
             Some(SignalHealth::Degraded)
         );
-        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Unavailable)).unwrap();
+        crate::db::update_agent_node_signal_health_inner(&conn, 1, Some(SignalHealth::Unavailable))
+            .unwrap();
         assert_eq!(
-            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            crate::db::get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .signal_health,
             Some(SignalHealth::Unavailable)
         );
         crate::db::update_agent_node_signal_health_inner(&conn, 1, None).unwrap();
         assert_eq!(
-            crate::db::get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            crate::db::get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .signal_health,
             None,
             "clearing to None must round-trip"
         );
@@ -1454,8 +1800,14 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(!has_mesh_before, "PRECONDITION: meshes.worktree_directory must not exist");
-        assert!(!has_node_before, "PRECONDITION: agent_nodes.worktree_path must not exist");
+        assert!(
+            !has_mesh_before,
+            "PRECONDITION: meshes.worktree_directory must not exist"
+        );
+        assert!(
+            !has_node_before,
+            "PRECONDITION: agent_nodes.worktree_path must not exist"
+        );
 
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
@@ -1473,8 +1825,14 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(has_mesh_after, "meshes.worktree_directory must exist after evolve_to");
-        assert!(has_node_after, "agent_nodes.worktree_path must exist after evolve_to");
+        assert!(
+            has_mesh_after,
+            "meshes.worktree_directory must exist after evolve_to"
+        );
+        assert!(
+            has_node_after,
+            "agent_nodes.worktree_path must exist after evolve_to"
+        );
 
         // Pre-v37 rows read back as None (inherit / legacy fallback).
         let mesh = crate::db::get_mesh_by_id_inner(&conn, 1).unwrap();
@@ -1493,7 +1851,9 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
         );
         crate::db::set_mesh_worktree_directory_inner(&conn, 1, Some("   ")).unwrap();
         assert_eq!(
-            crate::db::get_mesh_by_id_inner(&conn, 1).unwrap().worktree_directory,
+            crate::db::get_mesh_by_id_inner(&conn, 1)
+                .unwrap()
+                .worktree_directory,
             None,
             "blank clears to inherit"
         );
@@ -1735,7 +2095,11 @@ fn evolve_to_column_walk_is_idempotent_and_table_aware() {
 fn historic_continued_review_circuits_collapse_into_the_original_circuit() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     crate::db::init_schema(&conn).unwrap();
-    conn.execute("INSERT INTO meshes (id,name,path) VALUES (900,'review migration','/tmp/review-migration')", []).unwrap();
+    conn.execute(
+        "INSERT INTO meshes (id,name,path) VALUES (900,'review migration','/tmp/review-migration')",
+        [],
+    )
+    .unwrap();
     conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,graph_json,is_preset) VALUES (901,900,'Review','{}',1)", []).unwrap();
     for id in [902, 903] {
         conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,description,graph_json,is_preset)
@@ -1753,20 +2117,55 @@ fn historic_continued_review_circuits_collapse_into_the_original_circuit() {
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     for id in [911, 912, 913] {
-        let circuit_id: i64 = conn.query_row("SELECT circuit_id FROM autopilot_circuit_runs WHERE id=?1", [id], |row| row.get(0)).unwrap();
+        let circuit_id: i64 = conn
+            .query_row(
+                "SELECT circuit_id FROM autopilot_circuit_runs WHERE id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(circuit_id, 901);
     }
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id=900", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
-    assert_eq!(conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=913", [], |row| row.get::<_, String>(0)).unwrap(), "{\"frozen\":true}");
-    let context: String = conn.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id=913", [], |row| row.get(0)).unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&context).unwrap()["recovery.from_run_id"], "912");
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id=900",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=913",
+            [],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        "{\"frozen\":true}"
+    );
+    let context: String = conn
+        .query_row(
+            "SELECT context_json FROM autopilot_circuit_runs WHERE id=913",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&context).unwrap()["recovery.from_run_id"],
+        "912"
+    );
 }
 
 #[test]
 fn continued_review_migration_skips_runs_with_a_missing_original_circuit() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     crate::db::init_schema(&conn).unwrap();
-    conn.execute("INSERT INTO meshes (id,name,path) VALUES (920,'orphaned review','/tmp/orphaned-review')", []).unwrap();
+    conn.execute(
+        "INSERT INTO meshes (id,name,path) VALUES (920,'orphaned review','/tmp/orphaned-review')",
+        [],
+    )
+    .unwrap();
     conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,description,graph_json,is_preset)
         VALUES (921,920,'Continued review','Continue a failed review on its retained worktree','{}',0)", []).unwrap();
     conn.pragma_update(None, "foreign_keys", "OFF").unwrap();
@@ -1779,6 +2178,15 @@ fn continued_review_migration_skips_runs_with_a_missing_original_circuit() {
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
 
-    let circuit_id: i64 = conn.query_row("SELECT circuit_id FROM autopilot_circuit_runs WHERE id=923", [], |row| row.get(0)).unwrap();
-    assert_eq!(circuit_id, 921, "the run stays on its legacy circuit when the original circuit row is gone");
+    let circuit_id: i64 = conn
+        .query_row(
+            "SELECT circuit_id FROM autopilot_circuit_runs WHERE id=923",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        circuit_id, 921,
+        "the run stays on its legacy circuit when the original circuit row is gone"
+    );
 }

@@ -28,10 +28,10 @@
 //! [`CircuitBlueprintKind`] AND an entry to [`BUILT_IN_CATALOG`] in the
 //! same change. The drift gate ensures neither side gets forgotten.
 
+use super::model::CircuitTriggerKind;
 use super::model::{
     CircuitBlueprintKind, CircuitGraph, CircuitNodeKind, EdgeCondition, StepOutcome,
 };
-use super::model::CircuitTriggerKind;
 
 /// One per-blueprint contract entry. The catalog iterates these and
 /// exercises every field against the canonical builder so a drift in any
@@ -117,12 +117,14 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "wrapup_retry",
             "wrapup_correction",
             "reviewer",
+            "review_round",
             "review_classifier",
             "follow_feedback",
-            "close_reviewer",
             "feedback_classifier",
             "review_retry",
+            "re_review",
             "close_approved",
+            "merge",
             "review_exhausted",
             "review_blocked",
             "complete",
@@ -130,7 +132,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
         required_edges: &[
             ("trigger", "collaborator_gate", EdgeCondition::Always),
             ("collaborator_gate", "implementer", EdgeCondition::Always),
-            ("implementer", "implementation_classifier", EdgeCondition::Always),
+            (
+                "implementer",
+                "implementation_classifier",
+                EdgeCondition::Always,
+            ),
             // LLM classifier routes Completed → finish prompt.
             (
                 "implementation_classifier",
@@ -159,26 +165,42 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "reviewer",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
-            ("reviewer", "review_classifier", EdgeCondition::Always),
+            ("reviewer", "review_round", EdgeCondition::Always),
+            ("review_round", "review_classifier", EdgeCondition::Always),
             (
                 "review_classifier",
                 "follow_feedback",
                 EdgeCondition::OnOutcome(StepOutcome::Working),
             ),
-            ("review_classifier", "close_approved", EdgeCondition::OnOutcome(StepOutcome::Completed)),
-            ("review_classifier", "review_blocked", EdgeCondition::OnOutcome(StepOutcome::Blocked)),
-            ("close_approved", "complete", EdgeCondition::Always),
-            ("follow_feedback", "close_reviewer", EdgeCondition::Always),
-            ("close_reviewer", "feedback_classifier", EdgeCondition::Always),
+            (
+                "review_classifier",
+                "close_approved",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            (
+                "review_classifier",
+                "review_blocked",
+                EdgeCondition::OnOutcome(StepOutcome::Blocked),
+            ),
+            // Approval closes the reviewer, then hands the PR to the
+            // implementation agent to squash-merge.
+            ("close_approved", "merge", EdgeCondition::Always),
+            ("merge", "complete", EdgeCondition::Always),
+            (
+                "follow_feedback",
+                "feedback_classifier",
+                EdgeCondition::Always,
+            ),
             (
                 "feedback_classifier",
                 "review_retry",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             // Approval and retry exhaustion have separate terminal paths.
+            // Later rounds re-prompt the reviewer that is still open.
             (
                 "review_retry",
-                "finish",
+                "re_review",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             (
@@ -186,6 +208,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "review_exhausted",
                 EdgeCondition::OnOutcome(StepOutcome::Failed),
             ),
+            ("re_review", "review_round", EdgeCondition::Always),
         ],
         min_concurrency_limit: 2,
         default_concurrency_limit: 2,
@@ -212,6 +235,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 node_id: "follow_feedback",
                 must_contain: "{{node.reviewer.output}}",
             },
+            // Approval asks the implementation agent to squash-merge this PR.
+            PromptAssertion {
+                node_id: "merge",
+                must_contain: "gh pr merge {{pr.number}} --squash",
+            },
         ],
     },
 ];
@@ -224,7 +252,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
 /// `prompt` argument as the inject target; the review blueprint pins
 /// the trigger label that the implementation agent will read from
 /// `{{issue.*}}`.
-pub fn build_graph(blueprint: CircuitBlueprintKind, prompt: &str, trigger_label: &str) -> CircuitGraph {
+pub fn build_graph(
+    blueprint: CircuitBlueprintKind,
+    prompt: &str,
+    trigger_label: &str,
+) -> CircuitGraph {
     match blueprint {
         CircuitBlueprintKind::WalkingSkeleton => CircuitGraph::walking_skeleton(prompt),
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
@@ -383,15 +415,21 @@ mod tests {
         // GitHub-issue-label, and GitHub-PR-label without re-validation.
         let triggers = [
             CircuitNodeKind::Manual,
-            CircuitNodeKind::Interval { interval_seconds: 60 },
-            CircuitNodeKind::GithubIssueLabel { label: "buildmesh:run".into() },
-            CircuitNodeKind::GithubPullRequestLabel { label: "review-me".into() },
+            CircuitNodeKind::Interval {
+                interval_seconds: 60,
+            },
+            CircuitNodeKind::GithubIssueLabel {
+                label: "buildmesh:run".into(),
+            },
+            CircuitNodeKind::GithubPullRequestLabel {
+                label: "review-me".into(),
+            },
         ];
         for trigger in triggers {
             let graph = CircuitGraph::triggered_skeleton("p", trigger.clone());
-            graph
-                .validate()
-                .unwrap_or_else(|err| panic!("walking_skeleton rejected trigger {trigger:?}: {err}"));
+            graph.validate().unwrap_or_else(|err| {
+                panic!("walking_skeleton rejected trigger {trigger:?}: {err}")
+            });
         }
     }
 
@@ -466,7 +504,9 @@ mod tests {
     #[test]
     fn review_blueprint_implementation_agent_receives_issue_body_as_first_turn() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let implementer = graph.node("implementer").expect("implementer node required");
+        let implementer = graph
+            .node("implementer")
+            .expect("implementer node required");
         match &implementer.kind {
             CircuitNodeKind::SpawnAgentNode { prompt, .. } => {
                 assert!(
@@ -494,30 +534,52 @@ mod tests {
         let open_pr_failed: Vec<&super::super::model::CircuitEdge> = graph
             .edges
             .iter()
-            .filter(|e| e.from == "open_pr"
-                && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed)))
+            .filter(|e| {
+                e.from == "open_pr"
+                    && matches!(e.condition, EdgeCondition::OnOutcome(StepOutcome::Failed))
+            })
             .collect();
         assert_eq!(open_pr_failed.len(), 1);
         assert_eq!(open_pr_failed[0].to, "wrapup_retry");
     }
 
     #[test]
-    fn review_blueprint_closes_reviewer_node_on_feedback_path() {
+    fn review_blueprint_keeps_reviewer_open_until_approval_then_hands_off_the_merge() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let follow_to_close: Vec<&super::super::model::CircuitEdge> = graph
-            .edges
-            .iter()
-            .filter(|e| e.from == "follow_feedback" && e.to == "close_reviewer")
-            .collect();
-        assert_eq!(follow_to_close.len(), 1);
-        let close = graph
-            .node("close_reviewer")
-            .expect("close_reviewer required by contract");
-        match &close.kind {
+        assert!(graph.node("close_reviewer").is_none());
+        assert_eq!(
+            graph.children("follow_feedback"),
+            vec!["feedback_classifier".to_string()]
+        );
+        match &graph
+            .node("re_review")
+            .expect("re_review required by contract")
+            .kind
+        {
+            CircuitNodeKind::InjectPty { target_node_id, .. } => {
+                assert_eq!(target_node_id.as_deref(), Some("reviewer"));
+            }
+            other => panic!("re_review must be InjectPty, got {other:?}"),
+        }
+        match &graph
+            .node("close_approved")
+            .expect("close_approved required by contract")
+            .kind
+        {
             CircuitNodeKind::CloseAgentNode { target_node_id } => {
                 assert_eq!(target_node_id.as_deref(), Some("reviewer"));
             }
-            other => panic!("close_reviewer must be CloseAgentNode, got {other:?}"),
+            other => panic!("close_approved must be CloseAgentNode, got {other:?}"),
+        }
+        match &graph
+            .node("merge")
+            .expect("merge required by contract")
+            .kind
+        {
+            CircuitNodeKind::InjectPty { target_node_id, .. } => {
+                assert_eq!(target_node_id.as_deref(), Some("implementer"));
+            }
+            other => panic!("merge must be InjectPty, got {other:?}"),
         }
     }
 
@@ -551,7 +613,10 @@ mod tests {
             .expect("collaborator_gate required by contract");
         match &gate.kind {
             CircuitNodeKind::CollaboratorCheck { require_approval } => {
-                assert!(*require_approval, "collaborator_gate must require human approval");
+                assert!(
+                    *require_approval,
+                    "collaborator_gate must require human approval"
+                );
             }
             other => panic!("collaborator_gate must be CollaboratorCheck, got {other:?}"),
         }
@@ -571,16 +636,30 @@ mod tests {
         for node in &graph.nodes {
             match node.kind {
                 CircuitNodeKind::RetryLimit { .. } => saw_retry = true,
-                CircuitNodeKind::CollaboratorCheck { require_approval: true } => saw_collab = true,
+                CircuitNodeKind::CollaboratorCheck {
+                    require_approval: true,
+                } => saw_collab = true,
                 CircuitNodeKind::LlmTurnClassifier { .. } => saw_classifier += 1,
                 CircuitNodeKind::AnyCompleted | CircuitNodeKind::AllCompleted => saw_join += 1,
                 _ => {}
             }
         }
-        assert!(saw_retry, "review blueprint must bound its loops with a RetryLimit");
-        assert!(saw_collab, "review blueprint must gate the implementation on human approval");
-        assert!(saw_classifier >= 2, "review blueprint needs at least 2 LLM classifiers");
-        assert!(saw_join >= 1, "review blueprint needs at least one join (finish_round)");
+        assert!(
+            saw_retry,
+            "review blueprint must bound its loops with a RetryLimit"
+        );
+        assert!(
+            saw_collab,
+            "review blueprint must gate the implementation on human approval"
+        );
+        assert!(
+            saw_classifier >= 2,
+            "review blueprint needs at least 2 LLM classifiers"
+        );
+        assert!(
+            saw_join >= 1,
+            "review blueprint needs at least one join (finish_round)"
+        );
     }
 
     #[test]
@@ -628,14 +707,22 @@ mod tests {
         for contract in BUILT_IN_CATALOG {
             for assertion in contract.prompt_assertions {
                 let graph = build_graph(contract.marker, "p", "buildmesh:run");
-                let node = graph
-                    .node(assertion.node_id)
-                    .unwrap_or_else(|| panic!("{:?}: prompt assertion targets missing node '{}'", contract.marker, assertion.node_id));
+                let node = graph.node(assertion.node_id).unwrap_or_else(|| {
+                    panic!(
+                        "{:?}: prompt assertion targets missing node '{}'",
+                        contract.marker, assertion.node_id
+                    )
+                });
                 let prompt = match &node.kind {
                     CircuitNodeKind::SpawnAgentNode { prompt, .. }
                     | CircuitNodeKind::InjectPty { prompt, .. }
-                    | CircuitNodeKind::Notify { message: prompt, .. } => prompt.as_str(),
-                    CircuitNodeKind::GithubAction { comment: Some(comment), .. } => comment.as_str(),
+                    | CircuitNodeKind::Notify {
+                        message: prompt, ..
+                    } => prompt.as_str(),
+                    CircuitNodeKind::GithubAction {
+                        comment: Some(comment),
+                        ..
+                    } => comment.as_str(),
                     other => panic!(
                         "{:?}: prompt assertion on '{}' targets a non-prompt node kind: {other:?}",
                         contract.marker, assertion.node_id

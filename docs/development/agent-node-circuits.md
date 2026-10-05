@@ -64,14 +64,31 @@ activity tabs. Selecting a review activity retargets the header actions,
 terminal, input, and changes to that reviewer; the source task title remains
 stable. The All sessions menu remains available when the card is narrow.
 
+Both flows review a published pull request. The title-bar preset first asks the
+source to commit, push and open a pull request (`publish`), and waits for that
+turn's `BUILDMESH_HANDOFF_V1` result; a blocked publication waits for a person to
+approve continuing. The issue-driven blueprint already requires the
+implementer's pull request before its reviewer is spawned.
+
 Review findings are returned through the circuit run's existing feedback step
-to the source agent. The source's terminal remains the place where that agent
-receives the requested fixes, while the reviewer report remains available in
-the run history and on the reviewer activity. Both flows use explicit approval,
-changes-requested, and blocked verdicts. Only changes-requested reports start
-a fix round. A blocked or exhausted run preserves the reviewer checkpoint,
-including its association and worktree, for recovery; cleanup stops its live
-process and is retryable rather than deleting the review evidence.
+to the source agent, which commits and pushes its fixes. The source's terminal
+remains the place where that agent receives the requested fixes, while the
+reviewer report remains available in the run history and on the reviewer
+activity. The reviewer is spawned once per run: the round limit's loop
+re-enters at `re_review`, which prompts the same open reviewer to re-check its
+earlier findings, and a `review_round` join feeds either turn to the verdict
+gate. Both flows use explicit approval, changes-requested, and blocked verdicts.
+Only changes-requested reports start a fix round. A blocked or exhausted run
+preserves the reviewer checkpoint, including its association and worktree, for
+recovery; cleanup stops its live process and is retryable rather than deleting
+the review evidence.
+
+Approval closes the reviewer, then `merge` asks the source to squash-merge the
+pull request (marking a draft ready and waiting for required checks first). The
+run completes once that prompt is delivered: it does not wait for the merge.
+A completed run retires only the agents its graph closed, so the implementation
+agent stays open, and the circuit stops observing every agent it referenced.
+Failed and cancelled runs still retire their owned agents.
 
 By default, reviewers inherit the reviewed agent's harness. The app-wide
 **Reviewer provider** setting in Settings can override that fallback for
@@ -109,6 +126,15 @@ On startup, inactive stock review graphs are upgraded to this contract while
 preserving spawn settings and round limits. Customized issue-review prompts
 or topology are left intact. Active runs retain their saved graph; their
 upgrade is reconsidered on a later startup after they finish.
+
+The publication flow (publish, one reviewer, merge hand-off) reaches stored
+graphs through a one-time startup upgrade of the built-in preset and of
+issue-review circuits whose topology is exactly the previous stock shape.
+Edited prompts and reviewer settings are kept; stock feedback and approval texts
+move to their new wording. Each existing run is pinned to the graph it started
+with first, so active runs and failed-run recovery are unaffected. Review-derived
+copies are user-owned and keep their shape; the previous shape still satisfies
+the local review contract for continuation.
 
 Runs use the existing Circuits queue, capacity limits, run history, pause,
 approval, and cancellation controls. A repeated start while the source already

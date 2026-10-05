@@ -83,7 +83,26 @@ describe('run diagnostics', () => {
         run: { ...detail(49, 'failed').run, context_json: '{"review.extended":"1"}' },
       };
       expect(reviewCircuitForRun(extended, { verdictNodeId: 'review_classifier', retryNodeIds: ['review_retry'] }))
-        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], supportsContinuation: true });
+        .toEqual({ verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: 'merge', supportsContinuation: true });
+    });
+    it('says the agent was asked to merge only when the run delivered that request', () => {
+      const graph = { version: 3, nodes: [
+        { id: 'review_classifier', type: { type: 'review_verdict', target_node_id: 'reviewer' } },
+        { id: 'review_retry', type: { type: 'retry_limit', max_retries: 3 } },
+        { id: 'merge', type: { type: 'inject_pty', prompt: 'Squash and merge', target_node_id: 'implementer' } },
+      ], edges: [] };
+      const reviewCircuit = reviewCircuitMetadata({ graph_json: JSON.stringify(graph) });
+      expect(reviewCircuit?.mergeNodeId).toBe('merge');
+      const step = (node_id: string) => ({ id: 1, run_id: 50, node_id, agent_node_id: null,
+        parent_agent_node_id: null, status: 'completed', attempt: 1, outcome: 'completed',
+        error_message: null, started_at: null, completed_at: null });
+      const handedOff = { ...detail(50, 'completed'), steps: [step('review_classifier'), step('merge')] };
+      expect(reviewResult(handedOff, reviewCircuit)?.label).toBe('Review approved');
+      expect(reviewResult(handedOff, reviewCircuit)?.detail).toBe(
+        'The implementation agent was asked to squash-merge the pull request and was handed back. Check its report to confirm the merge.');
+      // A run approved before the merge hand-off existed keeps the manual advice.
+      const historical = { ...handedOff, steps: [step('review_classifier')] };
+      expect(reviewResult(historical, reviewCircuit)?.detail).toBe('Check the current PR head and required checks before merging.');
     });
     it('keeps historically completed but exhausted reviews in History (not Activity) for recovery', () => {
       const run = detail(48, 'completed');
