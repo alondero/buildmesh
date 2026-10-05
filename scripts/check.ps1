@@ -21,8 +21,12 @@
   Situational escalations NOT applied by default (add the flag if you hit them):
     -CleanRust         cargo clean -p buildmesh first (incremental stale binary:
                        new #[test] fns don't run, count looks unchanged)
-    -SerialRust        cargo test -- --test-threads=1 (OnceCell/static Mutex tests
-                       self-deadlock or interfere when run in parallel)
+    -SerialRust        cargo test -- --test-threads=1. Diagnostic only, not a
+                       fix: every DB-backed test installs its own database for
+                       its own thread (issue #2048), so the suite is
+                       parallel-safe. Reach for this to tell an ordering-
+                       dependent failure (a process-global keyed by an id that
+                       two tests can now share) apart from a real one.
 
 .PARAMETER Target
   unit | integration | rust | docs | all | all-ts  (default: all)

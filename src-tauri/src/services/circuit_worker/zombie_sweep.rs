@@ -462,7 +462,7 @@ mod tests {
     /// the lock is still held.
     #[test]
     fn notify_dispatches_after_the_writer_lock_is_released() {
-        db::test_support::ensure_db_for_tests();
+        let _db = db::test_support::isolated();
         let mesh = db::create_mesh("reap-global", "/tmp/reap-global").unwrap();
         let node = db::create_agent_node(
             mesh.id,
@@ -509,7 +509,7 @@ mod tests {
     /// A node that is not `running` is not transitioned and is not announced.
     #[test]
     fn no_notification_when_nothing_is_reaped() {
-        db::test_support::ensure_db_for_tests();
+        let _db = db::test_support::isolated();
         let mesh = db::create_mesh("reap-global-noop", "/tmp/reap-global-noop").unwrap();
         let node = db::create_agent_node(
             mesh.id,

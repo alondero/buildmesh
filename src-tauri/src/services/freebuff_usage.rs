@@ -731,12 +731,15 @@ mod tests {
         // tempdir so the test is hermetic regardless of the caller's
         // actual XDG_CONFIG_HOME (production code reads it via
         // `env::var_os`).
+        // The process environment is shared state: this mutation has to
+        // exclude every other test that mutates it *and* every test that
+        // snapshots it, so it takes the one crate-wide lock (issue #2048).
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let previous = env::var_os("XDG_CONFIG_HOME");
-        // SAFETY: single-threaded test run (the env var mutation
-        // would race with parallel tests; the test harness serialises
-        // env-mutating tests via static locks where used). Setting
-        // before read and restoring after keeps the cross-test
+        // SAFETY: `ENV_LOCK` above excludes every other test that touches the
+        // process environment, so no other thread reads or writes it here.
+        // Setting before read and restoring after keeps the cross-test
         // contract.
         unsafe { env::set_var("XDG_CONFIG_HOME", dir.path()) };
         let paths = freebuff_credential_paths();

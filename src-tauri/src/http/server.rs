@@ -644,6 +644,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn listener_shutdown_closes_root_and_device_websockets_but_not_other_listeners() {
         use crate::http::ws_ticket::{self, WsTarget};
         use futures_util::StreamExt;
@@ -659,7 +664,7 @@ mod tests {
             surface: "events".into(),
             node_id: None,
         };
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let device_id = {
             let conn = crate::db::write_conn();
             crate::db::pair_device_session_inner(&conn, None, None)
@@ -745,9 +750,26 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Serialises this module's tests against the process-global database.
+    ///
+    /// These handlers reach the database from a Tauri-managed thread
+    /// (`commands::run_blocking` / `tauri::async_runtime::spawn`), where the
+    /// `thread_local!` install behind `test_support::isolated` is invisible and
+    /// `adopt` cannot bridge a runtime the test does not own. The lock itself
+    /// lives in `db::test_support` so this module and `http::server` cannot
+    /// drift into two locks guarding one shared database.
+    fn shared_db() -> crate::db::test_support::SharedGlobalDb {
+        crate::db::test_support::shared_global_db()
+    }
+
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn revoked_device_cannot_open_an_already_minted_websocket_ticket() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let id = {
             let conn = crate::db::write_conn();
             crate::db::pair_device_session_inner(&conn, None, None)

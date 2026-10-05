@@ -415,11 +415,23 @@ jobs:
   # false` for the same reason ??? a sibling's failure must not cancel the
   # evidence.
   #
-  # `--test-threads=1` throughout: CLAUDE.md documents the `db::` tests as
-  # sharing one process-global database and reporting phantom failures (and
-  # wedging) in parallel, and a gate that cries wolf trains people to re-run
-  # it. The tested guard (scripts/ci/run-guarded.mjs) turns a hang into a step
+  # Default thread count throughout: every DB-backed test installs a private
+  # database for its own thread (issue #2048), so the suite is parallel-safe
+  # and forcing one test at a time would only throw away the runner's cores.
+  # The tested guard (scripts/ci/run-guarded.mjs) turns a hang into a step
   # failure with a log.
+  #
+  # Shard count re-evaluated after #2048, and deliberately left at seven. The
+  # split was chosen when each shard ran its tests serially (the `services`
+  # shard alone was ~100s); multi-threaded, the seven shards now measure
+  # 13-39s each (~173s of test time in total, slowest
+  # `git-env-preferences` at 39s). That puts per-shard setup (~30-50s of apt,
+  # toolchain and cache restore) back on the critical path rather than the
+  # tests, so consolidating into fewer, larger shards would *lengthen* the
+  # critical path (~40s + 173/k) instead of shortening it. The #1520
+  # property - a lost runner costs one group, not the suite - is also worth
+  # more now that the groups are cheap. Revisit if the slowest shard grows
+  # past the setup cost again.
   rust-tests:
     name: Rust tests (${{ matrix.shard.label }})
     needs: rust-build
@@ -513,7 +525,7 @@ jobs:
             --kill-grace-seconds 120 \
             --log "cargo-${{ matrix.shard.label }}.log" \
             --label "The ${{ matrix.shard.label }} shard" \
-            -- cargo test --locked --lib -- --test-threads=1 ${{ matrix.shard.args }}
+            -- cargo test --locked --lib -- ${{ matrix.shard.args }}
         working-directory: src-tauri
 
       - name: Upload the shard log
@@ -596,12 +608,12 @@ jobs:
             --log cargo-nonshard-tests.log \
             --label "Rust export, documentation, and integration tests" \
             -- bash -euo pipefail -c '
-              cargo test --locked --lib export_bindings -- --test-threads=1
-              cargo test --locked --doc -- --test-threads=1
+              cargo test --locked --lib export_bindings
+              cargo test --locked --doc
               for test_file in tests/*.rs; do
                 test_target="${test_file##*/}"
                 test_target="${test_target%.rs}"
-                cargo test --locked --test "$test_target" -- --test-threads=1
+                cargo test --locked --test "$test_target"
               done
             '
         working-directory: src-tauri
@@ -804,10 +816,10 @@ jobs:
 
       - name: Verify Windows ConPTY frame ordering
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames -- --test-threads=1
+        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames
         working-directory: src-tauri
 
       - name: Verify Windows background inference
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib agent::background::tests -- --test-threads=1
+        run: cargo test --locked --lib agent::background::tests
         working-directory: src-tauri

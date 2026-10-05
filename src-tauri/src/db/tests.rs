@@ -1013,16 +1013,10 @@ fn ensure_mesh_default_provider_normalized_is_idempotent() {
 /// a round-trip read must still see the rows we wrote.
 #[test]
 fn write_conn_recovers_from_poison() {
-    // The global DB must be initialized before the test can lock it.
-    // Other db-tests use a per-test temp file; we follow that pattern
-    // so this test stays self-contained and cleans up after itself.
-    let test_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let temp_path =
-        std::env::temp_dir().join(format!("buildmesh_issue_1224_poison_test_{}.db", test_id));
-    crate::db::init(&temp_path).expect("test setup: db::init must succeed");
+    // A per-test database (issue #2048). Poisoning the process-global
+    // `OnceCell` instead would leave a poisoned writer installed for every
+    // other test in the binary — the shared state this seam exists to remove.
+    let _db = crate::db::test_support::isolated();
 
     // Poison the singleton. `catch_unwind` keeps the test binary alive;
     // the panic payload is the assertion that the inner path panicked.
@@ -1065,15 +1059,9 @@ fn write_conn_recovers_from_poison() {
         "DB writes must survive the poison (issue #1224)"
     );
 
-    // Tidy so the probe table and the temp file do not leak into
-    // other tests. The OnceCell is process-wide, so a sibling test
-    // that calls `init` against the same path would otherwise race
-    // with us — a unique path per run keeps the test re-orderable.
-    crate::db::write_conn()
-        .execute("DROP TABLE IF EXISTS issue_1224_poison_probe", [])
-        .unwrap();
-    drop(crate::db::write_conn()); // release the guard before delete
-    std::fs::remove_file(&temp_path).ok();
+    // No cleanup needed: the database is this test's own, so the probe table
+    // it leaves behind dies with the guard and cannot be observed by a sibling
+    // test. That was the point of moving off the process-global database.
 }
 
 /// Issue #1383: hold an uncommitted writer transaction open and require a

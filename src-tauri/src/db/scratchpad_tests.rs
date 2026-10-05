@@ -1,12 +1,10 @@
 //! Tests for the scratch pad DB helpers (`get_mesh_scratchpad_inner`,
 //! `set_mesh_scratchpad`) and the v17 `ensure_mesh_scratchpad` safety net.
 //!
-//! Uses an in-memory SQLite connection rather than the global `DB`
-//! OnceCell, mirroring `migration_tests` and `tests`. The OnceCell
-//! can only be set once per process, so any test file that calls
-//! `db::init` (e.g. `mesh_tests`) has to be run in isolation with
-//! `--test-threads=1` — this file deliberately doesn't, so the whole
-//! suite can run as one `cargo test` invocation.
+//! Uses an in-memory SQLite connection of its own rather than the seam's
+//! per-test database, mirroring `migration_tests` and `tests`. Both approaches
+//! are parallel-safe (issue #2048): this file needs no seam helper because it
+//! only exercises the `_inner(&Connection)` helpers directly.
 
 #[cfg(test)]
 mod tests {

@@ -84,14 +84,25 @@ fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
     }
 }
 
+/// A run whose OpenPr effect is already claimed but uncertain, read by the
+/// recovery tests below. `_db` holds the private database `db::test_support`
+/// installed for this test thread (issue #2048) instead of a process-global
+/// one: every `db::` call in the test body then resolves to this test's own
+/// rows. The fixture owns the guard rather than this helper because dropping a
+/// local here would uninstall the database before the test body ran.
+///
+/// It is a *file-backed* database on purpose: `reopened_run` below simulates a
+/// crash restart by reopening the database by path, which only means anything
+/// if there is a file to reopen.
 struct OpenPrFixture {
+    _db: crate::db::test_support::IsolatedDbGuard,
     active: crate::db::ActiveCircuitRun,
     view: RunView,
     run_id: i64,
 }
 
 fn open_pr_fixture() -> OpenPrFixture {
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated_file();
     let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
     let mesh = crate::db::create_mesh(
@@ -202,6 +213,7 @@ fn open_pr_fixture() -> OpenPrFixture {
         }],
     };
     OpenPrFixture {
+        _db,
         active,
         view,
         run_id,
@@ -296,7 +308,12 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     let (finish_tx, finish_rx) = std::sync::mpsc::channel();
     let active = fixture.active.clone();
     let mut view = fixture.view.clone();
+    // The lookup runs on its own thread, and a `thread_local!` database
+    // install does not follow the thread: the worker has to adopt this test's
+    // database or it resolves the process-global one (issue #2048).
+    let lookup_db = fixture._db.handle();
     let lookup = std::thread::spawn(move || {
+        let _adopted = crate::db::test_support::adopt(&lookup_db);
         let event =
             github::reconcile_open_pr_for_worker(&active, &mut view, "open_pr", |_, _, head| {
                 started_tx.send(()).unwrap();
@@ -535,7 +552,11 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     let order_worker = Arc::clone(&order);
     let base_url = endpoint.base_url.clone();
     let thread_active = active.clone();
+    // As above: the dispatch thread adopts this test's database, because the
+    // per-thread install does not follow a spawned thread (issue #2048).
+    let lookup_db = fixture._db.handle();
     let lookup = std::thread::spawn(move || {
+        let _adopted = crate::db::test_support::adopt(&lookup_db);
         // Production orchestration only: `run_github_effect_pass` runs the
         // same batch, snapshot, gates, and dispatch the `execute_effects`
         // loop delegates to (`execute_effects` itself needs a Tauri
@@ -766,15 +787,20 @@ fn dispatch_pull_request_json() -> serde_json::Value {
 /// A run whose OpenPr step is scheduled (implementer completed, open_pr running)
 /// with a claimed GitHub effect — exactly the worker's state just before it
 /// dispatches the create. Holds the mesh temp dir so the recorded mesh path
-/// stays valid for the test's lifetime.
+/// stays valid for the test's lifetime, and `_db` the private database
+/// `db::test_support` installed for this test thread (issue #2048) so the test
+/// body reads this test's own rows. The fixture owns that guard rather than
+/// `dispatch_fixture`, because dropping it inside the helper would uninstall
+/// the database before the test body ran.
 struct DispatchFixture {
+    _db: crate::db::test_support::IsolatedDbGuard,
     run_id: i64,
     view: RunView,
     _dir: tempfile::TempDir,
 }
 
 fn dispatch_fixture() -> DispatchFixture {
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated_file();
     let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let dir = tempfile::tempdir().unwrap();
     let mesh = crate::db::create_mesh(
@@ -867,6 +893,7 @@ fn dispatch_fixture() -> DispatchFixture {
     .unwrap();
     let view = running_view(run_id);
     DispatchFixture {
+        _db,
         run_id,
         view,
         _dir: dir,

@@ -1017,8 +1017,7 @@ mod tests {
 
     #[test]
     fn github_feeds_report_unreadable_repository() {
-        let _guard = CREATE_PR_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_blocking_db();
+        let _db = ensure_pr_blocking_db();
         let tmp = TempGitRepo::new();
         let mesh = db::create_mesh("unreadable-github-feed", tmp.path().to_str().unwrap()).unwrap();
         let issues = get_repo_issues_blocking(mesh.id);
@@ -1030,8 +1029,7 @@ mod tests {
 
     #[test]
     fn github_feeds_without_github_origin_remain_empty() {
-        let _guard = CREATE_PR_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_blocking_db();
+        let _db = ensure_pr_blocking_db();
         for origin in [None, Some("https://gitlab.com/example/repo.git")] {
             let (tmp, path) = init_repo_with_commit();
             if let Some(url) = origin {
@@ -1660,7 +1658,14 @@ mod tests {
     impl TempGitRepo {
         fn new() -> Self {
             let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-            let tmp = std::env::temp_dir().join(format!("buildmesh_pr_test_{}", id));
+            // PID-prefixed: `NEXT_ID` is only unique inside one test process,
+            // and the shard runner executes several binaries against the same
+            // temp directory at once.
+            let tmp = std::env::temp_dir().join(format!(
+                "buildmesh_pr_test_{}_{}",
+                std::process::id(),
+                id
+            ));
             Self(tmp)
         }
         fn path(&self) -> &Path { &self.0 }
@@ -2180,23 +2185,10 @@ mod tests {
     // full DB → worktree → GitHub path so a regression in the session
     // translation is caught here rather than at e2e time.
 
-    /// Process-wide serialisation — `db::init` is one-shot and the global
-    /// connection is shared by every test in this binary. Mirrors the
-    /// `PR_TEST_LOCK` pattern in `commands::agent::tests`.
-    static CREATE_PR_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Init the global DB the first time a test needs it. No-op thereafter.
-    fn ensure_pr_blocking_db() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_pr_blocking_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&path);
-            let _ = crate::db::init(&path);
-        });
+    /// Install this test's private database and hand back the guard the test
+    /// body holds for its remaining statements.
+    fn ensure_pr_blocking_db() -> crate::db::test_support::IsolatedDbGuard {
+        crate::db::test_support::isolated()
     }
 
     /// Insert a mesh row pointing at `path` and an agent_node row in
@@ -2288,8 +2280,7 @@ mod tests {
     fn create_pr_blocking_recovers_from_duplicate_create_422() {
         use std::sync::atomic::Ordering;
 
-        let _guard = CREATE_PR_DB_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_blocking_db();
+        let _db = ensure_pr_blocking_db();
 
         let (_tmp, session_id) = make_session_node(
             "pr-blocking-mesh",

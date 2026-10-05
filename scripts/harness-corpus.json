@@ -24,7 +24,7 @@
     "id": "windows-wsl-routing",
     "promise": "Native and WSL launch recipes preserve command arguments",
     "boundary": "Rust spawn recipe quoting; platform independent contract",
-    "gate": { "command": ["cargo", "test", "--locked", "--lib", "agent::spawn_environment::tests::format_powershell_command", "--", "--test-threads=1"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
+    "gate": { "command": ["cargo", "test", "--locked", "--lib", "agent::spawn_environment::tests::format_powershell_command", "--"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
     "remaining": "Installed WSL distribution and native CLI execution need a Windows runtime check."
   },
   {
@@ -38,7 +38,7 @@
     "id": "agent-loss",
     "promise": "Confirmed lost agents are surfaced without reaping uncertain active agents",
     "boundary": "Rust zombie sweep against isolated production DB seams",
-    "gate": { "command": ["cargo", "test", "--locked", "--lib", "services::circuit_worker::zombie_sweep::tests::", "--", "--test-threads=1"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
+    "gate": { "command": ["cargo", "test", "--locked", "--lib", "services::circuit_worker::zombie_sweep::tests::", "--"], "cwd": "src-tauri", "rust": true, "tests": "rust", "minutes": 30 },
     "remaining": "UI notification of an actual killed agent remains a live runtime scenario."
   },
   {
