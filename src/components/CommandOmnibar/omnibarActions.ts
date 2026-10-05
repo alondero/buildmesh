@@ -8,6 +8,10 @@
  * the routing out of the component makes it unit-testable without
  * rendering React and keeps the palette a pure "search + select" surface.
  *
+ * Every Mesh-scoped route — the "Go to Mesh: <name>" entry (#2077) and the
+ * destination routes — starts with the same `selectMeshScope` write, so a
+ * palette action that names a Mesh always resolves the same scope.
+ *
  * Modal opens go through `uiStore` (`cheatsheetOpen` / `appSettingsOpen` /
  * `remoteAccessOpen`), the same source of truth App's `?` key and TitleBar's
  * header buttons already use — no window-event side channel.
@@ -36,6 +40,32 @@ export interface OmnibarActionContext {
   openProbeTab: (tab: ProbeTab) => void;
   /** Optional first-turn prompt for a spawn item (issue #1413). */
   initialPrompt?: string;
+}
+
+/**
+ * The one scope write every Mesh-scoped omnibar route performs (issue #2077):
+ * the "go to Mesh" entry, the Mesh-scoped Probe destinations, and the GitHub
+ * issue/PR routes.
+ *
+ * Selecting the Mesh is the whole action. The canvas follows through the
+ * uiStore mesh→mode subscription and the Mesh-lens Probe destinations follow
+ * the selection itself (#2073 deleted the per-tab pin), so no route here can
+ * leave the two halves of the scope disagreeing — the same one-write contract
+ * the title-bar picker uses.
+ *
+ * Ordering matters for the destination routes: the selection happens BEFORE
+ * the destination opens, because a Mesh-lens destination resolves its subject
+ * from `selectedMeshId`. Opening first would leave it reading the Mesh the
+ * user did not ask for.
+ */
+function selectMeshScope(meshId: number, ctx: OmnibarActionContext): void {
+  const changed = useMeshStore.getState().selectedMeshId !== meshId;
+  useMeshStore.getState().selectMesh(meshId);
+  // No selection change means the mesh→mode subscription cannot fire, so a
+  // cross-Mesh View Mode (Pinned / Filtered / All) is exited here. That is
+  // also the sticky re-click path (#2072): asking for the Mesh already in
+  // scope returns the canvas to its grid instead of doing nothing.
+  if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
 }
 
 /**
@@ -138,12 +168,15 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     return;
   }
   if (id.startsWith('mesh:')) {
+    // The "Go to Mesh: <name>" entry (#2077). Selecting the Mesh is the whole
+    // action: it moves the canvas into that Mesh's grid and retargets the
+    // Mesh-lens Probe destinations, so scope changes without a destination
+    // being opened.
     const meshId = Number(id.slice('mesh:'.length));
     if (!Number.isFinite(meshId)) return;
-    if (!ctx.meshes.some((mesh) => mesh.id === meshId)) return;
-    const changed = useMeshStore.getState().selectedMeshId !== meshId;
-    useMeshStore.getState().selectMesh(meshId);
-    if (!changed) ctx.setViewMode('mesh');
+    const mesh = ctx.meshes.find((item) => item.id === meshId);
+    if (!mesh) return;
+    selectMeshScope(mesh.id, ctx);
     return;
   }
   if (id.startsWith('command:')) {
@@ -198,9 +231,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(meshId)) return;
-    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
-    useMeshStore.getState().selectMesh(mesh.id);
-    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    selectMeshScope(mesh.id, ctx);
     ctx.openProbeTab(tab);
     return;
   }
@@ -217,9 +248,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
-    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
-    useMeshStore.getState().selectMesh(mesh.id);
-    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    selectMeshScope(mesh.id, ctx);
     if (id.startsWith('issue:')) {
       requestIssueNavigation({ meshId: mesh.id, issueNumber: number });
       ctx.openProbeTab('issues');
