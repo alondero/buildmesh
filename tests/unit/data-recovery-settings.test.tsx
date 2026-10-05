@@ -172,8 +172,11 @@ describe('Settings > Data & Diagnostics (issue #1537)', () => {
   it('shows the profile location, schema version, and retention policy', async () => {
     mockBackend();
     const pane = await openPane();
+    // `findByText`, not `getByText`: the pane is lazily loaded and its own
+    // data arrives in an effect after its root element is in the DOM, so the
+    // location is not on screen the instant the pane appears.
     expect(
-      within(pane).getByText('C:/Users/test/AppData/Roaming/dev.buildmesh'),
+      await within(pane).findByText('C:/Users/test/AppData/Roaming/dev.buildmesh'),
     ).toBeTruthy();
     expect(within(pane).getByText(/newest 3 automatic snapshots/i)).toBeTruthy();
     expect(within(pane).getByText(/You currently have 2\./)).toBeTruthy();
