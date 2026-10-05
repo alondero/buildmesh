@@ -501,7 +501,7 @@ jobs:
             --kill-grace-seconds 120 \
             --log "cargo-${{ matrix.shard.label }}.log" \
             --label "The ${{ matrix.shard.label }} shard" \
-            -- cargo test --locked --lib ${{ matrix.shard.args }}
+            -- cargo test --locked --lib -- ${{ matrix.shard.args }}
         working-directory: src-tauri
 
       - name: Upload the shard log
