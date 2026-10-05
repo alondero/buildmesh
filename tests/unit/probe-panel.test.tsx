@@ -296,6 +296,131 @@ describe('ProbePanel', () => {
     expect(await screen.findByLabelText('Search agent history')).toBeTruthy();
     expect(screen.queryByText('This tab\'s content is coming soon.')).toBeNull();
   });
+
+  it('promotes the subject label to a legible weight (issue #2075)', () => {
+    // Disclosure replaced capture in #2073, so the header's subject line is
+    // now the guarantee that a destination's subject does not drift unnoticed
+    // while the user reads a diff or a file tree. The old treatment was a
+    // 12px run in the low-emphasis grey (`text-xs text-text-secondary`)
+    // inherited from the row container — legible on its own, but the quietest
+    // thing in the header.
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const subjectRow = screen.getByTestId('probe-context-subject');
+    const subjectName = screen.getByTestId('probe-context-subject-name');
+
+    expect(subjectName.textContent).toBe('Mesh: demo');
+    expect(subjectName.className).toContain('text-sm');
+    expect(subjectName.className).toContain('font-medium');
+    expect(subjectName.className).toContain('text-text-primary');
+    // The row must no longer carry the muted/secondary run the old treatment
+    // inherited — that inheritance is the specific regression this pins.
+    expect(subjectRow.className).not.toContain('text-text-secondary');
+    expect(subjectRow.className).not.toContain('text-text-muted');
+  });
+
+  it('keeps the destination name heavier than the promoted subject (issue #2075)', () => {
+    // The subject grew to a `text-sm font-medium` line. Without a heavier
+    // title the two header lines would render identically and the header
+    // would stop saying which one is the destination.
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const title = screen.getByTestId('probe-context-title');
+    expect(title.textContent).toBe('Project Files');
+    expect(title.className).toContain('text-sm');
+    expect(title.className).toContain('font-semibold');
+
+    const subjectName = screen.getByTestId('probe-context-subject-name');
+    expect(subjectName.className).not.toContain('font-semibold');
+  });
+
+  it('keeps the mixed-ownership detail legible but subordinate (issue #2075)', () => {
+    // Project Files is the one Mesh-owned destination that follows a focused
+    // Agent Node's Node Working Directory, so this detail is the half of the
+    // disclosure that says WHICH tree is on screen. One step below the subject
+    // it qualifies, and off muted (the #732 load-bearing-label contract).
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    const detail = screen.getByTestId('probe-context-subject-detail');
+    expect(detail.textContent).toBe('· Working tree: agent-1');
+    expect(detail.className).toContain('text-xs');
+    expect(detail.className).toContain('text-text-secondary');
+    expect(detail.className).not.toContain('text-text-muted');
+  });
+
+  it('reports the repository root when no Agent Node in the Mesh is focused (issue #2075)', () => {
+    seedAgentNodes([], null);
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    render(<ProbePanel />);
+
+    expect(screen.getByTestId('probe-context-subject-name').textContent).toBe('Mesh: demo');
+    expect(screen.getByTestId('probe-context-subject-detail').textContent).toBe('· Repository root');
+  });
+
+  it('names the lens, the subject and the mode for every destination kind (issue #2075)', () => {
+    const cases = [
+      // Mesh lens: names the Mesh, and only Project Files carries a detail.
+      { tab: 'files', subject: 'Mesh: demo', detail: '· Working tree: agent-1', mode: 'Following selection' },
+      { tab: 'properties', subject: 'Mesh: demo', detail: null, mode: 'Following selection' },
+      // Agent lens: names the focused node, with its parent Mesh as detail.
+      { tab: 'review', subject: 'Agent: agent-1', detail: '· Mesh: demo', mode: 'Following selection' },
+      // Host lens: no selection, no Mesh name leaking in.
+      { tab: 'usage', subject: 'Host', detail: null, mode: 'Host-wide' },
+    ] as const;
+
+    for (const { tab, subject, detail, mode } of cases) {
+      useUIStore.setState({ probeOpen: true, probeTab: tab });
+      const { unmount } = render(<ProbePanel />);
+
+      expect(screen.getByTestId('probe-context-subject-name').textContent).toBe(subject);
+      expect(screen.getByTestId('probe-context-mode').textContent).toBe(mode);
+      const detailEl = screen.queryByTestId('probe-context-subject-detail');
+      if (detail === null) {
+        expect(detailEl).toBeNull();
+      } else {
+        expect(detailEl?.textContent).toBe(detail);
+      }
+      unmount();
+    }
+  });
+
+  it('long-forms the whole disclosure in the tooltip, so a truncated label cannot hide it (issue #2075)', () => {
+    // The header is legible down to the dock's 240px floor, where the subject
+    // row truncates. Per probe-ui-checklist.md §2 a truncating label must carry
+    // a tooltip that spells the long form — including the mixed-ownership
+    // detail, which is the part a truncated tail would eat first.
+    useUIStore.setState({ probeOpen: true, probeTab: 'files' });
+    const { unmount } = render(<ProbePanel />);
+    expect(screen.getByTestId('probe-context-subject').getAttribute('title'))
+      .toBe('Mesh: demo · Working tree: agent-1');
+    unmount();
+
+    useUIStore.setState({ probeOpen: true, probeTab: 'usage' });
+    render(<ProbePanel />);
+    expect(screen.getByTestId('probe-context-subject').getAttribute('title')).toBe('Host');
+  });
+
+  it('reaches the unavailable-subject empty state through ordinary selection loss (issue #2075)', () => {
+    // #2073 deleted the pins, so there is no stale pin to unpin: losing the
+    // subject through ordinary selection loss is what lands here, and the
+    // empty state names the lens plus its recovery action.
+    useUIStore.setState({ probeOpen: true, probeTab: 'review' });
+    render(<ProbePanel />);
+    expect(screen.queryByTestId('probe-context-empty')).toBeNull();
+
+    act(() => {
+      seedAgentNodes([], null); // focus lost while the panel stays open
+    });
+
+    const empty = screen.getByTestId('probe-context-empty');
+    expect(empty.textContent).toContain('No active agent node');
+    expect(empty.textContent).toContain('Agent lens');
+    expect(empty.textContent).toContain('focus an agent terminal');
+    expect(screen.getByTestId('probe-context-subject-name').textContent).toBe('Agent');
+  });
 });
 
 describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', () => {
