@@ -114,7 +114,9 @@ For a multiline Codex prompt, including one using a proxied Codex provider,
 Buildmesh waits until Codex renders the pasted content in its input box and the
 redraw settles before sending Enter. The wait captures an output position before
 the PTY write, accepts Codex's normalized line-ending count, and uses the completed
-paste marker for long prompts. A startup redraw alone cannot acknowledge the
+paste marker for long prompts. Muse also accepts the end of a long prompt drawn
+in full, because it collapses only the largest pastes into a marker. A startup
+redraw alone cannot acknowledge the
 paste; if Codex never renders it, the node is marked for attention instead of
 leaving an apparently submitted review idle. A dead process ends the wait early.
 Output that arrives immediately after Enter can acknowledge that keystroke.

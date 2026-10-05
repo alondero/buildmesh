@@ -47,7 +47,25 @@ Multiline Codex and Muse prompt delivery waits for a complete matching paste
 echo (a marker, or full visible text for short drafts) and one second of quiet
 output before sending Enter. Marker matching ignores terminal padding and line
 breaks while retaining the exact character
-count and closing bracket. A captured Codex 0.160.0 Windows ConPTY redraw at
+count and closing bracket.
+
+Muse Code 1.3.0 draws a mid-size paste in full in its input box and only
+collapses larger ones to the marker. Probing a real Windows ConPTY on 2026-10-05
+showed 600 and 839 raw characters drawn in full and 1,509 collapsed to
+`[Pasted Content 1509 chars]`; the exact collapse point (characters or lines)
+is unmeasured. For Muse, a draft past the full-text limit (measured after
+normalization, like the matcher) is therefore also confirmed by its last 64
+letters and digits appearing in output received after the write. The paste is
+read in order, so the tail appearing means the text before it was accepted, and
+a scrolling composer keeps the tail in view. Run 343's 831-character `publish`
+prompt was visibly staged but waited the full budget for a marker Muse never
+prints, so the step ended Unverified with no Enter sent. Known limit: a stale
+redraw that repaints an earlier prompt with an identical ending could satisfy the
+tail match; the one-second quiet requirement narrows this but does not remove
+it. Codex keeps its stricter rule (marker, or full text up to the limit) until
+its mid-size rendering is captured.
+
+A captured Codex 0.160.0 Windows ConPTY redraw at
 22 columns inserted extra spaces inside `[Pasted Content 9407 chars]`; the
 previous literal matcher rejected it. Run 320's ledger retained prompt intent
 and timed out after 30 seconds; its Codex transcript later contained the full
