@@ -88,6 +88,31 @@ Out of scope:
   in a spawned agent.
 - Issues only reproducible against an already-compromised host.
 
+## Data export and backups
+
+**Settings → Data & Diagnostics → Export a copy…** writes a single
+`.bmsnap` file. With the default *Leave credentials out of the export*
+setting ticked, it contains no provider API keys, no remote-access root
+token, no coordinator tokens, no paired-device sessions, and **no LAN
+HTTPS certificate or private key** — a copy of that key would let its
+holder impersonate the HTTPS identity your paired devices already trust.
+Terminal transcripts are never part of stored state, so they are never
+included. Windows Credential Manager entries are stored outside the data
+folder and are not exportable.
+
+A credential-free export is the one to attach to a bug report. If you turn
+redaction off, the file contains your API keys and tokens — treat it as a
+secret.
+
+Snapshots Buildmesh takes automatically are full fidelity (they include
+credentials) so that an upgrade or a restore is genuinely reversible, and
+are written with owner-only permissions. The LAN CA private key is never
+written to a snapshot or an export under any setting.
+
+Note that a manual copy of the whole app-data directory is **not** a
+backup that is safe to share: it includes `tls\ca.key.der` in the clear.
+Use the in-app export instead.
+
 ## Recognition
 
 Researchers who report valid, in-scope issues are credited in the

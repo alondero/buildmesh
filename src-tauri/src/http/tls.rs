@@ -27,6 +27,19 @@ pub(crate) fn protect_private_directory(dir: &Path) -> io::Result<()> {
     identity::protect(dir, true)
 }
 
+/// Restrict one file to its owner — the file-level counterpart to
+/// [`protect_private_directory`].
+///
+/// Exposed here (rather than duplicated in the caller) because `identity::protect`
+/// is the project's single Windows ACL primitive, and issue #1537 needs the
+/// same owner-only DACL for state backups and exports. `0o600` on Unix,
+/// `D:P(A;;FA;;;OW)` on Windows — a backup carries a database and a
+/// preferences file, so it inherits the same sensitivity as the TLS key it
+/// deliberately does *not* contain.
+pub(crate) fn protect_private_file(path: &Path) -> io::Result<()> {
+    identity::protect(path, false)
+}
+
 /// A self-signed certificate and its private key, both DER-encoded.
 pub struct SelfSignedCert {
     pub cert_der: Vec<u8>,

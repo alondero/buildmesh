@@ -54,5 +54,6 @@ pub mod project_detect;
 pub mod prune;
 pub mod remote;
 pub mod scratchpad;
+pub mod state_recovery;
 pub mod test;
 pub mod usage;

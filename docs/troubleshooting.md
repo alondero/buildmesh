@@ -318,6 +318,41 @@ Mesh root. Confirm the dependency manager and CLI are installed in that
 runtime, then run the command manually in the same directory. Include the
 command, exit status, OS/runtime, and a redacted output excerpt in a report.
 
+## A stored-state check reports damage
+
+**Settings → Data & Diagnostics → Run quick check** (or **Run full check**)
+reporting damage means SQLite found a problem in `buildmesh.db`. Buildmesh does
+not repair or delete anything in response — your data stays on disk exactly as
+it is, so you can still act on it.
+
+What to do, in order:
+
+1. **Export a copy** first, before touching anything else. Even a damaged
+   profile is worth preserving; the export is the artefact you would otherwise
+   lose.
+2. **Restore** from your newest good snapshot or export, if you have one.
+   Settings → Data & Diagnostics lists the snapshots in the `snapshots\`
+   folder; pick one, read what it contains, then stage it and restart.
+3. If a check fails *and* a warning in the same pane says Buildmesh kept a raw
+   copy, that copy is the damaged original preserved for exactly this reason.
+   Its path is shown in the warning. It is not a consistent snapshot, so
+   restoring it may not include the most recent changes — treat it as a last
+   resort.
+
+**A restore was rejected.** Corrupt, truncated, hand-edited files, and files
+from a newer Buildmesh than the one you are running are all refused, and your
+current data is left untouched. If a file you exported yourself is refused, it
+was most likely written by a newer build — check the Buildmesh version that
+produced it.
+
+**A restore was staged but nothing happened.** It applies on the next
+**launch**. Restart Buildmesh. If you would rather not, **Cancel the staged
+restore** in the same pane.
+
+**Paired devices stopped working after a restore.** Expected. A restore of a
+redacted export mints a new remote-access token, so every paired device has to
+sign in again. Re-share the pairing QR from **Settings → Remote Access**.
+
 ## The app fails to start or closes unexpectedly
 
 Launching Buildmesh again while it is already running looks like nothing

@@ -24,6 +24,7 @@ pub mod opencode_session;
 pub mod pool_worker;
 pub mod provider_verification;
 pub mod session_recovery;
+pub mod state_recovery;
 pub mod sync_lock;
 pub(crate) mod test_fixtures;
 pub mod transcript_paths;

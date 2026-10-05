@@ -68,6 +68,36 @@ const SMOKE_MESH_NAME = 'verify-smoke';
 const SMOKE_NODE_NAME = 'smoke-node';
 
 const SMOKE_FIXTURES = {
+  // State recovery (issue #1537). Fixtured rather than left to the mock's
+  // unmocked-command fallback so the smoke run actually renders the Data &
+  // Diagnostics pane — a pane that renders empty proves far less than one
+  // that renders with real content at every viewport and theme.
+  get_state_recovery_info: {
+    app_data_dir: 'C:/temp/verify-smoke-profile',
+    snapshot_dir: 'C:/temp/verify-smoke-profile/snapshots',
+    schema_version: 46,
+    snapshot_count: 1,
+    retention: 3,
+    pending_restore: false,
+    notice: null,
+  },
+  list_state_snapshots: [
+    {
+      path: 'C:/temp/verify-smoke-profile/snapshots/20260717T000000Z-manual.bmsnap',
+      file_name: '20260717T000000Z-manual.bmsnap',
+      kind: 'manual',
+      created_at: '2026-07-17T00:00:00Z',
+      schema_version: 46,
+      size_bytes: 2048,
+      redacted: false,
+    },
+  ],
+  check_state_integrity: {
+    ok: true,
+    scope: 'quick',
+    checked_at: '2026-07-17T00:00:00Z',
+    message: 'The database passed a quick check.',
+  },
   list_meshes: [
     {
       id: SMOKE_MESH_ID,
@@ -186,8 +216,14 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
         await page.getByRole('button', { name: 'Open settings', exact: true }).click();
         const dialog = page.getByRole('dialog', { name: 'Settings', exact: true });
         const tabs = dialog.getByRole('tab');
+        // Derived from the live tab count rather than pinned to an index: this
+        // asserts that `ArrowUp`/`End` wrap to the *last* tab, which is the
+        // behaviour. Hard-coding the last index re-breaks every time the
+        // Settings modal gains a tab (issue #1537 added "Data & Diagnostics").
+        const tabCount = await tabs.count();
+        const last = tabCount - 1;
         await expect(tabs.nth(0)).toBeFocused();
-        for (const [key, index] of [['ArrowUp', 3], ['ArrowDown', 0], ['End', 3], ['Home', 0], ['ArrowDown', 1]] as const) {
+        for (const [key, index] of [['ArrowUp', last], ['ArrowDown', 0], ['End', last], ['Home', 0], ['ArrowDown', 1]] as const) {
           await page.keyboard.press(key);
           await expect(tabs.nth(index)).toBeFocused();
           await expect(tabs.nth(index)).toHaveAttribute('aria-selected', 'true');
@@ -195,7 +231,7 @@ for (const size of [{ width: 900, height: 600 }, { width: 1280, height: 800 }, {
           await expect(dialog.getByRole('tabpanel')).toHaveAttribute('id', await tabs.nth(index).getAttribute('aria-controls') ?? 'missing');
           await expect(dialog.getByRole('tabpanel')).toHaveAttribute('aria-labelledby', await tabs.nth(index).getAttribute('id') ?? 'missing');
         }
-        for (const index of [0, 1, 2, 3]) {
+        for (let index = 0; index < tabCount; index++) {
           await tabs.nth(index).click();
           await page.keyboard.press('Tab');
           await expect(dialog.getByRole('tabpanel')).toBeFocused();

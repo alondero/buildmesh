@@ -1,6 +1,6 @@
 import type { AppSettingsTab } from '../../stores/uiStore';
 import { formatError } from '../../lib/errorUtils';
-import { useState, useEffect, useRef, useCallback, useMemo, useId, type KeyboardEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useId, lazy, Suspense, type KeyboardEvent } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SpawnOptionPicker } from '../Providers/SpawnOptionPicker';
@@ -52,17 +52,39 @@ async function getHostPairingVerifications(): Promise<PairingVerification[]> {
  *  settings that belong to it: General = app behaviour + appearance + runtime
  *  defaults; Providers = provider routing defaults + credentials; Harnesses =
  *  spawn-menu composition + per-harness defaults; Remote Access = network
- *  reachability. All panes stay MOUNTED (inactive ones get the `hidden`
- *  attribute) — the modal's dirty tracking (issue #730) lives in child
- *  component state, so unmounting a pane on tab-switch would destroy
- *  half-typed credentials while the modal still reports itself dirty. */
+ *  reachability; Data & Diagnostics = the profile's durable state (snapshot,
+ *  integrity check, export, restore — issue #1537). All panes stay MOUNTED
+ *  (inactive ones get the `hidden` attribute) — the modal's dirty tracking
+ *  (issue #730) lives in child component state, so unmounting a pane on
+ *  tab-switch would destroy half-typed credentials while the modal still
+ *  reports itself dirty. */
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
   { id: 'harnesses', label: 'Launch Configurations' },
   { id: 'remote', label: 'Remote Access' },
+  { id: 'data', label: 'Data & Diagnostics' },
 ] as const;
 type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
+
+/** Data & Diagnostics is the one pane that is NOT kept mounted, and the
+ *  only lazily-imported one. Two reasons, both load-bearing:
+ *
+ *  1. **The bundle budget (issue #1568).** A static import put this pane in
+ *     the desktop entry chunk and pushed it 3.3 kB over the documented
+ *     `maxRaw` ceiling. Most users never open this pane, so that is a real
+ *     first-paint cost for nothing — which is why the budget is bumped
+ *     intentionally rather than quietly.
+ *  2. **It is not editable state.** The keep-mounted rule above exists so a
+ *     tab-switch cannot destroy half-typed credentials while the modal
+ *     reports itself dirty (issue #730). This pane has no form and no dirty
+ *     state — everything it shows is derived from a fetch it re-runs on
+ *     mount — so the rule does not apply, and mounting it on every Settings
+ *     open would fire two IPC calls for a tab the user may never look at.
+ */
+const DataRecoverySection = lazy(() =>
+  import('./DataRecoverySection').then(module => ({ default: module.DataRecoverySection })),
+);
 
 /** Which pane a dirty site belongs to, so its nav item can show the
  *  unsaved-changes dot. Site keys: `autopilot-pool` + `worktree-dir` +
@@ -2597,6 +2619,36 @@ export function AppSettingsModal({ onClose, initialTab = 'general' }: AppSetting
             </ul>
           )}
         </SettingsSection>
+        </section>
+
+        {/* Data & Diagnostics (issue #1537). Its own pane rather than a
+            section on General because a staged restore and the "a copy was
+            kept" notice are consequential enough to deserve full space.
+
+            Rendered only while this tab is active — unlike the other panes,
+            which stay mounted so their dirty state survives a tab-switch.
+            This one holds no editable state, and mounting it unconditionally
+            would load its chunk and fire two IPC calls on every Settings
+            open. See the `lazy` note above. */}
+        <section
+          role="tabpanel"
+          id={`${tabIdPrefix}-panel-data`}
+          aria-labelledby={`${tabIdPrefix}-tab-data`}
+          tabIndex={0}
+          hidden={activeTab !== 'data'}
+          className="space-y-2"
+        >
+        {activeTab === 'data' && (
+        <Suspense
+          fallback={
+            <p className="py-6 text-sm text-text-muted" data-testid="settings-data-recovery-loading">
+              Loading Data &amp; Diagnostics…
+            </p>
+          }
+        >
+          <DataRecoverySection />
+        </Suspense>
+        )}
         </section>
         </div>
       </div>
