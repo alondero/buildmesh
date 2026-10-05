@@ -298,21 +298,21 @@ Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller 
 Terminal container resize is coalesced by the shared `TerminalResizeScheduler`, used by both agent and build/run registries. It waits for 200 ms without a size change before fitting, so pane dragging causes one PTY resize after the drag settles. A horizontal xterm resize reflows normal-buffer scrollback, and full-screen TUIs redraw for the final PTY size. Codex uses its fullscreen transcript mode rather than inline scrollback, avoiding a transcript clear and replay on width changes; history navigation belongs to Codex while it is running. Keep DOM measurement on the next animation frame and do not restore per-observation or per-frame `fit()` calls.
 
 ### Canvas Layout (View Modes)
-The canvas exposes five **View Modes** (wayfinder #982; state model #983; rendering #986; Filtered added #1609). The active mode is a pure UI string-literal union — no backend serialises it. The grid render, keyboard traversal (#987), and unit tests share one visibility definition, written as pure helpers so the mode→node-set mapping is testable without spinning up the store:
+The canvas exposes five **View Modes** (wayfinder #982; state model #983; rendering #986; Filtered added #1609). The active mode is a pure UI string-literal union — no backend serialises it. Every surface that must answer "what is the user looking at, and which Mesh is it" reads one pure, store-independent derivation instead of re-deriving scope for itself: `deriveScope` in `src/lib/viewModes.ts` resolves the effective scope once — the View Mode, the anchoring Mesh or none, whether the scope is Mesh-scoped, the visible and pre-filter node counts, and the Mesh the focused node contributes. The grid render, the canvas empty state's counts, keyboard traversal (#987), the title-bar scope indicator, and unit tests all consume that single value, so no two of them can disagree about the scope (#2071).
 
 - **single** — Solo the active node; subsumes the old maximize toggle. Escape returns to the grid mode `single` was entered from.
-- **mesh** — Scope to the sidebar-selected mesh. With no selection, falls back to the active node's mesh, then the first loaded mesh.
+- **mesh** — Scope to the sidebar-selected Mesh, and nothing else. There is no fallback chain: with no Mesh selected, Mesh Grid is an explicit empty state rather than a guessed Mesh, because silently showing the focused node's Mesh (or the first loaded Mesh) shows a scope the user never chose. Entering Mesh Grid with no Mesh selected opens the Mesh picker. Mesh selection is sticky — re-clicking the highlighted Mesh is a no-op while the canvas is already that Mesh's grid, and returns the canvas to that Mesh's grid from Pinned/Filtered/Single (#2072).
 - **pinned** — Cross-mesh filter over `is_pinned`; deliberately never touches `selectedMeshId`.
 - **all** — Every loaded node, across every mesh. All Nodes carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. `setViewMode` enforces this transition directly so callers remain side-effect-free.
 - **filtered** — Cross-mesh view narrowed by the Grid Controls (free-text search + provider/status filters; the Search Nodes bar mounts in the title bar only while this mode is active).
 
-The five-segment control is the bespoke `ViewModeSwitcher` in the title bar.
+The five-segment control is the bespoke `ViewModeSwitcher` in the title bar; the adjacent scope indicator names that scope (the Mesh, or an honest cross-Mesh label carrying an Agent Node count) and doubles as the Mesh picker, so choosing a Mesh is one write that moves the canvas and the Mesh-owned Probe destinations together (#2074, #2077). A search that escapes Mesh scope, and deleting the Mesh the canvas was showing, announce the move instead of changing the view silently (#2076).
 
 ### Probe Context Lenses (issue #1456)
 Probe destinations have explicit ownership in `src/lib/probeContext.ts`; the
 complete `PROBE_TAB_DEFINITIONS` record is the source of truth for ownership
 lens,
-baseline, selection-following, pinning, and statefulness. The three lenses are
+baseline, selection-following, and statefulness. The three lenses are
 `Host` (machine-wide provider/account/runtime state), `Mesh` (one repository,
 its configuration, GitHub feeds, worktrees, automation, and notes), and
 `Agent` (one Agent Node's changes and actions). Agent History is a Host finder
@@ -323,11 +323,15 @@ Agent-lens and uses the node-base baseline. The `useProbeContext` hook is the
 read seam for the shell and destination tabs: use its subject, resolved IDs,
 paths, and `hasRequiredContext` instead of reconstructing ownership from
 `selectedMeshId` or `activeNodeId`. The Probe header labels the subject and
-whether it is following selection or pinned. Pins are session UI state keyed to
-the destination; a missing pinned subject renders an explicit empty state and
-must not fall back to a newly selected Mesh or Agent Node. See
+whether the destination is fixed to Host or following selection; that label is
+promoted to a legible weight because naming the subject is the whole anti-drift
+guarantee. The context mode has exactly two values, `fixed` and `following`: no
+destination can hold a subject that disagrees with the sidebar selection, and a
+subject that disappears renders the explicit unavailable-context state instead
+of resolving a neighbour. See
 [`docs/adr/0029-probe-context-lenses.md`](adr/0029-probe-context-lenses.md)
-for the destination mapping and mixed-ownership decisions. Issue #1375 moved
+for the destination mapping and mixed-ownership decisions, and
+[`docs/adr/0041-disclosure-over-capture.md`](adr/0041-disclosure-over-capture.md) for why ADR-0029's pinning mandate was reversed in favour of disclosure (issue #2073). Issue #1375 moved
 Probe navigation title-bar-first — a command palette plus an on-demand
 inspector with no rail — but the lens contract itself is unchanged; see
 [`docs/adr/0030-titlebar-navigation-on-demand-inspector.md`](adr/0030-titlebar-navigation-on-demand-inspector.md).
@@ -337,7 +341,7 @@ alternation; it renders only while the panel is open and adds no reopen
 affordance, so the closed-render discipline stands.
 
 Related Files/Changes and Issues/Pull Requests share a strip slot, with
-per-destination context pins and unchanged command IDs. The working-set reducer
+unchanged command IDs. The working-set reducer
 owns group identity and replaces a group's remembered subview in place;
 recency affects eviction only. The Files subview is persisted independently
 of the session-only working set. Agent History reads all database nodes,

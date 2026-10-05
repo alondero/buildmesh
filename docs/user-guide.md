@@ -123,10 +123,10 @@ closes the menu. On short windows, scroll the menu to reach every tool.
 The inspector groups **Project Files** and **Agent Changes** under **Files &
 changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
 subviews inside the panel. The header shows the subject and whether it follows
-selection or is pinned; each subview retains its own pin. Files shows the
-working tree, while Agent Changes compares against HEAD or the selected
-repository's base merge point. Commands still open the exact requested view.
-The last Files subview is restored when you restart.
+your current selection. Files shows the working tree, while Agent Changes
+compares against HEAD or the selected repository's base merge point. Commands
+still open the exact requested view. The last Files subview is restored when
+you restart.
 
 **Agent History** finds lifecycle records across repositories, including
 archived nodes. Search by name, repository, branch or session, and filter by

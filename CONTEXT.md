@@ -80,7 +80,7 @@ The runtime classification of an **Agent Node** spawn — how it was triggered. 
 _Avoid_: spawn kind, spawn type, spawn trigger (these miss the runtime-vs-menu distinction).
 
 **Probe Context Lens**:
-The ownership perspective of a Probe destination: **Host** for machine-wide provider and account state, **Mesh** for one repository workspace and its configuration, or **Agent** for one Agent Node's changes and history. A lens names what the destination is about; a focused Agent Node may still provide a secondary working-tree view for the Mesh-owned File Explorer Panel.
+The ownership perspective of a Probe destination: **Host** for machine-wide provider and account state, **Mesh** for one repository workspace and its configuration, or **Agent** for one Agent Node's changes and history. A lens names what the destination is about; a focused Agent Node may still provide a secondary working-tree view for the Mesh-owned File Explorer Panel. A destination either reads the machine or follows the current Mesh or Agent Node selection — it never holds a captured subject of its own, so the selection is the only thing that decides what a destination is about and the inspector names the subject rather than offering a way to freeze it.
 _Avoid_: active context, Probe scope (both are too vague about ownership).
 
 
@@ -89,7 +89,7 @@ A project workspace associated with a local Git repository root path.
 _Avoid_: Project, repo, folder
 
 **View Mode**:
-The canvas's five-valued scope switch (`single` | `mesh` | `pinned` | `all` | `filtered`) — what set of Agent Nodes the grid renders, and how. `single` solos the active node and is excluded from the "grid" variants; the other four are grid modes. **All Nodes** carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`. The reverse is not required — a null mesh selection is also valid in `pinned`, `filtered`, and `single` modes.
+The canvas's five-valued scope switch (`single` | `mesh` | `pinned` | `all` | `filtered`) — what set of Agent Nodes the grid renders, and how. `single` solos the active node and is excluded from the "grid" variants; the other four are grid modes. **Mesh Grid** is scoped to the sidebar-selected Mesh and never guesses one: with no Mesh selected it is an explicit empty state, and entering it asks for a Mesh rather than picking one. Mesh selection is sticky — re-clicking the selected Mesh keeps that scope, and returns to it from a cross-Mesh mode, instead of clearing the selection. **All Nodes** carries a one-way invariant: `viewMode === 'all'` requires `selectedMeshId === null`, and it is the only route out of Mesh scope. The reverse is not required — a null mesh selection is also valid in `pinned`, `filtered`, and `single` modes.
 _Avoid_: layout mode, scope mode, canvas mode (the term is View Mode); "grid" alone (ambiguous with the underlying split-pane renderer).
 
 **Agent Node**:
