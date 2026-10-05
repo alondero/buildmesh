@@ -6,6 +6,7 @@ import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
 import { HeaderPillButton } from './HeaderPillButton';
+import { ScopeIndicator } from './ScopeIndicator';
 import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
 import { TitleBarOverflow } from './TitleBarOverflow';
@@ -481,6 +482,12 @@ export function TitleBar() {
           )}
           <Wordmark />
           <ViewModeSwitcher />
+          {/* #2074 — the scope indicator names the effective scope (the one
+              `deriveScope` value) and doubles as the Mesh picker. It sits in
+              this cluster, between the switcher that picks the View Mode and
+              the Filtered search bar that narrows it: same toolbar, same
+              width ladder, one degradation curve. */}
+          <ScopeIndicator />
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.
               An honest conditional mount: CSS can't interpolate `width: auto`,
