@@ -352,10 +352,13 @@ const terminalInputQueue = new TerminalInputQueue({ write: writeToAgentRaw });
  *
  * The transport owns the buffer, so the UI subscribes here instead of the
  * transport reaching into a store. Reports only once bytes have been held
- * past the queue's threshold, so a normal burst of typing shows nothing.
+ * past the queue's threshold, so a normal burst of typing shows nothing. The
+ * `nodeId` scopes every report and every withdrawal to one session, so a
+ * recovering agent cannot clear a badge another agent still needs.
  */
-export const subscribeTerminalInputStall = (listener: (stall: InputStall | null) => void) =>
-  terminalInputQueue.subscribeStall(listener);
+export const subscribeTerminalInputStall = (
+  listener: (nodeId: number, stall: InputStall | null) => void,
+) => terminalInputQueue.subscribeStall(listener);
 
 /** Forget everything pending for a session (node closed, mesh torn down). */
 export const cancelTerminalInput = (sessionId: number) => terminalInputQueue.cancel(sessionId);

@@ -65,10 +65,6 @@ impl InputOutcome {
         Self { disposition: InputDisposition::Backpressured, activity: InputActivity::default() }
     }
 
-    pub fn closed() -> Self {
-        Self { disposition: InputDisposition::Closed, activity: InputActivity::default() }
-    }
-
     pub fn is_accepted(&self) -> bool {
         self.disposition == InputDisposition::Accepted
     }

@@ -99,11 +99,9 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
   const circuitOwnership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
-  // Issue #1530 — the transport holds at most one session's input, and the
-  // store keeps the single slot. Only this node's own stall is shown here so
-  // the badge can never appear on a node whose input is flowing.
-  const stalledInput = useAgentNodeStore(s => s.stalledInput);
-  const stalledHere = stalledInput && stalledInput.nodeId === nodeId ? stalledInput : null;
+  // Issue #1530 — stalled input is tracked per node, so this header reads only
+  // its own entry and can never show (or hide) another node's stall.
+  const stall = useAgentNodeStore(s => s.stalledInputs[nodeId] ?? null);
   const meshesById = useMeshStore(s => s.meshesById);
   const isSingleMode = useUIStore(s => s.viewMode === 'single');
   const setViewMode = useUIStore(s => s.setViewMode);
@@ -191,7 +189,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         </span>
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
-        {stalledHere && <StalledInputBadge compact={compactHeader} stall={stalledHere} />}
+        {stall && <StalledInputBadge compact={compactHeader} stall={stall} />}
       </div>
         {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onReveal?.(); }}

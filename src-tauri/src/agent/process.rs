@@ -260,17 +260,19 @@ impl AgentProcess {
         };
         // Issue #1530: bound the queue by bytes as well as messages, and
         // report a refusal instead of dropping the buffer behind a success.
+        let len = data.len();
+        // Resolve the sender *before* reserving. `close_input` has already run
+        // by this point on a retired incarnation, so it will never `reset()` the
+        // gauge again — reserving first and returning `Closed` here would strand
+        // `len` bytes and one message as a permanent phantom backlog on the
+        // `DIAG` line until the entry is dropped (issue #1530 review).
+        let Some(tx) = guard.as_ref() else { return Err(InputWriteError::Closed); };
+        if !self.queue.admits(len) { return Err(InputWriteError::Backpressured); }
         // The reservation is made under `writer_tx` (held above), so a
         // concurrent enqueue cannot slip between the headroom check and the
         // reservation, and the `try_send` result rolls it back exactly.
-        let len = data.len();
-        if !self.queue.admits(len) { return Err(InputWriteError::Backpressured); }
         self.queue.reserve(len);
-        let sent = match guard.as_ref() {
-            Some(tx) => tx.try_send(data),
-            None => return Err(InputWriteError::Closed),
-        };
-        match sent {
+        match tx.try_send(data) {
             Ok(()) => {}
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 self.queue.release(len);
@@ -337,6 +339,13 @@ pub trait ProcessRegistryApi: Send + Sync {
     fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String>;
     /// One complete terminal input event; callers must not split keyboard events.
     fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String>;
+    /// `(queued_messages, queued_bytes)` for this agent's PTY input queue.
+    ///
+    /// On the trait rather than reached for through the global `PROCESS_REGISTRY`
+    /// so the mobile stalled-input event can be driven by an injected registry
+    /// in tests, instead of a test-only global that happens to be empty
+    /// (issue #1530 review).
+    fn input_queue(&self, session_id: i64) -> (usize, u64);
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String>;
 }
 
@@ -819,6 +828,9 @@ impl ProcessRegistryApi for AgentProcessRegistry {
     }
     fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String> {
         AgentProcessRegistry::write_input(self, session_id, data)
+    }
+    fn input_queue(&self, session_id: i64) -> (usize, u64) {
+        self.get(&session_id).map(|agent| agent.input_queue()).unwrap_or_default()
     }
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         AgentProcessRegistry::resize_pty(self, session_id, cols, rows)
@@ -1510,6 +1522,34 @@ mod tests {
         assert_eq!(agent.input_queue(), (1, 0), "a refusal must not be accounted as queued");
         assert!(!writer.release_and_collect(2).iter().any(|chunk| chunk == b"lost prompt"),
             "the refused buffer must never reach the PTY");
+        registry.kill_session(id);
+    }
+
+    /// A write that cannot even be attempted must leave no gauge residue.
+    ///
+    /// Issue #1530 review finding 2: the sender was resolved *after* the
+    /// reservation, so a write arriving at an already-retired incarnation
+    /// stranded its bytes as a phantom backlog. `close_input` has already run
+    /// by then, so nothing would ever zero them, and the entry outlives the
+    /// writer thread — the `DIAG` line would report the leak indefinitely.
+    #[test]
+    fn a_write_to_a_retired_session_leaves_no_gauge_residue() {
+        let registry = AgentProcessRegistry::new();
+        let id = -930_034;
+        insert_trivial_agent(&registry, id);
+        let agent = registry.get(&id).unwrap();
+        // The shape `close_input` leaves behind: the sender taken, so no
+        // `try_send` can ever succeed and no further `reset()` is coming.
+        *agent.writer_tx.lock().unwrap() = None;
+
+        let error = registry.write_input(id, b"never lands").unwrap_err();
+        assert_eq!(error, "Agent not running");
+        assert_eq!(
+            agent.input_queue(),
+            (0, 0),
+            "a write that could not be attempted must not strand gauge bytes"
+        );
+        assert_eq!(registry.input_queue_totals(), (0, 0));
         registry.kill_session(id);
     }
 

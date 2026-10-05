@@ -352,11 +352,9 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
         // only honest channel back to the phone is this broadcast. Without it
         // a stalled agent would swallow keystrokes invisibly.
         Ok(_) => {
-            let (queued_messages, queued_bytes) =
-                crate::agent::process::PROCESS_REGISTRY
-                    .get(&node_id)
-                    .map(|agent| agent.input_queue())
-                    .unwrap_or_default();
+            // Read the depth through the injected registry so this path is
+            // testable with a mock, rather than off the process-global one.
+            let (queued_messages, queued_bytes) = registry.input_queue(node_id);
             tracing::warn!(
                 node_id,
                 queued_messages,
@@ -908,6 +906,9 @@ mod tests {
         should_fail: bool,
         activity: crate::agent::process::InputActivity,
         disposition: crate::agent::process::InputDisposition,
+        /// What `input_queue` reports, so the stalled-input event can be
+        /// asserted end to end without the process-global registry.
+        queue_depth: (usize, u64),
     }
 
     impl MockRegistry {
@@ -920,6 +921,7 @@ mod tests {
                 should_fail: false,
                 activity: crate::agent::process::InputActivity { user_input: true, submitted: false },
                 disposition: crate::agent::process::InputDisposition::Accepted,
+                queue_depth: (0, 0),
             }
         }
         fn failing() -> Self {
@@ -968,6 +970,9 @@ mod tests {
                 disposition: self.disposition,
                 activity: self.activity,
             })
+        }
+        fn input_queue(&self, _session_id: i64) -> (usize, u64) {
+            self.queue_depth
         }
         fn resize_pty(&self, _session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
             if self.should_fail {
@@ -1034,6 +1039,54 @@ mod tests {
             sink.attention_cleared(),
             vec![1],
             "an accepted submit must still clear the node's attention"
+        );
+    }
+
+    /// A backpressured WebSocket write announces the stall on the event
+    /// broadcast, and says how deep the queue was.
+    ///
+    /// Issue #1530 review: this path used to read the process-global registry
+    /// directly, so it could not be asserted through a mock. With `input_queue`
+    /// on the trait, the whole path — refusal, depth lookup, emitted payload —
+    /// is observable here.
+    #[test]
+    fn a_backpressured_websocket_write_emits_a_stalled_input_event() {
+        let mut mock = MockRegistry::new();
+        mock.disposition = crate::agent::process::InputDisposition::Backpressured;
+        mock.queue_depth = (3, 96);
+        let mut events = super::super::events::subscribe();
+
+        forward_mobile_input_with(&mock, 42, "hello");
+
+        let emitted = events.try_recv().expect("a stalled-input event");
+        match emitted {
+            super::super::events::EventMsg::TerminalInputStalled {
+                session_id,
+                queued_messages,
+                queued_bytes,
+            } => {
+                assert_eq!(session_id, 42);
+                assert_eq!(queued_messages, 3, "the event must carry the registry's own depth");
+                assert_eq!(queued_bytes, 96);
+            }
+            // `EventMsg` deliberately has no `Debug`, so the "wrong variant"
+            // case is reported by shape rather than by printing the value.
+            _ => panic!("expected a terminal-input-stalled event on the broadcast"),
+        }
+    }
+
+    /// A refused write must still reach the phone, and an accepted one must not
+    /// claim to be stalled.
+    #[test]
+    fn an_accepted_websocket_write_emits_no_stalled_input_event() {
+        let mock = MockRegistry::new();
+        let mut events = super::super::events::subscribe();
+
+        forward_mobile_input_with(&mock, 42, "hello");
+
+        assert!(
+            events.try_recv().is_err(),
+            "a delivered keystroke must not raise a stall"
         );
     }
 

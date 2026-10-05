@@ -1848,4 +1848,59 @@ describe('useAgentNodeStore', () => {
       expect(useAgentNodeStore.getState().schedules[8]).toBeUndefined();
     });
   });
+
+  // Issue #1530 review finding 3 — stalled input is per session.
+  //
+  // With a single shared slot, whichever node recovered first withdrew the
+  // badge that a still-wedged node still needed, and because the other lane
+  // had already latched its report flag it never re-announced: the warning
+  // was lost permanently. Each node owning its own entry removes the whole
+  // class of bug.
+  describe('stalled input (issue #1530)', () => {
+    // Each case asserts on the whole map, so start from an empty one rather
+    // than inheriting whatever the previous case left behind.
+    beforeEach(() => {
+      useAgentNodeStore.setState({ stalledInputs: {} });
+    });
+
+    it('keeps one node stalled when a different node clears', () => {
+      const { setStalledInput, stalledInputs } = useAgentNodeStore.getState();
+
+      setStalledInput(1, { nodeId: 1, pendingBytes: 200, attempts: 3 });
+      setStalledInput(2, { nodeId: 2, pendingBytes: 50, attempts: 1 });
+      expect(Object.keys(useAgentNodeStore.getState().stalledInputs).sort()).toEqual(['1', '2']);
+
+      // Node 2 recovers.
+      useAgentNodeStore.getState().setStalledInput(2, null);
+      const after = useAgentNodeStore.getState().stalledInputs;
+      expect(after[1], 'node 1 is still wedged and must keep its badge').toMatchObject({
+        pendingBytes: 200,
+        attempts: 3,
+      });
+      expect(after[2], 'node 2 recovered').toBeUndefined();
+      void stalledInputs;
+    });
+
+    it('leaves the map empty once every session has recovered', () => {
+      useAgentNodeStore.getState().setStalledInput(4, { nodeId: 4, pendingBytes: 9, attempts: 1 });
+      useAgentNodeStore.getState().setStalledInput(4, null);
+      expect(useAgentNodeStore.getState().stalledInputs).toEqual({});
+    });
+
+    it('ignores a re-report that changes nothing', () => {
+      useAgentNodeStore.getState().setStalledInput(5, { nodeId: 5, pendingBytes: 10, attempts: 2 });
+      const before = useAgentNodeStore.getState().stalledInputs;
+      useAgentNodeStore.getState().setStalledInput(5, { nodeId: 5, pendingBytes: 10, attempts: 2 });
+      expect(useAgentNodeStore.getState().stalledInputs).toBe(before);
+    });
+
+    it('updates the entry when the backlog grows', () => {
+      useAgentNodeStore.getState().setStalledInput(6, { nodeId: 6, pendingBytes: 10, attempts: 1 });
+      useAgentNodeStore.getState().setStalledInput(6, { nodeId: 6, pendingBytes: 40, attempts: 2 });
+      expect(useAgentNodeStore.getState().stalledInputs[6]).toMatchObject({
+        pendingBytes: 40,
+        attempts: 2,
+      });
+    });
+  });
 });

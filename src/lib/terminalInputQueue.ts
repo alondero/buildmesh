@@ -54,8 +54,15 @@ export interface TerminalInputQueueOptions {
   maxAttempts?: number;
   baseDelayMs?: number;
   maxDelayMs?: number;
-  /** Called with the stall to show, or `null` when the session is clear. */
-  onStallChange?: (stall: InputStall | null) => void;
+  /**
+   * Called with the session it concerns, and `null` to withdraw that session's
+   * stall.
+   *
+   * The `nodeId` is load-bearing, not decoration: several agents can be
+   * stalled at once, so a bare "something cleared" would let one node's
+   * recovery wipe another node's still-wrong badge.
+   */
+  onStallChange?: (nodeId: number, stall: InputStall | null) => void;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -71,8 +78,22 @@ interface Lane {
   queue: string[];
   /** Resolvers for each queued buffer, index-aligned with `queue`. */
   waiters: Waiter[];
-  /** A write is in flight, or a retry timer is armed. */
+  /**
+   * A write is in flight, **or a retry timer is armed**.
+   *
+   * It must stay asserted across the backoff sleep, not just across the
+   * `await this.write(...)`: releasing it early lets a keystroke arriving
+   * mid-backoff start a second `drain` loop on this lane, which double-writes
+   * the head buffer and then `shift()`s a second time — popping a keystroke
+   * that was never written and reporting it as accepted.
+   */
   busy: boolean;
+  /**
+   * Set by `cancel`. An in-flight `drain` (or a post-sleep resume) belonging
+   * to a cancelled lane must stop, and must never delete whatever lane has
+   * since taken this session's place in the map.
+   */
+  cancelled: boolean;
   attempts: number;
   /**
    * When the head buffer first failed, or `null` if it has not failed yet.
@@ -83,6 +104,14 @@ interface Lane {
    */
   heldSinceMs: number | null;
   stallReported: boolean;
+  /**
+   * The last payload broadcast for this stall, so a re-notify only happens when
+   * something a user can see actually changed. A latched `stallReported` alone
+   * would freeze the badge at its first byte count while the backlog keeps
+   * growing, and the store's equality checks would never see a change.
+   */
+  reportedBytes: number;
+  reportedAttempts: number;
 }
 
 const DEFAULT_STALL_THRESHOLD_MS = 1_200;
@@ -120,7 +149,7 @@ export class TerminalInputQueue {
    * One set, one fan-out: an earlier shape kept `onStallChange` as its own
    * field *and* added it here, so every report was delivered twice.
    */
-  private readonly listeners = new Set<(stall: InputStall | null) => void>();
+  private readonly listeners = new Set<(nodeId: number, stall: InputStall | null) => void>();
 
   constructor(options: TerminalInputQueueOptions) {
     this.write = options.write;
@@ -138,7 +167,7 @@ export class TerminalInputQueue {
    * here rather than the transport reaching into a store — the dependency
    * arrow stays store → transport.
    */
-  subscribeStall(listener: (stall: InputStall | null) => void): () => void {
+  subscribeStall(listener: (nodeId: number, stall: InputStall | null) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -171,11 +200,12 @@ export class TerminalInputQueue {
     // Resolving rather than rejecting: a torn-down session is a normal end, and
     // an unhandled rejection here would be noise on a path that is already
     // closing.
+    lane.cancelled = true;
     for (const waiter of lane.waiters) waiter.resolve({ ...ACCEPTED, disposition: 'closed' });
     lane.queue.length = 0;
     lane.waiters.length = 0;
-    this.clearStall(lane);
-    this.lanes.delete(nodeId);
+    this.clearStall(nodeId, lane);
+    if (this.lanes.get(nodeId) === lane) this.lanes.delete(nodeId);
   }
 
   /** Test/introspection seam: what is currently held for a session. */
@@ -192,7 +222,17 @@ export class TerminalInputQueue {
   private laneFor(nodeId: number): Lane {
     let lane = this.lanes.get(nodeId);
     if (!lane) {
-      lane = { queue: [], waiters: [], busy: false, attempts: 0, heldSinceMs: null, stallReported: false };
+      lane = {
+        queue: [],
+        waiters: [],
+        busy: false,
+        cancelled: false,
+        attempts: 0,
+        heldSinceMs: null,
+        stallReported: false,
+        reportedBytes: -1,
+        reportedAttempts: -1,
+      };
       this.lanes.set(nodeId, lane);
     }
     return lane;
@@ -200,8 +240,11 @@ export class TerminalInputQueue {
 
   private async drain(nodeId: number, lane: Lane): Promise<void> {
     // One writer per session: this is what makes FIFO order and the
-    // no-duplicate guarantee hold under concurrent keystrokes.
-    if (lane.busy) return;
+    // no-duplicate guarantee hold under concurrent keystrokes. `busy` covers
+    // the whole attempt including its backoff, so a keystroke arriving while
+    // this lane is waiting to retry cannot start a second loop over the same
+    // queue.
+    if (lane.busy || lane.cancelled) return;
     const buffer = lane.queue[0];
     if (buffer === undefined) {
       this.retireIfEmpty(nodeId, lane);
@@ -245,8 +288,8 @@ export class TerminalInputQueue {
       return;
     }
 
-    lane.busy = false;
     if (outcome.disposition === 'accepted') {
+      lane.busy = false;
       lane.attempts = 0;
       this.settleHead(lane, outcome);
       this.retireIfEmpty(nodeId, lane);
@@ -257,6 +300,7 @@ export class TerminalInputQueue {
     // `closed` is terminal — the writer thread is gone or the session was
     // retired, so this buffer can never be delivered.
     if (outcome.disposition === 'closed') {
+      lane.busy = false;
       lane.attempts = 0;
       this.settleHead(lane, outcome);
       this.retireIfEmpty(nodeId, lane);
@@ -267,12 +311,16 @@ export class TerminalInputQueue {
     // Backpressured. The buffer stays at the head, so the next attempt re-sends
     // the identical bytes in the identical position — never a duplicate, never
     // out of order.
+    //
+    // `lane.busy` deliberately stays `true` for the rest of this attempt,
+    // including across the backoff sleep below.
     lane.attempts += 1;
     if (lane.heldSinceMs === null) lane.heldSinceMs = this.now();
     this.reportStallIfHeld(nodeId, lane);
     if (lane.attempts >= this.maxAttempts) {
       // Give up loudly: settle the buffer as `closed` so the caller can tell
       // the user their input was lost, rather than dropping it silently.
+      lane.busy = false;
       lane.attempts = 0;
       this.settleHead(lane, { ...ACCEPTED, disposition: 'closed' });
       this.retireIfEmpty(nodeId, lane);
@@ -281,6 +329,12 @@ export class TerminalInputQueue {
     }
 
     await this.sleep(this.backoff(lane.attempts));
+    // A cancel during the sleep may already have settled and deleted this
+    // lane; re-entering it would shift a queue that is no longer ours.
+    if (lane.cancelled) return;
+    // Releasing `busy` and re-entering the loop in one synchronous block means
+    // no other caller can observe the gap and start a competing loop.
+    lane.busy = false;
     void this.drain(nodeId, lane);
   }
 
@@ -306,8 +360,12 @@ export class TerminalInputQueue {
    */
   private retireIfEmpty(nodeId: number, lane: Lane): void {
     if (lane.queue.length > 0) return;
-    this.clearStall(lane);
-    this.lanes.delete(nodeId);
+    this.clearStall(nodeId, lane);
+    // Identity-checked: a `cancel` may already have removed this lane and a
+    // later write for the same session may have installed a fresh one. An
+    // unconditional delete would evict that new lane, silently dropping every
+    // keystroke buffered behind it.
+    if (this.lanes.get(nodeId) === lane) this.lanes.delete(nodeId);
   }
 
   private backoff(attempt: number): number {
@@ -316,25 +374,45 @@ export class TerminalInputQueue {
     return Math.min(this.baseDelayMs * 2 ** (attempt - 1), this.maxDelayMs);
   }
 
+  /**
+   * Report the stall once it is worth showing, and keep it current after that.
+   *
+   * The first report waits for the threshold; later ones fire whenever the
+   * visible numbers move, so a badge never sits there quoting a byte count the
+   * backlog has long since outgrown.
+   */
   private reportStallIfHeld(nodeId: number, lane: Lane): void {
-    if (lane.stallReported || lane.heldSinceMs === null) return;
-    if (this.now() - lane.heldSinceMs < this.stallThresholdMs) return;
+    if (lane.heldSinceMs === null) return;
+    if (!lane.stallReported && this.now() - lane.heldSinceMs < this.stallThresholdMs) return;
+    const pendingBytes = lane.queue.reduce((total, buffer) => total + buffer.length, 0);
+    if (
+      lane.stallReported &&
+      lane.reportedBytes === pendingBytes &&
+      lane.reportedAttempts === lane.attempts
+    ) {
+      return;
+    }
     lane.stallReported = true;
-    this.notifyStall({
-      nodeId,
-      pendingBytes: lane.queue.reduce((total, buffer) => total + buffer.length, 0),
-      attempts: lane.attempts,
-    });
+    lane.reportedBytes = pendingBytes;
+    lane.reportedAttempts = lane.attempts;
+    this.notifyStall(nodeId, { nodeId, pendingBytes, attempts: lane.attempts });
   }
 
-  private clearStall(lane: Lane): void {
+  /**
+   * Withdraw *this session's* stall. Scoped by `nodeId` on purpose: several
+   * agents can be wedged at once, and a node-wide "cleared" signal would let
+   * one recovering node wipe another node's still-wrong badge.
+   */
+  private clearStall(nodeId: number, lane: Lane): void {
     lane.heldSinceMs = null;
     if (!lane.stallReported) return;
     lane.stallReported = false;
-    this.notifyStall(null);
+    lane.reportedBytes = -1;
+    lane.reportedAttempts = -1;
+    this.notifyStall(nodeId, null);
   }
 
-  private notifyStall(stall: InputStall | null): void {
-    for (const listener of this.listeners) listener(stall);
+  private notifyStall(nodeId: number, stall: InputStall | null): void {
+    for (const listener of this.listeners) listener(nodeId, stall);
   }
 }

@@ -324,12 +324,30 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 /// pipe — the channel is then disconnected, subsequent `try_send`s
 /// return `Disconnected`, and `write_bytes` surfaces "Agent not
 /// running" to the caller).
+/// Zeroes a queue gauge on every exit path from [`pty_writer_thread`].
+///
+/// The thread can leave in three ways — the channel closed cleanly, a
+/// `write_all` error, or a `flush` error — and on the error paths the buffers
+/// still sitting in `rx` are dropped when the receiver is, without their byte
+/// accounting ever being released. Without this guard those bytes would stay on
+/// the `DIAG` line as a phantom backlog for as long as the registry entry
+/// survives, which outlives the writer thread (issue #1530 review).
+struct ResetGaugeOnDrop(std::sync::Arc<crate::agent::process::InputQueueGauge>);
+
+impl Drop for ResetGaugeOnDrop {
+    fn drop(&mut self) {
+        self.0.reset();
+    }
+}
+
 pub(super) fn pty_writer_thread(
     session_id: i64,
     mut writer: Box<dyn std::io::Write + Send>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
     queue: std::sync::Arc<crate::agent::process::InputQueueGauge>,
 ) {
+    // Armed before the first `recv`, so every `return` below resets the gauge.
+    let _reset_on_drop = ResetGaugeOnDrop(std::sync::Arc::clone(&queue));
     while let Ok(bytes) = rx.recv() {
         // Release the byte accounting as the buffer is handed off, not after
         // the write returns: `write_all` on a full ConPTY pipe can block for a
@@ -347,10 +365,8 @@ pub(super) fn pty_writer_thread(
     }
     // Channel closed cleanly (`close_input` dropped the sender). The
     // writer's `Drop` closes the underlying PTY pipe, so the agent's
-    // stdin EOFs and the agent CLI exits cleanly. Anything still counted
-    // as buffered is abandoned; zero it so diagnostics does not report a
-    // permanent phantom backlog for a dead session (issue #1530).
-    queue.reset();
+    // stdin EOFs and the agent CLI exits cleanly. The drop guard zeroes
+    // anything still counted as buffered.
     tracing::debug!(session_id, "PTY writer thread exiting (channel closed)");
 }
 

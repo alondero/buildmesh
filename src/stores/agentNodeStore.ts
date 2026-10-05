@@ -332,15 +332,14 @@ interface AgentNodeState {
   // the row, so we flag the node here the instant the user clicks and let
   // NodeItem show a spinner instead of looking frozen.
   closingNodeIds: Set<number>;
-  // Issue #1530 — the one session whose PTY input is currently being held by
-  // the transport's ordered retry buffer instead of delivered, or `null`.
-  //
-  // Deliberately a single slot rather than a per-node map: at most one node is
-  // ever genuinely wedged, and one badge slot in an already-dense node header
-  // is all the chrome the failure deserves. The buffer only reports once bytes
-  // have been held past its own threshold, so an ordinary burst of typing never
-  // lands here.
-  stalledInput: InputStall | null;
+  // Issue #1530 — sessions whose PTY input the transport's ordered retry
+  // buffer is holding rather than delivering, keyed by node id. A *record*, not
+  // a single slot: Buildmesh runs many agents in parallel, so two nodes can be
+  // stalled at the same time, and with one shared slot the first node to recover
+  // would withdraw a badge that another, still-wedged node still needs. Entries
+  // exist only while a node is actually stalled, so the map is empty in the
+  // normal case and the UI footprint is unchanged.
+  stalledInputs: Record<number, InputStall>;
   // Pending "send input at time T" schedules (issue #785), keyed by node ID.
   // One active schedule per node — a new `scheduleInput` cancels the prior
   // timer, and `deleteAgentNode` cancels the schedule outright so a stray
@@ -470,14 +469,10 @@ interface AgentNodeState {
   /// `fetchAgentNodes` fan-out. The implementation carries the reasoning.
   refreshCircuitOwnerships: () => Promise<void>;
   setSemanticTurn: (id: number, turn: SemanticTurnPayload | null) => void;
-  /// Issue #1530 — publish (or clear) the stalled-input state the transport's
-  /// ordered retry buffer reports.
-  ///
-  /// The single-slot invariant (at most one stalled session) is enforced
-  /// *inside* this setter, not in its callers: the transport, the terminal
-  /// registry and any future entrypoint all go through here, so none of them
-  /// can leave the badge desynchronized from the buffer that owns the bytes.
-  setStalledInput: (stall: InputStall | null) => void;
+  /// Issue #1530 — publish (or clear) one session's stalled-input state, as
+  /// reported by the transport's ordered retry buffer. Scoped by `nodeId` so
+  /// parallel agents cannot withdraw each other's badges.
+  setStalledInput: (nodeId: number, stall: InputStall | null) => void;
   findAgentNode: (id: number) => AgentNode | undefined;
   /// Issue #1054 — attach the store's Tauri event listeners; a one-line
   /// delegate to `agentNodeListeners.attachAgentNodeListeners`.
@@ -718,7 +713,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   loading: false,
   error: null,
   closingNodeIds: new Set(),
-  stalledInput: null,
+  stalledInputs: {},
   schedules: {},
 
   getAgentNodes: () => {
@@ -825,7 +820,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
       initTerminalInputWatch: () => {
         if (stallWatchAttached) return;
         stallWatchAttached = true;
-        api.subscribeTerminalInputStall((stall) => get().setStalledInput(stall));
+        api.subscribeTerminalInputStall((nodeId, stall) => get().setStalledInput(nodeId, stall));
       },
       initAttentionListeners: () => {
         // Wire the input watch on the first attempt whatever the lifecycle
@@ -1350,32 +1345,27 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     });
   },
 
-  setStalledInput: (stall) => {
-    // The invariant lives here, not in the callers: a stalled input state is
-    // meaningful for exactly one session, and a second report for a different
-    // node replaces the first rather than queueing behind it. Callers that
-    // set it directly (tests, the transport subscription) cannot desynchronize
-    // the badge from the buffer (issue #1002's rule, applied to this state).
+  setStalledInput: (nodeId, stall) => {
+    // The invariant lives here, not in the callers: each node owns its own
+    // entry, so the transport, the terminal registry and any future entrypoint
+    // cannot desynchronize a badge from the buffer that owns those bytes
+    // (issue #1002's rule, applied to this state). Critically, a `null` removes
+    // only `nodeId`'s entry — withdrawing one node's stall must never clear
+    // another node's, which a single shared slot could not express.
     set((state) => {
+      const current = state.stalledInputs[nodeId];
       if (stall === null) {
-        return state.stalledInput === null ? {} : { stalledInput: null };
+        if (current === undefined) return {};
+        const next = { ...state.stalledInputs };
+        delete next[nodeId];
+        return { stalledInputs: next };
       }
-      if (state.stalledInput && state.stalledInput.nodeId !== stall.nodeId) {
-        // Two sessions stalled at once. Keep the one with more bytes held: it
-        // is the more blocked agent, and the other's retry is still running.
-        return state.stalledInput.pendingBytes >= stall.pendingBytes
-          ? {}
-          : { stalledInput: stall };
-      }
-      if (
-        state.stalledInput &&
-        state.stalledInput.nodeId === stall.nodeId &&
-        state.stalledInput.pendingBytes === stall.pendingBytes &&
-        state.stalledInput.attempts === stall.attempts
-      ) {
+      // The buffer re-notifies as the backlog grows, so this comparison is what
+      // keeps an unchanged stall from re-rendering every node header.
+      if (current && current.pendingBytes === stall.pendingBytes && current.attempts === stall.attempts) {
         return {};
       }
-      return { stalledInput: stall };
+      return { stalledInputs: { ...state.stalledInputs, [nodeId]: stall } };
     });
   },
 
