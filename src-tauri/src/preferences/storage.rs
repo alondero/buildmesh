@@ -1,17 +1,25 @@
 //! Disk persistence, in-process cache, and atomic write coordination.
 //!
 //! This module is the **boundary** between the in-memory cache and durable
-//! storage. Everything that touches `preferences.json` on disk lives here:
-//! the `APP_DATA_DIR`/`CACHE`/`WRITE_LOCK` statics, the atomic temp-file
-//! writer, and the small façade (`load`/`save`/`update`) that the rest of
-//! the codebase uses.
+//! storage. It owns the `APP_DATA_DIR`/`CACHE`/`WRITE_LOCK` statics, the
+//! `load`/`save`/`update` façade the rest of the codebase uses, and — the
+//! reason this module exists at all — the rule that decides what a
+//! caller is *allowed* to do with a file that is not readable
+//! ([`LoadState`], issue #1523).
+//!
+//! The bytes on disk are owned by [`super::recovery`]: it classifies a
+//! payload, keeps the last-known-good backup, and performs the explicit
+//! recovery actions. This module owns the *process* state — the cache, the
+//! generation counter, and the write lock — and delegates every byte to
+//! `recovery`. The split is deliberate: `recovery::classify` is pure, so
+//! the classification rules are testable without a filesystem, while the
+//! stateful decision ("may this write land?") has exactly one home.
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 
 use super::model::AppPreferences;
-use super::migrations::migrate_prefs_json;
-use std::io::Write;
-use std::path::PathBuf;
+use super::recovery::{self, CorruptionInfo, PreferencesHealth, RecoveryOutcome};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -134,60 +142,177 @@ fn preferences_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "preferences module not initialized".to_string())
 }
 
-pub(crate) fn read_from_disk() -> Result<AppPreferences, String> {
-    let path = preferences_path()?;
-    if !path.exists() {
-        let mut prefs = AppPreferences::default();
-        super::launch_configurations::reconcile(&mut prefs);
-        return Ok(prefs);
-    }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read preferences.json: {}", e))?;
-    // Tolerate malformed/empty files — preferences are non-critical.
-    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            let mut prefs = AppPreferences::default();
-            super::launch_configurations::reconcile(&mut prefs);
-            return Ok(prefs);
-        }
-    };
-    migrate_prefs_json(&mut value);
-    let mut prefs: AppPreferences = match serde_json::from_value(value) {
-        Ok(p) => p,
-        Err(_) => {
-            tracing::warn!("preferences::read_from_disk post-migration deserialization failed; using defaults");
-            let mut prefs = AppPreferences::default();
-            super::launch_configurations::reconcile(&mut prefs);
-            return Ok(prefs);
-        }
-    };
-    super::launch_configurations::reconcile(&mut prefs);
-    Ok(prefs)
+/// The outcome of reading `preferences.json` off disk.
+///
+/// Issue #1523 made this a typed result because the *unreadable* case used
+/// to be indistinguishable from "no file yet": both produced
+/// `AppPreferences::default()`, that default was published as the
+/// authoritative cache, and the next ordinary settings change replaced the
+/// user's file with it. Only [`LoadState::Missing`] may seed the cache with
+/// defaults — a corrupt read is served defaults in memory (so read-only
+/// callers keep working) but is never published and never written back.
+#[derive(Debug, Clone)]
+pub enum LoadState {
+    /// No file on disk yet — a fresh install. The only state that may
+    /// populate the writable cache with defaults.
+    Missing,
+    /// The file parsed, migrated, and deserialized cleanly.
+    Healthy(Box<AppPreferences>),
+    /// The file exists but could not be turned into [`AppPreferences`]. The
+    /// original bytes are untouched on disk; [`CorruptionInfo`] says why.
+    Corrupt(Box<CorruptionInfo>),
 }
 
-pub(crate) fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
+/// The reconciled default preferences a fresh install starts from.
+fn defaults() -> AppPreferences {
+    let mut prefs = AppPreferences::default();
+    super::launch_configurations::reconcile(&mut prefs);
+    prefs
+}
+
+/// Read and classify the on-disk file. Never writes, never mutates the cache.
+///
+/// Every write path calls this first and refuses on anything but
+/// [`LoadState::Healthy`] / [`LoadState::Missing`] — re-reading rather than
+/// latching a flag from an earlier load, because the invariant has to hold
+/// for a process that writes before it ever reads, and for a cache that was
+/// populated before the file went bad underneath us. A `preferences.json` is
+/// a few tens of KB, so one extra read per write is cheaper than a latch that
+/// can disagree with the disk.
+///
+/// A read **error** refuses the write too, even though it proves nothing about
+/// the file's *contents*. A file we cannot read may be perfectly valid, and
+/// `fs::rename` can replace a file whose read access is denied — so
+/// proceeding would overwrite unreadable user data with defaults, which is
+/// the exact loss #1523 exists to prevent. Not being able to read the file is
+/// itself a reason to stop and say so.
+pub(crate) fn read_state() -> Result<LoadState, String> {
+    let path = preferences_path()?;
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(LoadState::Missing),
+        Err(e) => return Err(format!("failed to read preferences.json: {}", e)),
+    };
+    match recovery::classify(&raw) {
+        Ok(mut prefs) => {
+            super::launch_configurations::reconcile(&mut prefs);
+            Ok(LoadState::Healthy(Box::new(prefs)))
+        }
+        Err(payload) => {
+            let info = payload.into_info(&path, recovery::backup_available(&path));
+            // Content-free by construction: `reason` is an enum key and
+            // `detail` carries a serde category plus a line/column. The
+            // bytes themselves stay on disk — see `recovery`'s module docs.
+            tracing::warn!(
+                "preferences.json is corrupt ({}): {} — left on disk untouched, \
+                 settings writes are refused until it is recovered",
+                info.reason.as_str(),
+                info.detail
+            );
+            Ok(LoadState::Corrupt(Box::new(info)))
+        }
+    }
+}
+
+/// The message a refused write returns.
+///
+/// The `PREFERENCES_CORRUPT` prefix is a stable token, deliberately at the
+/// front: this string is what reaches the log and a support conversation, and
+/// a user can then say "I got a PREFERENCES_CORRUPT error" instead of quoting
+/// a sentence. The UI does *not* parse it — its live signal is
+/// [`health`] — so nothing in the frontend depends on this wording.
+pub(crate) fn corruption_error(info: &CorruptionInfo) -> String {
+    format!(
+        "PREFERENCES_CORRUPT: {} could not be read ({}), so it was not \
+         overwritten: {}. Open Settings to restore the last-known-good backup \
+         or reset the file.",
+        info.path,
+        info.reason.as_str(),
+        info.detail
+    )
+}
+
+/// The write gate: only a healthy or absent file may be written.
+///
+/// [`read_state`] deliberately reports corruption as a *value* so a reader
+/// can serve defaults; a writer has to turn that into a refusal, and this is
+/// the one place that does. Both writers ([`save`], [`try_update`]) go
+/// through it, so there is no second path into [`write_to_disk`].
+fn writable_state() -> Result<LoadState, String> {
+    match read_state()? {
+        state @ (LoadState::Healthy(_) | LoadState::Missing) => Ok(state),
+        LoadState::Corrupt(info) => Err(corruption_error(&info)),
+    }
+}
+
+/// Atomic, backup-refreshing write. Not a gate — call [`writable_state`]
+/// first.
+///
+/// Private on purpose: it is the only thing that can replace the file, so
+/// keeping it module-private makes [`writable_state`] structurally
+/// unavoidable rather than a convention.
+fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
     let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = preferences_path()?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create app data dir: {}", e))?;
-    }
     let json = serde_json::to_string_pretty(prefs)
         .map_err(|e| format!("failed to serialize preferences: {}", e))?;
-    let parent = path
+    // The last-known-good backup is refreshed from the exact bytes that just
+    // landed, *after* the atomic replacement — so a backup can never hold a
+    // payload that failed to deserialize, and a refused write (corrupt file)
+    // can never refresh it either.
+    recovery::persist_with_backup(&path, json.as_bytes())
+}
+
+/// Current health of the on-disk file, for the UI's recovery surface. Reads
+/// fresh so a file the user repaired by hand is picked up without a restart.
+pub fn health() -> Result<PreferencesHealth, String> {
+    let path = preferences_path()?;
+    let state = read_state()?;
+    Ok(PreferencesHealth::from_state(&path, &state))
+}
+
+/// Explicit recovery: put the last-known-good backup back, archiving
+/// whatever is on disk first.
+///
+/// The only path that repairs a corrupt file without discarding it — the
+/// command behind it is what the Settings pane's "Restore" action calls.
+pub fn restore_backup() -> Result<RecoveryOutcome, String> {
+    let path = preferences_path()?;
+    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let outcome = recovery::restore_backup(&path)?;
+    adopt(&outcome.preferences);
+    Ok(outcome)
+}
+
+/// Explicit recovery: archive the existing file and start from defaults.
+///
+/// The **only** path through the app that writes defaults over a file it
+/// could not read, and it is never reached implicitly — see
+/// `commands::preferences::reset_app_preferences`.
+pub fn reset() -> Result<RecoveryOutcome, String> {
+    let path = preferences_path()?;
+    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let outcome = recovery::reset_to_defaults(&path)?;
+    adopt(&outcome.preferences);
+    Ok(outcome)
+}
+
+/// Publish a recovery result as the live cache and invalidate derived caches.
+fn adopt(prefs: &AppPreferences) {
+    set_cache(Some(prefs.clone()));
+    bump_generation();
+}
+
+/// The corrupt `preferences.json`'s location, for the "open file location"
+/// action. Returns the containing directory, because a file manager opening
+/// a single file renders it with whichever app claims the extension — a JSON
+/// editor, not Explorer.
+pub fn preferences_directory() -> Result<PathBuf, String> {
+    let path = preferences_path()?;
+    Ok(path
         .parent()
-        .ok_or_else(|| "preferences path has no parent directory".to_string())?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("failed to create temporary preferences file: {e}"))?;
-    temporary
-        .write_all(json.as_bytes())
-        .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|e| format!("failed to write temporary preferences file: {e}"))?;
-    temporary
-        .persist(&path)
-        .map_err(|e| format!("failed to atomically replace preferences.json: {}", e.error))?;
-    Ok(())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".")))
 }
 
 /// Load preferences, populating the in-process cache on first call.
@@ -206,6 +331,13 @@ pub(crate) fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
 /// collide on the same in-memory value. Production keeps a process-
 /// global `Mutex` — there's exactly one app data dir per process, so
 /// global state is correct.
+///
+/// Issue #1523: a **corrupt** file still yields defaults here, so every
+/// read-only caller (spawn routing, the circuit classifier, the usage
+/// panel) keeps working instead of failing closed on a file the app can
+/// still show. Those defaults are deliberately *not* published to the
+/// cache: the write path re-reads the file and refuses, so no ordinary
+/// settings change can turn "unreadable" into "overwritten".
 pub fn load() -> Result<AppPreferences, String> {
     // Cold-cache populate, mutator, and cache publish all happen under the
     // mutex — the same contract as the pre-issue-#1386 implementation,
@@ -216,15 +348,25 @@ pub fn load() -> Result<AppPreferences, String> {
         if let Some(cached) = guard.as_ref() {
             return Ok(cached.clone());
         }
-        let prefs = read_from_disk()?;
-        *guard = Some(prefs.clone());
-        Ok(prefs)
+        match read_state()? {
+            LoadState::Healthy(prefs) => {
+                *guard = Some((*prefs).clone());
+                Ok(*prefs)
+            }
+            LoadState::Missing => {
+                let prefs = defaults();
+                *guard = Some(prefs.clone());
+                Ok(prefs)
+            }
+            LoadState::Corrupt(_) => Ok(defaults()),
+        }
     });
     result
 }
 
 /// Persist preferences to disk and refresh the cache.
 pub fn save(mut prefs: AppPreferences) -> Result<(), String> {
+    writable_state()?;
     super::launch_configurations::reconcile(&mut prefs);
     write_to_disk(&prefs)?;
     set_cache(Some(prefs));
@@ -246,9 +388,19 @@ pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreference
 }
 
 pub(crate) fn try_update(mutator: impl FnOnce(&mut AppPreferences) -> Result<(), String>) -> Result<AppPreferences, String> {
+    // The corruption gate runs *before* the cache lock: it is a plain
+    // filesystem read, and a refused write should not have taken the lock
+    // at all. Its result doubles as the cold-cache populate below, so the
+    // file is read exactly once either way.
+    let disk = writable_state()?;
     let result: Result<AppPreferences, String> = with_cache_mut(|guard| {
         if guard.is_none() {
-            *guard = Some(read_from_disk()?);
+            *guard = Some(match disk {
+                LoadState::Healthy(prefs) => *prefs,
+                // `writable_state` has already turned `Corrupt` into an
+                // `Err`, so `Missing` is the only other case here.
+                LoadState::Missing | LoadState::Corrupt(_) => defaults(),
+            });
         }
         let mut candidate = guard
             .as_ref()

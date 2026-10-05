@@ -260,6 +260,11 @@ pub fn run() {
             commands::mesh::get_default_provider,
             // App preferences (buildmesh-wide)
             commands::preferences::get_app_preferences,
+            // Corrupt-file recovery (issue #1523)
+            commands::preferences::get_preferences_health,
+            commands::preferences::restore_preferences_backup,
+            commands::preferences::reset_app_preferences,
+            commands::preferences::open_preferences_location,
             commands::preferences::set_app_default_provider,
             commands::preferences::set_app_reviewer_provider,
             commands::preferences::set_app_naming_provider,

@@ -147,6 +147,21 @@ fn open_in_file_manager_blocking(path: String) -> Result<(), String> {
         return Err(format!("Path is not a directory: {}", host_path));
     }
 
+    open_host_directory_in_file_manager(Path::new(&host_path))
+}
+
+/// Reveal an already-resolved **host** directory in the OS file manager.
+///
+/// Split out of [`open_in_file_manager_blocking`] for callers that hold a
+/// host path by construction and must not have it run through
+/// [`env::to_host_path`] — a `\\wsl$\` translation of an app-data directory
+/// would point Explorer at a UNC path the user did not ask for. The
+/// existence / directory checks stay in the command wrapper so this stays a
+/// pure "spawn the file manager" primitive.
+pub(crate) fn open_host_directory_in_file_manager(host_path: &Path) -> Result<(), String> {
+    // The platform branches below are string-shaped (the Windows one rewrites
+    // separators for `cmd`'s argument parser), so normalise once here.
+    let host_path = host_path.to_string_lossy();
     tracing::info!("open_in_file_manager: resolved path = {}", host_path);
 
     #[cfg(target_os = "windows")]
@@ -174,7 +189,7 @@ fn open_in_file_manager_blocking(path: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         command_no_window("open")
-            .arg(&host_path)
+            .arg(host_path)
             .spawn()
             .map_err(|e| format!("Failed to open file manager: {}", e))?;
     }
@@ -182,7 +197,7 @@ fn open_in_file_manager_blocking(path: String) -> Result<(), String> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         command_no_window("xdg-open")
-            .arg(&host_path)
+            .arg(host_path)
             .spawn()
             .map_err(|e| format!("Failed to open file manager: {}", e))?;
     }
