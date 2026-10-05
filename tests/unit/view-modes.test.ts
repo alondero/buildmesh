@@ -7,11 +7,14 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  deriveScope,
   scopeNodesForMode,
   resolveSingleNode,
-  resolveMeshScopeId,
+  type DerivedScope,
+  type ScopeInput,
 } from '../../src/lib/viewModes';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+import type { Mesh } from '../../src/types/generated/Mesh';
 
 function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
   return {
@@ -67,16 +70,14 @@ describe('scopeNodesForMode (wayfinder #982)', () => {
     expect(scopeNodesForMode('mesh', NODES, 10, null).map(n => n.id)).toEqual([a1.id, a2.id]);
   });
 
-  it("'mesh' falls back to the active node's mesh when nothing is selected", () => {
-    // Ticket #983: "the switcher's Mesh Grid segment uses selectedMeshId,
-    // falling back to the active node's mesh".
-    expect(scopeNodesForMode('mesh', NODES, null, b1.id).map(n => n.id)).toEqual([b1.id, b2.id]);
-  });
-
-  it("'mesh' falls back to the first node's mesh with no selection and no active node", () => {
-    // A persisted 'mesh' boot must not land on an empty grid while nodes
-    // exist — the fallback chain ends at the first loaded node's mesh.
-    expect(scopeNodesForMode('mesh', NODES, null, null).map(n => n.id)).toEqual([a1.id, a2.id]);
+  it("'mesh' has no scope when nothing is selected (#2071)", () => {
+    // #2071 deleted the fallback chain: with no sidebar selection the Mesh
+    // Grid has no Mesh to scope to, so it shows nothing and renders the
+    // explicit "no mesh selected" empty state. Picking the focused node's
+    // Mesh (or the first loaded Mesh) here would silently show a scope
+    // the user never chose.
+    expect(scopeNodesForMode('mesh', NODES, null, b1.id)).toEqual([]);
+    expect(scopeNodesForMode('mesh', NODES, null, null)).toEqual([]);
   });
 
   it("'mesh' returns an empty scope when no nodes are loaded", () => {
@@ -130,15 +131,118 @@ describe('scopeNodesForMode (wayfinder #982)', () => {
   });
 });
 
-describe('resolveMeshScopeId', () => {
-  it('prefers the sidebar selection', () => {
-    expect(resolveMeshScopeId(NODES, 20, a1.id)).toBe(20);
+// #2071 — the Mesh-scope fallback helper (`resolveMeshScopeId`) is gone. Its
+// replacement is `deriveScope`: one pure read of "what is the scope right now"
+// that every surface renders instead of re-deriving from the selection and the
+// focused node.
+const MESH_10 = { id: 10, name: 'alpha' } as Mesh;
+const MESH_20 = { id: 20, name: 'beta' } as Mesh;
+const MESHES = [MESH_10, MESH_20];
+
+function scope(overrides: Partial<ScopeInput> = {}): DerivedScope {
+  return deriveScope({
+    viewMode: 'all',
+    lastNonSingleMode: 'all',
+    agentNodes: NODES,
+    selectedMeshId: null,
+    activeNodeId: null,
+    meshes: MESHES,
+    ...overrides,
+  });
+}
+
+describe('deriveScope (#2071)', () => {
+  it('maps each View Mode to its node set', () => {
+    expect(scope({ viewMode: 'all' }).visibleNodes.map(n => n.id)).toEqual([a1.id, a2.id, b1.id, b2.id]);
+    expect(scope({ viewMode: 'pinned' }).visibleNodes.map(n => n.id)).toEqual([a2.id, b1.id]);
+    expect(scope({ viewMode: 'mesh', selectedMeshId: 20 }).visibleNodes.map(n => n.id)).toEqual([b1.id, b2.id]);
+    expect(scope({
+      viewMode: 'filtered',
+      controls: { gridSearchQuery: 'a', gridProviderFilter: null, gridStatusFilter: null },
+    }).visibleNodes.map(n => n.id)).toEqual([a1.id, a2.id]);
   });
 
-  it('falls back through active node → first node → null', () => {
-    expect(resolveMeshScopeId(NODES, null, b2.id)).toBe(20);
-    expect(resolveMeshScopeId(NODES, null, null)).toBe(10);
-    expect(resolveMeshScopeId([], null, null)).toBeNull();
+  it('reports the active Mesh — and only for a Mesh-scoped View Mode', () => {
+    const meshScope = scope({ viewMode: 'mesh', selectedMeshId: 20 });
+    expect(meshScope.mesh).toEqual({ id: 20, name: 'beta' });
+    expect(meshScope.isMeshScoped).toBe(true);
+
+    // 'pinned' and 'filtered' are cross-Mesh by design (#983/#1609) and
+    // 'all' clears the selection — so a sidebar selection never turns
+    // one of them into a Mesh scope, even with the Mesh still selected.
+    for (const viewMode of ['all', 'pinned', 'filtered'] as const) {
+      const crossMesh = scope({ viewMode, selectedMeshId: 20 });
+      expect(crossMesh.mesh).toBeNull();
+      expect(crossMesh.isMeshScoped).toBe(false);
+    }
+  });
+
+  it('counts the scope before the controls narrow it and what is visible now', () => {
+    const filtered = scope({
+      viewMode: 'filtered',
+      controls: { gridSearchQuery: 'b1', gridProviderFilter: null, gridStatusFilter: null },
+    });
+    expect(filtered.scopedNodeCount).toBe(4);
+    expect(filtered.visibleNodeCount).toBe(1);
+
+    // A stale search must not narrow a Mesh-scoped view (#1609) — the
+    // scope and the visible set stay the full Mesh.
+    const meshScope = scope({
+      viewMode: 'mesh',
+      selectedMeshId: 20,
+      controls: { gridSearchQuery: 'no such node', gridProviderFilter: null, gridStatusFilter: null },
+    });
+    expect(meshScope.scopedNodeCount).toBe(2);
+    expect(meshScope.visibleNodeCount).toBe(2);
+  });
+
+  it("names the focused node's Mesh when it differs from the scope's", () => {
+    // Single soloing another Mesh's node is the case this field exists
+    // for: the grid scope is mesh 10, the soloed node lives in mesh 20.
+    expect(scope({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 10, activeNodeId: b1.id }).focusedNodeMesh)
+      .toEqual({ id: 20, name: 'beta' });
+    expect(scope({ viewMode: 'mesh', selectedMeshId: 10, activeNodeId: a2.id }).focusedNodeMesh).toBeNull();
+    // A cross-Mesh scope has no Mesh of its own, so the focused node
+    // always names the one it belongs to.
+    expect(scope({ viewMode: 'all', activeNodeId: b2.id }).focusedNodeMesh).toEqual({ id: 20, name: 'beta' });
+    expect(scope({ viewMode: 'all', activeNodeId: null }).focusedNodeMesh).toBeNull();
+  });
+
+  it('Mesh Grid with no selection has no Mesh and shows nothing, even with nodes loaded (#2071)', () => {
+    // The focused node lives in mesh 20 and mesh 20 is loaded — the scope
+    // is still empty. Nothing picks a Mesh on the user's behalf.
+    const none = scope({ viewMode: 'mesh', selectedMeshId: null, activeNodeId: b1.id });
+    expect(none.mesh).toBeNull();
+    expect(none.isMeshScoped).toBe(false);
+    expect(none.visibleNodes).toEqual([]);
+    expect(none.visibleNodeCount).toBe(0);
+    expect(none.scopedNodeCount).toBe(0);
+  });
+
+  it('Mesh Grid with no selection and no nodes loaded is the same empty scope (#2071)', () => {
+    const none = scope({ viewMode: 'mesh', selectedMeshId: null, agentNodes: [], activeNodeId: null });
+    expect(none.mesh).toBeNull();
+    expect(none.isMeshScoped).toBe(false);
+    expect(none.visibleNodes).toEqual([]);
+    expect(none.visibleNodeCount).toBe(0);
+  });
+
+  it('reports the grid mode Single was entered from, without adopting the soloed node\'s Mesh', () => {
+    // `lastNonSingleMode` is the Escape target; the Mesh Grid the user
+    // returns to has no selection, so the scope stays empty — the
+    // soloed node's Mesh is reported as a contribution, not as the scope.
+    const single = scope({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: null, activeNodeId: b1.id });
+    expect(single.viewMode).toBe('single');
+    expect(single.gridMode).toBe('mesh');
+    expect(single.mesh).toBeNull();
+    expect(single.visibleNodes).toEqual([]);
+    expect(single.focusedNodeMesh).toEqual({ id: 20, name: 'beta' });
+  });
+
+  it('reports a Mesh whose name is not loaded as id-only, never a guessed label', () => {
+    const unloaded = scope({ viewMode: 'mesh', selectedMeshId: 30 });
+    expect(unloaded.mesh).toEqual({ id: 30, name: null });
+    expect(unloaded.isMeshScoped).toBe(true);
   });
 });
 

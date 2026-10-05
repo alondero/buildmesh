@@ -382,6 +382,32 @@ describe('AgentNodeView grid controls', () => {
     expect(useUIStore.getState().canvasSpawnMenuMeshId).toBe(1);
   });
 
+  it('renders the no-mesh-selected branch in Mesh Grid with no selection, nodes or not (#2071)', () => {
+    // #2071 deleted the Mesh-scope fallback chain, so Mesh Grid with no
+    // sidebar selection no longer quietly shows the focused node's Mesh
+    // (or the first loaded one). The grid renders an explicit empty state
+    // naming the missing selection — with agents loaded in other meshes.
+    seedAgentNodes(NODES, NODES[0].id);
+    const meshOnly = { id: 1, name: 'Repo', path: '/r' } as Mesh;
+    useMeshStore.setState({
+      selectedMeshId: null,
+      meshes: [meshOnly],
+      meshesById: new Map([[1, meshOnly]]),
+    });
+    useUIStore.setState({ viewMode: 'mesh' });
+
+    render(<AgentNodeView />);
+
+    expect(screen.queryByTestId('grid-output')).toBeNull();
+    expect(screen.getByText('No mesh selected')).toBeTruthy();
+    expect(screen.queryByText('No nodes match')).toBeNull();
+
+    // The CTA is a real store transition, not a dead button: All Nodes is
+    // the cross-Mesh view that needs no selection.
+    fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
+    expect(useUIStore.getState().viewMode).toBe('all');
+  });
+
   it('renders the selected-empty branch when the selected mesh has no nodes (#1536)', () => {
     seedAgentNodes([], null);
     const meshOnly = { id: 1, name: 'Empty Repo', path: '/r' } as Mesh;

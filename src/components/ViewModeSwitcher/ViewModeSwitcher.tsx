@@ -1,7 +1,4 @@
 import { useUIStore, type ViewMode } from '../../stores/uiStore';
-import { useMeshStore } from '../../stores/meshStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { resolveMeshScopeId } from '../../lib/viewModes';
 
 /**
  * ViewModeSwitcher — the five-segment View Mode control (wayfinder #982 /
@@ -14,9 +11,12 @@ import { resolveMeshScopeId } from '../../lib/viewModes';
  *
  * Segment semantics:
  *   - Single:    solo the active node (subsumes the old maximize toggle).
- *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection we
- *                select the fallback mesh (active node's, else first) —
- *                the selectMesh subscription in uiStore flips the mode.
+ *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection the
+ *                segment only sets the mode and the grid renders its "no
+ *                Mesh selected" empty state — #2071 deleted the fallback
+ *                that used to select the active node's mesh (or the first
+ *                loaded one) on the user's behalf. (A Mesh picker here is
+ *                #2076's job, not this one's.)
  *   - Pinned:    cross-mesh filter over is_pinned; never touches
  *                selectedMeshId.
  *   - All Nodes: clear the mesh selection (the same state the sidebar's
@@ -123,29 +123,11 @@ export function ViewModeSwitcher() {
   const setViewMode = useUIStore(state => state.setViewMode);
 
   const handleSelect = (mode: ViewMode) => {
-    if (mode === 'mesh') {
-      // Mesh Grid needs a mesh scope. The sidebar selection usually
-      // provides it; with no selection, select the fallback mesh (active
-      // node's, else first loaded) and let the uiStore mesh-subscription
-      // flip the mode. No nodes at all → set the mode directly (the view
-      // renders its empty state).
-      const { selectedMeshId, selectMesh } = useMeshStore.getState();
-      if (selectedMeshId === null) {
-        // Issue #1384 — the resolver reads the ordered array, so we
-        // derive it from the normalized split (or use the `getAgentNodes`
-        // helper). `getAgentNodes()` is the lightweight option here:
-        // this branch runs only on click, not in a render loop.
-        const { getAgentNodes, activeNodeId } = useAgentNodeStore.getState();
-        const agentNodes = getAgentNodes();
-        const meshId = resolveMeshScopeId(agentNodes, null, activeNodeId);
-        if (meshId !== null) {
-          selectMesh(meshId);
-          return;
-        }
-      }
-      setViewMode('mesh');
-      return;
-    }
+    // #2071 — Mesh Grid has no branch here any more. The mode is set and
+    // the Mesh comes from the sidebar alone: choosing one here (the active
+    // node's mesh, else the first loaded) showed the user a scope they
+    // never picked, and the fallback chain is deleted. With no selection
+    // the grid renders its "no mesh selected" empty state.
     if (mode === 'filtered') {
       // #1609 — switch first, then request focus. The request counter
       // pattern (App.tsx `focus-grid-search`) means the consumer's layout

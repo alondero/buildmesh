@@ -1,11 +1,13 @@
 ﻿/**
- * ViewModeSwitcher (wayfinder #982 / #983 / #986; Filtered #1609) — the
- * five-segment control in the canvas header that drives uiStore.viewMode.
- * Pins the segment rendering, ARIA semantics, and the deliberate
- * sidebar-sync round-trips (Mesh selects a fallback mesh and lets the
- * uiStore sync flip the mode; All clears the selection the same way the
- * sidebar re-click-deselect does). The Filtered segment additionally arms
- * the focus-grid-search request so the first click lands the user in the
+ * ViewModeSwitcher (wayfinder #982 / #983 / #986; Filtered #1609; Mesh Grid
+ * fallback deleted by #2071) — the five-segment control in the canvas header
+ * that drives uiStore.viewMode. Pins the segment rendering, ARIA semantics,
+ * and the deliberate sidebar-sync round-trips (All clears the selection the
+ * same way the sidebar re-click-deselect does). Since #2071 the Mesh Grid
+ * segment only sets the mode — it never picks a Mesh for the user, so the
+ * segment lands in the Mesh Grid's "no Mesh selected" empty state when
+ * nothing is selected. The Filtered segment additionally arms the
+ * focus-grid-search request so the first click lands the user in the
  * search box.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -109,8 +111,11 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       expect(useUIStore.getState().viewMode).toBe('all');
     });
 
-    it('clicking Mesh Grid with no selection falls back to the active node\'s mesh and syncs', () => {
-      // The "fallback to the active node's mesh" branch (ticket #983).
+    it('clicking Mesh Grid with no selection sets the mode and selects nothing (#2071)', () => {
+      // #2071 deleted the fallback chain: the segment only sets the View
+      // Mode. Picking the focused node's Mesh (or the first loaded Mesh)
+      // here silently chose a scope for the user — the Mesh Grid now
+      // renders its own "no Mesh selected" empty state instead.
       seedAgentNodes([NODE_A, NODE_B], NODE_B.id);
       useMeshStore.setState({
         meshes: [MESH_1, MESH_2],
@@ -119,7 +124,7 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       });
       render(<ViewModeSwitcher />);
       fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
-      expect(useMeshStore.getState().selectedMeshId).toBe(MESH_2.id);
+      expect(useMeshStore.getState().selectedMeshId).toBeNull();
       expect(useUIStore.getState().viewMode).toBe('mesh');
     });
 
