@@ -23,7 +23,7 @@ pub(crate) const RE_REVIEW_DELIVERY: &str = "The author has addressed your previ
 /// an empty argument lets `gh` resolve the pull request for the current branch.
 pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
     format!(
-        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`); wait for its required checks to pass (`gh pr checks{pr_argument} --watch`); then squash-merge it (`gh pr merge{pr_argument} --squash`). Do not make further changes. If a required check fails or the merge is blocked, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
+        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). If the PR branch is behind the base branch or the merge is blocked as out-of-date, bring it up to date first (`gh pr update-branch{pr_argument}`, or rebase onto the base branch and push), resolving only sync conflicts without changing what the PR does; then wait for its required checks to pass (`gh pr checks{pr_argument} --watch`) and squash-merge it (`gh pr merge{pr_argument} --squash`). Do not start new work or change what the PR does — sync operations (update, rebase, push) needed to merge are expected and allowed. If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
     )
 }
 
@@ -46,3 +46,25 @@ pub(crate) const LEGACY_FEEDBACK_PROMPT: &str = "An independent reviewer request
 pub(crate) const LEGACY_PR_REVIEW_PROMPT: &str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}.";
 
 pub(crate) const LEGACY_PR_REVIEW_WITH_VERDICT: &str = "review PR {{pr.number}} as a grumpy senior engineer who is obsessed with writing the right code, clean code, and having the right architecture. Add the review comments to the PR as a comment. The pull request URL is {{pr.url}}. State the reviewed commit and an explicit final verdict: approve only if there are no remaining actionable findings; otherwise request changes or explain what blocks review. Review completion alone is not approval. Re-check previous findings against the current code. Separate blocking correctness, specification and verification findings from optional style suggestions; do not turn optional preferences or unrelated redesigns into blockers.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_prompt_authorizes_branch_sync_instead_of_stopping_when_outdated() {
+        let prompt = merge_approved_pr("PR #1 (http://example/pr/1)", " 1");
+        assert!(
+            prompt.contains("behind"),
+            "merge prompt must name the behind-base case, was: {prompt:?}"
+        );
+        assert!(
+            prompt.contains("update-branch"),
+            "merge prompt must authorize bringing the branch up to date, was: {prompt:?}"
+        );
+        assert!(
+            !prompt.contains("Do not make further changes"),
+            "blanket no-changes ban stops agents from rebasing an outdated branch, was: {prompt:?}"
+        );
+    }
+}
