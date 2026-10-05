@@ -267,13 +267,14 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
 /// cannot tell a fresh redraw from a stale one that repaints an earlier prompt
 /// with an identical ending, which the quiet-output gate only narrows.
 fn visible_paste_proof(harness: &str, normalized: String) -> String {
-    if normalized.len() <= VISIBLE_PASTE_TEXT_LIMIT {
+    let chars = normalized.chars().count();
+    if chars <= VISIBLE_PASTE_TEXT_LIMIT {
         return normalized;
     }
     if harness != "muse" {
         return String::new();
     }
-    let skip = normalized.chars().count().saturating_sub(MUSE_TAIL_ANCHOR_CHARS);
+    let skip = chars.saturating_sub(MUSE_TAIL_ANCHOR_CHARS);
     normalized.chars().skip(skip).collect()
 }
 
@@ -765,12 +766,25 @@ mod tests {
     }
 
     #[test]
+    fn the_full_text_limit_counts_characters_not_bytes() {
+        // 200 characters but 400 bytes: under the limit, so every harness keeps the full text.
+        let accented = "é".repeat(200);
+        assert!(accented.len() > VISIBLE_PASTE_TEXT_LIMIT, "fixture precondition: over the limit in bytes only");
+        assert_eq!(visible_paste_proof("codex", accented.clone()), accented);
+        assert_eq!(visible_paste_proof("muse", accented.clone()), accented);
+        // One character past the limit is the boundary for both harnesses.
+        let at_limit = "é".repeat(VISIBLE_PASTE_TEXT_LIMIT);
+        assert_eq!(visible_paste_proof("codex", at_limit.clone()), at_limit);
+        assert_eq!(visible_paste_proof("codex", "é".repeat(VISIBLE_PASTE_TEXT_LIMIT + 1)), "");
+    }
+
+    #[test]
     fn muse_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
         let id = muse_publisher_node("muse-midsize-paste");
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
         assert!(
-            crate::circuit::launch::normalize_for_match(MUSE_MIDSIZE_PROMPT).len() > VISIBLE_PASTE_TEXT_LIMIT,
+            crate::circuit::launch::normalize_for_match(MUSE_MIDSIZE_PROMPT).chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
             "fixture precondition: past the full-text limit, where only a marker used to be accepted"
         );
         let (_, readiness) = stage_prompt_write(&registry, id, MUSE_MIDSIZE_PROMPT, None).unwrap().unwrap();
