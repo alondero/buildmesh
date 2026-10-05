@@ -105,6 +105,76 @@ describe('UsageBar (extracted, was on AccountCard)', () => {
   });
 });
 
+describe('UsageBar pace tick (period progress)', () => {
+  const HOUR = 3600_000;
+  const DAY = 24 * HOUR;
+
+  function tickLeft(window: { label: string; usedPercent: number | null; resetsAt: string | null }) {
+    render(<UsageBar window={window} />);
+    return screen.getByTestId('usage-pace-tick');
+  }
+
+  it('marks ~22% elapsed on a 5-hour window with 3.9h left', () => {
+    const resetsAt = new Date(Date.now() + 3.9 * HOUR).toISOString();
+    const tick = tickLeft({ label: '5-hour', usedPercent: 68, resetsAt });
+    expect(parseFloat(tick.style.left)).toBeCloseTo(22, 0);
+    expect(tick.getAttribute('title')).toBe('Period 22% elapsed');
+    expect(tick.getAttribute('role')).toBe('img');
+    expect(tick.getAttribute('aria-label')).toBe('Period 22% elapsed');
+  });
+
+  it('marks the trailing period on an Antigravity suffixed window', () => {
+    const resetsAt = new Date(Date.now() + 2.2 * DAY).toISOString();
+    const tick = tickLeft({ label: 'Gemini Models — Weekly', usedPercent: 15, resetsAt });
+    expect(parseFloat(tick.style.left)).toBeCloseTo(68.6, 0);
+    expect(tick.getAttribute('title')).toBe('Period 69% elapsed');
+  });
+
+  it('marks ~69% elapsed on a Weekly window with 2.2d left', () => {
+    const resetsAt = new Date(Date.now() + 2.2 * DAY).toISOString();
+    const tick = tickLeft({ label: 'Weekly', usedPercent: 15, resetsAt });
+    expect(parseFloat(tick.style.left)).toBeCloseTo(68.6, 0);
+    expect(tick.getAttribute('title')).toBe('Period 69% elapsed');
+  });
+
+  it('hides the tick when resetsAt is missing', () => {
+    render(<UsageBar window={{ label: '5-hour', usedPercent: 40, resetsAt: null }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
+  it('hides the tick when the label has no known duration', () => {
+    const resetsAt = new Date(Date.now() + HOUR).toISOString();
+    render(<UsageBar window={{ label: 'Fortnightly', usedPercent: 40, resetsAt }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
+  it.each([
+    'Claude Sonnet 4.6 (Thinking)',
+    'Gemini (all models)',
+    'GPT-OSS 120B',
+    'Grok Build Quota',
+    'Fast Requests',
+  ])('keeps model and non-period labels tick-free even with a valid reset (%s)', (label) => {
+    const resetsAt = new Date(Date.now() + HOUR).toISOString();
+    render(<UsageBar window={{ label, usedPercent: 40, resetsAt }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
+  it.each(['not-a-date', ''])('hides the tick when resetsAt is unparsable (%s)', (resetsAt) => {
+    render(<UsageBar window={{ label: '5-hour', usedPercent: 40, resetsAt }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
+  it.each([
+    ['in the past', -HOUR],
+    ['beyond the inferred duration (stale reset)', 6 * HOUR],
+  ])('hides the tick when the reset is %s', (_case, offsetMs) => {
+    const resetsAt = new Date(Date.now() + offsetMs).toISOString();
+    render(<UsageBar window={{ label: '5-hour', usedPercent: 40, resetsAt }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+});
+
 describe('BalanceCard (extracted, was on AccountCard)', () => {
   it('renders remaining balance and monthly spend with the currency', () => {
     render(<BalanceCard balance={{ remaining: 42.5, monthlySpend: 7.25, currency: 'USD' }} />);
