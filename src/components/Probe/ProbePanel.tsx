@@ -32,9 +32,13 @@
  * dense file lists while the center workspace stays useful on common laptop
  * resolutions.
  *
- * The header pins the active destination's icon in a tinted chip next to its
+ * The header shows the active destination's icon in a tinted chip next to its
  * label, with the explicit lens/subject and the fixed-or-following mode
  * visible so each destination body stays free of redundant context chrome.
+ * Issue #2075 promoted that lens/subject line to a legible weight: since
+ * #2073 removed Probe Context Pins, disclosure is the only thing making a
+ * selection-following destination's subject drift visible, so the subject is
+ * no longer the quietest run in the header.
  * Body
  * content fades in on destination switch (keyed remount), and the whole body
  * slides in from the right when the inspector opens — both animations run
@@ -233,7 +237,11 @@ function ProbePanelContent() {
             lens/subject + fixed-or-following mode + close button. The subject
             line replaces the directory-path strip the Issues / PRs tabs
             used to render individually, so every destination makes its
-            ownership visible in the same place. */}
+            ownership visible in the same place — and since #2075 that
+            disclosure renders at a weight that is actually readable at a
+            glance (see the comment on the subject row below). Only live-scope
+            information is here: #2073 removed the pin, so the header carries
+            no captured subject to disagree with the selection. */}
         <div
           className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
         >
@@ -245,17 +253,52 @@ function ProbePanelContent() {
               <ActiveIcon className="w-4 h-4" />
             </span>
             <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-sm text-text-primary font-medium truncate">
+              {/* Destination name — the heading the subject line sits under.
+                  Issue #2075 promoted the subject to a `text-sm font-medium`
+                  line, so the title takes `font-semibold`: without the extra
+                  step the two header lines would render identically and the
+                  header would stop saying which is the destination. */}
+              <span
+                data-testid="probe-context-title"
+                className="text-sm text-text-primary font-semibold truncate"
+              >
                 {activeDef.label}
               </span>
+              {/* Issue #2075 — the disclosure. Since #2073 deleted Probe
+                  Context Pins, this line IS the guarantee that the
+                  destination's subject is visible while the user reads a diff
+                  or a file tree: with two Agent Nodes in one Mesh, Agent
+                  Changes swaps subject and Project Files swaps working tree
+                  as focus moves. It therefore renders at the same size as the
+                  destination name, in `text-text-primary` (the highest-contrast
+                  text token) — previously a 12px `text-text-secondary` run,
+                  the quietest thing in the header. Glyph + text still carry the
+                  meaning, so colour is never the only signal. Size and colour
+                  live on the spans rather than the row, so the row cannot
+                  re-introduce the muted run by inheritance. */}
               <div
                 data-testid="probe-context-subject"
-                className="flex items-center gap-1 min-w-0 text-xs text-text-secondary"
-                title={context.subjectLabel}
+                className="flex items-center gap-1 min-w-0"
+                title={context.detailLabel
+                  ? `${context.subjectLabel} · ${context.detailLabel}`
+                  : context.subjectLabel}
               >
-                <span className="truncate min-w-0">{context.subjectLabel}</span>
+                <span
+                  data-testid="probe-context-subject-name"
+                  className="truncate min-w-0 text-sm font-medium text-text-primary"
+                >
+                  {context.subjectLabel}
+                </span>
+                {/* Mixed-ownership qualifier: Project Files' working tree vs the
+                    repository root, an Agent lens' parent Mesh. One step below
+                    the subject it qualifies, and off `text-text-muted` — it is
+                    the load-bearing half of the disclosure for the two
+                    destinations whose subject moves under the user (#732). */}
                 {context.detailLabel && (
-                  <span className="truncate min-w-0 text-text-muted">
+                  <span
+                    data-testid="probe-context-subject-detail"
+                    className="truncate min-w-0 text-xs text-text-secondary"
+                  >
                     · {context.detailLabel}
                   </span>
                 )}

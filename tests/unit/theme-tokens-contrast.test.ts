@@ -233,11 +233,21 @@ describe('load-bearing text-text-muted sites promoted to text-text-secondary (#7
     },
     {
       file: 'src/components/Probe/ProbePanel.tsx',
-      // Active mesh subheading in the probe header. The full className
-      // tail `truncate min-w-0` is unique to line 119 (the section
-      // message at line 274 also says `text-text-secondary` but uses
-      // `leading-relaxed` instead, so the fragment disambiguates).
-      fragment: 'text-text-secondary truncate min-w-0',
+      // The probe header's subject label — the disclosure that took over from
+      // Probe Context Pins (#2073), promoted to a legible weight in #2075.
+      // Anchored on the whole className, which is unique to this span (the
+      // mode line below it uses `text-2xs text-text-secondary truncate` in the
+      // other order).
+      fragment: 'truncate min-w-0 text-sm font-medium text-text-primary',
+      mustNotContain: 'text-text-muted',
+    },
+    {
+      file: 'src/components/Probe/ProbePanel.tsx',
+      // The mixed-ownership detail beside it — Project Files' focused Node
+      // Working Directory vs the repository root, an Agent lens' parent Mesh.
+      // The half of the disclosure a reader needs to tell WHICH subject is on
+      // screen, so it cannot fall back to muted either.
+      fragment: 'truncate min-w-0 text-xs text-text-secondary',
       mustNotContain: 'text-text-muted',
     },
     {
