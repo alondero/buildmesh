@@ -209,6 +209,97 @@ mod tests {
     }
 
     #[test]
+    fn review_publication_flow_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        use crate::circuit::test_support::{
+            pre_publication_issue_review, pre_publication_local_review,
+        };
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'publication', 'C:/publication')",
+            [],
+        )
+        .unwrap();
+
+        let preset = pre_publication_local_review(3).to_json().unwrap();
+        let issue = pre_publication_issue_review().to_json().unwrap();
+        // A Review-derived copy is user-owned, and a customized issue graph
+        // has extra obligations: neither is rewritten.
+        let copy = pre_publication_local_review(3).to_json().unwrap();
+        let mut customized = pre_publication_issue_review();
+        customized.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        let customized = customized.to_json().unwrap();
+        for (id, graph, is_preset) in [
+            (1, &preset, 1),
+            (2, &issue, 0),
+            (3, &copy, 0),
+            (4, &customized, 0),
+        ] {
+            conn.execute(
+                "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (?1, 1, 'c', ?2, ?3)",
+                rusqlite::params![id, graph, is_preset],
+            ).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
+                (10, 2, 1, 'issue:7:run', 'running'), (11, 1, 1, 'manual:a', 'failed');
+             DELETE FROM app_settings WHERE key = 'review_publication_flow_upgrade_v1';",
+        ).unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let read = |id: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let upgraded_preset = CircuitGraph::from_json(&read(1)).unwrap();
+        assert!(upgraded_preset.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
+        let upgraded_issue = CircuitGraph::from_json(&read(2)).unwrap();
+        assert!(upgraded_issue.has_review_topology_of(
+            &CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
+        ));
+        assert_eq!(read(3), copy);
+        assert_eq!(read(4), customized);
+
+        let snapshot = |run: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            snapshot(10),
+            issue,
+            "an active run keeps executing the graph it started with"
+        );
+        assert_eq!(
+            snapshot(11),
+            preset,
+            "a failed run keeps its graph for Review again"
+        );
+
+        // The flag makes the scan one-shot.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
+            [&issue],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(read(2), issue);
+    }
+
+    #[test]
     fn review_contract_upgrade_skips_active_rows_retries_and_preserves_custom_prompts() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();

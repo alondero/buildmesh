@@ -1269,6 +1269,13 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     assert!(tick.effects.iter().any(
         |effect| matches!(effect, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
     ));
+    for already_published in ["publish", "await_publish", "publish_ready"] {
+        assert_eq!(
+            view.step(already_published).unwrap().status,
+            StepStatus::Completed,
+            "an extension reviews the retained work without asking the source to publish again"
+        );
+    }
     assert_eq!(view.step("reviewer").unwrap().attempt, 4);
     assert!(
         conn.query_row(

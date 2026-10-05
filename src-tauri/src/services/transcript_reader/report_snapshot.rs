@@ -460,6 +460,41 @@ mod tests {
         }
     }
 
+    /// The review preset publishes before spawning its reviewer: deliver the
+    /// publish prompt and hand off the source's publication report.
+    fn publish_for_review(run: &mut RunView, source_event: &CircuitEvent) {
+        advance(
+            run,
+            &CircuitEvent::AgentReady {
+                node_id: "publish".into(),
+            },
+        );
+        let attempt = run.step("publish").unwrap().attempt;
+        advance(
+            run,
+            &CircuitEvent::PromptDelivered {
+                node_id: "publish".into(),
+                attempt,
+            },
+        );
+        let mut event = source_event.clone();
+        let CircuitEvent::TurnClassified {
+            node_id,
+            binding: Some(binding),
+            ..
+        } = &mut event
+        else {
+            panic!("classification fixture");
+        };
+        *node_id = "await_publish".into();
+        binding.owner.step_id = "await_publish".into();
+        advance(run, &event);
+        assert_eq!(
+            run.step("await_publish").unwrap().status,
+            StepStatus::Completed
+        );
+    }
+
     fn classified_run(snapshot: ReportSnapshot) -> (RunView, CircuitEvent) {
         let mut context = CircuitContext::new();
         context.set("source.agent_id", "900");
@@ -1170,15 +1205,13 @@ mod tests {
         )
         .unwrap()
         .expect("completed source report");
-        let transition = advance(
-            &mut run,
-            &CircuitEvent::TurnClassified {
-                node_id: "await_source".into(),
-                classification: Some(crate::circuit::evaluator::Classification::Completed),
-                output: Some(candidate.output),
-                binding: Some(candidate.binding),
-            },
-        );
+        let source_event = CircuitEvent::TurnClassified {
+            node_id: "await_source".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Completed),
+            output: Some(candidate.output),
+            binding: Some(candidate.binding),
+        };
+        let transition = advance(&mut run, &source_event);
         assert_eq!(
             run.step("await_source").unwrap().status,
             StepStatus::Completed
@@ -1188,6 +1221,8 @@ mod tests {
             Some("")
         );
         assert!(!transition.classifications[0].lifecycle_verified);
+        advance(&mut run, &tick);
+        publish_for_review(&mut run, &source_event);
         advance(&mut run, &tick);
         assert_eq!(run.step("reviewer").unwrap().status, StepStatus::Running);
 
@@ -1337,6 +1372,8 @@ mod tests {
         advance(&mut run, &tick);
         advance(&mut run, &source_event);
         advance(&mut run, &tick);
+        publish_for_review(&mut run, &source_event);
+        advance(&mut run, &tick);
         assert_eq!(run.step("reviewer").unwrap().status, StepStatus::Running);
         run.attach_agent_node("reviewer", 901);
         for step_id in ["reviewer", "verdict"] {
@@ -1361,6 +1398,20 @@ mod tests {
         assert_eq!(
             run.context.get("node.verdict.review_verdict"),
             Some("approved")
+        );
+        advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "merge".into(),
+            },
+        );
+        let attempt = run.step("merge").unwrap().attempt;
+        advance(
+            &mut run,
+            &CircuitEvent::PromptDelivered {
+                node_id: "merge".into(),
+                attempt,
+            },
         );
         assert_eq!(run.step("approved").unwrap().status, StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);

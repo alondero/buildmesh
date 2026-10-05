@@ -117,12 +117,14 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "wrapup_retry",
             "wrapup_correction",
             "reviewer",
+            "review_round",
             "review_classifier",
             "follow_feedback",
-            "close_reviewer",
             "feedback_classifier",
             "review_retry",
+            "re_review",
             "close_approved",
+            "merge",
             "review_exhausted",
             "review_blocked",
             "complete",
@@ -163,7 +165,8 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "reviewer",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
-            ("reviewer", "review_classifier", EdgeCondition::Always),
+            ("reviewer", "review_round", EdgeCondition::Always),
+            ("review_round", "review_classifier", EdgeCondition::Always),
             (
                 "review_classifier",
                 "follow_feedback",
@@ -179,10 +182,12 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "review_blocked",
                 EdgeCondition::OnOutcome(StepOutcome::Blocked),
             ),
-            ("close_approved", "complete", EdgeCondition::Always),
-            ("follow_feedback", "close_reviewer", EdgeCondition::Always),
+            // Approval closes the reviewer, then hands the PR to the
+            // implementation agent to squash-merge.
+            ("close_approved", "merge", EdgeCondition::Always),
+            ("merge", "complete", EdgeCondition::Always),
             (
-                "close_reviewer",
+                "follow_feedback",
                 "feedback_classifier",
                 EdgeCondition::Always,
             ),
@@ -192,9 +197,10 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             // Approval and retry exhaustion have separate terminal paths.
+            // Later rounds re-prompt the reviewer that is still open.
             (
                 "review_retry",
-                "finish",
+                "re_review",
                 EdgeCondition::OnOutcome(StepOutcome::Completed),
             ),
             (
@@ -202,6 +208,7 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 "review_exhausted",
                 EdgeCondition::OnOutcome(StepOutcome::Failed),
             ),
+            ("re_review", "review_round", EdgeCondition::Always),
         ],
         min_concurrency_limit: 2,
         default_concurrency_limit: 2,
@@ -227,6 +234,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             PromptAssertion {
                 node_id: "follow_feedback",
                 must_contain: "{{node.reviewer.output}}",
+            },
+            // Approval asks the implementation agent to squash-merge this PR.
+            PromptAssertion {
+                node_id: "merge",
+                must_contain: "gh pr merge {{pr.number}} --squash",
             },
         ],
     },
@@ -532,22 +544,42 @@ mod tests {
     }
 
     #[test]
-    fn review_blueprint_closes_reviewer_node_on_feedback_path() {
+    fn review_blueprint_keeps_reviewer_open_until_approval_then_hands_off_the_merge() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-        let follow_to_close: Vec<&super::super::model::CircuitEdge> = graph
-            .edges
-            .iter()
-            .filter(|e| e.from == "follow_feedback" && e.to == "close_reviewer")
-            .collect();
-        assert_eq!(follow_to_close.len(), 1);
-        let close = graph
-            .node("close_reviewer")
-            .expect("close_reviewer required by contract");
-        match &close.kind {
+        assert!(graph.node("close_reviewer").is_none());
+        assert_eq!(
+            graph.children("follow_feedback"),
+            vec!["feedback_classifier".to_string()]
+        );
+        match &graph
+            .node("re_review")
+            .expect("re_review required by contract")
+            .kind
+        {
+            CircuitNodeKind::InjectPty { target_node_id, .. } => {
+                assert_eq!(target_node_id.as_deref(), Some("reviewer"));
+            }
+            other => panic!("re_review must be InjectPty, got {other:?}"),
+        }
+        match &graph
+            .node("close_approved")
+            .expect("close_approved required by contract")
+            .kind
+        {
             CircuitNodeKind::CloseAgentNode { target_node_id } => {
                 assert_eq!(target_node_id.as_deref(), Some("reviewer"));
             }
-            other => panic!("close_reviewer must be CloseAgentNode, got {other:?}"),
+            other => panic!("close_approved must be CloseAgentNode, got {other:?}"),
+        }
+        match &graph
+            .node("merge")
+            .expect("merge required by contract")
+            .kind
+        {
+            CircuitNodeKind::InjectPty { target_node_id, .. } => {
+                assert_eq!(target_node_id.as_deref(), Some("implementer"));
+            }
+            other => panic!("merge must be InjectPty, got {other:?}"),
         }
     }
 

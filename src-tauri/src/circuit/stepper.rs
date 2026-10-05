@@ -3078,15 +3078,14 @@ fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
                     _ => false,
                 },
             );
+        // A failed run retires its owned agents through the terminal commit.
+        // A completed run hands back every agent its graph did not close: an
+        // approved review leaves the implementation agent open to merge.
         run.state = if unresolved {
             RunState::Failed
         } else {
             RunState::Completed
         };
-        if has_review {
-            run.context.set("cleanup.pending", "1");
-            t.context_changed = true;
-        }
         t.run_state_changed = true;
     }
 }
@@ -7368,8 +7367,76 @@ mod tests {
         assert_eq!(run.state, RunState::Running);
     }
 
+    /// PR opened, then the reviewer's first turn reaches the verdict gate
+    /// through the `review_round` join.
+    fn issue_review_to_first_verdict(run: &mut RunView, reviewer: i64) {
+        issue_review_to_open_pr(run);
+        open_pr_succeeds(run, 314);
+        advance(run, &tick(8, 8));
+        assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
+        finish_reviewer_turn(run, reviewer);
+    }
+
+    fn open_pr_succeeds(run: &mut RunView, pr: i64) {
+        advance(
+            run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(pr),
+                pr_url: Some(format!("https://github.com/example/repo/pull/{pr}")),
+                pr_head_ref: Some("gh42".into()),
+                pr_title: Some("Improve the widget".into()),
+                error: None,
+            },
+        );
+    }
+
+    fn finish_reviewer_turn(run: &mut RunView, reviewer: i64) {
+        run.attach_agent_node("reviewer", reviewer);
+        advance_with_completion_evidence(run, &agent_finished(reviewer, true));
+        advance(run, &tick(8, 8));
+        assert_eq!(status_of(run, "review_classifier"), StepStatus::Running);
+    }
+
+    /// Changes requested: findings go to the implementer, whose fix turn is
+    /// classified, then the retry gate re-prompts the still-open reviewer.
+    fn request_changes_and_fix(run: &mut RunView, findings: &str) -> Transition {
+        advance_with_report_evidence(
+            run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Working),
+                Some(findings),
+            ),
+        );
+        let feedback = advance(
+            run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        assert!(feedback.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+                if target == "implementer" && prompt.contains(findings))));
+        let delivered = acknowledge_prompt(run, "follow_feedback");
+        assert!(
+            delivered
+                .effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::CloseAgentNode { .. })),
+            "a fix round must keep the reviewer open: {:?}",
+            delivered.effects
+        );
+        advance(run, &tick(8, 8));
+        advance_with_report_evidence(
+            run,
+            &classified("feedback_classifier", Some(Classification::Completed)),
+        )
+    }
+
     #[test]
-    fn issue_review_blueprint_runs_reviewer_feedback_and_closes_reviewer_node() {
+    fn issue_review_blueprint_runs_reviewer_feedback_and_keeps_the_reviewer_open() {
         let mut run = issue_review_run();
         let open = issue_review_to_open_pr(&mut run);
         assert!(open.effects.iter().any(|effect| matches!(
@@ -7381,23 +7448,10 @@ mod tests {
         )));
         assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
 
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(314),
-                pr_url: Some("https://github.com/example/repo/pull/314".into()),
-                pr_head_ref: Some("gh42".into()),
-                pr_title: Some("Improve the widget".into()),
-                error: None,
-            },
-        );
+        open_pr_succeeds(&mut run, 314);
         advance(&mut run, &tick(8, 8));
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
-        run.attach_agent_node("reviewer", 701);
-        advance_with_completion_evidence(&mut run, &agent_finished(701, true));
-        assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
+        finish_reviewer_turn(&mut run, 701);
         let review_done = advance_with_report_evidence(
             &mut run,
             &classified_with_output(
@@ -7413,25 +7467,22 @@ mod tests {
         );
         assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
 
-        let close = advance(
+        let feedback = advance(
             &mut run,
             &CircuitEvent::AgentReady {
                 node_id: "follow_feedback".into(),
             },
         );
-        assert!(close.effects.iter().any(|effect| matches!(
+        assert!(feedback.effects.iter().any(|effect| matches!(
             effect,
             Effect::InjectPty { target_node_id: Some(target), prompt, .. }
-                if target == "implementer" && prompt.contains("PR #314")
+                if target == "implementer" && prompt.contains("PR #314") && prompt.contains("push")
         )));
-        let close = acknowledge_prompt(&mut run, "follow_feedback");
-        assert!(close.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::CloseAgentNode {
-                target_node_id: Some(target),
-                ..
-            } if target == "reviewer"
-        )));
+        let delivered = acknowledge_prompt(&mut run, "follow_feedback");
+        assert!(delivered
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::CloseAgentNode { .. })));
         advance(&mut run, &tick(8, 8));
         assert_eq!(status_of(&run, "feedback_classifier"), StepStatus::Running);
 
@@ -7441,11 +7492,99 @@ mod tests {
         );
         assert_eq!(run.state, RunState::Running);
         assert_eq!(status_of(&run, "review_retry"), StepStatus::Completed);
-        assert_eq!(status_of(&run, "finish"), StepStatus::Queued);
-        assert_eq!(run.step("finish").unwrap().attempt, 2);
+        assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
+        assert_eq!(run.step("re_review").unwrap().attempt, 2);
+        assert_eq!(
+            run.step("finish").unwrap().attempt,
+            1,
+            "a fix round does not repeat the wrap-up"
+        );
+        assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(701));
         assert_eq!(run.context.get("retry.attempt"), Some("2"));
         assert_eq!(run.context.get("retry.max_retries"), Some("3"));
         assert!(retry.effects.is_empty());
+    }
+
+    #[test]
+    fn issue_review_later_round_reprompts_the_same_reviewer() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        request_changes_and_fix(&mut run, "Fix the race.");
+
+        let next = advance(&mut run, &tick(8, 8));
+        assert!(
+            next.effects.iter().all(|effect| !matches!(
+                effect,
+                Effect::SpawnAgentNode { .. } | Effect::CallGithub { .. }
+            )),
+            "a later round neither spawns a reviewer nor repeats the PR check: {:?}",
+            next.effects
+        );
+        assert_eq!(status_of(&run, "re_review"), StepStatus::Running);
+        let reprompt = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "re_review".into(),
+            },
+        );
+        assert!(reprompt.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
+                if node_id == "re_review" && target == "reviewer" && prompt.contains("round 2 of 3"))));
+        assert_eq!(run.resolve_target_agent("re_review"), Some(701));
+        acknowledge_prompt(&mut run, "re_review");
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
+        assert_eq!(run.step("review_classifier").unwrap().attempt, 2);
+        assert_eq!(
+            run.step("reviewer").unwrap().attempt,
+            1,
+            "the reviewer is spawned once"
+        );
+    }
+
+    #[test]
+    fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_hands_it_back() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        let approved = advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("Approved. No remaining findings."),
+            ),
+        );
+        assert!(approved.effects.iter().any(|effect| matches!(effect,
+            Effect::CloseAgentNode { node_id, target_node_id: Some(target) }
+                if node_id == "close_approved" && target == "reviewer")));
+        assert_eq!(
+            run.state,
+            RunState::Running,
+            "the run waits to deliver the merge request"
+        );
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "merge"), StepStatus::Running);
+
+        let merge = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "merge".into(),
+            },
+        );
+        assert!(merge.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
+                if node_id == "merge" && target == "implementer"
+                    && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314"))));
+        let delivered = acknowledge_prompt(&mut run, "merge");
+        assert_eq!(run.state, RunState::Completed);
+        assert!(delivered.effects.iter().any(|effect| matches!(effect,
+            Effect::Notify { message } if message.contains("approved for PR #314") && message.contains("handed back"))));
+        assert_eq!(
+            run.context.get("cleanup.pending"),
+            None,
+            "an approved run leaves the implementer open"
+        );
+        assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
     }
 
     // -- issue-driven Autopilot review blueprint contract (#1469) -----------
@@ -7453,22 +7592,7 @@ mod tests {
     #[test]
     fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(314),
-                pr_url: Some("https://example/pr/314".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("Fix".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 701);
-        advance_with_completion_evidence(&mut run, &agent_finished(701, true));
+        issue_review_to_first_verdict(&mut run, 701);
         advance_with_report_evidence(
             &mut run,
             &classified_with_output(
@@ -7477,10 +7601,17 @@ mod tests {
                 Some("Approved. No remaining findings."),
             ),
         );
-        let t = advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8, 8));
+        advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "merge".into(),
+            },
+        );
+        let t = acknowledge_prompt(&mut run, "merge");
         assert_eq!(run.state, RunState::Completed);
-        assert_eq!(run.context.get("cleanup.pending"), Some("1"));
         assert!(run.step("follow_feedback").is_none());
+        assert!(run.step("re_review").is_none());
         assert!(t
             .effects
             .iter()
@@ -7491,22 +7622,7 @@ mod tests {
     #[test]
     fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(314),
-                pr_url: Some("https://example/pr/314".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("Fix".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 702);
-        advance_with_completion_evidence(&mut run, &agent_finished(702, true));
+        issue_review_to_first_verdict(&mut run, 702);
         let transition = advance_with_report_evidence(
             &mut run,
             &classified_with_output(
@@ -7542,9 +7658,9 @@ mod tests {
             .set("node.reviewer.output", "Changes requested.");
         let t = advance(&mut run, &tick(8, 8));
         assert!(run.step("close_approved").is_none());
+        assert!(run.step("merge").is_none());
         assert!(run.step("complete").is_none());
         assert_eq!(run.state, RunState::Failed);
-        assert_eq!(run.context.get("cleanup.pending"), Some("1"));
         assert!(!t.effects.iter().any(
             |e| matches!(e, Effect::Notify { message } if message.contains("Review approved"))
         ));
@@ -7724,22 +7840,7 @@ mod tests {
     #[test]
     fn issue_review_reviewer_output_is_captured_into_node_context() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(1),
-                pr_url: Some("https://example/pr/1".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("t".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance_with_completion_evidence(&mut run, &agent_finished(9001, true));
+        issue_review_to_first_verdict(&mut run, 9001);
         let _ = advance_with_report_evidence(
             &mut run,
             &classified_with_output(
@@ -7758,28 +7859,12 @@ mod tests {
     }
 
     /// `follow_feedback` injects into the IMPLEMENTATION agent (NOT the
-    /// reviewer) — the contract acceptance criterion "feedback closes the
-    /// reviewer branch correctly" hinges on this routing. A wrong-target
-    /// inject is the easiest way to silently break the loop.
+    /// reviewer). A wrong-target inject is the easiest way to silently
+    /// break the loop.
     #[test]
     fn issue_review_feedback_injection_targets_the_implementer_not_the_reviewer() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(1),
-                pr_url: Some("https://example/pr/1".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("t".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance_with_completion_evidence(&mut run, &agent_finished(9001, true));
+        issue_review_to_first_verdict(&mut run, 9001);
         let _ = advance_with_report_evidence(
             &mut run,
             &classified_with_output(
@@ -7817,160 +7902,65 @@ mod tests {
             "feedback prompt must contain the captured reviewer output: {prompt}"
         );
         assert!(
-            prompt.contains("PR #1"),
+            prompt.contains("PR #314"),
             "feedback prompt must cite the PR number: {prompt}"
         );
     }
 
-    /// After the follow_feedback inject, the `close_reviewer` step kills
-    /// the reviewer agent (not just its status — `CloseAgentNode` is a
-    /// strong action). The contract pins this: feedback MUST close the
-    /// reviewer branch.
+    /// The only reviewer close is on the approval path, and it targets the
+    /// reviewer: closing the implementer would discard the work to merge.
     #[test]
-    fn issue_review_close_reviewer_emits_close_agent_targeting_the_reviewer() {
-        let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(1),
-                pr_url: Some("https://example/pr/1".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("t".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance_with_completion_evidence(&mut run, &agent_finished(9001, true));
-        // A changes-requested verdict schedules follow_feedback.
-        let review_done = advance_with_report_evidence(
-            &mut run,
-            &classified_with_output(
-                "review_classifier",
-                Some(Classification::Working),
-                Some("report"),
-            ),
-        );
-        assert_eq!(
-            run.step("follow_feedback").map(|s| s.status),
-            Some(StepStatus::Running),
-            "follow_feedback must be Running before AgentReady"
-        );
-        // Delivery acknowledgement, not readiness, authorizes reviewer cleanup.
-        let dispatch = advance(
-            &mut run,
-            &CircuitEvent::AgentReady {
-                node_id: "follow_feedback".into(),
-            },
-        );
-        assert!(dispatch
-            .effects
+    fn issue_review_only_approval_closes_the_reviewer() {
+        let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let closes: Vec<(&str, Option<&str>)> = graph
+            .nodes
             .iter()
-            .all(|e| !matches!(e, Effect::CloseAgentNode { .. })));
-        let close = acknowledge_prompt(&mut run, "follow_feedback");
-        let emit = close.effects.iter().find_map(|e| match e {
-            Effect::CloseAgentNode {
-                node_id,
-                target_node_id,
-            } => Some((node_id, target_node_id)),
-            _ => None,
-        });
-        let (node_id, target) =
-            emit.expect("AgentReady must cascade the close_reviewer CloseAgentNode effect");
-        assert_eq!(node_id, "close_reviewer");
-        assert_eq!(
-            target.as_deref(),
-            Some("reviewer"),
-            "CloseAgentNode MUST target the reviewer — closing the implementer would kill the worker"
-        );
-        assert_eq!(
-            run.step("close_reviewer").map(|s| s.status),
-            Some(StepStatus::Completed)
-        );
-        let _ = review_done;
+            .filter_map(|node| match &node.kind {
+                CircuitNodeKind::CloseAgentNode { target_node_id } => {
+                    Some((node.id.as_str(), target_node_id.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![("close_approved", Some("reviewer"))]);
     }
 
     #[test]
     fn issue_review_three_real_rounds_exhaust_without_claiming_approval() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
+        issue_review_to_first_verdict(&mut run, 9001);
         for round in 1..=3 {
-            assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
-            advance(
-                &mut run,
-                &CircuitEvent::GithubActionResult {
-                    node_id: "open_pr".into(),
-                    success: true,
-                    pr_number: Some(1),
-                    pr_url: Some("https://example/pr/1".into()),
-                    pr_head_ref: Some("branch".into()),
-                    pr_title: Some("Fix".into()),
-                    error: None,
-                },
-            );
-            let spawn = advance(&mut run, &tick(8, 8));
-            assert!(spawn
-                .effects
-                .iter()
-                .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
-            run.attach_agent_node("reviewer", 9000 + round);
-            advance_with_completion_evidence(&mut run, &agent_finished(9000 + round, true));
-            advance_with_report_evidence(
-                &mut run,
-                &classified_with_output(
-                    "review_classifier",
-                    Some(Classification::Working),
-                    Some("Changes requested: fix the race."),
-                ),
-            );
-            let feedback = advance(
-                &mut run,
-                &CircuitEvent::AgentReady {
-                    node_id: "follow_feedback".into(),
-                },
-            );
-            assert!(feedback.effects.iter().any(
-                |e| matches!(e, Effect::InjectPty { prompt, .. } if prompt.contains("fix the race"))
-            ));
-            acknowledge_prompt(&mut run, "follow_feedback");
-            // The worker clears this association after the close effect.
-            run.step_mut("reviewer").unwrap().agent_node_id = None;
-            advance(&mut run, &tick(8, 8));
-            let result = advance_with_report_evidence(
-                &mut run,
-                &classified("feedback_classifier", Some(Classification::Completed)),
-            );
+            let result = request_changes_and_fix(&mut run, "Changes requested: fix the race.");
+            assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(9001));
             if round < 3 {
                 assert_eq!(run.state, RunState::Running);
-                assert_eq!(status_of(&run, "finish"), StepStatus::Queued);
+                assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
                 let next = advance(&mut run, &tick(8, 8));
                 assert!(
                     !next.effects.iter().any(|e| matches!(
                         e,
                         Effect::SpawnAgentNode { .. } | Effect::CallGithub { .. }
                     )),
-                    "a new round must wait for the new finish response: {:?}",
+                    "a new round must re-prompt the open reviewer: {:?}",
                     next.effects
                 );
                 advance(
                     &mut run,
                     &CircuitEvent::AgentReady {
-                        node_id: "finish".into(),
+                        node_id: "re_review".into(),
                     },
                 );
-                acknowledge_prompt(&mut run, "finish");
+                acknowledge_prompt(&mut run, "re_review");
                 advance(&mut run, &tick(8, 8));
-                advance_with_report_evidence(
-                    &mut run,
-                    &classified("finish_classifier", Some(Classification::Completed)),
-                );
+                assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
             } else {
                 let last = advance(&mut run, &tick(8, 8));
                 assert_eq!(run.state, RunState::Failed);
                 assert!(run.step("complete").is_none());
+                assert!(
+                    run.step("merge").is_none(),
+                    "an unapproved PR is never handed off to merge"
+                );
                 assert!(
                     result
                         .effects
@@ -7989,60 +7979,24 @@ mod tests {
         }
     }
 
-    /// The retry path's `Completed` outcome re-queues `finish` for
-    /// another implementation pass (attempt increments). Pin the
-    /// observable: after the first review-classifier pass the finish
-    /// step is at attempt 2, and `retry.attempt`/`retry.max_retries`
-    /// land in the run context for downstream template resolution.
+    /// The retry path's `Completed` outcome re-queues `re_review` for the
+    /// next round (attempt increments), and `retry.attempt` /
+    /// `retry.max_retries` land in the run context for the prompt.
     #[test]
-    fn issue_review_retry_completed_reamps_finish_step_with_incremented_attempt() {
+    fn issue_review_retry_completed_requeues_the_re_review_with_incremented_attempt() {
         let mut run = issue_review_run();
-        issue_review_to_open_pr(&mut run);
-        advance(
-            &mut run,
-            &CircuitEvent::GithubActionResult {
-                node_id: "open_pr".into(),
-                success: true,
-                pr_number: Some(1),
-                pr_url: Some("https://example/pr/1".into()),
-                pr_head_ref: Some("branch".into()),
-                pr_title: Some("t".into()),
-                error: None,
-            },
-        );
-        advance(&mut run, &tick(8, 8));
-        run.attach_agent_node("reviewer", 9001);
-        advance_with_completion_evidence(&mut run, &agent_finished(9001, true));
-        let _ = advance_with_report_evidence(
-            &mut run,
-            &classified_with_output(
-                "review_classifier",
-                Some(Classification::Working),
-                Some("reviewer report"),
-            ),
-        );
-        let _ = advance(
-            &mut run,
-            &CircuitEvent::AgentReady {
-                node_id: "follow_feedback".into(),
-            },
-        );
-        acknowledge_prompt(&mut run, "follow_feedback");
-        advance(&mut run, &tick(8, 8));
-        advance_with_report_evidence(
-            &mut run,
-            &classified("feedback_classifier", Some(Classification::Completed)),
-        );
+        issue_review_to_first_verdict(&mut run, 9001);
+        request_changes_and_fix(&mut run, "reviewer report");
         assert_eq!(
             run.step("review_retry").map(|s| s.status),
             Some(StepStatus::Completed)
         );
         assert_eq!(
-            run.step("finish").map(|s| s.status),
+            run.step("re_review").map(|s| s.status),
             Some(StepStatus::Queued),
-            "review_retry Completed must re-queue `finish` for another wrap-up pass"
+            "review_retry Completed must re-queue the re-review prompt"
         );
-        assert_eq!(run.step("finish").unwrap().attempt, 2);
+        assert_eq!(run.step("re_review").unwrap().attempt, 2);
         assert_eq!(run.context.get("retry.attempt").as_deref(), Some("2"));
         assert_eq!(run.context.get("retry.max_retries").as_deref(), Some("3"));
     }

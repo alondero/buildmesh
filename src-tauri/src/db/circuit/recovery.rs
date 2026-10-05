@@ -432,7 +432,16 @@ pub(crate) fn extend_failed_review_locked(
         [target],
     )
     .map_err(|e| e.to_string())?;
-    for node in ["trigger", "await_source", "source_ready"] {
+    // An extension reviews the retained work as it stands: the source is not
+    // asked to publish again before the queued reviewer.
+    for node in [
+        "trigger",
+        "await_source",
+        "source_ready",
+        "publish",
+        "await_publish",
+        "publish_ready",
+    ] {
         tx.execute("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome,started_at,completed_at)
             VALUES (?1,?2,'completed',?3,'completed',datetime('now'),datetime('now'))",
             params![target, node, next_attempt]).map_err(|e| e.to_string())?;

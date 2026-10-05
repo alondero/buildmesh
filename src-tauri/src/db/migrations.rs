@@ -286,7 +286,14 @@ pub(crate) enum AlwaysStep {
     DeduplicateReviewPresets,
     /// Materialise node lifecycle leases and import legacy cleanup intents.
     EnsureAgentNodeLifecycleLeases,
+    /// Move stock review graphs (the built-in preset and issue-review
+    /// circuits) to the publication flow: publish before review, one reviewer
+    /// across rounds, and a squash-merge hand-off on approval. Existing runs
+    /// are pinned to the graph they started with first.
+    UpgradeReviewPublicationFlow,
 }
+
+const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgrade_v1";
 
 const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
@@ -1081,6 +1088,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::DeduplicateReviewPresets,
     AlwaysStep::ConsolidateContinuedReviews,
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
+    AlwaysStep::UpgradeReviewPublicationFlow,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +1784,70 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
                 params![flag],
+            )?;
+        }
+        AlwaysStep::UpgradeReviewPublicationFlow => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+                || !table_present(conn, "circuit_run_snapshots")?
+            {
+                return Ok(());
+            }
+            let already_done: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+                params![REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
+                |row| row.get(0),
+            )?;
+            if already_done {
+                return Ok(());
+            }
+            let circuits: Vec<(i64, String, bool)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, graph_json, is_preset != 0 FROM autopilot_circuits ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, graph_json, is_preset) in circuits {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!("evolve_to: cannot inspect circuit {} for the review publication flow: {}", id, error);
+                        continue;
+                    }
+                };
+                // Review-derived copies are user-owned; only the read-only
+                // preset and issue-review blueprints are server-owned.
+                let changed = if is_preset {
+                    graph.upgrade_local_review_publication_flow()
+                } else {
+                    graph.upgrade_issue_review_publication_flow()
+                };
+                if !changed {
+                    continue;
+                }
+                let upgraded_json = graph.to_json().map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error,
+                    )))
+                })?;
+                // Runs without a snapshot read the circuit row; pin them so
+                // active work and failed-run recovery keep their own graph.
+                conn.execute(
+                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
+                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
+                    params![id],
+                )?;
+                conn.execute(
+                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, upgraded_json],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                params![REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
             )?;
         }
     }

@@ -40,8 +40,12 @@ export type CircuitProbeView = 'activity' | 'history' | 'queue' | 'manage';
 export interface ReviewCircuitMetadata {
   verdictNodeId: string;
   retryNodeIds: readonly string[];
+  /** The step that asks the implementation agent to merge after approval. */
+  mergeNodeId?: string;
   supportsContinuation?: boolean;
 }
+
+const MERGE_HAND_OFF_NODE_ID = 'merge';
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
 export function reviewCircuitMetadata(
@@ -54,7 +58,7 @@ export function reviewCircuitMetadata(
 export function reviewCircuitForRun(detail: CircuitRunDetail, circuit: ReviewCircuitMetadata | null): ReviewCircuitMetadata | null {
   const context = parseRunContext(detail.run.context_json);
   return context['review.extended'] === '1' || context['recovery.from_run_id']
-    ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], supportsContinuation: true }
+    ? { verdictNodeId: 'verdict', retryNodeIds: ['retry'], mergeNodeId: MERGE_HAND_OFF_NODE_ID, supportsContinuation: true }
     : circuit;
 }
 
@@ -73,11 +77,13 @@ export function circuitGraphFacts(
   try {
     const graph = parseGraph(circuit.graph_json);
     const verdict = graph.nodes.find((node) => node.type.type === 'review_verdict');
+    const merge = graph.nodes.find((node) => node.id === MERGE_HAND_OFF_NODE_ID && node.type.type === 'inject_pty');
     return {
       reviewCircuit: verdict === undefined
         ? null
         : {
             verdictNodeId: verdict.id,
+            ...(merge === undefined ? {} : { mergeNodeId: merge.id }),
             ...(graph.blueprint === 'issue_driven_autopilot_review' ? { supportsContinuation: true } : {}),
             retryNodeIds: graph.nodes
               .filter((node) => node.type.type === 'retry_limit')
@@ -104,10 +110,15 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
   // carries it. Retention empties `context_json` on pruned runs, so this is
   // a flourish on the run-level summary, never a requirement.
   const pass = reviewPassCount(parseRunContext(detail.run.context_json), reviewCircuit.verdictNodeId);
+  // Runs approved before the merge hand-off existed never delivered it.
+  const mergeRequested = reviewCircuit.mergeNodeId !== undefined
+    && detail.steps.some((s) => s.node_id === reviewCircuit.mergeNodeId && s.status === 'completed');
   return approved
     ? {
         label: 'Review approved',
-        detail: `${pass === null ? '' : `Approved on pass ${pass}. `}Check the current PR head and required checks before merging.`,
+        detail: `${pass === null ? '' : `Approved on pass ${pass}. `}${mergeRequested
+          ? 'The implementation agent was asked to squash-merge the pull request and was handed back. Check its report to confirm the merge.'
+          : 'Check the current PR head and required checks before merging.'}`,
         needsAttention: false,
       }
     : {

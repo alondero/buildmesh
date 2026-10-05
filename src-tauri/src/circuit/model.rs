@@ -1105,9 +1105,8 @@ impl CircuitGraph {
                 CircuitNodeKind::InjectPty { prompt, .. }
                     if node.id == "feedback" && prompt == old_feedback =>
                 {
-                    *prompt = Self::review_feedback_prompt(
-                        "An independent reviewer requested changes to your work.",
-                    );
+                    *prompt =
+                        Self::review_feedback_prompt(crate::review_contract::LOCAL_FEEDBACK_SCOPE);
                     changed = true;
                 }
                 _ => {}
@@ -1138,9 +1137,8 @@ impl CircuitGraph {
                 CircuitNodeKind::InjectPty { prompt, .. }
                     if node.id == "follow_feedback" && prompt == old_feedback =>
                 {
-                    *prompt = Self::review_feedback_prompt(
-                        "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}) and update the PR.",
-                    );
+                    *prompt =
+                        Self::review_feedback_prompt(crate::review_contract::PR_FEEDBACK_SCOPE);
                     changed = true;
                 }
                 _ => {}
@@ -1159,6 +1157,10 @@ impl CircuitGraph {
     /// The reviewer and implementation agent are separate agent nodes. The
     /// implementation node is idle after its wrap-up turn while the reviewer
     /// works, so the two processes can coexist without sharing a worktree.
+    /// The reviewer is spawned once and re-prompted for later rounds, so it
+    /// re-checks its own earlier findings. Approval closes the reviewer and
+    /// asks the implementation agent to squash-merge; the run then ends and
+    /// leaves that agent open.
     pub fn issue_driven_autopilot_review(trigger_label: &str) -> Self {
         use EdgeCondition::{Always, OnOutcome};
         use StepOutcome::Completed;
@@ -1260,6 +1262,7 @@ impl CircuitGraph {
                         timeout_seconds: None,
                     },
                 ),
+                node("review_round", CircuitNodeKind::AnyCompleted),
                 node(
                     "review_classifier",
                     CircuitNodeKind::ReviewVerdict {
@@ -1269,16 +1272,8 @@ impl CircuitGraph {
                 node(
                     "follow_feedback",
                     CircuitNodeKind::InjectPty {
-                        prompt: Self::review_feedback_prompt(
-                            "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}) and update the PR.",
-                        ),
+                        prompt: Self::review_feedback_prompt(crate::review_contract::PR_FEEDBACK_SCOPE),
                         target_node_id: Some("implementer".to_string()),
-                    },
-                ),
-                node(
-                    "close_reviewer",
-                    CircuitNodeKind::CloseAgentNode {
-                        target_node_id: Some("reviewer".to_string()),
                     },
                 ),
                 node(
@@ -1288,9 +1283,23 @@ impl CircuitGraph {
                     },
                 ),
                 node("review_retry", CircuitNodeKind::RetryLimit { max_retries: 3 }),
+                node(
+                    "re_review",
+                    CircuitNodeKind::InjectPty {
+                        prompt: Self::re_review_prompt(),
+                        target_node_id: Some("reviewer".to_string()),
+                    },
+                ),
                 node("close_approved", CircuitNodeKind::CloseAgentNode {
                     target_node_id: Some("reviewer".to_string()),
                 }),
+                node(
+                    "merge",
+                    CircuitNodeKind::InjectPty {
+                        prompt: Self::pr_merge_prompt(),
+                        target_node_id: Some("implementer".to_string()),
+                    },
+                ),
                 node("review_exhausted", CircuitNodeKind::Notify {
                     message: "Review limit reached for PR #{{pr.number}}. Latest fixes have not been approved. Resume the saved implementation session and request a fresh review.".to_string(),
                 }),
@@ -1300,7 +1309,7 @@ impl CircuitGraph {
                 node(
                     "complete",
                     CircuitNodeKind::Notify {
-                        message: "Review approved for PR #{{pr.number}} ({{issue.title}}). Check the current PR head and required checks before merging.".to_string(),
+                        message: Self::PR_APPROVED_MESSAGE.to_string(),
                     },
                 ),
             ],
@@ -1316,18 +1325,188 @@ impl CircuitGraph {
                 edge("wrapup_correction", "finish_round"),
                 edge("finish_round", "finish_classifier"),
                 outcome("open_pr", "reviewer", Completed),
-                edge("reviewer", "review_classifier"),
+                edge("reviewer", "review_round"),
+                edge("review_round", "review_classifier"),
                 outcome("review_classifier", "follow_feedback", StepOutcome::Working),
                 outcome("review_classifier", "close_approved", Completed),
                 outcome("review_classifier", "review_blocked", StepOutcome::Blocked),
-                edge("close_approved", "complete"),
-                edge("follow_feedback", "close_reviewer"),
-                edge("close_reviewer", "feedback_classifier"),
+                edge("close_approved", "merge"),
+                edge("merge", "complete"),
+                edge("follow_feedback", "feedback_classifier"),
                 outcome("feedback_classifier", "review_retry", Completed),
-                outcome("review_retry", "finish", Completed),
+                // A RetryLimit re-enters through its first child: later
+                // rounds re-prompt the open reviewer instead of respawning it.
+                outcome("review_retry", "re_review", Completed),
                 outcome("review_retry", "review_exhausted", StepOutcome::Failed),
+                edge("re_review", "review_round"),
             ],
         }
+    }
+
+    pub const PR_APPROVED_MESSAGE: &'static str = "Review approved for PR #{{pr.number}} ({{issue.title}}). The implementation agent was asked to squash-merge it and has been handed back to you.";
+    pub(crate) const LEGACY_PR_APPROVED_MESSAGE: &'static str = "Review approved for PR #{{pr.number}} ({{issue.title}}). Check the current PR head and required checks before merging.";
+
+    /// Later review rounds re-prompt the same reviewer. The policy is repeated
+    /// because a long-lived reviewer session may have compacted its first turn.
+    pub fn re_review_prompt() -> String {
+        format!(
+            "{}\n{}",
+            crate::review_contract::RE_REVIEW_DELIVERY,
+            Self::REVIEW_POLICY
+        )
+    }
+
+    pub fn pr_merge_prompt() -> String {
+        crate::review_contract::merge_approved_pr(
+            "PR #{{pr.number}} ({{pr.url}})",
+            " {{pr.number}}",
+        )
+    }
+
+    /// Move a stored issue-review graph from the per-round reviewer to the
+    /// publication flow: one reviewer re-prompted each round, and approval
+    /// handing the PR to the implementer to merge. Only the exact stock
+    /// topology is rewritten; prompts and launch settings are kept, apart
+    /// from stock texts whose meaning the new flow changes.
+    pub(crate) fn upgrade_issue_review_publication_flow(&mut self) -> bool {
+        if !self.is_issue_driven_autopilot_review() || self.node("close_reviewer").is_none() {
+            return false;
+        }
+        let mut upgraded = self.clone();
+        let rewired =
+            upgraded.retarget_edge("follow_feedback", "close_reviewer", "feedback_classifier")
+                && upgraded.remove_edge("close_reviewer", "feedback_classifier")
+                && upgraded.retarget_edge("review_retry", "finish", "re_review")
+                && upgraded.retarget_edge("reviewer", "review_classifier", "review_round")
+                && upgraded.retarget_edge("close_approved", "complete", "merge");
+        if !rewired {
+            return false;
+        }
+        upgraded.nodes.retain(|node| node.id != "close_reviewer");
+        let canonical = Self::issue_driven_autopilot_review("");
+        for id in ["review_round", "re_review", "merge"] {
+            upgraded
+                .nodes
+                .push(canonical.node(id).expect("canonical review node").clone());
+        }
+        for (from, to) in [
+            ("review_round", "review_classifier"),
+            ("merge", "complete"),
+            ("re_review", "review_round"),
+        ] {
+            upgraded.edges.push(CircuitEdge {
+                from: from.into(),
+                to: to.into(),
+                condition: EdgeCondition::Always,
+            });
+        }
+        upgraded.replace_stock_text(
+            "follow_feedback",
+            &Self::review_feedback_prompt(crate::review_contract::LEGACY_PR_FEEDBACK_SCOPE),
+            &Self::review_feedback_prompt(crate::review_contract::PR_FEEDBACK_SCOPE),
+        );
+        upgraded.replace_stock_text(
+            "complete",
+            Self::LEGACY_PR_APPROVED_MESSAGE,
+            Self::PR_APPROVED_MESSAGE,
+        );
+        if !upgraded.has_review_topology_of(&canonical) {
+            return false;
+        }
+        *self = upgraded;
+        true
+    }
+
+    /// Point the first `from -> to` edge at `new_to`, keeping its position so
+    /// a RetryLimit's first child (its loop re-entry) is preserved.
+    pub(crate) fn retarget_edge(&mut self, from: &str, to: &str, new_to: &str) -> bool {
+        let Some(edge) = self
+            .edges
+            .iter_mut()
+            .find(|edge| edge.from == from && edge.to == to)
+        else {
+            return false;
+        };
+        edge.to = new_to.to_string();
+        true
+    }
+
+    pub(crate) fn remove_edge(&mut self, from: &str, to: &str) -> bool {
+        let before = self.edges.len();
+        self.edges
+            .retain(|edge| !(edge.from == from && edge.to == to));
+        self.edges.len() != before
+    }
+
+    /// Replace a prompt or message only while it is still the shipped text.
+    pub(crate) fn replace_stock_text(&mut self, node_id: &str, stock: &str, replacement: &str) {
+        let Some(node) = self.nodes.iter_mut().find(|node| node.id == node_id) else {
+            return;
+        };
+        match &mut node.kind {
+            CircuitNodeKind::InjectPty { prompt: text, .. }
+            | CircuitNodeKind::SpawnAgentNode { prompt: text, .. }
+            | CircuitNodeKind::Notify { message: text }
+                if text == stock =>
+            {
+                *text = replacement.to_string();
+            }
+            _ => {}
+        }
+    }
+
+    /// Same review control flow as `template`, allowing edits a reviewer may
+    /// legitimately make: prompts, messages, launch settings and round limits.
+    /// Each template edge must appear exactly once and no other edge may exist.
+    pub(crate) fn has_review_topology_of(&self, template: &CircuitGraph) -> bool {
+        if self.nodes.len() != template.nodes.len() || self.edges.len() != template.edges.len() {
+            return false;
+        }
+        let nodes_match = template.nodes.iter().all(|expected| {
+            let Some(actual) = self.node(&expected.id) else {
+                return false;
+            };
+            match (&expected.kind, &actual.kind) {
+                (
+                    CircuitNodeKind::SpawnAgentNode { .. },
+                    CircuitNodeKind::SpawnAgentNode { .. },
+                )
+                | (CircuitNodeKind::Notify { .. }, CircuitNodeKind::Notify { .. }) => true,
+                (
+                    CircuitNodeKind::RetryLimit { .. },
+                    CircuitNodeKind::RetryLimit { max_retries },
+                ) => *max_retries > 0,
+                (
+                    CircuitNodeKind::InjectPty {
+                        target_node_id: expected,
+                        ..
+                    },
+                    CircuitNodeKind::InjectPty {
+                        target_node_id: actual,
+                        ..
+                    },
+                ) => expected == actual,
+                // Older saved presets used a task classifier after feedback.
+                (
+                    CircuitNodeKind::AwaitAgentTurn {
+                        target_node_id: expected,
+                    },
+                    CircuitNodeKind::LlmTurnClassifier {
+                        target_node_id: actual,
+                    },
+                ) => expected == actual,
+                (
+                    CircuitNodeKind::GithubIssueLabel { .. },
+                    CircuitNodeKind::GithubIssueLabel { .. },
+                ) => true,
+                (expected, actual) => expected == actual,
+            }
+        });
+        nodes_match
+            && template
+                .edges
+                .iter()
+                .all(|edge| self.edges.iter().filter(|actual| *actual == edge).count() == 1)
     }
 }
 
@@ -2372,10 +2551,22 @@ mod tests {
             g.node("review_prompt").is_none(),
             "the review instruction must be the reviewer's spawn-time first turn"
         );
+        assert!(
+            g.node("close_reviewer").is_none(),
+            "the reviewer stays open between rounds"
+        );
         assert!(matches!(
-            g.node("close_reviewer").map(|n| &n.kind),
-            Some(CircuitNodeKind::CloseAgentNode { target_node_id })
+            g.node("re_review").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { target_node_id, prompt })
                 if target_node_id.as_deref() == Some("reviewer")
+                    && prompt.contains("{{retry.attempt}}")
+                    && prompt.contains(CircuitGraph::REVIEW_POLICY)
+        ));
+        assert!(matches!(
+            g.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { target_node_id, prompt })
+                if target_node_id.as_deref() == Some("implementer")
+                    && prompt.contains("gh pr merge {{pr.number}} --squash")
         ));
         assert!(matches!(
             g.node("review_retry").map(|n| &n.kind),
@@ -2386,17 +2577,95 @@ mod tests {
             Some(CircuitNodeKind::Notify { message })
                 if message.contains("{{pr.number}}") && message.contains("{{issue.title}}")
         ));
-        assert!(
-            g.edges.iter().any(|edge| {
-                edge.from == "review_retry"
-                    && edge.to == "finish"
-                    && edge.condition == EdgeCondition::OnOutcome(StepOutcome::Completed)
-            }),
-            "review retry must re-enter the implementation wrap-up"
+        assert_eq!(
+            g.children("review_retry").first().map(String::as_str),
+            Some("re_review"),
+            "review retry must re-enter by re-prompting the reviewer"
         );
+        assert_eq!(g.children("close_approved"), vec!["merge".to_string()]);
+        assert_eq!(g.children("merge"), vec!["complete".to_string()]);
 
         let parsed = CircuitGraph::from_json(&g.to_json().unwrap()).unwrap();
         assert_eq!(parsed, g);
+    }
+
+    #[test]
+    fn stock_pre_publication_issue_review_upgrades_to_the_publication_flow() {
+        let mut stored = crate::circuit::test_support::pre_publication_issue_review();
+        if let Some(CircuitNode {
+            kind: CircuitNodeKind::SpawnAgentNode { model, .. },
+            ..
+        }) = stored.nodes.iter_mut().find(|node| node.id == "reviewer")
+        {
+            *model = Some("custom-reviewer-model".into());
+        }
+
+        assert!(stored.upgrade_issue_review_publication_flow());
+        stored.validate().unwrap();
+        let canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        assert!(stored.has_review_topology_of(&canonical));
+        assert_eq!(
+            stored.children("review_retry").first().map(String::as_str),
+            Some("re_review")
+        );
+        for id in ["follow_feedback", "re_review", "merge", "complete"] {
+            assert_eq!(
+                stored.node(id),
+                canonical.node(id),
+                "{id} uses the current stock text"
+            );
+        }
+        assert!(
+            matches!(
+                stored.node("reviewer").map(|node| &node.kind),
+                Some(CircuitNodeKind::SpawnAgentNode { model: Some(model), .. }) if model == "custom-reviewer-model"
+            ),
+            "reviewer launch settings survive the upgrade"
+        );
+        assert!(
+            !stored.upgrade_issue_review_publication_flow(),
+            "the upgrade is idempotent"
+        );
+    }
+
+    #[test]
+    fn publication_upgrade_keeps_custom_prompts_and_skips_custom_topology() {
+        let mut custom_prompt = crate::circuit::test_support::pre_publication_issue_review();
+        let custom = "Follow the PR comments and also update the changelog.";
+        if let Some(CircuitNode {
+            kind: CircuitNodeKind::InjectPty { prompt, .. },
+            ..
+        }) = custom_prompt
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "follow_feedback")
+        {
+            *prompt = custom.into();
+        }
+        assert!(custom_prompt.upgrade_issue_review_publication_flow());
+        assert!(matches!(
+            custom_prompt.node("follow_feedback").map(|node| &node.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt == custom
+        ));
+
+        let mut extra_step = crate::circuit::test_support::pre_publication_issue_review();
+        extra_step.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        extra_step.edges.push(CircuitEdge {
+            from: "complete".into(),
+            to: "announce".into(),
+            condition: EdgeCondition::Always,
+        });
+        let before = extra_step.clone();
+        assert!(!extra_step.upgrade_issue_review_publication_flow());
+        assert_eq!(
+            extra_step, before,
+            "a customized topology is left untouched"
+        );
     }
 
     #[test]
@@ -2430,7 +2699,7 @@ mod tests {
 
     #[test]
     fn stored_issue_review_blueprint_upgrades_injected_first_turns_to_spawn_prompts() {
-        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let mut graph = crate::circuit::test_support::pre_publication_issue_review();
 
         let implementer = graph
             .nodes
@@ -2533,7 +2802,7 @@ mod tests {
         // `blueprint` discriminator existed is classified by shape, so the
         // editor command cannot mistake it for a walking skeleton (floor 1)
         // and let its reviewer deadlock.
-        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let mut graph = crate::circuit::test_support::pre_publication_issue_review();
         graph.nodes.push(CircuitNode {
             id: "review_prompt".into(),
             kind: CircuitNodeKind::InjectPty {
@@ -2559,7 +2828,7 @@ mod tests {
 
     #[test]
     fn legacy_review_graphs_get_a_marker_without_inspecting_prompt_text() {
-        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let mut graph = crate::circuit::test_support::pre_publication_issue_review();
         graph.nodes.push(CircuitNode {
             id: "review_prompt".into(),
             kind: CircuitNodeKind::InjectPty {
@@ -2598,7 +2867,7 @@ mod tests {
 
     #[test]
     fn legacy_custom_injected_review_prompt_is_copied_verbatim() {
-        let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let mut graph = crate::circuit::test_support::pre_publication_issue_review();
         if let Some(node) = graph.nodes.iter_mut().find(|node| node.id == "reviewer") {
             if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut node.kind {
                 prompt.clear();
