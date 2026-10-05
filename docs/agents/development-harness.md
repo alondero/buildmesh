@@ -82,14 +82,16 @@ keeps infrastructure scope; dependency/build/rule changes retain product gates.
 | Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
 | Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
 | Android | APK and instrumentation compilation, executed JVM tests, strict Android lint through `scripts/check-android.mjs`; device instrumentation runs separately |
-| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent single-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
+| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent multi-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
 
 Cargo runs inside `src-tauri` so its binding-export configuration applies.
 The Rust test gate compiles once, then runs the CI shards, integration
-binaries and doctests up to four processes at a time; each process keeps
-`--test-threads=1` and its own database. Some tests assert wall-clock budgets
-and can fail under CPU contention (#2049), so set `BUILDMESH_RUST_TEST_JOBS=1`
-to run one process at a time before attributing such a failure.
+binaries and doctests up to four processes at a time; each process runs its
+own tests multi-threaded, which is safe because every DB-backed test installs
+a private database for its own thread (issue #2048). Some tests assert
+wall-clock budgets and can fail under CPU contention (#2049), so set
+`BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before attributing
+such a failure.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real

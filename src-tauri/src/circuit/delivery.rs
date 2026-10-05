@@ -468,9 +468,29 @@ mod tests {
         assert_eq!(injection_payload("do the thing"), "do the thing");
     }
 
+    /// Move a node this test just created into a process-unique id range.
+    ///
+    /// Every isolated test database restarts its autoincrement ids at 1
+    /// (issue #2048), while the evaluator's node map is process-global and
+    /// keyed by node id. Two delivery tests running in parallel would
+    /// otherwise register the same id and feed each other's PTY output into
+    /// one buffer. Nothing references the node yet — the test created it a
+    /// moment ago — so rewriting the primary key is safe.
+    fn unique_node_id(node_id: i64) -> i64 {
+        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 1_000_000 + 1;
+        crate::db::write_conn()
+            .execute(
+                "UPDATE agent_nodes SET id = ?1 WHERE id = ?2",
+                rusqlite::params![unique, node_id],
+            )
+            .expect("reserve a process-unique node id");
+        unique
+    }
+
     #[test]
     fn codex_multiline_waits_for_paste_render_before_enter() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
         let path = std::env::temp_dir().join("codex-guarded-paste");
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("guarded Codex paste", &path).unwrap();
@@ -478,7 +498,7 @@ mod tests {
             mesh.id, "source", &path, "main", crate::models::EnvType::Windows,
             "codex", None, None, None, None, false, None, None, None,
         ).unwrap();
-        let id = node.id;
+        let id = unique_node_id(node.id);
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
         let prompt = format!("feedback\n{}", "x".repeat(9398));
@@ -594,7 +614,7 @@ mod tests {
 
     #[test]
     fn live_codex_node_selects_rendered_paste_gate() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
         let path = std::env::temp_dir().join(format!("codex-paste-selection-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("codex paste selection", &path).unwrap();
@@ -602,41 +622,43 @@ mod tests {
             mesh.id, "reviewer", &path, "main", crate::models::EnvType::Windows,
             "codex", None, None, None, None, false, None, None, None,
         ).unwrap();
-        evaluator::register(node.id);
+        let node_id = unique_node_id(node.id);
+        evaluator::register(node_id);
 
         assert!(matches!(
-            paste_readiness(node.id, "review the change\nwith context").unwrap().paste,
+            paste_readiness(node_id, "review the change\nwith context").unwrap().paste,
             PasteReadiness::RenderedMultiline { .. }
         ));
         let proxied = crate::db::create_agent_node(
             mesh.id, "proxied reviewer", &path, "main", crate::models::EnvType::Windows,
             "codex:minimax", None, None, None, None, false, None, None, None,
         ).unwrap();
-        evaluator::register(proxied.id);
+        let proxied_id = unique_node_id(proxied.id);
+        evaluator::register(proxied_id);
         assert!(matches!(
-            paste_readiness(proxied.id, "review the change\nwith context").unwrap().paste,
+            paste_readiness(proxied_id, "review the change\nwith context").unwrap().paste,
             PasteReadiness::RenderedMultiline { .. }
         ));
-        let (registry, writes) = crate::agent::process::testing::capturing_registry(proxied.id);
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(proxied_id);
         let prompt = "review the change\r\nwith context";
-        evaluator::on_output(proxied.id, "old [Pasted Content 30 chars]");
-        let (_, readiness) = stage_prompt_write(&registry, proxied.id, prompt, None).unwrap().unwrap();
+        evaluator::on_output(proxied_id, "old [Pasted Content 30 chars]");
+        let (_, readiness) = stage_prompt_write(&registry, proxied_id, prompt, None).unwrap().unwrap();
         assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), injection_payload(prompt).into_bytes());
         let PasteReadiness::RenderedMultiline { chars, normalized_chars, content, output_cursor, .. } = readiness.paste else {
             panic!("proxied Codex must use the rendered paste gate");
         };
         assert_eq!((chars, normalized_chars), (31, 30));
-        assert!(!rendered_paste_visible(&evaluator::cleaned_output_since(proxied.id, output_cursor), chars, normalized_chars, &content));
-        evaluator::on_output(proxied.id, "[Pasted Content 30 chars]");
-        assert!(rendered_paste_visible(&evaluator::cleaned_output_since(proxied.id, output_cursor), chars, normalized_chars, &content));
+        assert!(!rendered_paste_visible(&evaluator::cleaned_output_since(proxied_id, output_cursor), chars, normalized_chars, &content));
+        evaluator::on_output(proxied_id, "[Pasted Content 30 chars]");
+        assert!(rendered_paste_visible(&evaluator::cleaned_output_since(proxied_id, output_cursor), chars, normalized_chars, &content));
         let long_prompt = format!("review this change\n{}", "x".repeat(7_000));
-        let PasteReadiness::RenderedMultiline { content, chars, normalized_chars, .. } = paste_readiness(proxied.id, &long_prompt).unwrap().paste else {
+        let PasteReadiness::RenderedMultiline { content, chars, normalized_chars, .. } = paste_readiness(proxied_id, &long_prompt).unwrap().paste else {
             panic!("long Codex prompts must retain the paste gate");
         };
         assert!(content.is_empty(), "a scrolled or truncated prompt cannot prove paste completion");
         assert!(!rendered_paste_visible("reviewthischange", chars, normalized_chars, &content));
         assert!(rendered_paste_visible(&format!("[Pasted Content {chars} chars]"), chars, normalized_chars, &content));
-        registry.kill_session(proxied.id);
+        registry.kill_session(proxied_id);
         evaluator::register(-930_099);
         assert!(
             paste_readiness(-930_099, "review the change\nwith context")
@@ -644,13 +666,13 @@ mod tests {
             "a failed provider lookup must not silently use the early-Enter path"
         );
         evaluator::unregister(-930_099);
-        evaluator::unregister(node.id);
-        evaluator::unregister(proxied.id);
+        evaluator::unregister(node_id);
+        evaluator::unregister(proxied_id);
     }
 
     #[test]
     fn live_muse_node_waits_for_rendered_multiline_paste() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
         let path = std::env::temp_dir().join("muse-paste-selection");
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("muse paste selection", &path).unwrap();
@@ -658,14 +680,15 @@ mod tests {
             mesh.id, "source", &path, "main", crate::models::EnvType::Windows,
             "muse", None, None, None, None, false, None, None, None,
         ).unwrap();
-        evaluator::register(node.id);
-        assert!(matches!(paste_readiness(node.id, "Review feedback\nApply the changes").unwrap().paste,
+        let node_id = unique_node_id(node.id);
+        evaluator::register(node_id);
+        assert!(matches!(paste_readiness(node_id, "Review feedback\nApply the changes").unwrap().paste,
             PasteReadiness::RenderedMultiline { .. }));
-        crate::db::update_cli_session_id(node.id, "nonexistent-muse-receipt-session").unwrap();
-        assert!(paste_readiness(node.id, "Apply the review findings").unwrap_err().contains("session log is unavailable"),
+        crate::db::update_cli_session_id(node_id, "nonexistent-muse-receipt-session").unwrap();
+        assert!(paste_readiness(node_id, "Apply the review findings").unwrap_err().contains("session log is unavailable"),
             "single-line follow-ups also require the established session receipt");
-        evaluator::unregister(node.id);
-        assert!(matches!(paste_readiness(node.id, "Manual\nfollow-up").unwrap().paste, PasteReadiness::Generic),
+        evaluator::unregister(node_id);
+        assert!(matches!(paste_readiness(node_id, "Manual\nfollow-up").unwrap().paste, PasteReadiness::Generic),
             "ordinary unbuffered nodes retain their existing submission path");
     }
 

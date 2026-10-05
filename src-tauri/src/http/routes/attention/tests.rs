@@ -113,7 +113,7 @@ use std::path::Path;
 fn stale_and_current_native_stops_follow_the_turn_fence() {
     use crate::services::circuit_worker::native_hooks::{NativeHook, NativeReceipt};
 
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated();
     let unique = format!(
         "issue1905-{}-{}",
         std::process::id(),

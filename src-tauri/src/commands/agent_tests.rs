@@ -793,6 +793,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_prefill_goes_argv_not_env() {
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
 
         let cmd = cmd_for(
@@ -904,6 +905,10 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_clears_inherited_backend_env() {
+        // The process environment is shared state: every test that mutates it
+        // holds the one crate-wide lock, so a parallel test cannot observe
+        // this mutation (or restore the var while we still read it).
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Simulate buildmesh launched from a shell that already exported a
         // provider override (e.g. a developer who ran `cwrap --minimax` in the
         // same terminal before starting the app).
@@ -935,6 +940,7 @@ mod tests {
     /// `custom_profile_injects_backend_env`.
     #[test]
     fn prefill_stays_argv_for_wsl() {
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
 
         let cmd = cmd_for(

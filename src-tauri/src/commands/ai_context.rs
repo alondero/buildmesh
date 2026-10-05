@@ -494,7 +494,14 @@ mod tests {
     impl TempRepo {
         fn new() -> Self {
             let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-            let tmp = std::env::temp_dir().join(format!("buildmesh_aictx_test_{}", id));
+            // PID-prefixed: `NEXT_ID` is only unique inside one test process,
+            // and the shard runner executes several binaries against the same
+            // temp directory at once.
+            let tmp = std::env::temp_dir().join(format!(
+                "buildmesh_aictx_test_{}_{}",
+                std::process::id(),
+                id
+            ));
             let _ = fs::remove_dir_all(&tmp);
             Self(tmp)
         }

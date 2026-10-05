@@ -2193,7 +2193,7 @@ mod tests {
     // uses internally. That's the "real git + real DB" coverage the issue
     // asks for; the orchestration is unit-tested above.
     //
-    // DB init routes through `db::test_support::ensure_db_for_tests`
+    // DB init routes through `db::test_support::isolated`
     // — every test in this file (and the rest of the lib test binary)
     // shares one global DB.
 
@@ -2307,7 +2307,7 @@ mod tests {
     /// don't collide on a stale directory.
     #[test]
     fn maintenance_drain_then_fill_end_to_end_on_real_repo() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
 
         let (_tmp, repo_path) = fresh_git_repo();
         let conn = crate::db::write_conn();

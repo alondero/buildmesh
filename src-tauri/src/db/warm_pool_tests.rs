@@ -965,33 +965,19 @@ mod tests {
     /// any latency above normal query time is attributable to writer-mutex
     /// contention, not to a real lock conflict.
     ///
-    /// Note: this test calls `db::init` and therefore contends with every
-    /// other global-DB test in the binary for the process-wide `DB`
-    /// OnceCell (first-init-wins). The `static GFS_LOCK` below mirrors
-    /// the `MESH_TESTS_LOCK` pattern in `mesh_tests` — a module-level
-    /// mutex keeps our init / seed / GC / probe sequence atomic against
-    /// our own re-entry, and unique IDs (`test_id`-based row names) keep
-    /// us isolated from whichever other test file happened to init first.
+    /// The test owns a private database for its thread (issue #2048), and
+    /// adopts it on the GC thread below: production reaches the database from
+    /// worker threads, and a `thread_local!` install does not follow the
+    /// thread that spawned the work.
     #[test]
     fn delete_orphaned_claimed_warm_worktrees_releases_writer_mutex_during_fs_teardown() {
-        static GFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serial = GFS_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _db = crate::db::test_support::isolated();
 
         let test_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let db_path = std::env::temp_dir()
-            .join(format!("buildmesh_issue_1228_fs_lock_test_{}.db", test_id));
-        // First-init-wins: a no-op if another test file in this binary
-        // already initialised the global DB with a different path. Either
-        // way the `write_conn()` we hold below targets the live writer.
-        crate::db::init(&db_path).expect("test setup: db::init must succeed");
 
-        // Use a unique mesh name so we don't collide with rows other
-        // global-DB tests may have written into the shared singleton.
         let mesh_name = format!("issue-1228-mesh-{}", test_id);
         let mesh_id: i64 = {
             let conn = crate::db::write_conn();
@@ -1056,7 +1042,12 @@ mod tests {
         // entry point, which is the function the issue targets (and the
         // only one that takes `write_conn()`).
         let (gc_done_tx, gc_done_rx) = std::sync::mpsc::channel::<()>();
+        let gc_db = _db.clone();
         let gc_handle = std::thread::spawn(move || {
+            // Adopt this test's database on the GC thread; without it the
+            // production entry point would resolve the process-global
+            // `OnceCell` instead of the rows seeded above.
+            let _adopted = crate::db::test_support::adopt(&gc_db);
             let _ = crate::db::delete_orphaned_claimed_warm_worktrees();
             let _ = gc_done_tx.send(());
         });
@@ -1102,19 +1093,16 @@ mod tests {
             "the probe DELETE must remove exactly the unrelated Available row"
         );
 
-        // Wait for the GC to finish so we can clean up the tempdirs and
-        // the DB file without racing the FS phase.
+        // Wait for the GC to finish so we can clean up the tempdirs
+        // without racing the FS phase.
         gc_done_rx
             .recv_timeout(std::time::Duration::from_secs(30))
             .expect("GC must finish within 30s");
         gc_handle.join().unwrap();
 
-        // Tidy up. Drop the dirs first (so the TempDir destructor doesn't
-        // try to re-remove paths the GC already deleted); then drop the
-        // write_conn guard before deleting the file.
+        // Drop the dirs last-but-one: the GC has already removed the paths
+        // it owned, and the TempDir destructor should not race it.
         drop(dirs);
-        drop(crate::db::write_conn());
-        std::fs::remove_file(&db_path).ok();
     }
 
     /// `delete_warm_worktrees_for_mesh_inner` is the mesh-delete hook (wired

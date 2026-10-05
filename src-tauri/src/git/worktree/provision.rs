@@ -1822,7 +1822,7 @@ mod tests {
     /// the SQL-level invariant the spec asked for.
     #[test]
     fn manual_warm_claim_persists_pool_slug_into_agent_node_row() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
 
         let td = TestDir::new("manual_adopt_db");
         let root = td.path();

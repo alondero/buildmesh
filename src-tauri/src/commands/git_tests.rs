@@ -23,7 +23,16 @@ mod tests {
     impl TempGitRepo {
         fn new() -> Self {
             let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-            let tmp = std::env::temp_dir().join(format!("buildmesh_git_test_{}", id));
+            // PID-prefixed: `NEXT_ID` only makes the name unique inside one
+            // test process, and the local shard runner (plus a second
+            // worktree) runs several test binaries against the same temp dir
+            // at once. Two processes both starting at 1 would share
+            // `buildmesh_git_test_1` and fight over the same checkout.
+            let tmp = std::env::temp_dir().join(format!(
+                "buildmesh_git_test_{}_{}",
+                std::process::id(),
+                id
+            ));
             Self(tmp)
         }
 

@@ -2,11 +2,9 @@
 //! error-line extraction, and the end-to-end clone orchestration driven against
 //! a local fixture repository.
 //!
-//! The clone tests stand up the shared process-global DB via `db::init` (which is
-//! one-shot), so they serialise on [`tests::MESH_CLONE_TEST_LOCK`] and follow the
-//! `ensure_*_db` pattern from `commands::pr`. Run this module with
-//! `--test-threads=1` for a trustworthy verdict, like every other DB-touching
-//! test in this binary.
+//! The clone tests install a private database for their own thread with
+//! [`crate::db::test_support::isolated`], so they no longer serialise on a
+//! module lock and no longer need `--test-threads=1` (issue #2048).
 
 #[cfg(test)]
 mod tests {
@@ -15,28 +13,10 @@ mod tests {
     };
     use crate::services::github::CloneTarget;
 
-    /// Serialises this module's DB-touching clone tests.
-    static MESH_CLONE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        MESH_CLONE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// Init the shared process-global DB the first time a test needs it; a no-op
-    /// thereafter (`db::init` is one-shot).
-    fn ensure_db() {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_mesh_clone_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&path);
-            let _ = crate::db::init(&path);
-        });
+    /// Install this test's private database and hand back the guard the test
+    /// body holds for its remaining statements.
+    fn ensure_db() -> crate::db::test_support::IsolatedDb {
+        crate::db::test_support::isolated()
     }
 
     /// Run `git` through the shared no-prompt wrapper; true on success. Using the
@@ -169,8 +149,7 @@ mod tests {
     /// admits github.com URLs, which no offline test can reach.
     #[test]
     fn clone_target_into_mesh_clones_locally_and_resolves_the_default_branch() {
-        let _serial = serial();
-        ensure_db();
+        let _db = ensure_db();
 
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -211,8 +190,7 @@ mod tests {
     /// blocked by the collision guard.
     #[test]
     fn clone_target_into_mesh_reports_gits_error_and_leaves_no_partial_tree() {
-        let _serial = serial();
-        ensure_db();
+        let _db = ensure_db();
 
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("parent");
