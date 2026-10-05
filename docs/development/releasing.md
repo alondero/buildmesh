@@ -27,14 +27,18 @@ output.)
 
 ### Steps
 
-1. **Strip the suffix and set the release version in all three manifests** (they
-   must agree exactly with the git tag — the release workflow enforces string
-   equality):
+1. **Strip the suffix and set the release version in every file that stores it**
+   (they must agree exactly with the git tag — the release workflow enforces
+   string equality):
    ```
    npm run version:set -- 1.2.0
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`,
-   `src-tauri/Cargo.toml`, and the `buildmesh` entry in `src-tauri/Cargo.lock`.
+   `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and
+   `package-lock.json` — commit all five. `package-lock.json` is easy to
+   forget because it looks like build output rather than a manifest, but npm
+   stores the root version in it twice (the top-level mirror and the
+   `packages[""]` entry) and rewrites both on the next install.
 2. Draft the release note:
    ```
    npm run release:notes
@@ -79,6 +83,18 @@ output.)
    npm run version:set -- 1.3.0-0
    ```
    Commit and merge so subsequent local builds stay newer than the release.
+   Commit `package-lock.json` with the rest: a bump that leaves the lockfile on
+   the released version is the exact drift the `Manifest versions` job and the
+   release tag gate now reject.
+
+One version, five files. `npm run version:set` is the fanout that keeps them
+in step, and `npm run check:versions`
+(`scripts/check-manifest-versions.mjs`) is the read-only check that all six
+version sites still agree. Run it after any hand edit to a version, and let
+CI run it for you: the `Manifest versions` job in
+`.github/workflows/verify.yml` reads the same script on every pull request, and
+`release.yml` runs it with the tag as the expected version. It needs no
+`npm ci` and no build, so it is the cheapest gate in the graph.
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
@@ -105,6 +121,7 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
+| `Verification / Manifest versions` | no — fails the run, and the required `Quality (Linux)` vitest suite asserts the same thing | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. It is not a required check in the ruleset, but a version-bump pull request also trips the `Quality (Linux)` vitest assertion, so drift blocks the merge either way. |
 | `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, and bundle budget always; the vitest unit + integration suites as well whenever the change-scope job (`Detect changes`) reports frontend changes. The fast frontend gate — it no longer compiles Rust. |
 | `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
@@ -232,8 +249,12 @@ assuming the packages are fine.
    first. `tauri-action` is downstream of that job, so a failing typecheck,
    test, lint, docs, or platform compile produces no draft release and no
    uploaded installer.
-2. Tag/version agreement — `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
-   and `package.json` must all match the tag.
+2. Tag/version agreement — all five version-bearing files must match the tag:
+   `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the
+   `buildmesh` entry in `src-tauri/Cargo.lock`, and `package-lock.json`. The
+   step runs `scripts/check-manifest-versions.mjs --expect <tag>`, the same
+   check the `Manifest versions` job runs on every pull request, so a release
+   cannot be cut from a tree the merge gate would have rejected.
 3. Mainline — the tagged commit must be reachable from `main`. A tag cut from a
    side branch, or from a commit that never went through the ruleset, fails
    before the build.

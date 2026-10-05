@@ -26,9 +26,18 @@ const targets = [
     file: path.join("src-tauri", "Cargo.lock"),
     apply: (t) => applyTomlNamedPackage(t, "buildmesh"),
   },
+  // The lockfile is a manifest too, not just build output: npm keeps the root
+  // version in it and rewrites it on the next install, so a bump that skips
+  // this file leaves the tree one install away from an unrelated diff — which
+  // is how a release commit once bumped four of the five files. See
+  // docs/development/releasing.md.
+  { file: "package-lock.json", apply: applyLockJson },
 ];
 
 const JSON_VERSION = /^(\s*"version"\s*:\s*")[^"]*(")/m;
+// The root package entry inside the lockfile's `packages` map. The version
+// that follows it is the second of the two places the root version lives.
+const LOCK_ROOT_ENTRY = /"packages"\s*:\s*\{\s*""\s*:\s*\{/;
 const TOML_VERSION = /^version\s*=\s*"[^"]*"\s*$/;
 
 const updates = [];
@@ -51,6 +60,23 @@ for (const { full, updated } of updates) {
 function applyJson(text) {
   if (!JSON_VERSION.test(text)) return null;
   return text.replace(JSON_VERSION, `$1${version}$2`);
+}
+
+// The lockfile carries the root version in two places: the top-level mirror
+// npm writes from package.json, and the `packages[""]` entry. Both move
+// together — patching only the top level leaves the next `npm install` to
+// rewrite the file and put the drift straight back. A lockfile without a
+// `packages` map (lockfileVersion 1) has no second site and is rejected
+// rather than half-updated.
+function applyLockJson(text) {
+  const topLevel = applyJson(text);
+  if (topLevel === null) return null;
+  const entry = LOCK_ROOT_ENTRY.exec(topLevel);
+  if (!entry) return null;
+  const start = entry.index + entry[0].length;
+  const rootEntry = topLevel.slice(start);
+  if (!JSON_VERSION.test(rootEntry)) return null;
+  return topLevel.slice(0, start) + rootEntry.replace(JSON_VERSION, `$1${version}$2`);
 }
 
 function applyTomlBlock(text, header) {
