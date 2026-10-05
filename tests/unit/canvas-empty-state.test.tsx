@@ -94,16 +94,18 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(decision.branch === 'selected-empty' && decision.meshId).toBe(42);
   });
 
-  it('mesh view without an explicit selection does NOT route to selected-empty (active-node-mesh fallback is unreachable)', () => {
-    // `scopeNodesForMode` falls back to agentNodes[0].mesh_id when
-    // selectedMeshId is null, so `scopedCount` is non-zero whenever
-    // any agent exists. The mesh-without-selection + scopedCount=0
-    // input is unreachable in production; the classifier correctly
-    // routes through to other branches (filters-exclude-all when
-    // filteredCount=0 and totalNodeCount>0).
+  it('routes Mesh Grid with no selection to the explicit no-mesh-selected branch (#2071)', () => {
+    // #2071 removed the Mesh-scope fallback chain, so Mesh Grid with no
+    // selection is now a reachable production state — and it is exactly
+    // the case the old "clear your filters" CTA lied about. Naming the
+    // missing selection is the honest answer, with or without nodes
+    // loaded elsewhere in the app.
     expect(
       branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null })),
-    ).toBe('filters-exclude-all');
+    ).toBe('no-mesh-selected');
+    expect(
+      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null })),
+    ).toBe('no-mesh-selected');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
@@ -154,27 +156,23 @@ describe('CanvasEmptyState (issue #1536)', () => {
     expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(42);
   });
 
-  it('mesh view with selectedMeshId=null surfaces filters-exclude-all when nodes exist', () => {
-    // Senior-review round 4: the previous mesh-without-selection
-    // branch rendered "No agents yet" while 3 agents existed — a
-    // blatant lie. The branch is gone; this case routes through to
-    // `filters-exclude-all` (the documented "Clear filters" CTA),
-    // which is at least truthful even though it assumes a filter
-    // is active when it isn't (the input classifier only knows
-    // `filteredCount` — the caller's grid controls know whether
-    // filters are active, but that's not part of the input shape).
-    const cbs = { ...noopCallbacks, onClearFilters: vi.fn(), onOpenSpawnMenu: vi.fn() };
+  it('no-mesh-selected branch names the missing selection and offers the All Nodes way out (#2071)', () => {
+    // Previously this state rendered "No nodes match" with a Clear-filters
+    // CTA — a lie, since no filter was active. The branch states what is
+    // missing and hands the user a real way out of Mesh Grid.
+    const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 3, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
+        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 0, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
         callbacks={cbs}
       />,
     );
 
+    expect(screen.getByText('No mesh selected')).toBeTruthy();
+    expect(screen.queryByText('No nodes match')).toBeNull();
     expect(screen.queryByText('No agents in this mesh')).toBeNull();
-    expect(screen.queryByText('No agents yet')).toBeNull();
-    expect(screen.getByText('No nodes match')).toBeTruthy();
-    expect(screen.getByTestId('canvas-empty-clear-filters')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
+    expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
   });
 
   it('filters-exclude-all branch: Clear search & filters CTA fires onClearFilters', () => {
