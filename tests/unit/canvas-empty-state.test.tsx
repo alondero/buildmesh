@@ -28,6 +28,8 @@ import {
   type CanvasEmptyStateCallbacks,
   type CanvasEmptyStateInput,
 } from '../../src/components/AgentNodeView/CanvasEmptyState';
+import { deriveScope } from '../../src/lib/viewModes';
+import type { NonSingleViewMode, ViewMode } from '../../src/stores/uiStore';
 
 const noopCallbacks: CanvasEmptyStateCallbacks = {
   onCreateMesh: vi.fn(),
@@ -41,16 +43,51 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-function input(overrides: Partial<CanvasEmptyStateInput> = {}): CanvasEmptyStateInput {
+/** Overrides the caller states the way the stores hold them — the View Mode
+ *  and the sidebar selection — plus the two counts the empty state measures.
+ *  `scope` is DERIVED here from the first two (#2070 review), so a test can
+ *  never hand the classifier a View Mode and a Mesh identity that the
+ *  derivation would not produce. */
+interface InputOverrides {
+  meshCount?: number;
+  totalNodeCount?: number;
+  scopedCount?: number;
+  filteredCount?: number;
+  viewMode?: ViewMode;
+  lastNonSingleMode?: NonSingleViewMode;
+  selectedMeshId?: number | null;
+  harnessReady?: boolean;
+}
+
+function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
+  const {
+    meshCount = 1,
+    totalNodeCount = 0,
+    scopedCount = 0,
+    filteredCount = 0,
+    viewMode = 'all',
+    lastNonSingleMode = viewMode === 'single' ? 'mesh' : viewMode,
+    selectedMeshId = null,
+    harnessReady = true,
+  } = overrides;
   return {
-    meshCount: 1,
-    totalNodeCount: 0,
-    scopedCount: 0,
-    filteredCount: 0,
-    viewMode: 'all',
-    selectedMeshId: null,
-    harnessReady: true,
-    ...overrides,
+    meshCount,
+    totalNodeCount,
+    scopedCount,
+    filteredCount,
+    harnessReady,
+    // The classifier reads the Mesh identity from the derived scope, never
+    // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
+    // derivation). The node list is empty because the counts above are this
+    // component's own measurement — the scope's identity does not depend on
+    // them.
+    scope: deriveScope({
+      viewMode,
+      lastNonSingleMode,
+      agentNodes: [],
+      selectedMeshId,
+      activeNodeId: null,
+    }),
   };
 }
 
@@ -81,7 +118,7 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
     expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
     expect(branch(input({ viewMode: 'mesh', meshCount: 0 }))).toBe('no-meshes');
-    expect(branch(input({ viewMode: 'filtered', meshCount: 0, gridSearchQuery: 'x' }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'filtered', meshCount: 0 }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
@@ -120,6 +157,27 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(
       branch(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
     ).toBe('filters-exclude-all');
+  });
+
+  // #2070 review — the classifier now reads the derived scope instead of
+  // re-testing `viewMode === 'mesh'` against `selectedMeshId`. That makes the
+  // two questions the derivation already separates ("what is the grid mode?"
+  // and "is there a Mesh in scope?") visible here: in Single the grid scope
+  // can still BE a Mesh while the canvas shows one soloed node, and claiming
+  // that Mesh is empty would be a lie. So the Mesh branches stay keyed on the
+  // View Mode the user set, and the Mesh identity comes from the scope.
+  it('does not call a Mesh empty when the scope is Mesh-scoped only because Single was entered from a Mesh grid', () => {
+    const single = input({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 42 });
+    expect(single.scope.isMeshScoped).toBe(true);
+    expect(single.scope.mesh).toEqual({ id: 42, name: null });
+    expect(classifyCanvasEmpty(single).branch).toBe('all-empty');
+  });
+
+  it("does not claim 'no mesh selected' in Single over an empty Mesh grid — that state is Mesh Grid's own", () => {
+    const single = input({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: null });
+    expect(single.scope.gridMode).toBe('mesh');
+    expect(single.scope.isMeshScoped).toBe(false);
+    expect(classifyCanvasEmpty(single).branch).toBe('all-empty');
   });
 });
 

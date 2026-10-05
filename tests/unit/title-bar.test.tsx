@@ -843,6 +843,69 @@ describe('TitleBar (bespoke window chrome)', () => {
         }
       });
 
+      // #2070 review — the picker used to call bare `selectMesh`, so choosing
+      // the Mesh already in scope just closed the panel and left the canvas
+      // cross-Mesh, while the sidebar and the omnibar returned it to that
+      // Mesh's grid. All three now run `uiStore.enterMeshScope`, so the same
+      // pick means the same scope everywhere.
+      it('returns the canvas to that Mesh Grid when the picker re-picks the Mesh already in scope', async () => {
+        const raf = mockRaf();
+        try {
+          act(() => {
+            useMeshStore.setState({ selectedMeshId: 1 });
+            useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+          });
+          await renderTitleBar();
+          fireEvent.click(screen.getByTestId('scope-indicator'));
+          fireEvent.click(screen.getByRole('button', { name: 'demo-1' }));
+
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+          expect(useMeshStore.getState().selectedMeshId).toBe(1);
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(document.activeElement).toBe(screen.getByTestId('scope-indicator'));
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('selects a different Mesh and returns the canvas to its grid from a cross-Mesh view', async () => {
+        const raf = mockRaf();
+        try {
+          act(() => {
+            useMeshStore.setState({ selectedMeshId: 1 });
+            useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+          });
+          await renderTitleBar();
+          fireEvent.click(screen.getByTestId('scope-indicator'));
+          fireEvent.click(screen.getByRole('button', { name: 'demo-2' }));
+
+          expect(useMeshStore.getState().selectedMeshId).toBe(2);
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      // A `role="dialog"` the user never hears about is not reachable by a
+      // screen reader: the panel opens with focus still on the trigger, so the
+      // press that hands over the picker announces nothing. Focus moves INTO
+      // the panel; Escape still hands it back to the trigger.
+      it('moves focus into the panel on open so the dialog is announced', async () => {
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+          expect(picker.contains(document.activeElement)).toBe(true);
+
+          fireEvent.keyDown(document, { key: 'Escape' });
+          expect(document.activeElement).toBe(trigger);
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
       it('reports an empty Mesh list rather than an empty picker', async () => {
         act(() => {
           useMeshStore.setState({ meshes: [], meshesById: new Map() });

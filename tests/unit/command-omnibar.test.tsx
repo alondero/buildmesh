@@ -748,7 +748,7 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
       meshesById: new Map([[mesh.id, mesh], [projectY.id, projectY]]),
       selectedMeshId: null,
     });
-    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', probeTab: 'issues' });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', probeTab: 'issues', openScopePickerRequest: 0 });
   });
 
   /** The derived canvas scope, read through the same hook order the grid uses. */
@@ -847,6 +847,72 @@ describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
       openProbeTab: vi.fn(),
     });
     expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    expect(currentScope().isMeshScoped).toBe(false);
+  });
+
+  // #2070 review — "enter Mesh scope for Mesh X" is ONE store operation
+  // (`uiStore.enterMeshScope`). These two cases are the omnibar half of that
+  // contract: the entry that names a Mesh and the `view-mesh` command must
+  // agree with the sidebar and the title-bar picker about what the same
+  // selection means.
+  it('returns the canvas to that Mesh Grid when the entry names the Mesh already in scope', () => {
+    // No selection change, so the mesh→mode subscription cannot fire — the
+    // re-click ruling (#2072) is what makes this reach Mesh Grid.
+    useMeshStore.setState({ selectedMeshId: mesh.id });
+    useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+
+    executeOmnibarItem('mesh:1', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    const scope = currentScope();
+    expect(scope.gridMode).toBe('mesh');
+    expect(scope.mesh).toEqual({ id: mesh.id, name: 'buildmesh' });
+  });
+
+  it('view-mesh returns the canvas to the selected Mesh Grid without asking again', () => {
+    useMeshStore.setState({ selectedMeshId: mesh.id });
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+
+    runOmnibarCommand('view-mesh', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    // A Mesh is already chosen, so there is nothing to ask about.
+    expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+  });
+
+  it('view-mesh asks instead of guessing when no Mesh is selected', () => {
+    // #2071 deleted the "focused node's Mesh, else the first loaded Mesh"
+    // fallback, and User Story 9 says this case must ask. A focused node and
+    // two loaded Meshes are both present here — exactly the state in which the
+    // old chain would have silently chosen `buildmesh`.
+    seedAgentNodes([node, projectYNode], node.id);
+    useMeshStore.setState({ selectedMeshId: null });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+
+    runOmnibarCommand('view-mesh', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    // Asking, not choosing: the selection is still the user's to make, the
+    // View Mode shows the honest "no Mesh selected" state, and the title-bar
+    // picker is asked to open.
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useUIStore.getState().openScopePickerRequest).toBe(1);
     expect(currentScope().isMeshScoped).toBe(false);
   });
 });

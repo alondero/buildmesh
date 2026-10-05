@@ -30,12 +30,14 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * ## The picker
  *
- * Choosing a Mesh calls `selectMesh` and nothing else. That one write moves
- * the canvas (the uiStore mesh→mode subscription) and the Probe destinations
- * (which follow the selection since #2073 deleted the Context Pins), so no
- * action here can put the two out of step. Escape and an outside click are
- * dismissal, not a decision: they close the panel, restore focus to the
- * trigger, and leave the scope exactly as it was.
+ * Choosing a Mesh calls `uiStore.enterMeshScope` and nothing else — the same
+ * store operation the sidebar Mesh row and the omnibar's Mesh-scoped routes
+ * call (#2070 review). That one operation moves the canvas and the Probe
+ * destinations (which follow the selection since #2073 deleted the Context
+ * Pins), so no action here can put the two out of step, and a re-pick of the
+ * Mesh already in scope means the same thing in all four entrypoints. Escape
+ * and an outside click are dismissal, not a decision: they close the panel,
+ * restore focus to the trigger, and leave the scope exactly as it was.
  *
  * It is a disclosure dialog rather than an ARIA `menu` on purpose: the panel
  * holds plain buttons, so Tab order, Enter and Escape work without a roving
@@ -56,9 +58,9 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * Opening is not choosing. The request opens the panel and nothing else —
  * `selectedMeshId` is untouched, so the canvas keeps the honest "no Mesh
- * selected" state (#2071) behind it. Focus is left where the press put it (on
- * the switcher segment); the panel is next in DOM order, so Tab reaches its
- * buttons, and Escape returns focus to this trigger.
+ * selected" state (#2071) behind it. Focus moves into the panel so the
+ * `role="dialog"` is announced (a dialog opened without it says nothing to a
+ * screen reader); Escape returns focus to this trigger.
  *
  * ## Width ladder
  *
@@ -270,7 +272,9 @@ export function ScopeIndicator() {
   const gridStatusFilter = useUIStore(s => s.gridStatusFilter);
   const selectedMeshId = useMeshStore(s => s.selectedMeshId);
   const meshes = useMeshStore(s => s.meshes);
-  const selectMesh = useMeshStore(s => s.selectMesh);
+  // Entering Mesh scope is one store operation (see the picker below); this
+  // component does not decide what re-picking a Mesh in scope means.
+  const enterMeshScope = useUIStore(s => s.enterMeshScope);
   const activeNodeId = useAgentNodeStore(s => s.activeNodeId);
   // `useShallow` on the element list, so a status flip re-renders this one
   // button while unrelated node writes (terminal output, circuit indicators)
@@ -314,11 +318,23 @@ export function ScopeIndicator() {
   useClickOutside(open ? PICKER_ID : null, () => setOpen(false));
   useEscapeKey(closeAndReturnFocus, open);
 
+  // Hand focus to the panel as it opens, from whichever route opened it. A
+  // `role="dialog"` the user is not moved into is silent for a screen reader —
+  // pressing Mesh Grid and hearing nothing is indistinguishable from a
+  // broken control. The panel itself takes focus (`tabIndex={-1}`, never a
+  // tab stop) rather than its first Mesh, so Enter cannot pick a Mesh the
+  // user only looked at; Tab reaches the rows, and Escape returns focus to
+  // the trigger through `closeAndReturnFocus`.
+  const panelRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!open) return;
+    panelRef.current?.focus();
+  }, [open]);
+
   // Open the picker on every distinct request (#2076). `useLayoutEffect` so
   // the panel is mounted before paint — same timing as the search-focus
-  // request in `GridControls`. Deliberately no focus move: the press belongs
-  // to the switcher segment, and focusing this trigger would make the next
-  // Enter close the panel the user was just handed.
+  // request in `GridControls` — and so the focus move above lands in the same
+  // commit as the mount.
   useLayoutEffect(() => {
     if (openPickerRequest === 0) return;
     setOpen(true);
@@ -356,8 +372,12 @@ export function ScopeIndicator() {
       </button>
       {open && (
         <div
+          ref={panelRef}
           id={PICKER_ID}
           role="dialog"
+          // Focusable, never a tab stop: the open effect focuses the panel so
+          // the dialog is announced, and Tab from there reaches the rows.
+          tabIndex={-1}
           aria-label="Select a Mesh"
           data-testid="scope-picker"
           className="absolute left-0 top-full z-50 mt-1 max-h-[calc(100dvh-4rem)] w-72 overflow-y-auto rounded-md border border-border-default bg-bg-card p-1 shadow-md animate-scale-in origin-top-left"
@@ -371,10 +391,13 @@ export function ScopeIndicator() {
                 key={mesh.id}
                 type="button"
                 onClick={() => {
-                  // One write: the canvas follows through the uiStore
-                  // mesh→mode subscription and the Probe destinations follow
-                  // the selection itself (#2073).
-                  selectMesh(mesh.id);
+                  // One store operation, shared with the sidebar and the
+                  // omnibar: a selection change moves the canvas through the
+                  // uiStore mesh→mode subscription, and re-picking the Mesh
+                  // already in scope returns the canvas to its grid (#2072).
+                  // The Probe destinations follow the selection itself
+                  // (#2073).
+                  enterMeshScope(mesh.id);
                   closeAndReturnFocus();
                 }}
                 data-testid={`scope-picker-mesh-${mesh.id}`}

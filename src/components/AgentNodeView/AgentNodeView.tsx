@@ -449,7 +449,6 @@ export function AgentNodeView() {
             // Terminal re-renders while the user is typing. Senior-
             // review finding: reactivity pollution.
             <CanvasEmptyStateContainer
-              viewMode={viewMode}
               selectedMeshId={selectedMeshId}
               agentNodes={agentNodes}
               scope={scope}

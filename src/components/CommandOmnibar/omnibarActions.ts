@@ -9,8 +9,13 @@
  * rendering React and keeps the palette a pure "search + select" surface.
  *
  * Every Mesh-scoped route — the "Go to Mesh: <name>" entry (#2077) and the
- * destination routes — starts with the same `selectMeshScope` write, so a
- * palette action that names a Mesh always resolves the same scope.
+ * destination routes — enters Mesh scope through the one store operation
+ * `uiStore.enterMeshScope`, so a palette action that names a Mesh always
+ * resolves the same scope the sidebar and the title-bar picker do. Ordering
+ * still matters for the destination routes: the scope is entered BEFORE the
+ * destination opens, because a Mesh-lens destination resolves its subject
+ * from `selectedMeshId`. Opening first would leave it reading the Mesh the
+ * user did not ask for.
  *
  * Modal opens go through `uiStore` (`cheatsheetOpen` / `appSettingsOpen` /
  * `remoteAccessOpen`), the same source of truth App's `?` key and TitleBar's
@@ -43,32 +48,6 @@ export interface OmnibarActionContext {
 }
 
 /**
- * The one scope write every Mesh-scoped omnibar route performs (issue #2077):
- * the "go to Mesh" entry, the Mesh-scoped Probe destinations, and the GitHub
- * issue/PR routes.
- *
- * Selecting the Mesh is the whole action. The canvas follows through the
- * uiStore mesh→mode subscription and the Mesh-lens Probe destinations follow
- * the selection itself (#2073 deleted the per-tab pin), so no route here can
- * leave the two halves of the scope disagreeing — the same one-write contract
- * the title-bar picker uses.
- *
- * Ordering matters for the destination routes: the selection happens BEFORE
- * the destination opens, because a Mesh-lens destination resolves its subject
- * from `selectedMeshId`. Opening first would leave it reading the Mesh the
- * user did not ask for.
- */
-function selectMeshScope(meshId: number, ctx: OmnibarActionContext): void {
-  const changed = useMeshStore.getState().selectedMeshId !== meshId;
-  useMeshStore.getState().selectMesh(meshId);
-  // No selection change means the mesh→mode subscription cannot fire, so a
-  // cross-Mesh View Mode (Pinned / Filtered / All) is exited here. That is
-  // also the sticky re-click path (#2072): asking for the Mesh already in
-  // scope returns the canvas to its grid instead of doing nothing.
-  if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
-}
-
-/**
  * Run the built-in command behind a `command:<id>` item. Returns false for
  * an unknown id (a catalog/store drift the tests pin) so callers can ignore
  * it deliberately rather than silently.
@@ -91,16 +70,24 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
       return true;
     case 'view-mesh': {
-      const meshStore = useMeshStore.getState();
-      if (meshStore.selectedMeshId === null) {
-        const active = useAgentNodeStore.getState().getActiveNode();
-        const meshId = active?.mesh_id ?? ctx.meshes[0]?.id;
-        if (meshId !== undefined) {
-          meshStore.selectMesh(meshId);
-          return true;
-        }
+      // #2070 review — this case used to re-inline the Mesh fallback chain
+      // #2071 deleted (focused node's Mesh, else the first loaded Mesh), so
+      // the palette could put the canvas in a scope nobody chose.
+      const selectedMeshId = useMeshStore.getState().selectedMeshId;
+      if (selectedMeshId !== null) {
+        // A Mesh is chosen: entering it is the same operation every other
+        // entrypoint performs, so a cross-Mesh View Mode returns to its grid.
+        useUIStore.getState().enterMeshScope(selectedMeshId);
+        return true;
       }
-      if (useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+      // Nothing is chosen, so nothing is selected. Enter Mesh Grid anyway —
+      // the View Mode flip is the honest "no Mesh selected" state the canvas
+      // already knows how to show (#2071) — and ASK, the same two writes the
+      // Mesh Grid segment performs (#2076). Never guess the Mesh: this is
+      // User Story 9, and the picker is open in the title bar behind the
+      // closing palette either way.
+      ctx.setViewMode('mesh');
+      useUIStore.getState().requestOpenScopePicker();
       return true;
     }
     case 'open-settings':
@@ -168,15 +155,15 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     return;
   }
   if (id.startsWith('mesh:')) {
-    // The "Go to Mesh: <name>" entry (#2077). Selecting the Mesh is the whole
-    // action: it moves the canvas into that Mesh's grid and retargets the
-    // Mesh-lens Probe destinations, so scope changes without a destination
-    // being opened.
+    // The "Go to Mesh: <name>" entry (#2077). Entering that Mesh's scope is
+    // the whole action: it moves the canvas into that Mesh's grid and
+    // retargets the Mesh-lens Probe destinations, so scope changes without a
+    // destination being opened.
     const meshId = Number(id.slice('mesh:'.length));
     if (!Number.isFinite(meshId)) return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh) return;
-    selectMeshScope(mesh.id, ctx);
+    useUIStore.getState().enterMeshScope(mesh.id);
     return;
   }
   if (id.startsWith('command:')) {
@@ -231,7 +218,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(meshId)) return;
-    selectMeshScope(mesh.id, ctx);
+    useUIStore.getState().enterMeshScope(mesh.id);
     ctx.openProbeTab(tab);
     return;
   }
@@ -248,7 +235,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
-    selectMeshScope(mesh.id, ctx);
+    useUIStore.getState().enterMeshScope(mesh.id);
     if (id.startsWith('issue:')) {
       requestIssueNavigation({ meshId: mesh.id, issueNumber: number });
       ctx.openProbeTab('issues');

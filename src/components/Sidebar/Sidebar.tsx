@@ -131,6 +131,10 @@ export function Sidebar() {
   // The action reference is stable across renders (zustand), so we bind
   // the tab at the prop site without an extra closure layer.
   const openProbeTab = useUIStore(s => s.openProbeTab);
+  // The one Mesh-scope entrypoint every Mesh click shares (see
+  // `handleSelectMesh`). Read as an action so the stable zustand reference
+  // keeps the memoized `MeshItem` rows skipping (#1748).
+  const enterMeshScope = useUIStore(s => s.enterMeshScope);
 
   // Issue #1264 — the open-id is a pre-prefixed string (built via
   // `dropdownId('mesh', mesh.id)`) so the sidebar spawn picker's
@@ -178,15 +182,16 @@ export function Sidebar() {
   // (it clears the selection inside `setViewMode`). The mesh→mode
   // subscription below short-circuits on an unchanged selection, so the
   // restore has to go through the View Mode setter.
+  //
+  // #2070 review — both halves of that ruling now live in one store
+  // operation (`uiStore.enterMeshScope`), because the sidebar, the title-bar
+  // picker and the omnibar each spelled it out and drifted: the picker's copy
+  // called bare `selectMesh`, so re-picking the Mesh in scope there only
+  // closed the panel. A wrapper like the one this handler used to be is the
+  // drift source, not the cure (issue #1002).
   const handleSelectMesh = useCallback((meshId: number) => {
-    if (useMeshStore.getState().selectedMeshId === meshId) {
-      if (useUIStore.getState().viewMode !== 'mesh') {
-        useUIStore.getState().setViewMode('mesh');
-      }
-      return;
-    }
-    selectMesh(meshId);
-  }, [selectMesh]);
+    enterMeshScope(meshId);
+  }, [enterMeshScope]);
   const handleToggleDropdown = useCallback((mesh: Mesh) => {
     const key = dropdownId('mesh', mesh.id);
     setOpenDropdownFor(prev => (prev === key ? null : key));

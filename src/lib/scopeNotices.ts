@@ -10,12 +10,13 @@
 // gate or discard the live path they describe. A notice says what happened;
 // the Mesh switch, the mode flip and the search focus all still run.
 //
-// The predicate reads the DERIVED scope (`deriveScope`, #2071) rather than
-// `selectedMeshId` on its own: Single reports the grid scope it was entered
-// from, so a solo out of a Mesh is a Mesh-anchored scope too, and it is the
-// scope — not the View Mode label — that decides whether a search escaped.
+// The predicate is the one `deriveScope` answers with
+// (`isMeshScopedView`, #2071) rather than a second derivation: Single reports
+// the grid scope it was entered from, so a solo out of a Mesh is a
+// Mesh-anchored scope too, and it is the scope — not the View Mode label —
+// that decides whether a search escaped.
 
-import { deriveScope } from './viewModes';
+import { isMeshScopedView } from './viewModes';
 import type { NonSingleViewMode, ViewMode } from '../stores/uiStore';
 
 /** The toast `provider` column for every scope notice — one origin label for
@@ -38,15 +39,6 @@ export function meshDeletedScopeNotice(meshName: string): string {
   return `Mesh “${meshName}” was deleted — the canvas moved to All Nodes.`;
 }
 
-/** The scope inputs a notice may read — deliberately narrower than
- *  `ScopeInput`: `isMeshScoped` is a function of the grid mode and the
- *  selection alone, so no node list or Mesh list is needed to answer it. */
-export interface ScopeNoticeInput {
-  viewMode: ViewMode;
-  lastNonSingleMode: NonSingleViewMode;
-  selectedMeshId: number | null;
-}
-
 /**
  * The notice a search gesture must show, or null when nothing escaped.
  *
@@ -56,17 +48,17 @@ export interface ScopeNoticeInput {
  * both report a cross-Mesh scope, so neither can be an escape. Callers read
  * this BEFORE the mode flip — after it, every scope is cross-Mesh and the
  * notice would always be lost.
+ *
+ * The three inputs are positional and each one is a real scope input, so this
+ * module no longer restates them as its own narrower interface and hands
+ * `deriveScope` a fabricated node list to read one boolean (#2070 review).
  */
-export function searchEscapeNotice(input: ScopeNoticeInput): string | null {
-  const scope = deriveScope({
-    viewMode: input.viewMode,
-    lastNonSingleMode: input.lastNonSingleMode,
-    // `isMeshScoped` reads `gridMode` and `selectedMeshId` only, so an empty
-    // node list cannot change the answer — this notice names the scope, it
-    // never reports a count.
-    agentNodes: [],
-    selectedMeshId: input.selectedMeshId,
-    activeNodeId: null,
-  });
-  return scope.isMeshScoped ? SEARCH_ESCAPE_NOTICE : null;
+export function searchEscapeNotice(
+  viewMode: ViewMode,
+  lastNonSingleMode: NonSingleViewMode,
+  selectedMeshId: number | null,
+): string | null {
+  return isMeshScopedView(viewMode, lastNonSingleMode, selectedMeshId)
+    ? SEARCH_ESCAPE_NOTICE
+    : null;
 }

@@ -426,6 +426,27 @@ interface UIState extends GridControls {
   // current mode isn't 'single'.
   exitSingleMode: () => void;
 
+  // ---- Entering Mesh scope (#2070) ----
+  // "Enter Mesh scope for Mesh X", as ONE transition. It lives here, next to
+  // the View Mode setter it drives, because the two halves of the scope -
+  // `selectedMeshId` in meshStore and `viewMode` here - cannot both be owned
+  // by meshStore without a circular import (meshStore already imports this
+  // module; see its header).
+  //
+  // Every entrypoint routes here: the sidebar Mesh row, the title-bar picker's
+  // Mesh rows, the omnibar's Mesh-scoped routes, and the `view-mesh` command.
+  // When the Mesh is already selected there is no selection change, so the
+  // mesh?mode subscription at the bottom of this file cannot fire - the View
+  // Mode setter is what honours the sticky re-click (#2072). Already in that
+  // Mesh's grid, it is a no-op. All Nodes clears the selection inside
+  // `setViewMode`, so it is never a re-click.
+  //
+  // The parameter is a Mesh id and cannot be null: no code path selects a Mesh
+  // the user did not choose (#2071), and "what to do with nothing selected"
+  // stays an entrypoint decision - the `view-mesh` command asks instead of
+  // guessing.
+  enterMeshScope: (meshId: number) => void;
+
   // ---- Grid Controls (wayfinder #988 / ticket #995) ----
   // The five control fields themselves come from `GridControls`. Every setter
   // below is idempotent — a same-value call neither notifies subscribers nor
@@ -672,6 +693,23 @@ export const useUIStore = create<UIState>((set, get) => {
       get().setViewMode(get().lastNonSingleMode);
     },
 
+    enterMeshScope: (meshId) => {
+      const { selectedMeshId, selectMesh } = useMeshStore.getState();
+      // A different Mesh is a selection change, and the mesh?mode
+      // subscription below turns that into Mesh Grid on its own.
+      if (selectedMeshId !== meshId) {
+        selectMesh(meshId);
+        return;
+      }
+      // The same Mesh again: the subscription short-circuits on an unchanged
+      // selection, so from a cross-Mesh View Mode the canvas would stay
+      // cross-Mesh. Re-picking the Mesh in scope means "take me back to its
+      // grid" (#2072); already there, this is a no-op.
+      if (get().viewMode !== 'mesh') {
+        get().setViewMode('mesh');
+      }
+    },
+
     ...initialGridControls,
 
     setGridSearchQuery: (query) => {
@@ -736,14 +774,14 @@ export const useUIStore = create<UIState>((set, get) => {
     enterFilteredFromSearch: () => {
       const { viewMode, lastNonSingleMode } = get();
       // Read BEFORE the flip: after it, every scope is cross-Mesh and the
-      // escape would be invisible. `searchEscapeNotice` decides from the
-      // derived scope (#2071), so Single over a Mesh grid counts and a
-      // Filtered re-click does not.
-      const notice = searchEscapeNotice({
+      // escape would be invisible. `searchEscapeNotice` decides from the same
+      // scope predicate `deriveScope` answers with (#2071), so Single over a
+      // Mesh grid counts and a Filtered re-click does not.
+      const notice = searchEscapeNotice(
         viewMode,
         lastNonSingleMode,
-        selectedMeshId: useMeshStore.getState().selectedMeshId,
-      });
+        useMeshStore.getState().selectedMeshId,
+      );
       if (get().viewMode !== 'filtered') get().setViewMode('filtered');
       // Re-arms on every press, including a re-click from Filtered: the
       // user's intent is "get me to the search box" (#1609).

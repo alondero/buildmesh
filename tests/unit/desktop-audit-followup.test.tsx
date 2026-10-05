@@ -66,7 +66,7 @@ describe('October desktop audit follow-up', () => {
     localStorage.setItem('buildmesh.readiness-dismissed', 'true');
     vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
     const elsewhere = [node(20, 'Other repository work', 'running', 2)];
-    render(<CanvasEmptyStateContainer viewMode="mesh" selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.queryByRole('list', { name: 'Getting started' })).toBeNull();
     expect((screen.getByRole('button', { name: 'Start Terminal' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Show setup guide' }));
@@ -93,7 +93,7 @@ describe('October desktop audit follow-up', () => {
     vi.mocked(invoke).mockImplementation(cmd => cmd === 'list_providers' ? (++reads === 1 ? checks.promise : retry.promise) : Promise.resolve([]));
     const elsewhere = [node(20, 'Other repository work', 'running', 2)];
     seedAgentNodes(elsewhere);
-    render(<CanvasEmptyStateContainer viewMode="mesh" selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.getByRole('button', { name: 'Start Terminal' })).toBeTruthy();
     expect(screen.getByRole('status').textContent).toContain('Checking available harnesses');
     fireEvent.click(screen.getByRole('button', { name: 'Check runtime and login' }));
@@ -256,7 +256,7 @@ describe('October desktop audit follow-up', () => {
     vi.mocked(invoke).mockResolvedValue([]);
     const creating = deferred<AgentNode>();
     vi.mocked(invoke).mockImplementation(cmd => cmd === 'create_agent_node' ? creating.promise : Promise.resolve([]));
-    render(<CanvasEmptyStateContainer viewMode="all" selectedMeshId={1} agentNodes={[]} scope={emptyScope('all', 1, [])} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={[]} scope={emptyScope('all', 1, [])} />);
     const start = screen.getByRole('button', { name: 'Start Terminal' });
     fireEvent.click(start); fireEvent.click(start);
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'create_agent_node')).toHaveLength(1);
