@@ -267,21 +267,31 @@ pub(super) fn spawn_hands_off_report(view: &RunView, node_id: &str) -> bool {
     matches!(
         view.graph.node(node_id).map(|node| &node.kind),
         Some(CircuitNodeKind::SpawnAgentNode { .. })
-    ) && view.graph.edges.iter().any(|edge| edge.from == node_id)
-        && view
-            .graph
-            .edges
-            .iter()
-            .filter(|edge| edge.from == node_id)
-            .all(|edge| {
-                matches!(
-                    view.graph.node(&edge.to).map(|node| &node.kind),
-                    Some(
-                        CircuitNodeKind::LlmTurnClassifier { .. }
-                            | CircuitNodeKind::ReviewVerdict { .. }
-                    )
-                )
-            })
+    ) && every_successor_classifies(view, node_id, true)
+}
+
+/// A report is handed off when every successor judges it. A round join (the
+/// re-prompted reviewer's fan-in) is transparent, one level deep.
+fn every_successor_classifies(view: &RunView, node_id: &str, through_join: bool) -> bool {
+    let mut successors = view
+        .graph
+        .edges
+        .iter()
+        .filter(|edge| edge.from == node_id)
+        .peekable();
+    successors.peek().is_some()
+        && successors.all(
+            |edge| match view.graph.node(&edge.to).map(|node| &node.kind) {
+                Some(
+                    CircuitNodeKind::LlmTurnClassifier { .. }
+                    | CircuitNodeKind::ReviewVerdict { .. },
+                ) => true,
+                Some(CircuitNodeKind::AnyCompleted) if through_join => {
+                    every_successor_classifies(view, &edge.to, false)
+                }
+                _ => false,
+            },
+        )
 }
 
 /// What a `verdict` gate may do with a yielded report.

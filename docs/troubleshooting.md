@@ -66,6 +66,35 @@ If the badge never clears, check the diagnostics log for the `pty_qmsg=` and
 returns to zero is a transient stall, one that stays high means the agent is
 genuinely stuck, and a non-zero count with no queued work means a stuck
 counter. Include that line in a [report](#what-to-include-in-a-report).
+## "Buildmesh couldn't read your settings"
+
+Settings shows a warning panel because `preferences.json` could not be turned
+into settings. The file is **not** damaged by this and is **not** replaced:
+Buildmesh refuses every settings write while the file is unreadable, so your
+provider accounts, API keys, pairings, and Autopilot settings are still on
+disk. The three actions in the panel are described in
+[Settings that matter](user-guide.md#when-buildmesh-cannot-read-your-settings).
+
+The log line is content-free by design - a corrupt `preferences.json` holds
+plaintext API keys, so nothing from the file is ever written to the log:
+
+```
+WARN preferences::storage::read_state preferences.json is corrupt (invalid_json): the file is not valid JSON (malformed JSON at line 1 column 24) - left on disk untouched, settings writes are refused until it is recovered
+```
+
+The reason code is worth reading:
+
+| Reason | Meaning |
+|---|---|
+| `invalid_json` | The file is damaged, empty, cut short, or not text - most often an interrupted write |
+| `not_an_object` | The file holds a JSON array or a bare value instead of a settings object |
+| `schema_mismatch` | A field has a type this version cannot read - usually a file written by a newer Buildmesh |
+
+To recover without the UI, stop Buildmesh, copy
+`%APPDATA%\com.alond.buildmesh\preferences.json` somewhere safe, then either
+delete it (a fresh start) or replace its contents with
+`preferences.json.bak` from the same folder. Start Buildmesh again; the log
+line above disappears once the file parses.
 
 ## Command Code does not accept typing
 

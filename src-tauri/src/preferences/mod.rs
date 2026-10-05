@@ -9,7 +9,10 @@
 //!
 //! The module is split along concern lines:
 //!   * [`model`] — wire types (`#[derive(TS)]` structs/enums).
-//!   * [`storage`] — disk I/O, in-process cache, atomic write coordination.
+//!   * [`storage`] — disk I/O, in-process cache, atomic write coordination,
+//!     and the rule that a corrupt file is never written back.
+//!   * [`recovery`] — corruption classification, the last-known-good backup,
+//!     and the explicit restore/reset actions (issue #1523).
 //!   * [`migrations`] — legacy `preferences.json` read migration (ADR-0025).
 //!   * [`resolver`] — provider catalog, account/pairing merge, harness profile
 //!     derivation, default-provider precedence, pairing compatibility.
@@ -24,6 +27,7 @@
 pub mod compatibility;
 pub mod migrations;
 pub mod model;
+pub mod recovery;
 pub mod resolver;
 pub mod spawn_configurations;
 pub mod launch_configurations;
@@ -46,14 +50,25 @@ pub use model::{
 
 // ----- Re-exports: storage ----------------------------------------------
 
+#[allow(unused_imports)]
 pub use storage::{
-    app_data_dir, circuit_agent_pool_size, default_provider, generation, init, issue_spawn_prompt, load,
-    naming_provider, pr_spawn_prompt, reviewer_provider, save, update, worktree_directory,
+    app_data_dir, circuit_agent_pool_size, default_provider, generation, health, init,
+    issue_spawn_prompt, load, naming_provider, pr_spawn_prompt, preferences_directory, reset,
+    restore_backup, reviewer_provider, save, update, worktree_directory, LoadState,
 };
 #[cfg(test)]
 pub(crate) use storage::{init_for_tests, reset_for_tests};
 #[allow(unused_imports)]
 pub(crate) use storage::ensure_default_provider_normalized;
+
+// ----- Re-exports: recovery ----------------------------------------------
+
+/// The recovery wire types are only consumed by the Tauri commands and the
+/// tests today, so the block carries an `allow` like its siblings above.
+#[allow(unused_imports)]
+pub use recovery::{
+    CorruptionInfo, CorruptionReason, PreferencesHealth, PreferencesStatus, RecoveryOutcome,
+};
 
 // ----- Re-exports: resolver ---------------------------------------------
 

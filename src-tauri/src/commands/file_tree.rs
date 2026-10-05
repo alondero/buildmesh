@@ -147,6 +147,25 @@ fn open_in_file_manager_blocking(path: String) -> Result<(), String> {
         return Err(format!("Path is not a directory: {}", host_path));
     }
 
+    open_host_directory_in_file_manager(Path::new(&host_path))
+}
+
+/// Reveal an already-resolved **host** directory in the OS file manager.
+///
+/// Split out of [`open_in_file_manager_blocking`] for callers that hold a
+/// host path by construction and must not have it run through
+/// [`env::to_host_path`] — a WSL UNC translation of an app-data directory
+/// would point Explorer at a UNC path the user did not ask for. The
+/// existence / directory checks stay in the command wrapper so this stays a
+/// pure "spawn the file manager" primitive.
+pub(crate) fn open_host_directory_in_file_manager(host_path: &Path) -> Result<(), String> {
+    // The platform branches below are string-shaped (the Windows one rewrites
+    // separators for `cmd`'s argument parser), so normalise once here.
+    // Owned, not `Cow`: `Command::arg` wants `AsRef<OsStr>`, which `Cow<str>`
+    // does not implement — a `Cow` binding compiles on Windows (where the
+    // argument goes through `.args([.. &String])`) and fails on Unix, where
+    // the same `Cow` is handed straight to `.arg(..)`.
+    let host_path = host_path.to_string_lossy().into_owned();
     tracing::info!("open_in_file_manager: resolved path = {}", host_path);
 
     #[cfg(target_os = "windows")]

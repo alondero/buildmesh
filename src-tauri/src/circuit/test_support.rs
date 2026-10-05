@@ -1,6 +1,7 @@
 //! Synthetic authoritative adapter facts for graph-routing tests. Negative
 //! evidence tests call `advance` directly and must not use this fixture.
 
+use super::model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition};
 use super::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact, WorkEvidence};
 use super::stepper::{
     advance, CircuitEvent, ClassificationBinding, ObservationInputFence, RunView, Transition,
@@ -37,10 +38,20 @@ pub(crate) fn record_report_evidence(
     text: &str,
 ) -> ClassificationBinding {
     use sha2::{Digest, Sha256};
-    record_report_evidence_for_turn(run, owner, text, &format!("turn-{:x}", Sha256::digest(text.as_bytes())))
+    record_report_evidence_for_turn(
+        run,
+        owner,
+        text,
+        &format!("turn-{:x}", Sha256::digest(text.as_bytes())),
+    )
 }
 
-pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, text: &str, turn_id: &str) -> ClassificationBinding {
+pub(crate) fn record_report_evidence_for_turn(
+    run: &mut RunView,
+    owner: &str,
+    text: &str,
+    turn_id: &str,
+) -> ClassificationBinding {
     use sha2::{Digest, Sha256};
     let step = run.step(owner).expect("native evidence fixture owner");
     let agent_node_id = step
@@ -60,7 +71,8 @@ pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, te
         report_revision: None,
     };
     let input_guard = ObservationInputFence {
-                transcript_guard: None, report_guard: None,
+        transcript_guard: None,
+        report_guard: None,
         agent_node_id,
         input_stamp: format!("input-{turn_id}"),
         observed_at_ms: 1000,
@@ -111,24 +123,148 @@ pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, te
 
 /// Graph-routing fixtures must supply terminal ownership evidence; a legacy
 /// process/status callback is deliberately insufficient for assigned work.
-pub(crate) fn advance_with_completion_evidence(run: &mut RunView, event: &CircuitEvent) -> Transition {
-    if let CircuitEvent::AgentFinished { agent_node_id, success: true, output } = event {
-        if let Some(step) = run.steps.iter().find(|step| step.status == super::stepper::StepStatus::Running
-            && step.agent_node_id == Some(*agent_node_id)) {
-            let identity = ObservationIdentity { run_id:run.run_id,step_id:step.node_id.clone(),attempt:step.attempt,
-                agent_node_id:*agent_node_id,session_incarnation:Some("100".into()),session_id:Some(format!("session-{agent_node_id}")),
-                turn_id:Some(format!("finished-{}",step.attempt)),report_revision:None };
-            let mut facts = vec![ObservedWorkFact::ForegroundTerminated, ObservedWorkFact::OwnershipCovered,
-                ObservedWorkFact::AssignedWorkCompleted];
+pub(crate) fn advance_with_completion_evidence(
+    run: &mut RunView,
+    event: &CircuitEvent,
+) -> Transition {
+    if let CircuitEvent::AgentFinished {
+        agent_node_id,
+        success: true,
+        output,
+    } = event
+    {
+        if let Some(step) = run.steps.iter().find(|step| {
+            step.status == super::stepper::StepStatus::Running
+                && step.agent_node_id == Some(*agent_node_id)
+        }) {
+            let identity = ObservationIdentity {
+                run_id: run.run_id,
+                step_id: step.node_id.clone(),
+                attempt: step.attempt,
+                agent_node_id: *agent_node_id,
+                session_incarnation: Some("100".into()),
+                session_id: Some(format!("session-{agent_node_id}")),
+                turn_id: Some(format!("finished-{}", step.attempt)),
+                report_revision: None,
+            };
+            let mut facts = vec![
+                ObservedWorkFact::ForegroundTerminated,
+                ObservedWorkFact::OwnershipCovered,
+                ObservedWorkFact::AssignedWorkCompleted,
+            ];
             if let Some(text) = output {
-                facts.push(ObservedWorkFact::AssistantReport { text:text.clone(), revision:"completion-report".into() });
+                facts.push(ObservedWorkFact::AssistantReport {
+                    text: text.clone(),
+                    revision: "completion-report".into(),
+                });
             }
             let observations = facts
-                .into_iter().enumerate().map(|(index,fact)| CircuitObservation { identity:identity.clone(),
-                    source:"synthetic_completion_adapter".into(),source_id:Some(index.to_string()),observed_at_ms:1000,
-                    authoritative:true,fact }).collect();
-            return advance(run,&CircuitEvent::ObservationBatch {receipt_id:0,expected:identity,observations,stale:false,input_guard:None});
+                .into_iter()
+                .enumerate()
+                .map(|(index, fact)| CircuitObservation {
+                    identity: identity.clone(),
+                    source: "synthetic_completion_adapter".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: 1000,
+                    authoritative: true,
+                    fact,
+                })
+                .collect();
+            return advance(
+                run,
+                &CircuitEvent::ObservationBatch {
+                    receipt_id: 0,
+                    expected: identity,
+                    observations,
+                    stale: false,
+                    input_guard: None,
+                },
+            );
         }
     }
-    advance(run,event)
+    advance(run, event)
+}
+
+fn close_reviewer_before(graph: &mut CircuitGraph, next: &str) {
+    graph.nodes.push(CircuitNode {
+        id: "close_reviewer".into(),
+        kind: CircuitNodeKind::CloseAgentNode {
+            target_node_id: Some("reviewer".into()),
+        },
+    });
+    graph.edges.push(CircuitEdge {
+        from: "close_reviewer".into(),
+        to: next.into(),
+        condition: EdgeCondition::Always,
+    });
+}
+
+/// The issue-review topology shipped before the publication flow: a reviewer
+/// closed after every feedback round, re-entry at the wrap-up, no merge.
+pub(crate) fn pre_publication_issue_review() -> CircuitGraph {
+    let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+    let added = ["review_round", "re_review", "merge"];
+    graph
+        .nodes
+        .retain(|node| !added.contains(&node.id.as_str()));
+    graph
+        .edges
+        .retain(|edge| !added.contains(&edge.from.as_str()));
+    assert!(graph.retarget_edge("reviewer", "review_round", "review_classifier"));
+    assert!(graph.retarget_edge("close_approved", "merge", "complete"));
+    assert!(graph.retarget_edge("follow_feedback", "feedback_classifier", "close_reviewer"));
+    assert!(graph.retarget_edge("review_retry", "re_review", "finish"));
+    close_reviewer_before(&mut graph, "feedback_classifier");
+    graph.replace_stock_text(
+        "follow_feedback",
+        &CircuitGraph::review_feedback_prompt(crate::review_contract::PR_FEEDBACK_SCOPE),
+        &CircuitGraph::review_feedback_prompt(crate::review_contract::LEGACY_PR_FEEDBACK_SCOPE),
+    );
+    graph.replace_stock_text(
+        "complete",
+        CircuitGraph::PR_APPROVED_MESSAGE,
+        CircuitGraph::LEGACY_PR_APPROVED_MESSAGE,
+    );
+    graph.validate().unwrap();
+    graph
+}
+
+/// The title-bar review shape shipped before the publication flow: a fresh
+/// reviewer every round, closed after feedback, and no publish or merge.
+pub(crate) fn pre_publication_local_review(rounds: i32) -> CircuitGraph {
+    use super::model_node_review::{LEGACY_LOCAL_APPROVED_MESSAGE, LOCAL_APPROVED_MESSAGE};
+    let mut graph = CircuitGraph::agent_review(None, None, rounds);
+    let added = [
+        "publish",
+        "await_publish",
+        "confirm_publish",
+        "publish_ready",
+        "review_round",
+        "re_review",
+        "merge",
+    ];
+    graph
+        .nodes
+        .retain(|node| !added.contains(&node.id.as_str()));
+    graph
+        .edges
+        .retain(|edge| !added.contains(&edge.from.as_str()));
+    assert!(graph.retarget_edge("source_ready", "publish", "reviewer"));
+    assert!(graph.retarget_edge("reviewer", "review_round", "verdict"));
+    assert!(graph.retarget_edge("feedback", "await_fixes", "close_reviewer"));
+    assert!(graph.retarget_edge("retry", "re_review", "reviewer"));
+    assert!(graph.retarget_edge("close_approved", "merge", "approved"));
+    close_reviewer_before(&mut graph, "await_fixes");
+    graph.replace_stock_text(
+        "feedback",
+        &CircuitGraph::review_feedback_prompt(crate::review_contract::LOCAL_FEEDBACK_SCOPE),
+        &CircuitGraph::review_feedback_prompt(crate::review_contract::LEGACY_LOCAL_FEEDBACK_SCOPE),
+    );
+    graph.replace_stock_text(
+        "approved",
+        LOCAL_APPROVED_MESSAGE,
+        LEGACY_LOCAL_APPROVED_MESSAGE,
+    );
+    graph.validate().unwrap();
+    graph
 }
