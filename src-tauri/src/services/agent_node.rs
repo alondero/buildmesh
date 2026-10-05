@@ -1297,17 +1297,16 @@ mod tests {
         assert!(db::node_spawn_configuration(i64::MAX, "codex").unwrap().is_none());
     }
 
-    /// Create a fresh mesh in this test's own database at a unique per-test
-    /// path, and return its id together with the guard that keeps that
-    /// database installed. Each call uses a monotonic counter so parallel
-    /// tests can't collide on the `meshes.path` UNIQUE constraint.
+    /// Create a fresh mesh at a unique per-test path and return its id. Each
+    /// call uses a monotonic counter so parallel tests can't collide on the
+    /// `meshes.path` UNIQUE constraint.
     ///
-    /// The guard travels back to the test body because `isolated()` is
-    /// the caller installs it (issue #2048) and holds the guard: a helper that
+    /// The caller installs the database with `db::test_support::isolated()` and
+    /// holds that guard for the rest of the test (issue #2048). A helper that
     /// installed the database and dropped the guard on return would leave the
     /// rest of the test reading the process-global database, or panicking with
-    /// "database not initialized". Returning the guard in a tuple would invite
-    /// `let (mesh_id, _) = fresh_mesh()`, which drops it immediately.
+    /// "database not initialized" — and returning the guard in a tuple would
+    /// invite `let (mesh_id, _) = fresh_mesh()`, which drops it immediately.
     fn fresh_mesh() -> i64 {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let path = format!("/tmp/buildmesh_invariant_test_{}", id);

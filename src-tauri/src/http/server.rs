@@ -750,33 +750,16 @@ mod tests {
             .unwrap_or(0)
     }
 
-    /// Serialises this module's tests and gives them the process-global
-    /// database.
+    /// Serialises this module's tests against the process-global database.
     ///
-    /// These start real listeners through `tauri::async_runtime::spawn`, so
-    /// their acceptor and handler bodies reach the database from
-    /// Tauri-managed threads where a `thread_local!` install is invisible.
-    /// `test_support::adopt` cannot bridge a runtime the test does not own.
-    ///
-    /// Sharing the global database is correct here, and much narrower than it
-    /// used to be: these and the `http::routes::session` tests are the only
-    /// ones left that reach for it.
-    static SERVER_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn shared_db() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let path = std::env::temp_dir().join(format!(
-                "buildmesh_http_server_test_{}.db",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&path);
-            let _ = crate::db::init(&path);
-        });
-        SERVER_DB_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// These handlers reach the database from a Tauri-managed thread
+    /// (`commands::run_blocking` / `tauri::async_runtime::spawn`), where the
+    /// `thread_local!` install behind `test_support::isolated` is invisible and
+    /// `adopt` cannot bridge a runtime the test does not own. The lock itself
+    /// lives in `db::test_support` so this module and `http::server` cannot
+    /// drift into two locks guarding one shared database.
+    fn shared_db() -> crate::db::test_support::SharedGlobalDb {
+        crate::db::test_support::shared_global_db()
     }
 
     #[tokio::test]

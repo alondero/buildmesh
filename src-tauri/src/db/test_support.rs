@@ -70,6 +70,7 @@
 //! helpers, the way `db::circuit_tests` does — that path needs no pool.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -91,11 +92,17 @@ struct Installed {
     db: &'static super::Database,
     /// Files to best-effort remove once the test is done with this database.
     ///
-    /// Only a file-backed install populates it, and the removal is allowed
-    /// to fail: the leaked connections still hold the file open on Windows,
-    /// so the usual outcome is that the per-process scratch directory is
-    /// reclaimed by the next run instead (see [`scratch_dir`]).
+    /// Only a file-backed install populates it. The removal is allowed to
+    /// fail: the leaked connections still hold the file open on Windows, so
+    /// the directory is left to the OS temp cleaner there — see
+    /// [`scratch_dir`], which is deliberately not reclaimed by the next run.
     files: Arc<Vec<PathBuf>>,
+    /// This install's private preferences directory. `preferences::storage`
+    /// keeps `APP_DATA_DIR` / `CACHE` in per-thread slots, so without a fresh
+    /// directory per install a test would inherit whatever the previous test
+    /// on this recycled libtest worker thread left behind. Dropping this
+    /// `TempDir` removes the files.
+    prefs: Option<tempfile::TempDir>,
     /// How many live guards point at this database on this thread. The
     /// outermost [`isolated`] call sets it to 1; a nested call inside a
     /// shared helper bumps it so the helper cannot replace the caller's rows.
@@ -193,12 +200,62 @@ fn database_files(db_path: &Path) -> Vec<PathBuf> {
 /// isolate `APP_DATA_DIR` per test thread (issue #1386), so each thread gets
 /// its own temp directory here, exactly as the old process-global helper gave
 /// each test binary one.
-fn ensure_preferences_dir() {
-    thread_local! {
-        static PREFS_DIR: tempfile::TempDir = tempfile::tempdir().expect("test preferences directory");
+/// Give this thread a private preferences directory and return it so the
+/// install can drop it.
+///
+/// `preferences::storage` keeps `APP_DATA_DIR` / `CACHE` in per-thread slots,
+/// and libtest reuses worker threads. A directory created once per *thread* is
+/// not enough: the next test to land here would inherit the previous one's
+/// files and in-memory cache. So the outermost install claims a fresh one —
+/// but only when the thread has none, because a test is allowed to install its
+/// own directory *before* calling `isolated()` (several do, to seed a specific
+/// preferences fixture) and that must not be silently replaced. What actually
+/// stops the bleed is [`crate::preferences::reset_for_tests`] on the outermost
+/// drop, which clears the slots before the next test sees them.
+fn install_preferences_dir() -> Option<tempfile::TempDir> {
+    if crate::preferences::app_data_dir().is_some() {
+        // The test owns this directory; do not adopt it as ours to delete.
+        return None;
     }
-    if crate::preferences::app_data_dir().is_none() {
-        PREFS_DIR.with(|dir| crate::preferences::init_for_tests(dir.path().to_path_buf()));
+    let dir = tempfile::tempdir().expect("test preferences directory");
+    crate::preferences::init_for_tests(dir.path().to_path_buf());
+    Some(dir)
+}
+
+/// Serialises the tests that have to use the process-global database.
+///
+/// Exactly one lock and one initialisation live here on purpose. `db::init`
+/// fills a first-wins `OnceCell`, so every caller shares whichever database
+/// won the race; two module-local locks would happily hand two tests their own
+/// "serialised" sections while they still wrote the same device-session tables
+/// concurrently. One lock, one database.
+///
+/// Prefer [`isolated`]. Reach for this only when the code under test reaches the
+/// database from a thread the test does not own — a `spawn_blocking` offload or
+/// a Tauri-managed runtime, where a `thread_local!` install is invisible and
+/// [`adopt`] cannot reach.
+static GLOBAL_DB_LOCK: Mutex<()> = Mutex::new(());
+
+/// RAII handle serialising access to the process-global database.
+#[must_use = "this handle is what serialises the test; bind it (`let _serial = ...`) and drop it when the test ends"]
+pub struct SharedGlobalDb {
+    /// Not read: holding the lock for the guard's lifetime *is* the effect.
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Serialised access to the process-global database — see [`GLOBAL_DB_LOCK`] for
+/// when (and why) this exists at all.
+pub fn shared_global_db() -> SharedGlobalDb {
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let _ = scratch_dir();
+        let _ = std::fs::create_dir_all(scratch_dir());
+        let _ = super::init(&scratch_dir().join("global.sqlite"));
+    });
+    SharedGlobalDb {
+        _guard: GLOBAL_DB_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     }
 }
 
@@ -243,10 +300,9 @@ pub fn isolated_file() -> IsolatedDbGuard {
 
 /// Shared install path for [`isolated`] and [`isolated_file`].
 fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
-    ensure_preferences_dir();
     match claim_depth() {
         // A nested call inside a shared helper: keep the caller's database.
-        Some(current) => IsolatedDbGuard { handle: current },
+        Some(current) => IsolatedDbGuard::from(current),
         None => {
             let db = open_isolated_at(&db_path).unwrap_or_else(|error| {
                 panic!(
@@ -263,11 +319,12 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
                 *slot.borrow_mut() = Some(Installed {
                     db,
                     files: Arc::clone(&handle.files),
+                    prefs: install_preferences_dir(),
                     depth: 1,
                     owner: true,
                 });
             });
-            IsolatedDbGuard { handle }
+            IsolatedDbGuard::from(handle)
         }
     }
 }
@@ -310,18 +367,21 @@ pub fn adopt(handle: &IsolatedDbHandle) -> IsolatedDbGuard {
         );
     }
     match claim_depth() {
-        Some(current) => IsolatedDbGuard { handle: current },
+        Some(current) => IsolatedDbGuard::from(current),
         None => {
             let handle = handle.clone();
             INSTALLED.with(|slot| {
                 *slot.borrow_mut() = Some(Installed {
                     db: handle.db,
                     files: Arc::clone(&handle.files),
+                    // The adopting thread has preferences slots of its own, and
+                    // nothing seeded them.
+                    prefs: install_preferences_dir(),
                     depth: 1,
                     owner: false,
                 });
             });
-            IsolatedDbGuard { handle }
+            IsolatedDbGuard::from(handle)
         }
     }
 }
@@ -367,14 +427,22 @@ const _: fn() = || {
 /// accident from a copied value; to reach the database from a spawned thread,
 /// take an [`IsolatedDbHandle`] with [`IsolatedDbGuard::handle`] instead.
 ///
-/// Dropping the last guard on a thread uninstalls that thread's install, so
-/// the next test to run on the same libtest worker thread starts from an empty
-/// schema. The `Database` itself is leaked rather than freed — see the module
-/// docs — so a guard governs *which* database the thread resolves, not the
-/// lifetime of the allocation.
+/// It is also `!Send` and `!Sync` (`PhantomData<*const ()>`). A guard owns a
+/// *thread-local* install, so moving one to another thread would make its
+/// `Drop` decrement whatever that thread happened to have installed. The
+/// handle is the type that crosses threads.
+///
+/// Dropping the last guard on a thread uninstalls that thread's install and
+/// clears its preferences slots, so the next test to run on the same libtest
+/// worker thread starts from an empty schema and an empty preferences
+/// directory. The `Database` itself is leaked rather than freed — see the
+/// module docs — so a guard governs *which* database the thread resolves, not
+/// the lifetime of the allocation.
 #[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
 pub struct IsolatedDbGuard {
     handle: IsolatedDbHandle,
+    /// Pins the guard to its thread; see the type docs.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl IsolatedDbGuard {
@@ -385,13 +453,30 @@ impl IsolatedDbGuard {
     }
 }
 
+/// Single construction site for the guard, so the thread pin cannot be
+/// forgotten at one of the install paths.
+impl From<IsolatedDbHandle> for IsolatedDbGuard {
+    fn from(handle: IsolatedDbHandle) -> Self {
+        IsolatedDbGuard { handle, _not_send: PhantomData }
+    }
+}
+
 impl Drop for IsolatedDbGuard {
     fn drop(&mut self) {
+        let mine = self.handle.db;
         INSTALLED.with(|slot| {
             let mut slot = slot.borrow_mut();
             let Some(installed) = slot.as_mut() else {
                 return;
             };
+            // Only ever release *our own* install. The guard is `!Send` today,
+            // so this cannot fire — it is the invariant stated in one place, so
+            // a future change that relaxes the pin fails loudly here instead of
+            // silently stealing another install's depth.
+            assert!(
+                std::ptr::eq(installed.db, mine),
+                "db::test_support: dropping a guard released a different install"
+            );
             installed.depth = installed.depth.saturating_sub(1);
             if installed.depth == 0 {
                 // Only the creating thread removes the files: an adopting
@@ -406,6 +491,12 @@ impl Drop for IsolatedDbGuard {
                         let _ = std::fs::remove_file(file);
                     }
                 }
+                // The preferences slots are per-thread, so leaving them set
+                // would hand this test's preferences to the next test that runs
+                // on this recycled worker thread. Dropping the `TempDir` here
+                // removes the files as well.
+                crate::preferences::reset_for_tests();
+                installed.prefs = None;
                 *slot = None;
             }
         });
@@ -555,6 +646,59 @@ mod tests {
         crate::db::create_mesh("current", "C:/adopt-foreign-current").unwrap();
 
         let _adopted = adopt(&foreign);
+    }
+
+    /// Preferences are per-thread slots and libtest reuses worker threads, so
+    /// an install that does not reset them hands the next test on that thread
+    /// the previous test's preferences. Pin both halves: the directory is
+    /// fresh per install, and the outermost drop leaves the thread clean.
+    #[test]
+    fn preferences_are_reset_for_the_next_test_on_the_thread() {
+        // libtest reuses worker threads, so pin the precondition: this test
+        // owns the thread's preferences slots from here on.
+        crate::preferences::reset_for_tests();
+
+        let first_dir;
+        {
+            let _db = isolated();
+            first_dir = crate::preferences::app_data_dir().unwrap();
+            assert!(first_dir.exists(), "the install seeds a real directory");
+        }
+        assert_eq!(
+            crate::preferences::app_data_dir(),
+            None,
+            "the outermost drop must clear the thread's preferences slot, or the \
+             next test on this recycled worker thread inherits them"
+        );
+
+        let _db = isolated();
+        let second_dir = crate::preferences::app_data_dir().unwrap();
+        assert_ne!(
+            first_dir, second_dir,
+            "each install gets its own preferences directory"
+        );
+        assert!(!first_dir.exists(), "the previous directory is torn down");
+    }
+
+    /// One lock for the process-global database. Two module-local locks would
+    /// each look serialised while both callers still wrote the same tables,
+    /// because `db::init` fills a first-wins `OnceCell` they both share.
+    #[test]
+    fn shared_global_db_is_serialised_against_itself() {
+        let _serial = shared_global_db();
+        // A second holder on another thread must not be able to take it, which
+        // is what "one lock" buys over the two module locks this replaced.
+        let contended = std::thread::spawn(|| {
+            let _contended = shared_global_db();
+            true
+        });
+
+        assert!(
+            !contended.is_finished(),
+            "a second shared_global_db() must block while the first is held"
+        );
+        drop(_serial);
+        assert!(contended.join().unwrap());
     }
 
     /// `db::init` must still open exactly one process-global database, and a
