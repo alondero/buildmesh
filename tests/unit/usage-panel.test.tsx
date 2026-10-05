@@ -119,6 +119,15 @@ describe('UsageBar pace tick (period progress)', () => {
     const tick = tickLeft({ label: '5-hour', usedPercent: 68, resetsAt });
     expect(parseFloat(tick.style.left)).toBeCloseTo(22, 0);
     expect(tick.getAttribute('title')).toBe('Period 22% elapsed');
+    expect(tick.getAttribute('role')).toBe('img');
+    expect(tick.getAttribute('aria-label')).toBe('Period 22% elapsed');
+  });
+
+  it('marks the trailing period on an Antigravity suffixed window', () => {
+    const resetsAt = new Date(Date.now() + 2.2 * DAY).toISOString();
+    const tick = tickLeft({ label: 'Gemini Models — Weekly', usedPercent: 15, resetsAt });
+    expect(parseFloat(tick.style.left)).toBeCloseTo(68.6, 0);
+    expect(tick.getAttribute('title')).toBe('Period 69% elapsed');
   });
 
   it('marks ~69% elapsed on a Weekly window with 2.2d left', () => {
@@ -136,6 +145,18 @@ describe('UsageBar pace tick (period progress)', () => {
   it('hides the tick when the label has no known duration', () => {
     const resetsAt = new Date(Date.now() + HOUR).toISOString();
     render(<UsageBar window={{ label: 'Fortnightly', usedPercent: 40, resetsAt }} />);
+    expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
+  });
+
+  it.each([
+    'Claude Sonnet 4.6 (Thinking)',
+    'Gemini (all models)',
+    'GPT-OSS 120B',
+    'Grok Build Quota',
+    'Fast Requests',
+  ])('keeps model and non-period labels tick-free even with a valid reset (%s)', (label) => {
+    const resetsAt = new Date(Date.now() + HOUR).toISOString();
+    render(<UsageBar window={{ label, usedPercent: 40, resetsAt }} />);
     expect(screen.queryByTestId('usage-pace-tick')).toBeNull();
   });
 

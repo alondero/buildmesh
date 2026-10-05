@@ -43,11 +43,11 @@ export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
   const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
   const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'Unavailable';
-  // Period-pace tick: where "now" sits in the window's period, so the
-  // user can see whether usage is ahead of or behind the period so far.
-  // Null (unknown label, missing/stale reset) renders no tick — the bar
-  // stays exactly as before rather than showing an invented marker.
-  const pace = getUsageWindowPacePercent(window);
+  // Period-elapsed tick: where "now" sits in the window's period, so
+  // the user can see whether usage is ahead of or behind the period so
+  // far. Null (unknown label, missing/stale reset) renders no tick — the
+  // bar stays exactly as before rather than showing an invented marker.
+  const periodElapsedPct = getUsageWindowPacePercent(window);
   return (
     <div className="mt-2 first:mt-0">
       <div className="flex justify-between items-baseline gap-2 text-xs mb-1">
@@ -61,13 +61,14 @@ export function UsageBar({ window }: { window: UsageWindow }) {
             style={{ width: `${Math.min(percent, 100)}%` }}
           />
         </div>
-        {pace != null && (
+        {periodElapsedPct != null && (
           <div
             data-testid="usage-pace-tick"
-            title={`Period ${pace.toFixed(0)}% elapsed`}
-            aria-hidden="true"
+            role="img"
+            aria-label={`Period ${periodElapsedPct.toFixed(0)}% elapsed`}
+            title={`Period ${periodElapsedPct.toFixed(0)}% elapsed`}
             className="absolute -top-0.5 -bottom-0.5 w-0.5 -ml-px rounded-full bg-text-primary/80 pointer-events-none"
-            style={{ left: `${pace}%` }}
+            style={{ left: `${periodElapsedPct}%` }}
           />
         )}
       </div>
