@@ -14,8 +14,9 @@ name: Verify
 # docs/development/releasing.md in the same commit.
 #
 # The jobs form a fan-out, not a chain. `changes` (change-scope
-# classification) and `quality` (frontend) start at t=0; `changes` reads the
-# pull request's diff and the Rust branch of the graph (`rust-build`, the
+# classification) and `quality` (frontend) start at t=0; `manifest-versions`
+# starts with them and is the one job with no dependency at all. `changes` reads
+# the pull request's diff and the Rust branch of the graph (`rust-build`, the
 # seven `rust-tests` shards, `rust-nonshard`, and the `rust-bindings` aggregate) only starts
 # when it reports that Rust moved, so a frontend-only pull request never
 # compiles and a Rust-only pull request never boots the browser suites.
@@ -94,6 +95,29 @@ jobs:
           else
             node scripts/ci/changed-scope.mjs
           fi
+
+  # The app version lives in five files (package.json, tauri.conf.json,
+  # Cargo.toml, the buildmesh entry in Cargo.lock, and package-lock.json),
+  # and a bump that reaches four of them is a silent failure until something
+  # reads the fifth. This job is a pure read of those six version sites, so it
+  # needs no `npm ci`, no change-scope classification, and no upstream job: it
+  # starts at t=0 on every event and finishes in seconds. The same script backs
+  # `npm run check:versions` locally and the tag gate in release.yml, so the
+  # pull-request check and the release check cannot drift apart.
+  #
+  # Invoked as `node scripts/...` rather than through npm so the job provably
+  # needs no dependency install.
+  manifest-versions:
+    name: Manifest versions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check every manifest agrees on one version
+        run: node scripts/check-manifest-versions.mjs
 
   # The fast, frontend-only gate — the first result a PR hears back from. It
   # deliberately no longer compiles Rust: that moved to `rust-build`, so the

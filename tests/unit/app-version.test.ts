@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execSync, execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 const root = path.resolve(__dirname, "../..");
@@ -16,7 +17,18 @@ function manifestVersions() {
   const lockVersion = lock.match(
     /^\[\[package\]\]\nname = "buildmesh"\nversion = "([^"]+)"/m,
   )?.[1];
-  return { pkg: pkg.version, tauri: tauri.version, cargo: cargoVersion, lock: lockVersion };
+  // npm stores the root version twice, and `npm install` rewrites both. A bump
+  // that reaches only one of them reverts on the next install, which is how
+  // the lockfile fell behind a release commit in the first place.
+  const npmLock = JSON.parse(readFileSync(path.join(root, "package-lock.json"), "utf8"));
+  return {
+    pkg: pkg.version,
+    tauri: tauri.version,
+    cargo: cargoVersion,
+    lock: lockVersion,
+    npmLock: npmLock.version,
+    npmLockRootEntry: npmLock.packages[""].version,
+  };
 }
 
 function latestTagVersion(): string {
@@ -56,14 +68,17 @@ function gt(a: string, b: string) {
 }
 
 describe("app version manifests", () => {
-  it("agree across package.json, tauri.conf.json, Cargo.toml and Cargo.lock", () => {
+  it("agree across every file that stores the version", () => {
     const versions = manifestVersions();
-    expect(versions.pkg).toBeTruthy();
-    expect(versions.cargo).toBeTruthy();
-    expect(versions.lock).toBeTruthy();
-    expect(versions.pkg).toBe(versions.tauri);
-    expect(versions.pkg).toBe(versions.cargo);
-    expect(versions.pkg).toBe(versions.lock);
+    // Every site must both report a version and report the same one: the
+    // release gate compares them as strings, so an unreadable site is as
+    // fatal as a disagreeing one.
+    for (const [site, value] of Object.entries(versions)) {
+      expect(value, `${site} reported no version`).toBeTruthy();
+      expect(value, `${site} is ${value} but package.json is ${versions.pkg}`).toBe(
+        versions.pkg,
+      );
+    }
   });
 
   it("is valid semver with optional prerelease suffix", () => {
@@ -135,5 +150,147 @@ describe("version:set", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/MSI-safe/);
     expect(manifestVersions()).toEqual(before);
+  });
+});
+
+// The fanout is the fix for a release that bumped four of the five version
+// sites, so it is tested against a real run of the real script rather than
+// against its source. set-version.mjs resolves the repository root from its own
+// path, so the test stages a throwaway tree with the layout it writes to and
+// bumps that copy instead of the working tree.
+const STAGED_FILES = [
+  ["package.json"],
+  ["package-lock.json"],
+  ["src-tauri", "tauri.conf.json"],
+  ["src-tauri", "Cargo.toml"],
+  ["src-tauri", "Cargo.lock"],
+] as const;
+
+function stageManifestTree(): string {
+  const dir = mkdtempSync(path.join(tmpdir(), "buildmesh-version-set-"));
+  mkdirSync(path.join(dir, "scripts"), { recursive: true });
+  mkdirSync(path.join(dir, "src-tauri"), { recursive: true });
+  cpSync(
+    path.join(root, "scripts", "set-version.mjs"),
+    path.join(dir, "scripts", "set-version.mjs"),
+  );
+  for (const segments of STAGED_FILES) {
+    cpSync(path.join(root, ...segments), path.join(dir, ...segments));
+  }
+  return dir;
+}
+
+function stagedVersions(dir: string) {
+  const read = (segments: readonly string[]) =>
+    readFileSync(path.join(dir, ...segments), "utf8");
+  return {
+    pkg: JSON.parse(read(["package.json"])).version,
+    tauri: JSON.parse(read(["src-tauri", "tauri.conf.json"])).version,
+    cargo: read(["src-tauri", "Cargo.toml"]).match(/^version\s*=\s*"([^"]+)"/m)?.[1],
+    lock: read(["src-tauri", "Cargo.lock"]).match(
+      /^\[\[package\]\]\nname = "buildmesh"\nversion = "([^"]+)"/m,
+    )?.[1],
+    npmLock: JSON.parse(read(["package-lock.json"])).version,
+    npmLockRootEntry: JSON.parse(read(["package-lock.json"])).packages[""].version,
+  };
+}
+
+function runStagedVersionSet(dir: string, version: string) {
+  try {
+    execFileSync(
+      process.execPath,
+      [path.join(dir, "scripts", "set-version.mjs"), version],
+      { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return { status: 0, stderr: "" };
+  } catch (e: unknown) {
+    const err = e as { status?: number; stderr?: string };
+    return { status: err.status ?? 1, stderr: String(err.stderr ?? "") };
+  }
+}
+
+// Every pinned dependency version in the staged lockfile, so a test can prove
+// none of them moved.
+function dependencyVersions(dir: string): Record<string, unknown> {
+  const lock = JSON.parse(readFileSync(path.join(dir, "package-lock.json"), "utf8"));
+  const entries = Object.entries(lock.packages)
+    .filter(([name]) => name !== "")
+    .map(([name, meta]) => [name, (meta as { version?: unknown }).version]);
+  return Object.fromEntries(entries);
+}
+
+describe("version:set fanout", () => {
+  it("bumps every version site, including both in the lockfile", () => {
+    const dir = stageManifestTree();
+    try {
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+      expect(result.status, result.stderr).toBe(0);
+      const versions = stagedVersions(dir);
+      for (const [site, value] of Object.entries(versions)) {
+        expect(value, `${site} was not bumped`).toBe("9.9.9-0");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the working tree alone", () => {
+    const before = manifestVersions();
+    const dir = stageManifestTree();
+    try {
+      runStagedVersionSet(dir, "9.9.9-0");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    expect(manifestVersions()).toEqual(before);
+  });
+
+  // The corruption path the unbounded search opened: with no version on the
+  // `packages[""]` entry, a search over the rest of the file falls through to
+  // the first dependency and rewrites *its* pinned version — a lockfile whose
+  // resolved versions no longer match reality, which breaks `npm ci`, reported
+  // as a successful bump. The second site is bounded to the `""` entry, so the
+  // bump has to fail and write nothing.
+  it("fails instead of rewriting a dependency when the root lockfile entry has no version", () => {
+    const dir = stageManifestTree();
+    try {
+      const file = path.join(dir, "package-lock.json");
+      const lock = JSON.parse(readFileSync(file, "utf8"));
+      delete (lock.packages[""] as { version?: string }).version;
+      writeFileSync(file, `${JSON.stringify(lock, null, 2)}\n`);
+      const lockBefore = readFileSync(file, "utf8");
+      const depsBefore = dependencyVersions(dir);
+
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/package-lock\.json/);
+      // Nothing written: the failure happens before any file is written.
+      expect(readFileSync(file, "utf8")).toBe(lockBefore);
+      expect(dependencyVersions(dir)).toEqual(depsBefore);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails rather than half-updating when the lockfile has no packages map", () => {
+    const dir = stageManifestTree();
+    try {
+      // lockfileVersion 1 shape: a top-level version and no `packages` map, so
+      // the second site does not exist to be written.
+      const file = path.join(dir, "package-lock.json");
+      writeFileSync(
+        file,
+        `${JSON.stringify({ name: "app", version: "1.3.0", lockfileVersion: 1 }, null, 2)}\n`,
+      );
+      const before = readFileSync(file, "utf8");
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/package-lock\.json/);
+      // Not even the top-level mirror moves: the target is rejected whole.
+      expect(readFileSync(file, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
