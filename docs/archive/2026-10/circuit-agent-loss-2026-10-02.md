@@ -21,7 +21,7 @@ of the replay failure, not proof of the exact error from every historical call.
 
 Among runs 254 through 280, 21 runs had the same final `piloted agent node was
 closed` message. Older runs lacked checkpoint history, so their original causes
-cannot all be recovered. The [September 30 audit](circuit-recovery-2026-09-30.md)
+cannot all be recovered. The [September 30 audit](../2026-09/circuit-recovery-2026-09-30.md)
 also found prompt-delivery uncertainty, input drafts and persistence failures.
 Closing an agent after a stuck workflow does not establish why it became stuck.
 

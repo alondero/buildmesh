@@ -298,7 +298,7 @@ Use separate worktrees for simultaneous fresh MiniMax agents. If an older run
 already has a wrong conversation id, preserve its worktree and history and recover
 the verified original conversation before rechecking the run. Rechecking alone
 cannot establish which conversation belongs to the implementer. See
-[the runs 276/277 investigation](development/circuit-runs-276-277.md).
+[the runs 276/277 investigation](archive/2026-10/circuit-runs-276-277.md).
 
 ## Muse fails to start with `os error 267` or `Not a directory`
 

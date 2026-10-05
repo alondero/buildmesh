@@ -158,7 +158,7 @@ gap, as does live delivery.
 
 ## Related
 
-- [Circuit reliability acceptance](../development/circuit-reliability-acceptance.md)
+- [Circuit reliability acceptance](../archive/2026-09/circuit-reliability-acceptance.md)
 - [Circuit session observation and autonomous supervision](../development/circuit-session-observation.md)
 - [Harness attention reliability audit](harness-attention-reliability.md)
 - [Harness capabilities matrix](harness-capabilities-matrix.md)

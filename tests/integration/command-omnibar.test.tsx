@@ -9,7 +9,7 @@
  *   1. **Open from a terminal-focus element.** The palette must render on
  *      top of the terminal grid, capture focus into the search box, and
  *      NOT remount any xterm terminal (TerminalManager singleton — see
- *      `docs/knowledge-primer.md` *Terminal Persistence*).
+ *      `docs/development/terminals.md`, *Terminal Persistence*).
  *   2. **Seed and search.** Seeding at least one mesh + one command
  *      gives the listbox something to filter; typing a query narrows the
  *      results, and the `>` prefix routes to the command menu.

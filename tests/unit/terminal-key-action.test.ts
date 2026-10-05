@@ -111,7 +111,7 @@ describe('resolveKeyAction', () => {
 
     // Regression for issue #1568 — xterm must NOT claim Ctrl+Shift+K
     // because the Omnibar's Tauri global-shortcut (App.tsx:146) owns that
-    // chord on Win/Linux. Per the primer rule (knowledge-primer.md:133)
+    // chord on Win/Linux. Per the rule in docs/development/terminals.md
     // the terminal-side gesture remapped to Ctrl+Shift+L rather than
     // being deleted.
     it('Ctrl+Shift+K → passthrough (Omnibar owns the chord, issue #1568)', () => {

@@ -1,8 +1,11 @@
 # Circuit session observation and autonomous supervision
 
-Audience: circuit and harness maintainers. Status: architecture assessment and
-implementation contract, September 26, 2026. Recorded verification is below;
-remaining acceptance requirements are not claims of executed tests.
+Status: current
+
+Audience: circuit and harness maintainers. This document is an architecture
+assessment and implementation contract dated September 26, 2026. Recorded
+verification is below; remaining acceptance requirements are not claims of
+executed tests.
 
 Buildmesh should let an operator supervise many sessions by surfacing actionable
 exceptions while ordinary work progresses independently. The existing pure
@@ -13,11 +16,11 @@ boundaries, rather than replacing the workflow with another model judgement.
 ## Diagnosis
 
 Historical failures repeatedly made observation depend on the state it needed
-to establish. [Run 86](circuit-run-86-observer-recovery.md) needed a watcher to
-publish yield, but watcher recovery waited for yield. [Run 122](review-circuit-handoff-audit.md)
-had native completion while its display remained Running. [September 26 stalls](circuit-failures-2026-09-26.md)
+to establish. [Run 86](../archive/2026-09/circuit-run-86-observer-recovery.md) needed a watcher to
+publish yield, but watcher recovery waited for yield. [Run 122](../archive/2026-09/review-circuit-handoff-audit.md)
+had native completion while its display remained Running. [September 26 stalls](../archive/2026-09/circuit-failures-2026-09-26.md)
 required ownership coverage unavailable from installed harnesses and stopped
-observing Unverified steps. [Run 104](circuit-run-104-watchdog.md) shows the
+observing Unverified steps. [Run 104](../archive/2026-09/circuit-run-104-watchdog.md) shows the
 opposite error: quiet background work was treated as a finished review.
 
 Run 239 exposes another broken boundary: terminal focus/cursor protocol traffic

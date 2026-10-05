@@ -1122,8 +1122,8 @@ pub fn on_created(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), S
 
 /// Crash recovery sweep — runs once at startup. Any node still marked
 /// `Running` has no live process (a crash means no graceful shutdown).
-/// Mark them `Suspended` so `auto_resume_nodes` can pick them up on
-/// the frontend's first draw. Replaces the inline
+/// Mark them `Suspended` so the `auto_resume_agent_nodes` command can pick
+/// them up on the frontend's first draw. Replaces the inline
 /// `db::mark_running_nodes_suspended()` call in `lib.rs:265`.
 ///
 /// Not a per-node transition, so it doesn't take the sink — the

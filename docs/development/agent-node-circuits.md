@@ -1,5 +1,7 @@
 # Circuits from Agent Nodes
 
+Status: current
+
 Use the Circuit icon beside Build/Run in an Agent Node's title bar. Choose
 **Automated review loop** or a saved Circuit with a manual trigger on the same
 Mesh. Saved Circuits keep their configured timing and actions; the review
@@ -51,7 +53,7 @@ exhausted classifier budget still requires an explicit evidence recheck.
 
 When an agent disappears, its cancellation explanation retains the preceding
 checkpoint. Siblings stopped by a failed run identify that failure as their cause.
-See the [agent loss audit](circuit-agent-loss-2026-10-02.md) for the historical
+See the [agent loss audit](../archive/2026-10/circuit-agent-loss-2026-10-02.md) for the historical
 classifier and identity failures hidden by the old closure message.
 
 ## Review presentation contract
@@ -188,7 +190,7 @@ is bounded: if the source never becomes observable, the [#1791
 watchdog](../releases/v1.4.0.md#circuit-watchdog-fails-fast-on-never-observed-agents-1791)
 ends it after 15 minutes with "agent produced no session identity or report
 within 15 minutes — inspect the agent terminal" instead of holding the run for
-the full active-wait budget, as in the [Muse Index review](circuit-run-183-muse-index.md).
+the full active-wait budget, as in the [Muse Index review](../archive/2026-09/circuit-run-183-muse-index.md).
 
 The title-bar control is stricter than the backend on one axis: it disables
 itself when the *source* harness cannot yield a turn (for example, a plain
@@ -267,7 +269,7 @@ is still being integrated.
 A yielded foreground turn alone cannot complete a spawn that was assigned work.
 Native child/background observation is still being integrated; the current
 status projection has reduced confidence and cannot prove complete ownership.
-See the [acceptance record](circuit-reliability-acceptance.md) for the remaining
+See the [acceptance record](../archive/2026-09/circuit-reliability-acceptance.md) for the remaining
 implementation and live-verification gaps.
 
 Review Runs pin their graph, reviewer launch configuration and behavior revision

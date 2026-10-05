@@ -228,7 +228,7 @@ mod tests {
     /// Collision-resistant test target: every test run gets a fresh random
     /// suffix so a half-cleaned credential from a previous failure cannot
     /// shadow the result. `buildmesh-test-` prefix is registered in
-    /// `docs/knowledge-primer.md` so a future operator clearing test
+    /// `docs/development/providers.md` so a future operator clearing test
     /// credentials can run `cmdkey /list:buildmesh-test-*` to find leftovers.
     fn unique_target(label: &str) -> String {
         format!(
