@@ -195,6 +195,9 @@ export function CircuitRunCard({
   // The run row carries no error column; the ledger's first errored step
   // is the run's failure reason.
   const firstError = runFailureStep(steps);
+  // When the "what to do next" box is shown it explains the problem in plain
+  // words, so the raw scheduler reason would only repeat it.
+  const showNextSteps = runNeedsNextSteps(run, steps);
   // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
   // memoised: the duration clock re-renders a live card every second and must
   // not re-parse the blob each tick.
@@ -273,6 +276,8 @@ export function CircuitRunCard({
         </span>
         {/* Activity line — the fact the old one-liner buried. Wraps
             rather than clips: a long node id is the whole point. */}
+        {/* Skipped when it would only repeat the headline state ("Failed" twice). */}
+        {(activity.nodeId !== null || review?.needsAttention || activity.label !== runStateLabel(run.state)) && (
         <span
           className="mt-0.5 flex items-baseline gap-1 flex-wrap text-2xs"
           data-testid={`run-activity-${run.id}`}
@@ -286,7 +291,8 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
-        {activity.detail !== null && (
+        )}
+        {activity.detail !== null && !showNextSteps && (
           <span
             className="mt-0.5 block text-2xs text-text-muted break-words"
             data-testid={`run-reason-${run.id}`}
@@ -323,10 +329,13 @@ export function CircuitRunCard({
           className="px-2 pb-1.5 flex items-baseline gap-1.5 flex-wrap text-2xs"
           data-testid={`run-agent-${run.id}`}
         >
-          <span className="text-text-muted">Agent node:</span>
-          <span className="font-mono text-text-secondary break-words min-w-0">
-            {linkedAgentLabel ?? `#${linkedAgent}`}
-          </span>
+          <span className="text-text-muted">Agent node</span>
+          {/* The headline already names it; repeat only a different node. */}
+          {(linkedAgentLabel === null || linkedAgentLabel !== subject.label) && (
+            <span className="font-mono text-text-secondary break-words min-w-0">
+              {linkedAgentLabel ?? `#${linkedAgent}`}
+            </span>
+          )}
           {linkedAgentLabel !== null && (
             <button
               type="button"
@@ -405,7 +414,7 @@ export function CircuitRunCard({
       {/* A run that needs a person says what happened and what to do right here,
           with the actions that advance it. A collapsed card still surfaces it:
           a failure you have to expand to find is a failure you miss. */}
-      {runNeedsNextSteps(run, steps) ? (
+      {showNextSteps ? (
         <RunNextSteps
           run={run}
           steps={steps}
@@ -515,20 +524,23 @@ export function CircuitRunCard({
                           )}
                         </>
                       )}
-                    </div>
-                    <div className="mt-0.5 flex items-baseline gap-1.5 flex-wrap text-text-muted">
-                      <span className="font-mono break-words min-w-0">{s.node_id}</span>
+                      {/* Same line, wrapping when narrow: a step reads at a glance
+                          rather than as three stacked rows. The raw node id is
+                          shown only when the role label is not already it. */}
+                      {nodeRoleLabel(s.node_id, kind) !== s.node_id && (
+                        <span className="font-mono break-words min-w-0 text-text-muted">{s.node_id}</span>
+                      )}
                       {Number.isFinite(stepStarted) && (
-                        <span className="shrink-0" data-testid={`run-step-times-${run.id}-${s.node_id}`}>
+                        <span className="shrink-0 text-text-muted" data-testid={`run-step-times-${run.id}-${s.node_id}`}>
                           · {formatWallClock(stepStarted, clock)}
                           {Number.isFinite(stepFinished) ? ` → ${formatWallClock(stepFinished, clock)}` : ''}
                         </span>
                       )}
                       {stepDuration !== null && (
-                        <span className="shrink-0">· {formatDurationMs(stepDuration)}</span>
+                        <span className="shrink-0 text-text-muted">· {formatDurationMs(stepDuration)}</span>
                       )}
                       {stepAgent !== null && (
-                        <span className="shrink-0">
+                        <span className="shrink-0 text-text-muted">
                           · agent{' '}
                           <span className="font-mono text-text-secondary">
                             {stepAgentLabel ?? `#${stepAgent}`}

@@ -261,15 +261,19 @@ describe('a running run waiting on evidence', () => {
     );
   });
 
-  it('recording a result needs a note, and sends it', async () => {
+  it('recording a result asks what you checked first, and sends the note', async () => {
     vi.mocked(circuitRunAttention).mockResolvedValue(checkpointed());
     renderPanel({ state: 'running' }, waiting);
 
-    const done = (await screen.findByTestId('run-checkpoint-7-review_classifier-completed')) as HTMLButtonElement;
-    expect(done.disabled).toBe(true);
+    // The box stays short until you act: no note field yet.
+    expect(screen.queryByTestId('run-checkpoint-note-7')).toBeNull();
+    fireEvent.click(await screen.findByTestId('run-checkpoint-7-review_classifier-completed'));
+    const confirm = screen.getByTestId('run-checkpoint-confirm-7') as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(recordCircuitOutcome).not.toHaveBeenCalled();
     fireEvent.change(screen.getByTestId('run-checkpoint-note-7'), { target: { value: 'Read the reviewer report; it is final.' } });
-    expect(done.disabled).toBe(false);
-    fireEvent.click(done);
+    expect(confirm.disabled).toBe(false);
+    fireEvent.click(confirm);
 
     await waitFor(() =>
       expect(recordCircuitOutcome).toHaveBeenCalledWith({

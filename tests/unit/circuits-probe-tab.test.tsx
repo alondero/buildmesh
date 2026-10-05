@@ -1277,7 +1277,11 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
       expect((await screen.findByTestId('run-subject-41')).textContent).toBe('ai-loading-spinner');
       // The run id is still there, but as a small tag, not the headline.
       expect(screen.getByTestId('run-id-41').textContent).toBe('#41');
-      expect(screen.getByTestId('run-agent-41').textContent).toContain('ai-loading-spinner');
+      // The link goes to the implementation node, not the active reviewer; the
+      // headline already names it, so the row does not repeat the name.
+      expect(screen.getByTestId('run-agent-41').textContent).not.toContain('ebony-unhelpful-cudgel');
+      fireEvent.click(screen.getByTestId('run-agent-open-41'));
+      expect(useAgentNodeStore.getState().activeNodeId).toBe(900);
     });
 
     it('keeps a recognisable name once the implementation node has been closed', async () => {
@@ -1387,8 +1391,9 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     });
     openProbeDestination('circuits');
 
-    const link = await screen.findByTestId('run-agent-29');
-    expect(link.textContent).toContain('impl-agent');
+    // The headline names the node; the row beneath it is just the way there.
+    expect((await screen.findByTestId('run-subject-29')).textContent).toBe('impl-agent');
+    expect(screen.getByTestId('run-agent-29').textContent).not.toContain('impl-agent');
     fireEvent.click(screen.getByTestId('run-agent-open-29'));
     expect(useAgentNodeStore.getState().activeNodeId).toBe(900);
     expect(useMeshStore.getState().selectedMeshId).toBe(42);

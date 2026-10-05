@@ -18,6 +18,11 @@ function entryTime(observedAt: string, now: Date): string {
   return Number.isFinite(ms) ? formatWallClock(ms, now) : observedAt;
 }
 
+/** The worker saying it applied something: true of almost every key event. */
+function isRoutineProvenance(entry: CircuitHistoryEntry): boolean {
+  return entry.source === 'circuit_worker' && (entry.disposition === 'applied' || entry.disposition === null);
+}
+
 /** Parse a history `detail` payload, or `null` when it is not JSON. */
 function parseDetail<T>(detail: string): T | null {
   try { return JSON.parse(detail) as T; } catch { return null; }
@@ -304,8 +309,9 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
               {reference !== null && <span className="text-text-muted">· {reference}</span>}
             </div>
             {/* Uniform provenance (issue #1909). Observations already render a
-                richer source/disposition line inside their own block. */}
-            {entry.source && entry.kind !== 'observation' && <div className="text-text-muted break-words" data-testid={`history-provenance-${entry.id}`}>
+                richer source/disposition line inside their own block, and the
+                routine "the worker applied it" is not worth a line per entry. */}
+            {entry.source && entry.kind !== 'observation' && !isRoutineProvenance(entry) && <div className="text-text-muted break-words" data-testid={`history-provenance-${entry.id}`}>
               Source: {entry.source}{entry.disposition ? ` · ${entry.disposition.replace(/_/g, ' ')}` : ''}
             </div>}
             {showBody && <HistoryDetail entry={entry} />}

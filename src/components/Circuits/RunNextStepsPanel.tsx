@@ -63,6 +63,8 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
   const [attention, setAttention] = useState<CircuitRunAttention | null>(null);
   const [note, setNote] = useState('');
   const [noting, setNoting] = useState<string | null>(null);
+  /** The recorded result awaiting its note: which step, which outcome. */
+  const [recording, setRecording] = useState<{ nodeId: string; attempt: number; action: CheckpointAction } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [refresh, setRefresh] = useState(0);
@@ -124,6 +126,7 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
       await work();
       setNote('');
       setNoting(null);
+      setRecording(null);
       setRefresh((value) => value + 1);
     } catch (cause) {
       setError(String(cause));
@@ -262,13 +265,24 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               <p className="text-text-secondary">{roleLabel(checkpoint.node_id)}</p>
               <div className="mt-0.5 flex items-center gap-1.5 flex-wrap">
                 {checkpoint.actions.map((action) => {
+                  // Checking again changes nothing and acts at once; recording a
+                  // result is a statement, so it asks what you checked first.
                   const needsNote = action !== 'recheck';
+                  const open =
+                    recording?.nodeId === checkpoint.node_id &&
+                    recording.attempt === checkpoint.attempt &&
+                    recording.action === action;
                   return (
                     <button
                       key={action}
                       type="button"
-                      disabled={disabled || (needsNote && note.trim() === '')}
-                      onClick={() => void record(checkpoint.node_id, checkpoint.attempt, action)}
+                      disabled={disabled}
+                      aria-expanded={needsNote ? open : undefined}
+                      onClick={() =>
+                        needsNote
+                          ? setRecording(open ? null : { nodeId: checkpoint.node_id, attempt: checkpoint.attempt, action })
+                          : void record(checkpoint.node_id, checkpoint.attempt, action)
+                      }
                       data-testid={`run-checkpoint-${run.id}-${checkpoint.node_id}-${action}`}
                       className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
                     >
@@ -279,19 +293,29 @@ export function RunNextSteps({ run, steps, roleLabel, busy }: RunNextStepsProps)
               </div>
             </div>
           ))}
-          {attention.checkpoints.some((checkpoint) => checkpoint.actions.some((action) => action !== 'recheck')) && (
-            <label className="block text-text-secondary">
-              To record what happened, say what you checked. It is saved in the run history and does not
-              grant approval.
-              <textarea
-                value={note}
-                onChange={(event) => setNote(event.target.value)}
-                disabled={disabled}
-                data-testid={`run-checkpoint-note-${run.id}`}
-                rows={2}
-                className="mt-0.5 block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1 text-text-primary"
-              />
-            </label>
+          {recording !== null && (
+            <div className="space-y-1">
+              <label className="block text-text-secondary">
+                What did you check? This is saved in the run history and does not grant approval.
+                <textarea
+                  value={note}
+                  onChange={(event) => setNote(event.target.value)}
+                  disabled={disabled}
+                  data-testid={`run-checkpoint-note-${run.id}`}
+                  rows={2}
+                  className="mt-0.5 block w-full min-w-0 rounded-sm border border-border-subtle bg-bg-card p-1 text-text-primary"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={disabled || note.trim() === ''}
+                onClick={() => void record(recording.nodeId, recording.attempt, recording.action)}
+                data-testid={`run-checkpoint-confirm-${run.id}`}
+                className="px-1.5 py-1 rounded-md bg-accent-cyan/15 text-accent-cyan hover:bg-accent-cyan/25 disabled:opacity-40"
+              >
+                Confirm: {checkpointActionLabel(recording.action)}
+              </button>
+            </div>
           )}
           {attention.checkpoints.length === 0 && (
             <p className="text-text-muted">Autopilot is still re-checking on its own.</p>
