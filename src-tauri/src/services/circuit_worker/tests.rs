@@ -5326,6 +5326,66 @@ fn wait_event(events: &[CircuitEvent]) -> &CircuitEvent {
     &events[0]
 }
 
+/// Run 335: a yielded implementer's report was classified WORKING 13 seconds
+/// after the gate started, and the 30-second per-harness lifecycle budget then
+/// parked the gate Unverified before the agent could resume. The budget is for
+/// reconciling a yield that has no verdict yet; once the classifier has said
+/// the agent still has work, waiting for its next report gets the documented
+/// 15-minute yielded allowance.
+#[test]
+fn yielded_wait_after_a_working_verdict_gets_the_full_yielded_allowance() {
+    const HARNESS_LIFECYCLE_BUDGET_MS: i64 = 30_000;
+    fn yielded_timeout_ms(verdict: Option<(&str, &str)>) -> i64 {
+        let mut view = spawn_wait_view(1, None);
+        if let Some((classification, evaluated_attempt)) = verdict {
+            view.context
+                .set("node.worker.classification", classification);
+            view.context
+                .set("node.worker.evaluated_attempt", evaluated_attempt);
+        }
+        let mut events = Vec::new();
+        observe_waits_with(&view, &mut events, 1_000, |_, _| {
+            Some(WaitObservation {
+                progress: Some("report:1".into()),
+                observed: true,
+                yielded: true,
+                yielded_budget_ms: HARNESS_LIFECYCLE_BUDGET_MS,
+                active_budget_ms: ACTIVE_WAIT_MS,
+            })
+        });
+        match wait_event(&events) {
+            CircuitEvent::WaitObserved { timeout_ms, .. } => *timeout_ms,
+            other => panic!("expected WaitObserved, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        yielded_timeout_ms(None),
+        HARNESS_LIFECYCLE_BUDGET_MS,
+        "a yield with no verdict keeps the per-harness lifecycle budget"
+    );
+    assert_eq!(
+        yielded_timeout_ms(Some(("working", "1"))),
+        YIELDED_WAIT_MS,
+        "a WORKING verdict means the next report is the agent's own, not lifecycle evidence"
+    );
+    assert_eq!(
+        yielded_timeout_ms(Some(("continue", "1"))),
+        YIELDED_WAIT_MS,
+        "a delivered continuation waits for the agent's next report the same way"
+    );
+    assert_eq!(
+        yielded_timeout_ms(Some(("working", "2"))),
+        HARNESS_LIFECYCLE_BUDGET_MS,
+        "a verdict recorded for an earlier attempt says nothing about this one"
+    );
+    assert_eq!(
+        yielded_timeout_ms(Some(("completed", "1"))),
+        HARNESS_LIFECYCLE_BUDGET_MS,
+        "only a verdict that says work remains widens the window"
+    );
+}
+
 /// Create a node and register it with the evaluator so `observe_waits`
 /// reads it. Returns its id.
 fn register_test_agent(mesh_id: i64, path: &str, name: &str) -> i64 {

@@ -231,7 +231,7 @@ async function waitForUnverifiedCheckpoint(runId) {
   }
   const rolloutRecheck = evidence.entries.some((entry) => entry.kind === 'observation'
     && JSON.parse(entry.detail).observation?.source === 'codex_rollout_task_complete');
-  const boundedWindow = state.step.error_message?.includes('Evidence window ended after 1 minutes') ?? false;
+  const boundedWindow = state.step.error_message?.includes('Evidence window ended after 1 minute:') ?? false;
   if (!rolloutRecheck && !boundedWindow) {
     throw new Error(`Run ${runId} reached Unverified without recording a Codex rollout recheck or its declared 60-second evidence window`);
   }
