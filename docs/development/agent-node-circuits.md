@@ -87,8 +87,8 @@ Approval closes the reviewer, then `merge` asks the source to squash-merge the
 pull request: it marks a draft ready, brings a behind-base branch up to date
 with `gh pr update-branch` (never a rebase, which would rewrite the approved
 commits), waits for the pushed commit's own workflow run, and only then
-squash-merges. The
-run completes once that prompt is delivered: it does not wait for the merge.
+squash-merges. The run completes once that prompt is delivered: it does
+not wait for the merge.
 A completed run retires only the agents its graph closed, so the implementation
 agent stays open, and the circuit stops observing every agent it referenced.
 Failed and cancelled runs still retire their owned agents.

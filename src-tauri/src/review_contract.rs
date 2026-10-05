@@ -25,9 +25,9 @@ pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
     format!(
         "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). \
         Then check whether the PR branch is behind the base branch (`gh pr view{pr_argument} --json mergeStateStatus,mergeable`). \
-        Only if it reports behind or out-of-date, bring it up to date with `gh pr update-branch{pr_argument}` — prefer update-branch over rebasing, because rebasing rewrites the approved commits and can dismiss the approving review. \
+        Only if mergeStateStatus reports BEHIND (behind the base branch) or the PR is otherwise reported out-of-date, bring it up to date with `gh pr update-branch{pr_argument}` — prefer update-branch over rebasing, because rebasing rewrites the approved commits and can dismiss the approving review. \
         Do not start new work or change what the PR does; updating the branch is expected, and report any merge-conflict resolution you had to perform. \
-        Then wait for the required checks on the pushed commit: find the workflow run for that commit (`gh run list --commit <sha>`) and poll that run's jobs until they complete — do not use `gh pr checks --watch`, which aggregates superseded runs and can report stale pending entries. \
+        Then wait for the required checks on the pushed commit: resolve the workflow run for that commit (`gh run list --commit <sha> --json databaseId`) and poll that run's jobs (`gh run view <run-id> --json status,conclusion,jobs`) until every job completes — do not use `gh pr checks --watch`, which aggregates superseded runs and can report stale pending entries. \
         Then squash-merge it (`gh pr merge{pr_argument} --squash`). \
         If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. \
         Report the merge result. The Circuit has finished and will not send further prompts to this session."
