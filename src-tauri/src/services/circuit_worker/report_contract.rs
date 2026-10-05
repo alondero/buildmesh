@@ -1,7 +1,7 @@
 //! Explicit report decisions, consumed only after the normal evidence preflight.
 
-use super::*;
 use super::turn_classify::{awaits_review_turn, is_reviewer_verdict_gate};
+use super::*;
 use crate::circuit::evaluator::Classification;
 
 const REVIEW: &str = "BUILDMESH_REVIEW_V1: ";

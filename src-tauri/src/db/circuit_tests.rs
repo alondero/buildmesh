@@ -62,7 +62,9 @@ fn review_blueprint_is_available_without_runs_and_ensure_preserves_its_identity(
     assert!(rows[0].1.is_empty());
     let id = rows[0].0.id;
     let graph = rows[0].0.graph_json.clone();
-    assert!(CircuitGraph::from_json(&graph).unwrap().has_local_review_contract());
+    assert!(CircuitGraph::from_json(&graph)
+        .unwrap()
+        .has_local_review_contract());
     circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
     let again = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap();
     assert_eq!(again.len(), 1);
@@ -77,27 +79,63 @@ fn review_blueprint_is_available_without_runs_and_ensure_preserves_its_identity(
 
 #[test]
 fn review_blueprint_copy_is_manual_disabled_independent_and_has_no_transferred_runs() {
-    let mut conn=isolated_test_conn();
-    let mesh=create_mesh_inner(&conn,"blueprint","/tmp/blueprint").unwrap();
-    let original=sample_graph_json();
-    let blueprint=create_autopilot_circuit_inner(&conn,mesh.id,"Review Blueprint","",2,&original).unwrap();
-    conn.execute("UPDATE autopilot_circuits SET is_preset=1 WHERE id=?1",[blueprint.id]).unwrap();
-    let run=create_circuit_run_locked(&mut conn,blueprint.id,mesh.id,"manual:original","{}").unwrap();
-    assert!(update_autopilot_circuit_graph_inner(&conn,blueprint.id,&sample_graph_json()).is_err());
-    assert!(set_autopilot_circuit_concurrency_limit_inner(&conn,blueprint.id,4).is_err());
-    assert!(set_autopilot_circuit_enabled_inner(&conn,blueprint.id,true).is_err());
-    assert!(delete_autopilot_circuit_locked(&mut conn, blueprint.id).is_err(), "built-in blueprint deletion is forbidden at the mutation boundary");
-    let copy=circuit::ledger::copy_review_blueprint_locked(&mut conn,blueprint.id,"Independent review").unwrap();
-    assert_ne!(copy.id,blueprint.id);
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "blueprint", "/tmp/blueprint").unwrap();
+    let original = sample_graph_json();
+    let blueprint =
+        create_autopilot_circuit_inner(&conn, mesh.id, "Review Blueprint", "", 2, &original)
+            .unwrap();
+    conn.execute(
+        "UPDATE autopilot_circuits SET is_preset=1 WHERE id=?1",
+        [blueprint.id],
+    )
+    .unwrap();
+    let run = create_circuit_run_locked(&mut conn, blueprint.id, mesh.id, "manual:original", "{}")
+        .unwrap();
+    assert!(
+        update_autopilot_circuit_graph_inner(&conn, blueprint.id, &sample_graph_json()).is_err()
+    );
+    assert!(set_autopilot_circuit_concurrency_limit_inner(&conn, blueprint.id, 4).is_err());
+    assert!(set_autopilot_circuit_enabled_inner(&conn, blueprint.id, true).is_err());
+    assert!(
+        delete_autopilot_circuit_locked(&mut conn, blueprint.id).is_err(),
+        "built-in blueprint deletion is forbidden at the mutation boundary"
+    );
+    let copy = circuit::ledger::copy_review_blueprint_locked(
+        &mut conn,
+        blueprint.id,
+        "Independent review",
+    )
+    .unwrap();
+    assert_ne!(copy.id, blueprint.id);
     assert!(!copy.is_preset);
     assert!(!copy.enabled);
-    let graph=CircuitGraph::from_json(&copy.graph_json).unwrap();
-    assert!(graph.roots().iter().all(|node|matches!(node.kind,crate::circuit::model::CircuitNodeKind::Manual)));
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id=?1",[copy.id],|row|row.get::<_,i64>(0)).unwrap(),0);
-    let changed=CircuitGraph::walking_skeleton("Independent changes").to_json().unwrap();
-    update_autopilot_circuit_graph_inner(&conn,copy.id,&changed).unwrap();
-    assert_eq!(get_autopilot_circuit_inner(&conn,blueprint.id).unwrap().unwrap().graph_json,original);
-    assert!(get_circuit_run_inner(&conn,run).unwrap().is_some());
+    let graph = CircuitGraph::from_json(&copy.graph_json).unwrap();
+    assert!(graph
+        .roots()
+        .iter()
+        .all(|node| matches!(node.kind, crate::circuit::model::CircuitNodeKind::Manual)));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE circuit_id=?1",
+            [copy.id],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let changed = CircuitGraph::walking_skeleton("Independent changes")
+        .to_json()
+        .unwrap();
+    update_autopilot_circuit_graph_inner(&conn, copy.id, &changed).unwrap();
+    assert_eq!(
+        get_autopilot_circuit_inner(&conn, blueprint.id)
+            .unwrap()
+            .unwrap()
+            .graph_json,
+        original
+    );
+    assert!(get_circuit_run_inner(&conn, run).unwrap().is_some());
 }
 
 #[test]
@@ -106,26 +144,105 @@ fn copied_review_continuation_requires_the_frozen_review_contract() {
     use crate::circuit::model::{CircuitNodeKind, EdgeCondition};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "copy continuation", "/tmp/copy-continuation").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
-        "codex", None, None, None, None, false, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Source",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let blueprint = create_autopilot_circuit_inner(&conn, mesh.id, "Review Blueprint", "", 2, &CircuitGraph::agent_review(None, None, 2).to_json().unwrap()).unwrap();
-    conn.execute("UPDATE autopilot_circuits SET is_preset=1 WHERE id=?1", [blueprint.id]).unwrap();
+    let blueprint = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "Review Blueprint",
+        "",
+        2,
+        &CircuitGraph::agent_review(None, None, 2).to_json().unwrap(),
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE autopilot_circuits SET is_preset=1 WHERE id=?1",
+        [blueprint.id],
+    )
+    .unwrap();
     let copy = copy_review_blueprint_locked(&mut conn, blueprint.id, "My review").unwrap();
     let mut graph = CircuitGraph::from_json(&copy.graph_json).unwrap();
-    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut graph.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap().kind { *prompt = "Review the security boundary".into(); }
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut graph
+        .nodes
+        .iter_mut()
+        .find(|n| n.id == "reviewer")
+        .unwrap()
+        .kind
+    {
+        *prompt = "Review the security boundary".into();
+    }
     update_autopilot_circuit_graph_inner(&conn, copy.id, &graph.to_json().unwrap()).unwrap();
     let run = create_node_circuit_run_locked(&mut conn, source.id, Some(copy.id), 2, None).unwrap();
-    commit_circuit_advance_locked(&mut conn, run, Some("failed"), None, &[CircuitStepOp { node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false }]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "failed".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
     let plan = review_recovery_inner(&conn, run, 2).unwrap();
     assert_eq!(plan.source_id, source.id);
-    assert!(matches!(&plan.graph.node("reviewer").unwrap().kind, CircuitNodeKind::SpawnAgentNode { prompt, .. } if prompt == "Review the security boundary"));
-    graph.edges.iter_mut().find(|edge| edge.to == "close_approved").unwrap().condition = EdgeCondition::Always;
+    assert!(
+        matches!(&plan.graph.node("reviewer").unwrap().kind, CircuitNodeKind::SpawnAgentNode { prompt, .. } if prompt == "Review the security boundary")
+    );
+    graph
+        .edges
+        .iter_mut()
+        .find(|edge| edge.to == "close_approved")
+        .unwrap()
+        .condition = EdgeCondition::Always;
     update_autopilot_circuit_graph_inner(&conn, copy.id, &graph.to_json().unwrap()).unwrap();
-    assert!(review_recovery_inner(&conn, run, 2).is_ok(), "later edits cannot change the retained run");
-    let changed = create_node_circuit_run_locked(&mut conn, source.id, Some(copy.id), 2, None).unwrap();
-    commit_circuit_advance_locked(&mut conn, changed, Some("failed"), None, &[CircuitStepOp { node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false }]).unwrap();
-    assert!(review_recovery_inner(&conn, changed, 2).unwrap_err().contains("manual recovery"));
+    assert!(
+        review_recovery_inner(&conn, run, 2).is_ok(),
+        "later edits cannot change the retained run"
+    );
+    let changed =
+        create_node_circuit_run_locked(&mut conn, source.id, Some(copy.id), 2, None).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        changed,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "failed".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    assert!(review_recovery_inner(&conn, changed, 2)
+        .unwrap_err()
+        .contains("manual recovery"));
 }
 
 /// #1910 audit: only the built-in Review Blueprint is copyable, and
@@ -138,13 +255,34 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
     use crate::circuit::model::CircuitNodeKind;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "blueprint-audit", "/tmp/blueprint-audit").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Implementation", &mesh.path, "work", EnvType::Windows,
-        "claude", None, None, None, None, false, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Implementation",
+        &mesh.path,
+        "work",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
-    let blueprint = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()[0].0.id;
+    let blueprint = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()[0]
+        .0
+        .id;
 
-    assert_eq!(copy_review_blueprint_locked(&mut conn, blueprint, "   ").unwrap_err(), "Give the Circuit a name.");
+    assert_eq!(
+        copy_review_blueprint_locked(&mut conn, blueprint, "   ").unwrap_err(),
+        "Give the Circuit a name."
+    );
     let copy = copy_review_blueprint_locked(&mut conn, blueprint, "Independent review").unwrap();
     assert_eq!(
         copy_review_blueprint_locked(&mut conn, copy.id, "Second copy").unwrap_err(),
@@ -153,21 +291,45 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
     );
 
     let run = create_node_circuit_run_locked(&mut conn, source.id, Some(copy.id), 2, None).unwrap();
-    let context = CircuitContext::from_json(&get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json).unwrap();
+    let context = CircuitContext::from_json(
+        &get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     let pinned_launch = context.get("review.launch.reviewer").map(str::to_string);
     assert!(
-        pinned_launch.as_deref().is_some_and(|plan| !plan.is_empty()),
+        pinned_launch
+            .as_deref()
+            .is_some_and(|plan| !plan.is_empty()),
         "the effective reviewer launch plan is pinned when the run is created"
     );
-    commit_circuit_advance_locked(&mut conn, run, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "failed".into(), outcome: Some(Some("working".into())),
-        error: Some(Some("One more pass is needed".into())), agent_node_id: None, attempt: 2, fresh_attempt: false,
-    }]).unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "failed".into(),
+            outcome: Some(Some("working".into())),
+            error: Some(Some("One more pass is needed".into())),
+            agent_node_id: None,
+            attempt: 2,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
 
     set_autopilot_circuit_enabled_inner(&conn, copy.id, false).unwrap();
     let mut edited = CircuitGraph::from_json(&copy.graph_json).unwrap();
-    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } =
-        &mut edited.nodes.iter_mut().find(|node| node.id == "reviewer").unwrap().kind
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &mut edited
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "reviewer")
+        .unwrap()
+        .kind
     {
         *prompt = "A later, unrelated review instruction".into();
     }
@@ -182,36 +344,63 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
     );
     assert_eq!(
         plan.frozen_launches,
-        vec![("review.launch.reviewer".to_string(), pinned_launch.clone().unwrap())],
+        vec![(
+            "review.launch.reviewer".to_string(),
+            pinned_launch.clone().unwrap()
+        )],
         "the pinned reviewer configuration survives disabling and rewriting the source Circuit"
     );
     let successor = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
     assert_ne!(
-        get_circuit_run_inner(&conn, successor).unwrap().unwrap().circuit_id,
+        get_circuit_run_inner(&conn, successor)
+            .unwrap()
+            .unwrap()
+            .circuit_id,
         copy.id,
         "continuation never reuses the disabled source Circuit"
     );
     assert_eq!(
-        CircuitContext::from_json(&get_circuit_run_inner(&conn, successor).unwrap().unwrap().context_json)
-            .unwrap().get("review.launch.reviewer"),
+        CircuitContext::from_json(
+            &get_circuit_run_inner(&conn, successor)
+                .unwrap()
+                .unwrap()
+                .context_json
+        )
+        .unwrap()
+        .get("review.launch.reviewer"),
         pinned_launch.as_deref(),
         "the successor carries the frozen reviewer configuration forward"
     );
 
     // Deleting the source Circuit removes its own ledger; the retained
     // successor keeps its pinned graph and configuration.
-    let successor_graph: String = conn.query_row(
-        "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get(0),
-    ).unwrap();
+    let successor_graph: String = conn
+        .query_row(
+            "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+            [successor],
+            |row| row.get(0),
+        )
+        .unwrap();
     delete_autopilot_circuit_locked(&mut conn, copy.id).unwrap();
     assert!(get_circuit_run_inner(&conn, run).unwrap().is_none());
     assert_eq!(
-        conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get::<_, String>(0)).unwrap(),
+        conn.query_row(
+            "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+            [successor],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
         successor_graph
     );
     assert_eq!(
-        CircuitContext::from_json(&get_circuit_run_inner(&conn, successor).unwrap().unwrap().context_json)
-            .unwrap().get("review.launch.reviewer"),
+        CircuitContext::from_json(
+            &get_circuit_run_inner(&conn, successor)
+                .unwrap()
+                .unwrap()
+                .context_json
+        )
+        .unwrap()
+        .get("review.launch.reviewer"),
         pinned_launch.as_deref(),
     );
 }
@@ -222,78 +411,191 @@ fn review_blueprint_copy_is_authorized_only_from_the_built_in_and_survives_sourc
 /// journal or ownership ledger.
 #[test]
 fn continued_review_dispatches_only_review_work_and_records_the_run_it_continues() {
-    use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
     use crate::circuit::model::{CircuitNodeKind, GithubActionKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-only", "/tmp/review-only").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "PR fixes",
+        &mesh.path,
+        "pr-head",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let original = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
-    let published = |graph: &CircuitGraph| graph.nodes.iter().any(|node| matches!(
-        &node.kind,
-        CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. }
-    ));
-    assert!(published(&original), "the continued run really did own a PR publication step");
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &original.to_json().unwrap()).unwrap();
-    let parent = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:7",
-        r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7"}"#).unwrap();
-    let op = |node_id: &str, agent_node_id| CircuitStepOp {
-        node_id: node_id.into(), status: "completed".into(), outcome: Some(Some("working".into())),
-        error: None, agent_node_id, attempt: 3, fresh_attempt: false,
+    let published = |graph: &CircuitGraph| {
+        graph.nodes.iter().any(|node| {
+            matches!(
+                &node.kind,
+                CircuitNodeKind::GithubAction {
+                    action: GithubActionKind::OpenPr,
+                    ..
+                }
+            )
+        })
     };
-    commit_circuit_advance_locked(&mut conn, parent, Some("failed"), None, &[op("implementer", Some(source.id)), op("review_classifier", None)]).unwrap();
-    let parent_history: Vec<(i64, String)> = conn.prepare(
-        "SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id").unwrap()
-        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
-        .collect::<Result<_, _>>().unwrap();
+    assert!(
+        published(&original),
+        "the continued run really did own a PR publication step"
+    );
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "PR review",
+        "",
+        2,
+        &original.to_json().unwrap(),
+    )
+    .unwrap();
+    let parent = create_circuit_run_locked(
+        &mut conn,
+        circuit.id,
+        mesh.id,
+        "issue:7",
+        r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7"}"#,
+    )
+    .unwrap();
+    let op = |node_id: &str, agent_node_id| CircuitStepOp {
+        node_id: node_id.into(),
+        status: "completed".into(),
+        outcome: Some(Some("working".into())),
+        error: None,
+        agent_node_id,
+        attempt: 3,
+        fresh_attempt: false,
+    };
+    commit_circuit_advance_locked(
+        &mut conn,
+        parent,
+        Some("failed"),
+        None,
+        &[
+            op("implementer", Some(source.id)),
+            op("review_classifier", None),
+        ],
+    )
+    .unwrap();
+    let parent_history: Vec<(i64, String)> = conn
+        .prepare("SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id")
+        .unwrap()
+        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
 
     let plan = review_recovery_inner(&conn, parent, 1).unwrap();
-    assert!(!published(&plan.graph), "continuation drops the PR publication step");
-    assert!(!plan.graph.nodes.iter().any(|node| node.id == "implementer"), "continuation drops the implementation step");
-    let spawns: Vec<&str> = plan.graph.nodes.iter()
+    assert!(
+        !published(&plan.graph),
+        "continuation drops the PR publication step"
+    );
+    assert!(
+        !plan.graph.nodes.iter().any(|node| node.id == "implementer"),
+        "continuation drops the implementation step"
+    );
+    let spawns: Vec<&str> = plan
+        .graph
+        .nodes
+        .iter()
         .filter(|node| matches!(node.kind, CircuitNodeKind::SpawnAgentNode { .. }))
-        .map(|node| node.id.as_str()).collect();
-    assert_eq!(spawns, ["reviewer"], "the reviewer is the only agent a follow-up may spawn");
-    let successor = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
-    let snapshot = CircuitGraph::from_json(&conn.query_row(
-        "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [successor], |row| row.get::<_, String>(0),
-    ).unwrap()).unwrap();
-    assert!(!published(&snapshot) && !snapshot.nodes.iter().any(|node| node.id == "open_pr"),
-        "the pinned snapshot of the follow-up cannot publish a pull request");
+        .map(|node| node.id.as_str())
+        .collect();
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1", [successor], |row| row.get::<_, i64>(0)).unwrap(),
+        spawns,
+        ["reviewer"],
+        "the reviewer is the only agent a follow-up may spawn"
+    );
+    let successor = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
+    let snapshot = CircuitGraph::from_json(
+        &conn
+            .query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+                [successor],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !published(&snapshot) && !snapshot.nodes.iter().any(|node| node.id == "open_pr"),
+        "the pinned snapshot of the follow-up cannot publish a pull request"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1",
+            [successor],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
         0,
         "a fresh follow-up has claimed no external effect"
     );
     assert!(
-        list_circuit_run_steps_inner(&conn, successor).unwrap().iter().all(|step| step.agent_node_id != Some(source.id)),
+        list_circuit_run_steps_inner(&conn, successor)
+            .unwrap()
+            .iter()
+            .all(|step| step.agent_node_id != Some(source.id)),
         "the implementation agent is borrowed by the follow-up, never owned by it"
     );
-    let borrowed = list_circuit_agent_ownerships_inner(&conn).unwrap().into_iter()
-        .find(|row| row.0 == source.id).expect("the source is still visible as a borrowed run");
+    let borrowed = list_circuit_agent_ownerships_inner(&conn)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.0 == source.id)
+        .expect("the source is still visible as a borrowed run");
     assert_eq!(borrowed.1, successor);
-    assert_eq!(borrowed.5, None, "the implementation agent is not an owned step of the follow-up");
+    assert_eq!(
+        borrowed.5, None,
+        "the implementation agent is not an owned step of the follow-up"
+    );
 
-    let continuation: String = conn.query_row(
-        "SELECT detail FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'", [successor],
-        |row| row.get(0)).expect("the follow-up's own history names the run it continues");
+    let continuation: String = conn
+        .query_row(
+            "SELECT detail FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
+            [successor],
+            |row| row.get(0),
+        )
+        .expect("the follow-up's own history names the run it continues");
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&continuation).unwrap()["from_run_id"].as_i64(),
         Some(parent)
     );
-    let after: Vec<(i64, String)> = conn.prepare(
-        "SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id").unwrap()
-        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?))).unwrap()
-        .collect::<Result<_, _>>().unwrap();
-    assert_eq!(after, parent_history, "the failed ancestor's ledger stays immutable");
+    let after: Vec<(i64, String)> = conn
+        .prepare("SELECT id,kind FROM circuit_run_history WHERE run_id=?1 ORDER BY id")
+        .unwrap()
+        .query_map(params![parent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        after, parent_history,
+        "the failed ancestor's ledger stays immutable"
+    );
 
     cancel_circuit_run_locked(&mut conn, successor).unwrap();
-    assert_eq!(get_circuit_run_inner(&conn, successor).unwrap().unwrap().state, "cancelled");
+    assert_eq!(
+        get_circuit_run_inner(&conn, successor)
+            .unwrap()
+            .unwrap()
+            .state,
+        "cancelled"
+    );
     let retry = review_recovery_inner(&conn, parent, 1).unwrap();
     assert!(
-        create_node_circuit_run_recovery_locked(&mut conn, retry, 1).unwrap_err().contains("cancelled"),
+        create_node_circuit_run_recovery_locked(&mut conn, retry, 1)
+            .unwrap_err()
+            .contains("cancelled"),
         "a cancelled successor closes the lineage; the ancestor cannot mint around it"
     );
 }
@@ -303,12 +605,28 @@ fn circuit_run_pins_its_blueprint_before_later_edits() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "snapshot", "/tmp/snapshot").unwrap();
     let original = sample_graph_json();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "original", "", 1, &original).unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "original", "", 1, &original).unwrap();
     let id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:one", "{}").unwrap();
-    conn.execute("UPDATE autopilot_circuits SET graph_json=?1 WHERE id=?2",
-        params![CircuitGraph::walking_skeleton("different work").to_json().unwrap(), circuit.id]).unwrap();
+    conn.execute(
+        "UPDATE autopilot_circuits SET graph_json=?1 WHERE id=?2",
+        params![
+            CircuitGraph::walking_skeleton("different work")
+                .to_json()
+                .unwrap(),
+            circuit.id
+        ],
+    )
+    .unwrap();
     let active = list_active_circuit_runs_inner(&conn).unwrap();
-    assert_eq!(active.iter().find(|r| r.run.id == id).unwrap().circuit_graph_json, original);
+    assert_eq!(
+        active
+            .iter()
+            .find(|r| r.run.id == id)
+            .unwrap()
+            .circuit_graph_json,
+        original
+    );
 }
 
 #[test]
@@ -322,22 +640,67 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
             VALUES (1,1,1,'a','failed','{\"cleanup.pending\":\"1\"}',2), (2,1,1,'b','running','{}',NULL), (3,1,1,'c','failed','{}',NULL);
         INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status) VALUES
             (1,'owned',1,'failed'),(1,'borrowed',2,'failed'),(1,'shared',3,'failed'),(2,'active',3,'running'),(3,'historic',4,'failed');").unwrap();
-    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
+    assert_eq!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
+        vec![1]
+    );
     // A failed deletion leaves the association for the next pass/restart.
-    assert_eq!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(), vec![1]);
-    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = 1 WHERE id = 2", []).unwrap();
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty(), "another run borrows this agent");
-    conn.execute("UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2", []).unwrap();
-    let stale_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().unwrap();
+    assert_eq!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
+        vec![1]
+    );
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET source_agent_node_id = 1 WHERE id = 2",
+        [],
+    )
+    .unwrap();
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty(),
+        "another run borrows this agent"
+    );
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET source_agent_node_id = NULL WHERE id = 2",
+        [],
+    )
+    .unwrap();
+    let stale_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .unwrap();
     super::circuit::release_circuit_agent_cleanup_inner(&conn, 1, &stale_claim).unwrap();
-    let newer_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().unwrap();
-    assert!(super::circuit::archive_circuit_agent_inner(&conn, 1, &stale_claim).unwrap().is_empty());
-    assert_ne!(conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(), "archived");
-    assert_eq!(super::circuit::archive_circuit_agent_inner(&conn, 1, &newer_claim).unwrap(), vec![(1, "failed".into())]);
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
+    let newer_claim = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .unwrap();
+    assert!(
+        super::circuit::archive_circuit_agent_inner(&conn, 1, &stale_claim)
+            .unwrap()
+            .is_empty()
+    );
+    assert_ne!(
+        conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |r| r
+            .get::<_, String>(0))
+            .unwrap(),
+        "archived"
+    );
+    assert_eq!(
+        super::circuit::archive_circuit_agent_inner(&conn, 1, &newer_claim).unwrap(),
+        vec![(1, "failed".into())]
+    );
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(conn.query_row("SELECT agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='owned'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    conn.execute("UPDATE agent_nodes SET status = 'running' WHERE id = 1", []).unwrap();
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty(), "resumed sessions must not be reaped by old cleanup intent");
+    conn.execute("UPDATE agent_nodes SET status = 'running' WHERE id = 1", [])
+        .unwrap();
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty(),
+        "resumed sessions must not be reaped by old cleanup intent"
+    );
 }
 
 #[test]
@@ -362,11 +725,30 @@ fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
     let generation = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
         .unwrap()
         .expect("the resume must claim the durable spawn generation");
-    assert!(super::circuit::archive_circuit_agent_inner(&conn, 1, &cleanup_generation).unwrap().is_empty());
-    assert_ne!(conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |row| row.get::<_, String>(0)).unwrap(), "archived");
-    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap().is_empty());
-    assert_eq!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap(), Some(generation.clone()));
+    assert!(
+        super::circuit::archive_circuit_agent_inner(&conn, 1, &cleanup_generation)
+            .unwrap()
+            .is_empty()
+    );
+    assert_ne!(
+        conn.query_row("SELECT status FROM agent_nodes WHERE id=1", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        "archived"
+    );
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .is_none());
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap(),
+        Some(generation.clone())
+    );
     assert_eq!(
         conn.query_row(
             "SELECT spawn_generation FROM agent_node_lifecycle_leases WHERE node_id=1",
@@ -378,10 +760,22 @@ fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
     );
 
     super::circuit::release_circuit_agent_spawn_inner(&conn, 1, &generation).unwrap();
-    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1).unwrap().is_none());
-    assert!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1).unwrap().is_none());
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .is_none());
+    assert!(super::circuit::circuit_agent_spawn_claim_inner(&conn, 1)
+        .unwrap()
+        .is_none());
     super::circuit::clear_finished_circuit_cleanup_inner(&conn).unwrap();
-    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -396,14 +790,26 @@ fn expired_spawn_lease_keeps_cleanup_request_for_the_next_sweep() {
         INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
             VALUES (1,'owned',1,'failed');").unwrap();
 
-    let first = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1).unwrap().unwrap();
+    let first = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
+        .unwrap()
+        .unwrap();
     conn.execute(
         "UPDATE agent_node_lifecycle_leases SET spawn_expires_at = unixepoch() - 1 WHERE node_id = 1",
         [],
     ).unwrap();
-    let second = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1).unwrap().unwrap();
+    let second = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
+        .unwrap()
+        .unwrap();
     assert_ne!(first, second, "an expired spawn lease must be replaceable");
-    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        conn.query_row(
+            "SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
 }
 
 #[test]
@@ -413,24 +819,47 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
     let legacy = include_str!("../../tests/fixtures/legacy-issue-review-circuit.json");
     let mut graph = CircuitGraph::from_json(legacy).unwrap();
     let reviewer = graph.nodes.iter_mut().find(|n| n.id == "reviewer").unwrap();
-    if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. } = &mut reviewer.kind {
+    if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. } =
+        &mut reviewer.kind
+    {
         *model = Some("saved-model".into());
         *prompt = "custom reviewer instructions".into();
-    } else { panic!("fixture must contain a reviewer spawn"); }
-    conn.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'review','/repo');
-        DELETE FROM app_settings WHERE key='issue_review_verdict_upgrade_v1';").unwrap();
+    } else {
+        panic!("fixture must contain a reviewer spawn");
+    }
+    conn.execute_batch(
+        "INSERT INTO meshes (id,name,path) VALUES (1,'review','/repo');
+        DELETE FROM app_settings WHERE key='issue_review_verdict_upgrade_v1';",
+    )
+    .unwrap();
     conn.execute("INSERT INTO autopilot_circuits (id,mesh_id,name,graph_json) VALUES (1,1,'custom title',?1)", [graph.to_json().unwrap()]).unwrap();
     super::init_schema(&conn).unwrap();
-    let upgraded: String = conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id=1", [], |r| r.get(0)).unwrap();
+    let upgraded: String = conn
+        .query_row(
+            "SELECT graph_json FROM autopilot_circuits WHERE id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let upgraded_graph = CircuitGraph::from_json(&upgraded).unwrap();
     upgraded_graph.validate().unwrap();
-    assert!(matches!(upgraded_graph.node("review_classifier").map(|n| &n.kind),
-        Some(crate::circuit::model::CircuitNodeKind::ReviewVerdict { .. })));
+    assert!(matches!(
+        upgraded_graph.node("review_classifier").map(|n| &n.kind),
+        Some(crate::circuit::model::CircuitNodeKind::ReviewVerdict { .. })
+    ));
     assert!(matches!(upgraded_graph.node("reviewer").map(|n| &n.kind),
         Some(crate::circuit::model::CircuitNodeKind::SpawnAgentNode { model, prompt, .. })
             if model.as_deref() == Some("saved-model") && prompt == "custom reviewer instructions"));
     super::init_schema(&conn).unwrap();
-    assert_eq!(conn.query_row("SELECT graph_json FROM autopilot_circuits WHERE id=1", [], |r| r.get::<_, String>(0)).unwrap(), upgraded);
+    assert_eq!(
+        conn.query_row(
+            "SELECT graph_json FROM autopilot_circuits WHERE id=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        upgraded
+    );
     graph.edges.pop();
     let custom = graph.clone();
     assert!(!graph.upgrade_issue_review_verdict());
@@ -441,8 +870,11 @@ fn circuit_review_verdict_upgrade_preserves_saved_overrides_and_is_repeatable() 
 fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "failure-cleanup", "/tmp/failure-cleanup").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "cleanup", "", 2, &sample_graph_json()).unwrap();
-    let run = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cleanup", "{}").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "cleanup", "", 2, &sample_graph_json())
+            .unwrap();
+    let run =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cleanup", "{}").unwrap();
     set_circuit_run_state_inner(&conn, run, "running").unwrap();
     assert!(reserve_circuit_agent_slots_locked(&mut conn, run, 2).unwrap());
     assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 1);
@@ -459,34 +891,93 @@ fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
 fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "node-review-mesh", "/tmp/node-review").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Fix parser",
+        &mesh.path,
+        "pr-head",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
+    let run_id =
+        create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()))
+            .unwrap();
     // First writer wins: a retry passing no pick, or a different one, gets the
     // existing run back untouched — neither the provider nor the round limit
     // from the later calls is applied.
-    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap(), run_id);
-    assert_eq!(create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("anthropic".into())).unwrap(), run_id);
-    assert!(list_autopilot_circuits_inner(&conn, mesh.id).unwrap().is_empty(), "preset is hidden from user blueprints");
-    let preset_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
-        rusqlite::params![mesh.id], |row| row.get(0),
-    ).unwrap();
+    assert_eq!(
+        create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap(),
+        run_id
+    );
+    assert_eq!(
+        create_node_circuit_run_locked(&mut conn, source.id, None, 5, Some("anthropic".into()))
+            .unwrap(),
+        run_id
+    );
+    assert!(
+        list_autopilot_circuits_inner(&conn, mesh.id)
+            .unwrap()
+            .is_empty(),
+        "preset is hidden from user blueprints"
+    );
+    let preset_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 1",
+            rusqlite::params![mesh.id],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(preset_count, 1);
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.source_agent_node_id, Some(source.id));
     let ctx = crate::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
     assert_eq!(ctx.source_agent_id(), Some(source.id));
     assert_eq!(ctx.get("source.base_ref"), Some(mesh.base_ref.as_str()));
-    assert_eq!(ctx.get("review.provider"), Some("codex"), "the first picked reviewer provider survives the dedup re-creates");
-    assert_eq!(ctx.get("retry.max_retries"), Some("3"), "and so does the first round limit");
-    assert!(list_circuit_agent_ownerships_inner(&conn, ).unwrap().iter().any(|row| row.0 == source.id && row.1 == run_id));
-    commit_circuit_advance_locked(&mut conn, run_id, Some("running"), None, &[CircuitStepOp {
-        node_id: "reviewer".into(), status: "running".into(), outcome: None, error: None,
-        agent_node_id: Some(123456), attempt: 1, fresh_attempt: false,
-    }]).unwrap();
-    assert_eq!(cancel_circuit_run_locked(&mut conn, run_id).unwrap(), vec![123456]);
+    assert_eq!(
+        ctx.get("review.provider"),
+        Some("codex"),
+        "the first picked reviewer provider survives the dedup re-creates"
+    );
+    assert_eq!(
+        ctx.get("retry.max_retries"),
+        Some("3"),
+        "and so does the first round limit"
+    );
+    assert!(list_circuit_agent_ownerships_inner(&conn,)
+        .unwrap()
+        .iter()
+        .any(|row| row.0 == source.id && row.1 == run_id));
+    commit_circuit_advance_locked(
+        &mut conn,
+        run_id,
+        Some("running"),
+        None,
+        &[CircuitStepOp {
+            node_id: "reviewer".into(),
+            status: "running".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: Some(123456),
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        cancel_circuit_run_locked(&mut conn, run_id).unwrap(),
+        vec![123456]
+    );
     assert!(get_agent_node_by_id_inner(&conn, source.id).is_ok());
     assert_eq!(
         list_circuit_agent_ownerships_inner(&conn, ).unwrap().iter().find(|row| row.0 == source.id).map(|row| row.4.as_str()),
@@ -494,27 +985,62 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
         "terminal source ownership remains durable; the UI mapper intentionally hides cancelled runs"
     );
     let history = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap();
-    assert_eq!(history.len(), 1, "the preset is history-visible after completion");
+    assert_eq!(
+        history.len(),
+        1,
+        "the preset is history-visible after completion"
+    );
     assert!(history[0].0.is_preset);
     assert_eq!(history[0].1[0].run.state, "cancelled");
 }
 
 #[test]
 fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
-    use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
     use crate::circuit::{context::CircuitContext, model::CircuitNodeKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "recovery", "/tmp/recovery").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "pr-head", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Fix parser",
+        &mesh.path,
+        "pr-head",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
-    assert!(review_recovery_inner(&conn, old, 1).unwrap_err().contains("Only failed"));
-    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
-        error: Some(Some("Latest findings".into())), agent_node_id: None, attempt: 3, fresh_attempt: false,
-    }]).unwrap();
+    let old = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()))
+        .unwrap();
+    assert!(review_recovery_inner(&conn, old, 1)
+        .unwrap_err()
+        .contains("Only failed"));
+    commit_circuit_advance_locked(
+        &mut conn,
+        old,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "completed".into(),
+            outcome: Some(Some("working".into())),
+            error: Some(Some("Latest findings".into())),
+            agent_node_id: None,
+            attempt: 3,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
     let history = get_circuit_run_inner(&conn, old).unwrap().unwrap();
     let steps = list_circuit_run_steps_inner(&conn, old).unwrap();
     assert!(review_recovery_inner(&conn, old, 0).is_err());
@@ -522,27 +1048,57 @@ fn failed_review_continuation_keeps_history_and_borrows_the_same_worktree() {
     assert_eq!(plan.source_id, source.id);
     let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
     let plan = review_recovery_inner(&conn, old, 1).unwrap();
-    assert_eq!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap(), next, "double clicks reuse the active follow-up");
+    assert_eq!(
+        create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap(),
+        next,
+        "double clicks reuse the active follow-up"
+    );
     let new_run = get_circuit_run_inner(&conn, next).unwrap().unwrap();
     assert_eq!(new_run.state, "pending");
     assert_eq!(new_run.source_agent_node_id, Some(source.id));
     let ctx = CircuitContext::from_json(&new_run.context_json).unwrap();
-    assert_eq!(ctx.get("recovery.from_run_id"), Some(old.to_string().as_str()));
+    assert_eq!(
+        ctx.get("recovery.from_run_id"),
+        Some(old.to_string().as_str())
+    );
     assert_eq!(ctx.get("retry.max_retries"), Some("1"));
     assert_eq!(get_circuit_run_inner(&conn, old).unwrap().unwrap(), history);
     assert_eq!(list_circuit_run_steps_inner(&conn, old).unwrap(), steps);
-    let graph = CircuitGraph::from_json(&get_autopilot_circuit_inner(&conn, new_run.circuit_id).unwrap().unwrap().graph_json).unwrap();
-    assert!(matches!(&graph.node("reviewer").unwrap().kind, CircuitNodeKind::SpawnAgentNode { provider: Some(p), .. } if p == "codex"));
+    let graph = CircuitGraph::from_json(
+        &get_autopilot_circuit_inner(&conn, new_run.circuit_id)
+            .unwrap()
+            .unwrap()
+            .graph_json,
+    )
+    .unwrap();
+    assert!(
+        matches!(&graph.node("reviewer").unwrap().kind, CircuitNodeKind::SpawnAgentNode { provider: Some(p), .. } if p == "codex")
+    );
     if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &graph.node("reviewer").unwrap().kind {
         assert!(prompt.contains("{{source.output}}"));
         assert!(prompt.contains("{{retry.attempt}} of {{retry.max_retries}}"));
     }
-    assert!(matches!(&graph.node("retry").unwrap().kind, CircuitNodeKind::RetryLimit { max_retries: 1 }));
-    assert!(cancel_circuit_run_locked(&mut conn, next).unwrap().is_empty(), "cancellation never owns the borrowed implementation agent");
+    assert!(matches!(
+        &graph.node("retry").unwrap().kind,
+        CircuitNodeKind::RetryLimit { max_retries: 1 }
+    ));
+    assert!(
+        cancel_circuit_run_locked(&mut conn, next)
+            .unwrap()
+            .is_empty(),
+        "cancellation never owns the borrowed implementation agent"
+    );
     let plan = review_recovery_inner(&conn, old, 1).unwrap();
-    assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap_err().contains("cancelled"),
-        "requesting the ancestor again cannot bypass cancellation of its successor");
-    assert_eq!(get_agent_node_by_id_inner(&conn, source.id).unwrap().branch, source.branch);
+    assert!(
+        create_node_circuit_run_recovery_locked(&mut conn, plan, 1)
+            .unwrap_err()
+            .contains("cancelled"),
+        "requesting the ancestor again cannot bypass cancellation of its successor"
+    );
+    assert_eq!(
+        get_agent_node_by_id_inner(&conn, source.id).unwrap().branch,
+        source.branch
+    );
 }
 
 #[test]
@@ -551,70 +1107,240 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     use crate::circuit::context::CircuitContext;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "same review", "/tmp/same-review").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Fix parser", &mesh.path, "work", EnvType::Windows,
-        "codex", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Fix parser",
+        &mesh.path,
+        "work",
+        EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let run_id = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
+    let run_id =
+        create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()))
+            .unwrap();
     let before = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
-    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
-        error: Some(Some("Latest findings".into())), agent_node_id: None, attempt: 3, fresh_attempt: false,
-    }]).unwrap();
-    let prior_history: i64 = conn.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1", [run_id], |r| r.get(0)).unwrap();
-    let original_graph: String = conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1", [run_id], |r| r.get(0)).unwrap();
-    conn.execute("DELETE FROM circuit_run_snapshots WHERE run_id=?1", [run_id]).unwrap();
-    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    commit_circuit_advance_locked(
+        &mut conn,
+        run_id,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "completed".into(),
+            outcome: Some(Some("working".into())),
+            error: Some(Some("Latest findings".into())),
+            agent_node_id: None,
+            attempt: 3,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    let prior_history: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1",
+            [run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let original_graph: String = conn
+        .query_row(
+            "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+            [run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    conn.execute(
+        "DELETE FROM circuit_run_snapshots WHERE run_id=?1",
+        [run_id],
+    )
+    .unwrap();
+    assert_eq!(
+        extend_failed_review_locked(&mut conn, run_id, 1).unwrap(),
+        run_id
+    );
     let after = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(after.circuit_id, before.circuit_id);
     assert_eq!(after.state, "pending");
-    assert_eq!(CircuitContext::from_json(&after.context_json).unwrap().get("retry.max_retries"), Some("4"));
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuits", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-    let archived_graph: String = conn.query_row("SELECT graph_json FROM circuit_run_snapshot_history WHERE run_id=?1 AND attempt=4",
-        [run_id], |r| r.get(0)).unwrap();
-    assert_eq!(archived_graph, original_graph, "the replaced graph must survive without an existing snapshot row");
-    assert!(conn.query_row("SELECT EXISTS(SELECT 1 FROM circuit_run_snapshots WHERE run_id=?1)", [run_id], |r| r.get::<_, bool>(0)).unwrap(),
-        "the review-only snapshot must be upserted for legacy runs");
-    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 0,
-        "a manually borrowed source is not an Autopilot pool agent");
+    assert_eq!(
+        CircuitContext::from_json(&after.context_json)
+            .unwrap()
+            .get("retry.max_retries"),
+        Some("4")
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuits", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    let archived_graph: String = conn
+        .query_row(
+            "SELECT graph_json FROM circuit_run_snapshot_history WHERE run_id=?1 AND attempt=4",
+            [run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        archived_graph, original_graph,
+        "the replaced graph must survive without an existing snapshot row"
+    );
+    assert!(
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM circuit_run_snapshots WHERE run_id=?1)",
+            [run_id],
+            |r| r.get::<_, bool>(0)
+        )
+        .unwrap(),
+        "the review-only snapshot must be upserted for legacy runs"
+    );
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(),
+        0,
+        "a manually borrowed source is not an Autopilot pool agent"
+    );
     let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
-    assert_eq!(steps.iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 4);
-    assert!(steps.iter().all(|s| s.node_id != "implementer" && s.node_id != "open_pr"));
+    assert_eq!(
+        steps
+            .iter()
+            .find(|s| s.node_id == "reviewer")
+            .unwrap()
+            .attempt,
+        4
+    );
+    assert!(steps
+        .iter()
+        .all(|s| s.node_id != "implementer" && s.node_id != "open_pr"));
     let mut view = crate::circuit::stepper::RunView {
         run_id,
-        graph: CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
-            [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap(),
+        graph: CircuitGraph::from_json(
+            &conn
+                .query_row(
+                    "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+                    [run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+        )
+        .unwrap(),
         state: crate::circuit::stepper::RunState::Pending,
         context: CircuitContext::from_json(&after.context_json).unwrap(),
-        steps: steps.into_iter().map(|step| crate::circuit::stepper::StepView {
-            node_id: step.node_id,
-            status: crate::circuit::stepper::StepStatus::from_db_str(&step.status),
-            outcome: step.outcome.as_deref().and_then(crate::circuit::model::StepOutcome::from_db_str),
-            error: step.error_message,
-            agent_node_id: step.agent_node_id,
-            attempt: step.attempt,
-        }).collect(),
+        steps: steps
+            .into_iter()
+            .map(|step| crate::circuit::stepper::StepView {
+                node_id: step.node_id,
+                status: crate::circuit::stepper::StepStatus::from_db_str(&step.status),
+                outcome: step
+                    .outcome
+                    .as_deref()
+                    .and_then(crate::circuit::model::StepOutcome::from_db_str),
+                error: step.error_message,
+                agent_node_id: step.agent_node_id,
+                attempt: step.attempt,
+            })
+            .collect(),
     };
     use crate::circuit::stepper::{advance, Capacity, CircuitEvent, Effect, StepStatus};
     advance(&mut view, &CircuitEvent::Triggered);
-    let tick = advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots: 2, agent_free_slots: 2 }));
+    let tick = advance(
+        &mut view,
+        &CircuitEvent::Tick(Capacity {
+            circuit_free_slots: 2,
+            agent_free_slots: 2,
+        }),
+    );
     assert_eq!(view.step("reviewer").unwrap().status, StepStatus::Running);
-    assert!(tick.effects.iter().any(|effect| matches!(effect, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")));
+    assert!(tick.effects.iter().any(
+        |effect| matches!(effect, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
+    ));
     assert_eq!(view.step("reviewer").unwrap().attempt, 4);
-    assert!(conn.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1", [run_id], |r| r.get::<_, i64>(0)).unwrap() > prior_history);
-    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
-    assert_eq!(CircuitContext::from_json(&get_circuit_run_inner(&conn, run_id).unwrap().unwrap().context_json).unwrap().get("retry.max_retries"), Some("4"));
-    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "completed".into(), outcome: Some(Some("working".into())),
-        error: Some(Some("More findings".into())), agent_node_id: None, attempt: 4, fresh_attempt: false,
-    }]).unwrap();
-    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
-    let final_context = CircuitContext::from_json(&get_circuit_run_inner(&conn, run_id).unwrap().unwrap().context_json).unwrap();
+    assert!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1",
+            [run_id],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap()
+            > prior_history
+    );
+    assert_eq!(
+        extend_failed_review_locked(&mut conn, run_id, 1).unwrap(),
+        run_id
+    );
+    assert_eq!(
+        CircuitContext::from_json(
+            &get_circuit_run_inner(&conn, run_id)
+                .unwrap()
+                .unwrap()
+                .context_json
+        )
+        .unwrap()
+        .get("retry.max_retries"),
+        Some("4")
+    );
+    commit_circuit_advance_locked(
+        &mut conn,
+        run_id,
+        Some("failed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "verdict".into(),
+            status: "completed".into(),
+            outcome: Some(Some("working".into())),
+            error: Some(Some("More findings".into())),
+            agent_node_id: None,
+            attempt: 4,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        extend_failed_review_locked(&mut conn, run_id, 1).unwrap(),
+        run_id
+    );
+    let final_context = CircuitContext::from_json(
+        &get_circuit_run_inner(&conn, run_id)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     assert_eq!(final_context.get("retry.max_retries"), Some("5"));
-    assert_eq!(list_circuit_run_steps_inner(&conn, run_id).unwrap().iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 5);
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        list_circuit_run_steps_inner(&conn, run_id)
+            .unwrap()
+            .iter()
+            .find(|s| s.node_id == "reviewer")
+            .unwrap()
+            .attempt,
+        5
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
     cancel_circuit_run_locked(&mut conn, run_id).unwrap();
-    assert!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap_err().contains("Cancelled reviews require a fresh review"));
+    assert!(extend_failed_review_locked(&mut conn, run_id, 1)
+        .unwrap_err()
+        .contains("Cancelled reviews require a fresh review"));
 }
 
 #[test]
@@ -623,52 +1349,176 @@ fn extending_issue_review_replays_neither_implementation_nor_publication() {
     use crate::circuit::model::{CircuitNodeKind, GithubActionKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "issue extension", "/tmp/issue-extension").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "work", EnvType::Windows,
-        "codex", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "PR fixes",
+        &mesh.path,
+        "work",
+        EnvType::Windows,
+        "codex",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &graph.to_json().unwrap()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:9",
-        r#"{"pr.number":"9","pr.url":"https://github.com/test/repo/pull/9"}"#).unwrap();
-    commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[
-        CircuitStepOp { node_id: "implementer".into(), status: "completed".into(), outcome: Some(Some("completed".into())),
-            error: None, agent_node_id: Some(source.id), attempt: 1, fresh_attempt: false },
-        CircuitStepOp { node_id: "review_classifier".into(), status: "completed".into(), outcome: Some(Some("working".into())),
-            error: None, agent_node_id: None, attempt: 3, fresh_attempt: false },
-    ]).unwrap();
-    assert_eq!(extend_failed_review_locked(&mut conn, run_id, 1).unwrap(), run_id);
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "PR review",
+        "",
+        2,
+        &graph.to_json().unwrap(),
+    )
+    .unwrap();
+    let run_id = create_circuit_run_locked(
+        &mut conn,
+        circuit.id,
+        mesh.id,
+        "issue:9",
+        r#"{"pr.number":"9","pr.url":"https://github.com/test/repo/pull/9"}"#,
+    )
+    .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run_id,
+        Some("failed"),
+        None,
+        &[
+            CircuitStepOp {
+                node_id: "implementer".into(),
+                status: "completed".into(),
+                outcome: Some(Some("completed".into())),
+                error: None,
+                agent_node_id: Some(source.id),
+                attempt: 1,
+                fresh_attempt: false,
+            },
+            CircuitStepOp {
+                node_id: "review_classifier".into(),
+                status: "completed".into(),
+                outcome: Some(Some("working".into())),
+                error: None,
+                agent_node_id: None,
+                attempt: 3,
+                fresh_attempt: false,
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        extend_failed_review_locked(&mut conn, run_id, 1).unwrap(),
+        run_id
+    );
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.circuit_id, circuit.id);
     assert_eq!(run.source_agent_node_id, Some(source.id));
-    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 1,
-        "the borrowed former circuit agent still counts against the optional global pool");
-    conn.execute("UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1", [run_id]).unwrap();
-    assert_eq!(count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(), 1,
-        "terminal extended runs still count their retained Circuit-owned source agent");
-    assert!(run.context_json.contains("https://github.com/test/repo/pull/9"));
-    let snapshot = CircuitGraph::from_json(&conn.query_row("SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
-        [run_id], |row| row.get::<_, String>(0)).unwrap()).unwrap();
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(),
+        1,
+        "the borrowed former circuit agent still counts against the optional global pool"
+    );
+    conn.execute(
+        "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1",
+        [run_id],
+    )
+    .unwrap();
+    assert_eq!(
+        count_retained_circuit_agent_nodes_total_inner(&conn).unwrap(),
+        1,
+        "terminal extended runs still count their retained Circuit-owned source agent"
+    );
+    assert!(run
+        .context_json
+        .contains("https://github.com/test/repo/pull/9"));
+    let snapshot = CircuitGraph::from_json(
+        &conn
+            .query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id=?1",
+                [run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert!(snapshot.node("implementer").is_none());
-    assert!(!snapshot.nodes.iter().any(|node| matches!(node.kind, CircuitNodeKind::GithubAction { action: GithubActionKind::OpenPr, .. })));
-    assert_eq!(list_circuit_run_steps_inner(&conn, run_id).unwrap().iter().find(|s| s.node_id == "reviewer").unwrap().attempt, 4);
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert!(!snapshot.nodes.iter().any(|node| matches!(
+        node.kind,
+        CircuitNodeKind::GithubAction {
+            action: GithubActionKind::OpenPr,
+            ..
+        }
+    )));
+    assert_eq!(
+        list_circuit_run_steps_inner(&conn, run_id)
+            .unwrap()
+            .iter()
+            .find(|s| s.node_id == "reviewer")
+            .unwrap()
+            .attempt,
+        4
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
 }
 
 #[test]
 fn review_continuation_follows_failed_generations_and_reuses_success() {
-    use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
     use crate::circuit::context::CircuitContext;
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-lineage", "/tmp/review-lineage").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Implementation", &mesh.path, "work", EnvType::Windows,
-        "claude", None, None, None, None, false, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Implementation",
+        &mesh.path,
+        "work",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let root = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into())).unwrap();
-    let fail = |conn: &mut Connection, id| commit_circuit_advance_locked(conn, id, Some("failed"), None, &[CircuitStepOp {
-        node_id: "verdict".into(), status: "failed".into(), outcome: Some(Some("failed".into())),
-        error: Some(Some("Needs another review".into())), agent_node_id: None, attempt: 1, fresh_attempt: false,
-    }]).unwrap();
+    let root = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("codex".into()))
+        .unwrap();
+    let fail = |conn: &mut Connection, id| {
+        commit_circuit_advance_locked(
+            conn,
+            id,
+            Some("failed"),
+            None,
+            &[CircuitStepOp {
+                node_id: "verdict".into(),
+                status: "failed".into(),
+                outcome: Some(Some("failed".into())),
+                error: Some(Some("Needs another review".into())),
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap()
+    };
     fail(&mut conn, root);
     let plan = review_recovery_inner(&conn, root, 1).unwrap();
     let second = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
@@ -677,49 +1527,126 @@ fn review_continuation_follows_failed_generations_and_reuses_success() {
     let third = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
     assert_ne!(third, second);
     let run = get_circuit_run_inner(&conn, third).unwrap().unwrap();
-    assert_eq!(CircuitContext::from_json(&run.context_json).unwrap().get("recovery.from_run_id"), Some(second.to_string().as_str()));
+    assert_eq!(
+        CircuitContext::from_json(&run.context_json)
+            .unwrap()
+            .get("recovery.from_run_id"),
+        Some(second.to_string().as_str())
+    );
     commit_circuit_advance_locked(&mut conn, third, Some("completed"), None, &[]).unwrap();
     let plan = review_recovery_inner(&conn, root, 1).unwrap();
-    assert_eq!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap(), third);
-    assert_eq!(conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get::<_,i64>(0)).unwrap(), 3);
+    assert_eq!(
+        create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap(),
+        third
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
 }
 
 #[test]
 fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
-    use super::circuit::recovery::review_recovery_inner;
     use super::circuit::ledger::create_node_circuit_run_recovery_locked;
+    use super::circuit::recovery::review_recovery_inner;
     use crate::circuit::{context::CircuitContext, model::CircuitNodeKind};
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "pr-recovery", "/tmp/pr-recovery").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "PR fixes", &mesh.path, "pr-head", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "PR fixes",
+        &mesh.path,
+        "pr-head",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", 2, &graph.to_json().unwrap()).unwrap();
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "PR review",
+        "",
+        2,
+        &graph.to_json().unwrap(),
+    )
+    .unwrap();
     let old = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:7", r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7","node.reviewer.output":"OLD REPORT"}"#).unwrap();
     assert!(review_recovery_inner(&conn, old, 1).is_err());
-    let op = |node_id: &str, agent_node_id| CircuitStepOp { node_id: node_id.into(), status: "completed".into(), outcome: Some(Some("working".into())), error: None, agent_node_id, attempt: 3, fresh_attempt: false };
-    commit_circuit_advance_locked(&mut conn, old, Some("failed"), None, &[op("implementer", Some(source.id)), op("review_classifier", None)]).unwrap();
+    let op = |node_id: &str, agent_node_id| CircuitStepOp {
+        node_id: node_id.into(),
+        status: "completed".into(),
+        outcome: Some(Some("working".into())),
+        error: None,
+        agent_node_id,
+        attempt: 3,
+        fresh_attempt: false,
+    };
+    commit_circuit_advance_locked(
+        &mut conn,
+        old,
+        Some("failed"),
+        None,
+        &[
+            op("implementer", Some(source.id)),
+            op("review_classifier", None),
+        ],
+    )
+    .unwrap();
     let plan = review_recovery_inner(&conn, old, 1).unwrap();
-    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } = &plan.graph.node("reviewer").unwrap().kind {
+    if let CircuitNodeKind::SpawnAgentNode { prompt, .. } =
+        &plan.graph.node("reviewer").unwrap().kind
+    {
         assert!(prompt.contains("https://github.com/test/repo/pull/7"));
-    } else { panic!("missing reviewer"); }
-    if let CircuitNodeKind::InjectPty { prompt, target_node_id } = &plan.graph.node("feedback").unwrap().kind {
+    } else {
+        panic!("missing reviewer");
+    }
+    if let CircuitNodeKind::InjectPty {
+        prompt,
+        target_node_id,
+    } = &plan.graph.node("feedback").unwrap().kind
+    {
         assert_eq!(target_node_id.as_deref(), Some("$source"));
         assert!(prompt.contains("update the PR"));
         let mut context = CircuitContext::new();
         context.set("node.reviewer.output", "NEW REPORT");
         assert!(context.resolve(prompt).contains("NEW REPORT"));
         assert!(!prompt.contains("OLD REPORT"));
-    } else { panic!("missing feedback"); }
-    let cleanup = claim_circuit_agent_cleanup_inner(&conn, source.id).unwrap().unwrap();
-    assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap_err().contains("still being stopped"));
+    } else {
+        panic!("missing feedback");
+    }
+    let cleanup = claim_circuit_agent_cleanup_inner(&conn, source.id)
+        .unwrap()
+        .unwrap();
+    assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1)
+        .unwrap_err()
+        .contains("still being stopped"));
     assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 0);
     release_circuit_agent_cleanup_inner(&conn, source.id, &cleanup).unwrap();
     let plan = review_recovery_inner(&conn, old, 1).unwrap();
     let next = create_node_circuit_run_recovery_locked(&mut conn, plan, 1).unwrap();
-    assert_eq!(get_circuit_run_inner(&conn, next).unwrap().unwrap().state, "pending");
-    assert!(claim_circuit_agent_cleanup_inner(&conn, source.id).unwrap().is_none(), "new borrower fences subsequent cleanup");
+    assert_eq!(
+        get_circuit_run_inner(&conn, next).unwrap().unwrap().state,
+        "pending"
+    );
+    assert!(
+        claim_circuit_agent_cleanup_inner(&conn, source.id)
+            .unwrap()
+            .is_none(),
+        "new borrower fences subsequent cleanup"
+    );
 }
 
 #[test]
@@ -727,17 +1654,61 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "node-workflow-mesh", "/tmp/node-workflow").unwrap();
     let other = create_mesh_inner(&conn, "node-other-mesh", "/tmp/node-other").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Source", &mesh.path, "main", EnvType::Windows,
-        "claude", None, None, None, None, false, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Source",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let foreign = create_autopilot_circuit_inner(&conn, other.id, "foreign", "", 1, &sample_graph_json()).unwrap();
-    assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None).unwrap_err().contains("manual Circuit"));
-    let interval = CircuitGraph::triggered_skeleton("task", crate::circuit::model::CircuitNodeKind::Interval { interval_seconds: 60 });
-    let timed = create_autopilot_circuit_inner(&conn, mesh.id, "timed", "", 1, &interval.to_json().unwrap()).unwrap();
+    let foreign =
+        create_autopilot_circuit_inner(&conn, other.id, "foreign", "", 1, &sample_graph_json())
+            .unwrap();
+    assert!(
+        create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None)
+            .unwrap_err()
+            .contains("manual Circuit")
+    );
+    let interval = CircuitGraph::triggered_skeleton(
+        "task",
+        crate::circuit::model::CircuitNodeKind::Interval {
+            interval_seconds: 60,
+        },
+    );
+    let timed = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "timed",
+        "",
+        1,
+        &interval.to_json().unwrap(),
+    )
+    .unwrap();
     assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(timed.id), 3, None).is_err());
-    let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
-    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, None).unwrap();
-    assert_eq!(get_circuit_run_inner(&conn, run).unwrap().unwrap().circuit_id, manual.id);
+    let manual =
+        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json())
+            .unwrap();
+    let run =
+        create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, None).unwrap();
+    assert_eq!(
+        get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .circuit_id,
+        manual.id
+    );
     cancel_circuit_run_locked(&mut conn, run).unwrap();
     // An authored Circuit carries its reviewer provider in its graph, so the
     // title-bar override must not leak into the run context. Assert the exact
@@ -746,14 +1717,32 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     // distinguishable from "clobbered with an empty string".
     let expected_reviewer = crate::preferences::reviewer_provider().unwrap_or_default();
     let run_context = crate::circuit::context::CircuitContext::from_json(
-        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
-    ).unwrap();
-    let rerun = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("codex".into())).unwrap();
+        &get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
+    let rerun = create_node_circuit_run_locked(
+        &mut conn,
+        source.id,
+        Some(manual.id),
+        3,
+        Some("codex".into()),
+    )
+    .unwrap();
     let rerun_context = crate::circuit::context::CircuitContext::from_json(
-        &get_circuit_run_inner(&conn, rerun).unwrap().unwrap().context_json,
-    ).unwrap();
+        &get_circuit_run_inner(&conn, rerun)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     assert!(rerun != run, "the cancelled run was replaced");
-    assert_eq!(run_context.get("review.provider"), Some(expected_reviewer.as_str()));
+    assert_eq!(
+        run_context.get("review.provider"),
+        Some(expected_reviewer.as_str())
+    );
     assert_eq!(
         rerun_context.get("review.provider"),
         Some(expected_reviewer.as_str()),
@@ -764,9 +1753,30 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
 #[test]
 fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "node-review-validation-mesh", "/tmp/node-review-validation").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Validated", &mesh.path, "main", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "node-review-validation-mesh",
+        "/tmp/node-review-validation",
+    )
+    .unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Validated",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     // The picker disables ineligible harnesses, but the backend holds its
     // own invariant: the spawn cascade treats any non-empty string as the
@@ -774,8 +1784,13 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     // "reviewer" on a harness that can never yield a turn. Bare, padded,
     // and composite (the harness segment decides) all reject.
     for picked in ["terminal", "  terminal  ", "terminal:minimax"] {
-        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into())).unwrap_err();
-        assert!(err.contains("Terminal"), "{picked:?} must be rejected, got {err:?}");
+        let err =
+            create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()))
+                .unwrap_err();
+        assert!(
+            err.contains("Terminal"),
+            "{picked:?} must be rejected, got {err:?}"
+        );
     }
     // Issue #1816: the gate is attention compatibility, not a
     // Terminal-only denylist — `dsh` and `freebuff` have
@@ -784,20 +1799,41 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
     // missing turn-completion signal. (Issue #1775 gave `cline` a file hook,
     // so it is no longer ineligible.) Rejections happen before any DB
     // work, so the same source row is reusable across picks here.
-    for (picked, name) in [("dsh", "DeepSeek Harness"), ("freebuff", "Freebuff"), ("freebuff:minimax", "Freebuff")] {
-        let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into())).unwrap_err();
-        assert!(err.contains(name), "{picked:?} must name the harness ({name}), got {err:?}");
-        assert!(err.contains("turn-completion"), "{picked:?} must name the missing capability, got {err:?}");
+    for (picked, name) in [
+        ("dsh", "DeepSeek Harness"),
+        ("freebuff", "Freebuff"),
+        ("freebuff:minimax", "Freebuff"),
+    ] {
+        let err =
+            create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some(picked.into()))
+                .unwrap_err();
+        assert!(
+            err.contains(name),
+            "{picked:?} must name the harness ({name}), got {err:?}"
+        );
+        assert!(
+            err.contains("turn-completion"),
+            "{picked:?} must name the missing capability, got {err:?}"
+        );
     }
     // A blank pick is not an error — it means "inherit", so the run keeps the
     // app-wide Reviewer provider snapshot it would have had anyway.
-    let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("   ".into())).unwrap();
+    let run =
+        create_node_circuit_run_locked(&mut conn, source.id, None, 3, Some("   ".into())).unwrap();
     let ctx = crate::circuit::context::CircuitContext::from_json(
-        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
-    ).unwrap();
+        &get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     assert_eq!(
         ctx.get("review.provider"),
-        Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
+        Some(
+            crate::preferences::reviewer_provider()
+                .unwrap_or_default()
+                .as_str()
+        ),
         "a blank pick collapses to the app-wide snapshot",
     );
 }
@@ -808,20 +1844,54 @@ fn node_review_rejects_terminal_reviewer_and_collapses_blank() {
 #[test]
 fn node_review_ignores_ineligible_override_for_authored_circuit() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "authored-override-mesh", "/tmp/authored-override").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Authored", &mesh.path, "main", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let mesh =
+        create_mesh_inner(&conn, "authored-override-mesh", "/tmp/authored-override").unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Authored",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
-    let manual = create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json()).unwrap();
+    let manual =
+        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json())
+            .unwrap();
     // Would be refused on the built-in preset path; the authored path
     // ignores the value entirely, so the run mints.
-    let run = create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, Some("freebuff".into())).unwrap();
+    let run = create_node_circuit_run_locked(
+        &mut conn,
+        source.id,
+        Some(manual.id),
+        3,
+        Some("freebuff".into()),
+    )
+    .unwrap();
     let ctx = crate::circuit::context::CircuitContext::from_json(
-        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
-    ).unwrap();
+        &get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     assert_eq!(
         ctx.get("review.provider"),
-        Some(crate::preferences::reviewer_provider().unwrap_or_default().as_str()),
+        Some(
+            crate::preferences::reviewer_provider()
+                .unwrap_or_default()
+                .as_str()
+        ),
         "the authored-Circuit override is ignored, not applied",
     );
 }
@@ -846,15 +1916,38 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     crate::preferences::save(crate::preferences::AppPreferences {
         reviewer_provider: Some("freebuff".to_string()),
         ..Default::default()
-    }).expect("store stale app-wide reviewer");
+    })
+    .expect("store stale app-wide reviewer");
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "inherit-gate-mesh", "/tmp/inherit-gate").unwrap();
-    let source = create_agent_node_inner(&conn, mesh.id, "Inherit", &mesh.path, "main", EnvType::Windows,
-        "claude", None, None, None, None, true, None, None, None).unwrap();
+    let source = create_agent_node_inner(
+        &conn,
+        mesh.id,
+        "Inherit",
+        &mesh.path,
+        "main",
+        EnvType::Windows,
+        "claude",
+        None,
+        None,
+        None,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let err = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap_err();
-    assert!(err.contains("Freebuff"), "stale value must name the harness, got {err:?}");
-    assert!(err.contains("Settings"), "stale value must point at Settings, got {err:?}");
+    assert!(
+        err.contains("Freebuff"),
+        "stale value must name the harness, got {err:?}"
+    );
+    assert!(
+        err.contains("Settings"),
+        "stale value must point at Settings, got {err:?}"
+    );
     assert!(
         err.contains("turn-completion"),
         "stale value must name the missing capability, got {err:?}"
@@ -863,11 +1956,16 @@ fn node_review_refuses_stale_ineligible_app_wide_reviewer_on_inherit() {
     crate::preferences::save(crate::preferences::AppPreferences {
         reviewer_provider: Some("codex".to_string()),
         ..Default::default()
-    }).expect("store eligible app-wide reviewer");
+    })
+    .expect("store eligible app-wide reviewer");
     let run = create_node_circuit_run_locked(&mut conn, source.id, None, 3, None).unwrap();
     let ctx = crate::circuit::context::CircuitContext::from_json(
-        &get_circuit_run_inner(&conn, run).unwrap().unwrap().context_json,
-    ).unwrap();
+        &get_circuit_run_inner(&conn, run)
+            .unwrap()
+            .unwrap()
+            .context_json,
+    )
+    .unwrap();
     assert_eq!(ctx.get("review.provider"), Some("codex"));
     crate::preferences::reset_for_tests();
 }
@@ -881,13 +1979,23 @@ fn circuit_crud_round_trips_all_fields() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-crud-mesh", "/tmp/circuit-crud").unwrap();
 
-    let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "nightly-sweep", "desc", 3, &sample_graph_json()).unwrap();
+    let created = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "nightly-sweep",
+        "desc",
+        3,
+        &sample_graph_json(),
+    )
+    .unwrap();
     assert_eq!(created.mesh_id, mesh.id);
     assert_eq!(created.name, "nightly-sweep");
     assert_eq!(created.description, "desc");
     assert_eq!(created.concurrency_limit, 3);
-    assert!(!created.enabled, "circuits default to disabled (draft-first, issue #1356)");
+    assert!(
+        !created.enabled,
+        "circuits default to disabled (draft-first, issue #1356)"
+    );
     // graph_json round-trips back into the parsed AST.
     let parsed = CircuitGraph::from_json(&created.graph_json).unwrap();
     assert_eq!(parsed.nodes.len(), 4);
@@ -899,24 +2007,38 @@ fn circuit_crud_round_trips_all_fields() {
     // Enable/disable round-trips (the Probe tab's toggle).
     assert!(!listed[0].enabled);
     set_autopilot_circuit_enabled_inner(&conn, created.id, true).unwrap();
-    let enabled = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    let enabled = get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .unwrap();
     assert!(enabled.enabled);
     set_autopilot_circuit_enabled_inner(&conn, created.id, false).unwrap();
-    let disabled = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    let disabled = get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .unwrap();
     assert!(!disabled.enabled);
 
     delete_autopilot_circuit_locked(&mut conn, created.id).unwrap();
-    assert!(get_autopilot_circuit_inner(&conn, created.id).unwrap().is_none());
-    assert!(list_autopilot_circuits_inner(&conn, mesh.id).unwrap().is_empty());
-
+    assert!(get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .is_none());
+    assert!(list_autopilot_circuits_inner(&conn, mesh.id)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn create_autopilot_circuit_is_draft_first_disabled() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-draft-mesh", "/tmp/circuit-draft").unwrap();
-    let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "still-authoring", "", 1, &sample_graph_json()).unwrap();
+    let created = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "still-authoring",
+        "",
+        1,
+        &sample_graph_json(),
+    )
+    .unwrap();
     assert!(!created.enabled);
 
     // Fresh-DB column default matches the INSERT (issue #1356).
@@ -932,7 +2054,8 @@ fn create_autopilot_circuit_is_draft_first_disabled() {
     assert_eq!(dflt.as_deref(), Some("0"));
 
     // Trigger Now is the dry-run seam and must mint a run while disabled.
-    let run_id = crate::commands::circuit::trigger_circuit_now_locked(&mut conn, created.id).unwrap();
+    let run_id =
+        crate::commands::circuit::trigger_circuit_now_locked(&mut conn, created.id).unwrap();
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.circuit_id, created.id);
     assert_eq!(run.state, "pending");
@@ -941,7 +2064,6 @@ fn create_autopilot_circuit_is_draft_first_disabled() {
         "manual identity, got {}",
         run.trigger_identity
     );
-
 }
 
 #[test]
@@ -950,9 +2072,15 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     // is replaced and round-trips back into the AST; other columns
     // (name, enabled, concurrency_limit) are untouched.
     let conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-update-graph-mesh", "/tmp/circuit-update-graph").unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-update-graph-mesh",
+        "/tmp/circuit-update-graph",
+    )
+    .unwrap();
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "editable", "desc", 2, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "editable", "desc", 2, &sample_graph_json())
+            .unwrap();
 
     let new_graph = CircuitGraph {
         version: 1,
@@ -979,10 +2107,15 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     };
     update_autopilot_circuit_graph_inner(&conn, created.id, &new_graph.to_json().unwrap()).unwrap();
 
-    let reloaded = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    let reloaded = get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(reloaded.name, "editable");
     assert_eq!(reloaded.concurrency_limit, 2);
-    assert!(!reloaded.enabled, "graph save must not flip the draft-first enabled flag");
+    assert!(
+        !reloaded.enabled,
+        "graph save must not flip the draft-first enabled flag"
+    );
     let parsed = CircuitGraph::from_json(&reloaded.graph_json).unwrap();
     assert_eq!(parsed, new_graph);
 
@@ -990,7 +2123,6 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     // silently no-op (review finding: rows_affected == 0 returned Ok).
     let missing = update_autopilot_circuit_graph_inner(&conn, 999_999, &sample_graph_json());
     assert!(missing.is_err());
-
 }
 
 #[test]
@@ -998,17 +2130,27 @@ fn set_autopilot_circuit_concurrency_limit_persists_and_errors_on_missing() {
     // The canvas editor's per-circuit step-slot control. Only
     // `concurrency_limit` changes; every other column is untouched.
     let conn = isolated_test_conn();
-    let mesh =
-        create_mesh_inner(&conn, "circuit-set-concurrency-mesh", "/tmp/circuit-set-concurrency").unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-set-concurrency-mesh",
+        "/tmp/circuit-set-concurrency",
+    )
+    .unwrap();
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "tunable", "desc", 2, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "tunable", "desc", 2, &sample_graph_json())
+            .unwrap();
 
     set_autopilot_circuit_concurrency_limit_inner(&conn, created.id, 5).unwrap();
-    let reloaded = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    let reloaded = get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(reloaded.concurrency_limit, 5);
     assert_eq!(reloaded.name, "tunable");
     assert_eq!(reloaded.description, "desc");
-    assert!(!reloaded.enabled, "a budget change must not flip the draft-first flag");
+    assert!(
+        !reloaded.enabled,
+        "a budget change must not flip the draft-first flag"
+    );
 
     // A stale editor writing against a deleted circuit must error.
     let missing = set_autopilot_circuit_concurrency_limit_inner(&conn, 999_999, 3);
@@ -1021,22 +2163,24 @@ fn update_circuit_concurrency_limit_clamps_by_blueprint_and_errors_on_missing() 
     // primitive): the blueprint floor must be applied and the returned row
     // must report the clamped value.
     let mut conn = isolated_test_conn();
-    let mesh =
-        create_mesh_inner(&conn, "circuit-cmd-concurrency-mesh", "/tmp/circuit-cmd-concurrency").unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-cmd-concurrency-mesh",
+        "/tmp/circuit-cmd-concurrency",
+    )
+    .unwrap();
     let review_graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
         .to_json()
         .unwrap();
     // Persist a 1-slot review circuit — the legacy state the floor exists to
     // prevent. The command must clamp it up to 2 on the next write.
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "review-loop", "", 1, &review_graph).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "review-loop", "", 1, &review_graph)
+            .unwrap();
 
-    let updated = crate::commands::circuit::update_circuit_concurrency_limit_locked(
-        &mut conn,
-        created.id,
-        1,
-    )
-    .unwrap();
+    let updated =
+        crate::commands::circuit::update_circuit_concurrency_limit_locked(&mut conn, created.id, 1)
+            .unwrap();
     assert_eq!(updated.concurrency_limit, 2);
     assert_eq!(
         get_autopilot_circuit_inner(&conn, created.id)
@@ -1048,11 +2192,8 @@ fn update_circuit_concurrency_limit_clamps_by_blueprint_and_errors_on_missing() 
     );
 
     // A stale editor writing against a deleted circuit must error.
-    let missing = crate::commands::circuit::update_circuit_concurrency_limit_locked(
-        &mut conn,
-        999_999,
-        3,
-    );
+    let missing =
+        crate::commands::circuit::update_circuit_concurrency_limit_locked(&mut conn, 999_999, 3);
     assert!(missing.is_err());
 }
 
@@ -1065,7 +2206,8 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     // enabled circuit survives restarts.
     let mesh = create_mesh_inner(&conn, "circuit-persist-mesh", "/tmp/circuit-persist").unwrap();
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "survivor", "", 1, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "survivor", "", 1, &sample_graph_json())
+            .unwrap();
     set_autopilot_circuit_enabled_inner(&conn, created.id, true).unwrap();
 
     {
@@ -1075,10 +2217,14 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
         crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
     }
 
-    let after = get_autopilot_circuit_inner(&conn, created.id).unwrap().unwrap();
+    let after = get_autopilot_circuit_inner(&conn, created.id)
+        .unwrap()
+        .unwrap();
     assert_eq!(after.name, "survivor");
-    assert!(after.enabled, "an explicitly enabled circuit must survive evolve_to");
-
+    assert!(
+        after.enabled,
+        "an explicitly enabled circuit must survive evolve_to"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,11 +2236,17 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-ledger-mesh", "/tmp/circuit-ledger").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "ledgered", "", 2, &sample_graph_json()).unwrap();
-
-    let run_id =
-        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1234", r#"{"circuit.name":"ledgered"}"#)
+        create_autopilot_circuit_inner(&conn, mesh.id, "ledgered", "", 2, &sample_graph_json())
             .unwrap();
+
+    let run_id = create_circuit_run_locked(
+        &mut conn,
+        circuit.id,
+        mesh.id,
+        "manual:1234",
+        r#"{"circuit.name":"ledgered"}"#,
+    )
+    .unwrap();
     let runs = list_circuit_runs_inner(&conn, circuit.id, 10).unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].state, "pending");
@@ -1103,8 +2255,9 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     // `circuit.*` before the worker ever sees the row).
     assert_eq!(runs[0].context_json, r#"{"circuit.name":"ledgered"}"#);
 
-// One atomic advance: trigger completes, spawn starts.
-    commit_circuit_advance_locked(&mut conn, 
+    // One atomic advance: trigger completes, spawn starts.
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         Some("running"),
         Some(r#"{"circuit.name":"ledgered"}"#),
@@ -1137,15 +2290,22 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     assert_eq!(spawn_step.status, "running");
     assert!(spawn_step.outcome.is_none());
     assert!(spawn_step.started_at.is_some(), "insert stamps started_at");
-    assert!(spawn_step.completed_at.is_none(), "non-terminal step has no completed_at");
+    assert!(
+        spawn_step.completed_at.is_none(),
+        "non-terminal step has no completed_at"
+    );
     assert_eq!(spawn_step.attempt, 1);
 
     // A stale worker association is a harmless no-op, not a rusqlite
     // QueryReturnedNoRows sentinel from an UPDATE with zero matches.
-    assert!(!set_circuit_step_agent_node_with_parent_inner(&conn, run_id, "missing", 899, None).unwrap());
+    assert!(
+        !set_circuit_step_agent_node_with_parent_inner(&conn, run_id, "missing", 899, None)
+            .unwrap()
+    );
     // Attach the spawned agent node, then finish the step.
     set_circuit_step_agent_node_with_parent_inner(&conn, run_id, "spawn", 900, None).unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         Some("completed"),
         None,
@@ -1155,8 +2315,8 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -1171,7 +2331,6 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     );
     let runs = list_circuit_runs_inner(&conn, circuit.id, 10).unwrap();
     assert_eq!(runs[0].state, "completed");
-
 }
 
 #[test]
@@ -1179,11 +2338,15 @@ fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-queue-mesh", "/tmp/circuit-queue").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "queue", "", 2, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "queue", "", 2, &sample_graph_json())
+            .unwrap();
 
-    let first = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
-    let second = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
-    let third = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
+    let first =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
 
     let ids = list_queued_circuit_runs_inner(&conn, mesh.id)
         .unwrap()
@@ -1207,7 +2370,6 @@ fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
         .map(|(run, _)| run.id)
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![third, first, second]);
-
 }
 
 #[test]
@@ -1215,11 +2377,15 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-queue-edge", "/tmp/circuit-queue-edge").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "queue-edge", "", 2, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "queue-edge", "", 2, &sample_graph_json())
+            .unwrap();
 
-    let first = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
-    let second = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
-    let third = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
+    let first =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
 
     // Jump to front/back.
     assert!(move_queued_circuit_run_to_edge_locked(&mut conn, third, true).unwrap());
@@ -1242,7 +2408,8 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
     assert_eq!(ids, vec![first, second, third]);
 
     // Explicit drag-drop order.
-    let reordered = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[third, second, first]).unwrap();
+    let reordered =
+        reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[third, second, first]).unwrap();
     assert_eq!(reordered, 3);
     let ids = list_queued_circuit_runs_inner(&conn, mesh.id)
         .unwrap()
@@ -1253,14 +2420,27 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
 
     // Stale payload (unknown id) aborts with a domain error the UI can show,
     // never a raw SQLite syntax error.
-    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, 999_999]).unwrap_err();
-    assert!(err.contains("refresh and retry"), "unexpected error: {}", err);
-    assert!(!err.contains("not valid"), "raw SQLite error leaked: {}", err);
+    let err =
+        reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, 999_999]).unwrap_err();
+    assert!(
+        err.contains("refresh and retry"),
+        "unexpected error: {}",
+        err
+    );
+    assert!(
+        !err.contains("not valid"),
+        "raw SQLite error leaked: {}",
+        err
+    );
 
     // Partial subset aborts: reordering 2 of 3 would collide positions with
     // the unpassed row.
     let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, second]).unwrap_err();
-    assert!(err.contains("expected 3 pending runs"), "unexpected error: {}", err);
+    assert!(
+        err.contains("expected 3 pending runs"),
+        "unexpected error: {}",
+        err
+    );
     // Queue order is unchanged after both aborts.
     let ids = list_queued_circuit_runs_inner(&conn, mesh.id)
         .unwrap()
@@ -1270,18 +2450,31 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
     assert_eq!(ids, vec![third, second, first]);
 
     // Duplicate ids abort.
-    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, first, second]).unwrap_err();
+    let err = reorder_queued_circuit_runs_locked(&mut conn, mesh.id, &[first, first, second])
+        .unwrap_err();
     assert!(err.contains("duplicate"), "unexpected error: {}", err);
-
 }
 
 #[test]
 fn cancelling_a_missing_run_is_a_quiet_noop_not_an_error() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-cancel-missing", "/tmp/circuit-cancel-missing").unwrap();
-    let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cancel-missing", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:gone", "{}").unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-cancel-missing",
+        "/tmp/circuit-cancel-missing",
+    )
+    .unwrap();
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "cancel-missing",
+        "",
+        2,
+        &sample_graph_json(),
+    )
+    .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:gone", "{}").unwrap();
     // Single cancel of a live run works, second cancel of the now-terminal
     // row still succeeds, and an unknown id returns empty without error.
     let agents = cancel_circuit_run_locked(&mut conn, run_id).unwrap();
@@ -1295,41 +2488,58 @@ fn cancelling_a_missing_run_is_a_quiet_noop_not_an_error() {
     let batch = cancel_circuit_runs_locked(&mut conn, &[run_id, 999_999, run_id]).unwrap();
     assert!(batch.agents.is_empty());
     assert!(batch.cancelled.is_empty());
-
 }
 
 #[test]
 fn batch_cancel_terminalises_every_run_in_one_transaction() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-batch-cancel", "/tmp/circuit-batch-cancel").unwrap();
+    let mesh =
+        create_mesh_inner(&conn, "circuit-batch-cancel", "/tmp/circuit-batch-cancel").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "batch", "", 2, &sample_graph_json()).unwrap();
-    let first = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
-    let second = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
-    let third = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "batch", "", 2, &sample_graph_json())
+            .unwrap();
+    let first =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let second =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:2", "{}").unwrap();
+    let third =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:3", "{}").unwrap();
 
     let batch = cancel_circuit_runs_locked(&mut conn, &[first, second, third]).unwrap();
     assert_eq!(batch.cancelled, vec![first, second, third]);
-    assert!(list_queued_circuit_runs_inner(&conn, mesh.id).unwrap().is_empty());
+    assert!(list_queued_circuit_runs_inner(&conn, mesh.id)
+        .unwrap()
+        .is_empty());
     for run_id in [first, second, third] {
-        let run = get_circuit_run_inner(&conn, run_id).unwrap().expect("run row survives as ledger");
+        let run = get_circuit_run_inner(&conn, run_id)
+            .unwrap()
+            .expect("run row survives as ledger");
         assert_eq!(run.state, "cancelled");
     }
-
 }
 
 #[test]
 fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-active-ledger", "/tmp/circuit-active-ledger").unwrap();
-    let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "active ledger", "", 2, &sample_graph_json()).unwrap();
+    let mesh =
+        create_mesh_inner(&conn, "circuit-active-ledger", "/tmp/circuit-active-ledger").unwrap();
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "active ledger",
+        "",
+        2,
+        &sample_graph_json(),
+    )
+    .unwrap();
 
-    let older_active = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "active", "{}").unwrap();
+    let older_active =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "active", "{}").unwrap();
     set_circuit_run_state_inner(&conn, older_active, "running").unwrap();
     let mut terminal_ids = Vec::new();
     for index in 0..11 {
-        let run_id = create_circuit_run_locked(&mut conn, 
+        let run_id = create_circuit_run_locked(
+            &mut conn,
             circuit.id,
             mesh.id,
             &format!("terminal:{}", index),
@@ -1348,27 +2558,54 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
         .collect::<Vec<_>>();
     assert_eq!(visible_ids.len(), 11, "one active plus ten terminal rows");
     assert!(visible_ids.contains(&older_active));
-    assert!(!visible_ids.contains(&terminal_ids[0]), "oldest terminal row is bounded out");
-
+    assert!(
+        !visible_ids.contains(&terminal_ids[0]),
+        "oldest terminal row is bounded out"
+    );
 }
 
 #[test]
 fn review_preset_history_keeps_a_bounded_recovery_window() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-history", "/tmp/review-history").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "review history", "", 2, &sample_graph_json()).unwrap();
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "review history",
+        "",
+        2,
+        &sample_graph_json(),
+    )
+    .unwrap();
     {
         // (using outer conn)
-        conn.execute("UPDATE autopilot_circuits SET is_preset = 1 WHERE id = ?1", [circuit.id]).unwrap();
+        conn.execute(
+            "UPDATE autopilot_circuits SET is_preset = 1 WHERE id = ?1",
+            [circuit.id],
+        )
+        .unwrap();
     }
     for index in 0..60 {
-        let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, &format!("review:{index}"), "{}").unwrap();
+        let run_id = create_circuit_run_locked(
+            &mut conn,
+            circuit.id,
+            mesh.id,
+            &format!("review:{index}"),
+            "{}",
+        )
+        .unwrap();
         commit_circuit_advance_locked(&mut conn, run_id, Some("failed"), None, &[]).unwrap();
     }
     let rows = list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap();
     assert_eq!(rows[0].1.len(), 50);
-    assert!(!rows[0].1.iter().any(|ledger| ledger.run.trigger_identity == "review:0"));
-    assert!(rows[0].1.iter().any(|ledger| ledger.run.trigger_identity == "review:59"));
+    assert!(!rows[0]
+        .1
+        .iter()
+        .any(|ledger| ledger.run.trigger_identity == "review:0"));
+    assert!(rows[0]
+        .1
+        .iter()
+        .any(|ledger| ledger.run.trigger_identity == "review:59"));
 }
 
 #[test]
@@ -1376,26 +2613,43 @@ fn completed_review_verdict_needing_attention_stays_in_the_recovery_window() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-attention", "/tmp/review-attention").unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:review");
-    let circuit = create_autopilot_circuit_inner(&conn, 
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
         mesh.id,
         "review attention",
         "",
         2,
         &graph.to_json().unwrap(),
-    ).unwrap();
-    let run = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "review:attention", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, run, Some("completed"), None, &[CircuitStepOp {
-        node_id: "review_classifier".into(),
-        status: "completed".into(),
-        outcome: Some(Some("working".into())),
-        error: None,
-        agent_node_id: None,
-        attempt: 1,
-        fresh_attempt: false,
-    }]).unwrap();
+    )
+    .unwrap();
+    let run = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "review:attention", "{}")
+        .unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
+        run,
+        Some("completed"),
+        None,
+        &[CircuitStepOp {
+            node_id: "review_classifier".into(),
+            status: "completed".into(),
+            outcome: Some(Some("working".into())),
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }],
+    )
+    .unwrap();
 
     let rows = list_circuits_with_recent_runs_inner(&conn, mesh.id, 0).unwrap();
-    assert_eq!(rows[0].1.iter().map(|ledger| ledger.run.id).collect::<Vec<_>>(), vec![run]);
+    assert_eq!(
+        rows[0]
+            .1
+            .iter()
+            .map(|ledger| ledger.run.id)
+            .collect::<Vec<_>>(),
+        vec![run]
+    );
 }
 
 #[test]
@@ -1403,10 +2657,13 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cancel-mesh", "/tmp/circuit-cancel").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cancel", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "cancel", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
     set_circuit_run_state_inner(&conn, run_id, "running").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -1423,16 +2680,25 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     .unwrap();
 
     assert!(reserve_circuit_agent_slots_locked(&mut conn, run_id, 2).unwrap());
-    assert_eq!(circuit_agent_slots_reserved_inner(&conn, run_id).unwrap(), 2);
+    assert_eq!(
+        circuit_agent_slots_reserved_inner(&conn, run_id).unwrap(),
+        2
+    );
 
     let agents = cancel_circuit_run_locked(&mut conn, run_id).unwrap();
     assert_eq!(agents, vec![991]);
-    assert_eq!(get_circuit_run_inner(&conn, run_id).unwrap().unwrap().state, "cancelled");
+    assert_eq!(
+        get_circuit_run_inner(&conn, run_id).unwrap().unwrap().state,
+        "cancelled"
+    );
     let cancelled_step = list_circuit_run_steps_inner(&conn, run_id).unwrap();
     assert_eq!(cancelled_step[0].status, "cancelled");
     assert_eq!(cancelled_step[0].outcome.as_deref(), Some("cancelled"));
     assert_eq!(count_active_circuit_runs_inner(&conn, mesh.id).unwrap(), 0);
-    assert_eq!(circuit_agent_slots_reserved_inner(&conn, run_id).unwrap(), 0);
+    assert_eq!(
+        circuit_agent_slots_reserved_inner(&conn, run_id).unwrap(),
+        0
+    );
     assert_eq!(
         cancel_circuit_run_locked(&mut conn, run_id).unwrap(),
         vec![991],
@@ -1442,7 +2708,6 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
         list_circuit_run_ids_for_cleanup_inner(&conn, circuit.id).unwrap(),
         vec![run_id]
     );
-
 }
 
 #[test]
@@ -1450,11 +2715,15 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cancel-race", "/tmp/circuit-cancel-race").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cancel race", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel-race", "{}").unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "cancel race", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel-race", "{}")
+            .unwrap();
 
     cancel_circuit_run_locked(&mut conn, run_id).unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         Some("running"),
         Some(r#"{"stale":true}"#),
@@ -1474,20 +2743,29 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
     let run = get_circuit_run_inner(&conn, run_id).unwrap().unwrap();
     assert_eq!(run.state, "cancelled");
     assert_eq!(run.context_json, "{}");
-    assert!(list_circuit_run_steps_inner(&conn, run_id).unwrap().is_empty());
+    assert!(list_circuit_run_steps_inner(&conn, run_id)
+        .unwrap()
+        .is_empty());
     assert!(!transition_circuit_run_state_inner(&conn, run_id, "running", "paused").unwrap());
-
 }
 
 #[test]
 fn circuit_agent_ownership_comes_from_the_step_ledger() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-owner-mesh", "/tmp/circuit-owner").unwrap();
-    let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "issue autopilot", "", 2, &sample_graph_json())
-            .unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:42:run", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "issue autopilot",
+        "",
+        2,
+        &sample_graph_json(),
+    )
+    .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:42:run", "{}").unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         Some("running"),
         None,
@@ -1502,7 +2780,8 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         }],
     )
     .unwrap();
-    let agent = create_agent_node_inner(&conn, 
+    let agent = create_agent_node_inner(
+        &conn,
         mesh.id,
         "implementer",
         "/tmp/circuit-owner-node",
@@ -1523,22 +2802,22 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
     // per-test in-memory DB (issue #1691), this test's own rows are
     // the only ones visible to it, so the delta equals the absolute
     // count this test contributes.
-    let active_before = count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap();
+    let active_before = count_active_circuit_agent_nodes_total_inner(&conn).unwrap();
     set_circuit_step_agent_node_with_parent_inner(&conn, run_id, "spawn", agent.id, None).unwrap();
     assert_eq!(
-        count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap(),
+        count_active_circuit_agent_nodes_total_inner(&conn,).unwrap(),
         active_before + 1,
         "setting the spawn step's agent_node_id increments the active count by 1"
     );
-    let retained_before = count_retained_circuit_agent_nodes_total_inner(&conn, ).unwrap();
+    let retained_before = count_retained_circuit_agent_nodes_total_inner(&conn).unwrap();
     commit_circuit_advance_locked(&mut conn, run_id, Some("completed"), None, &[]).unwrap();
     assert_eq!(
-        count_retained_circuit_agent_nodes_total_inner(&conn, ).unwrap(),
+        count_retained_circuit_agent_nodes_total_inner(&conn,).unwrap(),
         retained_before + 1,
         "moving the run to `completed` shifts our agent from active to retained"
     );
 
-    let ownerships = list_circuit_agent_ownerships_inner(&conn, ).unwrap();
+    let ownerships = list_circuit_agent_ownerships_inner(&conn).unwrap();
     assert!(
         ownerships.iter().any(|row| {
             row.0 == agent.id
@@ -1560,22 +2839,23 @@ fn circuit_agent_ownership_comes_from_the_step_ledger() {
         "clearing this step removes this agent's ownership without assuming other parallel tests are idle"
     );
     assert_eq!(
-        count_retained_circuit_agent_nodes_total_inner(&conn, ).unwrap(),
+        count_retained_circuit_agent_nodes_total_inner(&conn,).unwrap(),
         retained_before,
         "clearing the step drops the retained count back to the pre-terminal baseline"
     );
-
 }
 
 #[test]
 fn step_upsert_never_duplicates_a_node_row() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-upsert-mesh", "/tmp/circuit-upsert").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "dup", "", 1, &sample_graph_json()).unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "dup", "", 1, &sample_graph_json()).unwrap();
     let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "", "{}").unwrap();
 
-for _ in 0..3 {
-        commit_circuit_advance_locked(&mut conn, 
+    for _ in 0..3 {
+        commit_circuit_advance_locked(
+            &mut conn,
             run_id,
             None,
             None,
@@ -1594,7 +2874,6 @@ for _ in 0..3 {
     let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
     assert_eq!(steps.len(), 1, "UNIQUE(run_id, node_id) must dedupe");
     assert_eq!(steps[0].agent_node_id, Some(7));
-
 }
 
 #[test]
@@ -1606,9 +2885,12 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     // WHICH mechanism it pins: the explicit deletes.
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cascade-mesh", "/tmp/circuit-cascade").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "doomed", "", 1, &sample_graph_json()).unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "doomed", "", 1, &sample_graph_json())
+            .unwrap();
     let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -1618,8 +2900,8 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
@@ -1650,18 +2932,26 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     };
     assert_eq!(remaining_runs, 0, "runs must cascade with their circuit");
     assert_eq!(remaining_steps, 0, "steps must cascade with their run");
-
 }
 
 #[test]
 fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
     // delete_mesh must not leave circuit-ledger orphans behind.
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-mesh-cascade", "/tmp/circuit-mesh-cascade").unwrap();
-    let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "doomed-with-mesh", "", 1, &sample_graph_json()).unwrap();
+    let mesh =
+        create_mesh_inner(&conn, "circuit-mesh-cascade", "/tmp/circuit-mesh-cascade").unwrap();
+    let circuit = create_autopilot_circuit_inner(
+        &conn,
+        mesh.id,
+        "doomed-with-mesh",
+        "",
+        1,
+        &sample_graph_json(),
+    )
+    .unwrap();
     let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -1671,15 +2961,17 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
             outcome: Some(Some("completed".into())),
             error: None,
             agent_node_id: None,
-                attempt: 1,
-        fresh_attempt: false,
+            attempt: 1,
+            fresh_attempt: false,
         }],
     )
     .unwrap();
 
     delete_mesh_inner(&conn, mesh.id).unwrap();
 
-    assert!(list_autopilot_circuits_inner(&conn, mesh.id).unwrap().is_empty());
+    assert!(list_autopilot_circuits_inner(&conn, mesh.id)
+        .unwrap()
+        .is_empty());
     let remaining_runs: i64 = {
         // (using outer conn)
         conn.query_row(
@@ -1690,7 +2982,6 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
         .unwrap()
     };
     assert_eq!(remaining_runs, 0);
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,21 +2993,25 @@ fn concurrency_counters_count_only_running_work() {
     let mut conn = isolated_test_conn();
     let mesh_a = create_mesh_inner(&conn, "circuit-count-a", "/tmp/circuit-count-a").unwrap();
     let mesh_b = create_mesh_inner(&conn, "circuit-count-b", "/tmp/circuit-count-b").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh_a.id, "one", "", 4, &sample_graph_json()).unwrap();
-    let c2 = create_autopilot_circuit_inner(&conn, mesh_a.id, "two", "", 4, &sample_graph_json()).unwrap();
-    let cb = create_autopilot_circuit_inner(&conn, mesh_b.id, "bee", "", 4, &sample_graph_json()).unwrap();
+    let c1 = create_autopilot_circuit_inner(&conn, mesh_a.id, "one", "", 4, &sample_graph_json())
+        .unwrap();
+    let c2 = create_autopilot_circuit_inner(&conn, mesh_a.id, "two", "", 4, &sample_graph_json())
+        .unwrap();
+    let cb = create_autopilot_circuit_inner(&conn, mesh_b.id, "bee", "", 4, &sample_graph_json())
+        .unwrap();
 
     // `count_active_circuit_agent_nodes_total` is global. With the
     // per-test in-memory DB (issue #1691), this test's rows are the
     // only ones visible to it, so the delta equals the absolute count
     // we just contributed (3 distinct agents — 101, 102, 999).
     // buildmesh-gh1655-circuit-tests-isolation.
-    let active_before = count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap();
+    let active_before = count_active_circuit_agent_nodes_total_inner(&conn).unwrap();
 
     // Circuit one: one completed step + one running step piloting agent
     // 101 + one queued step (must not count).
     let r1 = create_circuit_run_locked(&mut conn, c1.id, mesh_a.id, "", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         r1,
         Some("running"),
         None,
@@ -1728,7 +3023,7 @@ fn concurrency_counters_count_only_running_work() {
                 error: None,
                 agent_node_id: None,
                 attempt: 1,
-            fresh_attempt: false,
+                fresh_attempt: false,
             },
             CircuitStepOp {
                 node_id: "spawn".into(),
@@ -1746,15 +3041,16 @@ fn concurrency_counters_count_only_running_work() {
                 error: None,
                 agent_node_id: None,
                 attempt: 1,
-            fresh_attempt: false,
+                fresh_attempt: false,
             },
         ],
     )
     .unwrap();
 
     // Circuit two (same mesh): running step piloting agent 102.
-let r2 = create_circuit_run_locked(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    let r2 = create_circuit_run_locked(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap();
+    commit_circuit_advance_locked(
+        &mut conn,
         r2,
         Some("running"),
         None,
@@ -1772,7 +3068,8 @@ let r2 = create_circuit_run_locked(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap
 
     // Mesh B contributes to the app-wide active circuit-agent count.
     let rb = create_circuit_run_locked(&mut conn, cb.id, mesh_b.id, "", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         rb,
         Some("running"),
         None,
@@ -1791,11 +3088,10 @@ let r2 = create_circuit_run_locked(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap
     assert_eq!(count_running_circuit_steps_inner(&conn, c1.id).unwrap(), 1);
     assert_eq!(count_running_circuit_steps_inner(&conn, c2.id).unwrap(), 1);
     assert_eq!(
-        count_active_circuit_agent_nodes_total_inner(&conn, ).unwrap(),
+        count_active_circuit_agent_nodes_total_inner(&conn,).unwrap(),
         active_before + 3,
         "three distinct piloted agents (101, 102, 999) appear across all active circuit runs"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1812,9 +3108,12 @@ let r2 = create_circuit_run_locked(&mut conn, c2.id, mesh_a.id, "", "{}").unwrap
 fn count_active_circuit_runs_includes_running_paused_only() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-run-count", "/tmp/circuit-run-count").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
-    let c2 = create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
-    let c3 = create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+    let c2 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
+    let c3 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
 
     // One pending, one running, one paused — only the latter two count.
     let r_pending = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
@@ -1835,7 +3134,6 @@ fn count_active_circuit_runs_includes_running_paused_only() {
     // (gated, not deleted — the next pass re-evaluates it).
     let still_there = get_circuit_run_inner(&conn, r_pending).unwrap().unwrap();
     assert_eq!(still_there.state, "pending");
-
 }
 
 /// Terminal runs (`completed`, `failed`) do NOT count toward the
@@ -1846,11 +3144,18 @@ fn count_active_circuit_runs_includes_running_paused_only() {
 #[test]
 fn count_active_circuit_runs_excludes_terminal_states() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-run-count-terminal", "/tmp/circuit-run-count-terminal")
-        .unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
-    let c2 = create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
-    let c3 = create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-run-count-terminal",
+        "/tmp/circuit-run-count-terminal",
+    )
+    .unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+    let c2 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
+    let c3 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
 
     let r_done = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     commit_circuit_advance_locked(&mut conn, r_done, Some("completed"), None, &[]).unwrap();
@@ -1866,13 +3171,24 @@ fn count_active_circuit_runs_excludes_terminal_states() {
         "only running/paused count; pending and terminal both excluded"
     );
 
-
     // Sanity: the terminal commits didn't wipe rows. r_pending is
     // still there pending (will be re-evaluated next worker pass);
     // r_done and r_dead are terminal in DB.
-    assert_eq!(get_circuit_run_inner(&conn, r_done).unwrap().unwrap().state, "completed");
-    assert_eq!(get_circuit_run_inner(&conn, r_dead).unwrap().unwrap().state, "failed");
-    assert_eq!(get_circuit_run_inner(&conn, r_pending).unwrap().unwrap().state, "pending");
+    assert_eq!(
+        get_circuit_run_inner(&conn, r_done).unwrap().unwrap().state,
+        "completed"
+    );
+    assert_eq!(
+        get_circuit_run_inner(&conn, r_dead).unwrap().unwrap().state,
+        "failed"
+    );
+    assert_eq!(
+        get_circuit_run_inner(&conn, r_pending)
+            .unwrap()
+            .unwrap()
+            .state,
+        "pending"
+    );
 }
 
 /// Single-release idempotency lives inside `commit_circuit_advance`'s
@@ -1883,8 +3199,14 @@ fn count_active_circuit_runs_excludes_terminal_states() {
 #[test]
 fn commit_circuit_advance_terminal_state_is_idempotent_under_double_signal() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-commit-term-idem", "/tmp/circuit-commit-term-idem").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-commit-term-idem",
+        "/tmp/circuit-commit-term-idem",
+    )
+    .unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
     let r1 = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     set_circuit_run_state_inner(&conn, r1, "running").unwrap();
 
@@ -1904,7 +3226,6 @@ fn commit_circuit_advance_terminal_state_is_idempotent_under_double_signal() {
         row.state, "completed",
         "second terminal commit must not overwrite the first"
     );
-
 }
 
 /// A commit against a row that's already in a terminal state (e.g.
@@ -1914,8 +3235,14 @@ fn commit_circuit_advance_terminal_state_is_idempotent_under_double_signal() {
 #[test]
 fn commit_circuit_advance_terminal_state_skips_already_terminal_runs() {
     let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(&conn, "circuit-commit-term-skip", "/tmp/circuit-commit-term-skip").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+    let mesh = create_mesh_inner(
+        &conn,
+        "circuit-commit-term-skip",
+        "/tmp/circuit-commit-term-skip",
+    )
+    .unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
     let r1 = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     set_circuit_run_state_inner(&conn, r1, "failed").unwrap();
 
@@ -1927,7 +3254,6 @@ fn commit_circuit_advance_terminal_state_skips_already_terminal_runs() {
         row.state, "failed",
         "must not overwrite an existing terminal state"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1939,7 +3265,8 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-active-mesh", "/tmp/circuit-active").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "watched", "", 3, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "watched", "", 3, &sample_graph_json())
+            .unwrap();
     set_autopilot_circuit_enabled_inner(&conn, circuit.id, true).unwrap();
 
     let done = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
@@ -1949,7 +3276,7 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     // With the per-test in-memory DB (issue #1691), the only runs
     // visible to this test are the two we just created — the
     // scope-to-this-circuit filter is now belt-and-suspenders.
-    let active = list_active_circuit_runs_inner(&conn, )
+    let active = list_active_circuit_runs_inner(&conn)
         .unwrap()
         .into_iter()
         .filter(|r| r.run.circuit_id == circuit.id)
@@ -1961,10 +3288,12 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     assert_eq!(active[0].circuit_concurrency_limit, 3);
     assert!(active[0].circuit_enabled);
     assert_eq!(
-        CircuitGraph::from_json(&active[0].circuit_graph_json).unwrap().nodes.len(),
+        CircuitGraph::from_json(&active[0].circuit_graph_json)
+            .unwrap()
+            .nodes
+            .len(),
         4
     );
-
 }
 
 #[test]
@@ -1974,20 +3303,28 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
     // DIFFERENT circuit reacting to the same identity is independent.
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-dedupe-mesh", "/tmp/circuit-dedupe").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh.id, "one", "", 1, &sample_graph_json()).unwrap();
-    let c2 = create_autopilot_circuit_inner(&conn, mesh.id, "two", "", 1, &sample_graph_json()).unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "one", "", 1, &sample_graph_json()).unwrap();
+    let c2 =
+        create_autopilot_circuit_inner(&conn, mesh.id, "two", "", 1, &sample_graph_json()).unwrap();
 
-    let first = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+    let first =
+        create_circuit_run_locked(&mut conn, c1.id, mesh.id, "issue:42:buildmesh:run", "{}")
+            .unwrap();
     let replay =
-        create_circuit_run_locked(&mut conn, c1.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
-    assert_eq!(first, replay, "same circuit + identity must dedupe to one run");
+        create_circuit_run_locked(&mut conn, c1.id, mesh.id, "issue:42:buildmesh:run", "{}")
+            .unwrap();
+    assert_eq!(
+        first, replay,
+        "same circuit + identity must dedupe to one run"
+    );
     let independent =
-        create_circuit_run_locked(&mut conn, c2.id, mesh.id, "issue:42:buildmesh:run", "{}").unwrap();
+        create_circuit_run_locked(&mut conn, c2.id, mesh.id, "issue:42:buildmesh:run", "{}")
+            .unwrap();
     assert_ne!(
         first, independent,
         "a second circuit may process the same source independently"
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2000,9 +3337,14 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     let conn = isolated_test_conn();
     let mesh_a = create_mesh_inner(&conn, "circuit-enabled-a", "/tmp/circuit-enabled-a").unwrap();
     let mesh_b = create_mesh_inner(&conn, "circuit-enabled-b", "/tmp/circuit-enabled-b").unwrap();
-    let on_a = create_autopilot_circuit_inner(&conn, mesh_a.id, "on-a", "", 1, &sample_graph_json()).unwrap();
-    let on_b = create_autopilot_circuit_inner(&conn, mesh_b.id, "on-b", "", 1, &sample_graph_json()).unwrap();
-    let off = create_autopilot_circuit_inner(&conn, mesh_a.id, "off", "", 1, &sample_graph_json()).unwrap();
+    let on_a =
+        create_autopilot_circuit_inner(&conn, mesh_a.id, "on-a", "", 1, &sample_graph_json())
+            .unwrap();
+    let on_b =
+        create_autopilot_circuit_inner(&conn, mesh_b.id, "on-b", "", 1, &sample_graph_json())
+            .unwrap();
+    let off = create_autopilot_circuit_inner(&conn, mesh_a.id, "off", "", 1, &sample_graph_json())
+        .unwrap();
     set_autopilot_circuit_enabled_inner(&conn, on_a.id, true).unwrap();
     set_autopilot_circuit_enabled_inner(&conn, on_b.id, true).unwrap();
 
@@ -2010,25 +3352,31 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     // visible to this test are the three we just created. The id
     // filter is now belt-and-suspenders against future test additions
     // that might inadvertently create a fourth enabled circuit.
-    let listed: Vec<i64> = list_enabled_circuits_inner(&conn, )
+    let listed: Vec<i64> = list_enabled_circuits_inner(&conn)
         .unwrap()
         .into_iter()
         .map(|c| c.id)
         .filter(|id| [on_a.id, on_b.id, off.id].contains(id))
         .collect();
     assert_eq!(listed.len(), 2, "disabled circuits must not appear");
-    assert!(listed.contains(&on_a.id) && listed.contains(&on_b.id), "listing spans meshes");
-
+    assert!(
+        listed.contains(&on_a.id) && listed.contains(&on_b.id),
+        "listing spans meshes"
+    );
 }
 
 #[test]
 fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cooldown-mesh", "/tmp/circuit-cooldown").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "paced", "", 1, &sample_graph_json()).unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "paced", "", 1, &sample_graph_json())
+            .unwrap();
 
     assert!(
-        latest_circuit_run_created_at_inner(&conn, circuit.id).unwrap().is_none(),
+        latest_circuit_run_created_at_inner(&conn, circuit.id)
+            .unwrap()
+            .is_none(),
         "a never-fired circuit has no cooldown anchor"
     );
 
@@ -2036,11 +3384,18 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     std::thread::sleep(std::time::Duration::from_millis(1100));
     create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "interval:2500", "{}").unwrap();
 
-    let latest = latest_circuit_run_created_at_inner(&conn, circuit.id).unwrap().unwrap();
+    let latest = latest_circuit_run_created_at_inner(&conn, circuit.id)
+        .unwrap()
+        .unwrap();
     // MAX(created_at) must be the SECOND run's timestamp — the sleep
     // guarantees SQLite's datetime strings differ and sort correctly.
     let runs = list_circuit_runs_inner(&conn, circuit.id, 10).unwrap();
-    let newest = runs.iter().map(|r| r.created_at.as_str()).max().unwrap().to_string();
+    let newest = runs
+        .iter()
+        .map(|r| r.created_at.as_str())
+        .max()
+        .unwrap()
+        .to_string();
     assert_eq!(latest, newest);
 
     // The identity set the GitHub poll pass pre-filters against.
@@ -2048,7 +3403,6 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     assert_eq!(identities.len(), 2);
     assert!(identities.contains(&"interval:1000".to_string()));
     assert!(identities.contains(&"interval:2500".to_string()));
-
 }
 
 // ---------------------------------------------------------------------------
@@ -2127,7 +3481,10 @@ fn evolve_to_v34_creates_circuit_tables_and_queue_index_from_a_v33_db() {
             |row| row.get::<_, i64>(0).map(|c| c > 0),
         )
         .unwrap();
-    assert!(queue_index, "queue ordering must have a composite mesh/state/position index");
+    assert!(
+        queue_index,
+        "queue ordering must have a composite mesh/state/position index"
+    );
 
     // Idempotent: re-running the migration must not error or duplicate.
     crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
@@ -2216,7 +3573,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(circuit_id, 1, "run history moves to the canonical preset row");
+    assert_eq!(
+        circuit_id, 1,
+        "run history moves to the canonical preset row"
+    );
     assert_eq!(source_id, Some(7));
     let missing_source: Option<i64> = conn
         .query_row(
@@ -2225,7 +3585,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(missing_source, None, "deleted historical sources remain nullable during migration");
+    assert_eq!(
+        missing_source, None,
+        "deleted historical sources remain nullable during migration"
+    );
     let unique_preset_index: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'uq_autopilot_circuits_preset_mesh'",
@@ -2233,7 +3596,10 @@ fn review_preset_migration_collapses_duplicates_and_backfills_source_binding() {
             |row| row.get::<_, i64>(0).map(|count| count > 0),
         )
         .unwrap();
-    assert!(unique_preset_index, "each mesh can have only one review preset row");
+    assert!(
+        unique_preset_index,
+        "each mesh can have only one review preset row"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2245,11 +3611,13 @@ fn paused_runs_stay_active_and_counters_count_them() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-pause-mesh", "/tmp/circuit-pause").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "pausable", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "pausable", "", 4, &sample_graph_json())
+            .unwrap();
 
     // A running step on a RUNNING run occupies one slot.
     let r1 = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         r1,
         Some("running"),
         None,
@@ -2269,29 +3637,45 @@ fn paused_runs_stay_active_and_counters_count_them() {
     // With the per-test in-memory DB (issue #1691), the only run visible
     // to this test is `r1`; the circuit-scoped filter is belt-and-suspenders.
     set_circuit_run_state_inner(&conn, r1, "paused").unwrap();
-    let active = list_active_circuit_runs_inner(&conn, ).unwrap();
-    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
-    assert_eq!(mine.len(), 1, "a paused run stays active (it resumes later)");
+    let active = list_active_circuit_runs_inner(&conn).unwrap();
+    let mine: Vec<_> = active
+        .iter()
+        .filter(|a| a.run.circuit_id == circuit.id)
+        .collect();
+    assert_eq!(
+        mine.len(),
+        1,
+        "a paused run stays active (it resumes later)"
+    );
     assert_eq!(mine[0].run.state, "paused");
-    assert_eq!(count_running_circuit_steps_inner(&conn, circuit.id).unwrap(), 1);
+    assert_eq!(
+        count_running_circuit_steps_inner(&conn, circuit.id).unwrap(),
+        1
+    );
 
     // Resume flips the state back through the same setter.
     set_circuit_run_state_inner(&conn, r1, "running").unwrap();
-    let active = list_active_circuit_runs_inner(&conn, ).unwrap();
-    let mine: Vec<_> = active.iter().filter(|a| a.run.circuit_id == circuit.id).collect();
+    let active = list_active_circuit_runs_inner(&conn).unwrap();
+    let mine: Vec<_> = active
+        .iter()
+        .filter(|a| a.run.circuit_id == circuit.id)
+        .collect();
     assert_eq!(mine[0].run.state, "running");
-
 }
 
 #[test]
 fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-retry-mesh", "/tmp/circuit-retry").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "flaky", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "flaky", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
 
     // Round 1 fails with an error.
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -2308,7 +3692,8 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     .unwrap();
 
     // Retry reset: fresh_attempt clears outcome/error and stamps attempt 2.
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -2329,35 +3714,54 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     assert_eq!(work.status, StepStatus::Queued.as_db_str());
     assert_eq!(work.attempt, 2, "the retry's execution count persists");
     assert_eq!(work.outcome, None, "fresh attempt clears the stale outcome");
-    assert_eq!(work.error_message, None, "fresh attempt clears the stale error");
+    assert_eq!(
+        work.error_message, None,
+        "fresh attempt clears the stale error"
+    );
     assert!(work.started_at.is_some());
-    assert!(work.completed_at.is_none(), "a reset step is back in flight");
-
+    assert!(
+        work.completed_at.is_none(),
+        "a reset step is back in flight"
+    );
 }
 
 #[test]
 fn explicit_error_clear_works_for_running_and_completed_steps() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "classifier recovery", "/tmp/classifier-recovery").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
     let mut op = CircuitStepOp {
-        node_id: "classifier".into(), status: "running".into(), outcome: None,
-        error: Some(Some("Classifier unavailable; retrying".into())), agent_node_id: None,
-        attempt: 2, fresh_attempt: false,
+        node_id: "classifier".into(),
+        status: "running".into(),
+        outcome: None,
+        error: Some(Some("Classifier unavailable; retrying".into())),
+        agent_node_id: None,
+        attempt: 2,
+        fresh_attempt: false,
     };
     commit_circuit_advance_locked(&mut conn, run_id, None, None, &[op.clone()]).unwrap();
-    assert!(list_circuit_run_steps_inner(&conn, run_id).unwrap()[0].error_message.is_some());
+    assert!(list_circuit_run_steps_inner(&conn, run_id).unwrap()[0]
+        .error_message
+        .is_some());
     op.error = Some(None);
     commit_circuit_advance_locked(&mut conn, run_id, None, None, &[op.clone()]).unwrap();
-    assert_eq!(list_circuit_run_steps_inner(&conn, run_id).unwrap()[0].error_message, None);
+    assert_eq!(
+        list_circuit_run_steps_inner(&conn, run_id).unwrap()[0].error_message,
+        None
+    );
     op.error = Some(Some("stale again".into()));
     commit_circuit_advance_locked(&mut conn, run_id, None, None, &[op.clone()]).unwrap();
     op.status = "completed".into();
     op.outcome = Some(Some("completed".into()));
     op.error = Some(None);
     commit_circuit_advance_locked(&mut conn, run_id, None, None, &[op]).unwrap();
-    let step = list_circuit_run_steps_inner(&conn, run_id).unwrap().remove(0);
+    let step = list_circuit_run_steps_inner(&conn, run_id)
+        .unwrap()
+        .remove(0);
     assert_eq!(step.error_message, None);
     assert_eq!(step.attempt, 2);
     assert!(step.completed_at.is_some());
@@ -2367,11 +3771,15 @@ fn explicit_error_clear_works_for_running_and_completed_steps() {
 fn gate_outcomes_stamp_completed_at_and_round_trip() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-gate-mesh", "/tmp/circuit-gate").unwrap();
-    let circuit = create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json()).unwrap();
-    let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json())
+            .unwrap();
+    let run_id =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
 
     for outcome in ["blocked", "working", "green", "red"] {
-        commit_circuit_advance_locked(&mut conn, 
+        commit_circuit_advance_locked(
+            &mut conn,
             run_id,
             None,
             None,
@@ -2389,7 +3797,8 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
     }
 
     // A blocked STATUS (collaborator approval parking) is not terminal.
-    commit_circuit_advance_locked(&mut conn, 
+    commit_circuit_advance_locked(
+        &mut conn,
         run_id,
         None,
         None,
@@ -2407,7 +3816,10 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
 
     let steps = list_circuit_run_steps_inner(&conn, run_id).unwrap();
     for outcome in ["blocked", "working", "green", "red"] {
-        let step = steps.iter().find(|s| s.node_id == format!("gate-{outcome}")).unwrap();
+        let step = steps
+            .iter()
+            .find(|s| s.node_id == format!("gate-{outcome}"))
+            .unwrap();
         assert_eq!(step.outcome.as_deref(), Some(outcome));
         assert!(
             step.completed_at.is_some(),
@@ -2419,5 +3831,4 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
         parked.completed_at.is_none(),
         "a blocked status parks without completing"
     );
-
 }

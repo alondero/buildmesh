@@ -80,7 +80,7 @@
 //! `test_v8_to_v9_adds_source_issue_via_safety_net` and the new
 //! `evolve_to_handles_v6_to_current` test.
 
-use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
+use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 
 /// The schema version this build expects. Bumped per PR whenever a new
 /// migration entry is added to [`all_column_specs`].
@@ -326,55 +326,241 @@ const SPECS: &[ColumnSpec] = &[
     // version-gated pass (any vN+1+ already has them) but they still
     // participate in the always-run pass, where the pragma check
     // makes them no-ops.
-    ColumnSpec { version: 1, table: "meshes", column: "id", type_with_default: "INTEGER PRIMARY KEY AUTOINCREMENT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "meshes", column: "name", type_with_default: "TEXT NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "meshes", column: "path", type_with_default: "TEXT NOT NULL UNIQUE", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "meshes", column: "layout", type_with_default: "TEXT NOT NULL DEFAULT 'grid'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "meshes", column: "position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "meshes", column: "created_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "id",
+        type_with_default: "INTEGER PRIMARY KEY AUTOINCREMENT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "name",
+        type_with_default: "TEXT NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "path",
+        type_with_default: "TEXT NOT NULL UNIQUE",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "layout",
+        type_with_default: "TEXT NOT NULL DEFAULT 'grid'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "position",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "meshes",
+        column: "created_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
     // v8 — user-tunable columns (issue #456).
-    ColumnSpec { version: 8, table: "meshes", column: "build_command", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "run_command", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "model", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "effort", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "use_worktree", type_with_default: "INTEGER NOT NULL DEFAULT 1", read_default: ReadDefault::CoalesceInt(1) },
-    ColumnSpec { version: 8, table: "meshes", column: "worktree_mode", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "default_provider", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 8, table: "meshes", column: "base_ref", type_with_default: "TEXT NOT NULL DEFAULT 'origin/main'", read_default: ReadDefault::CoalesceText("origin/main") },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "build_command",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "run_command",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "model",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "effort",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "use_worktree",
+        type_with_default: "INTEGER NOT NULL DEFAULT 1",
+        read_default: ReadDefault::CoalesceInt(1),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "worktree_mode",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "default_provider",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 8,
+        table: "meshes",
+        column: "base_ref",
+        type_with_default: "TEXT NOT NULL DEFAULT 'origin/main'",
+        read_default: ReadDefault::CoalesceText("origin/main"),
+    },
     // v17 — Scratch Pad (issue #516). NOT NULL + DEFAULT '' so the
     // no-notes case is indistinguishable from the already-has-notes
     // case at the read boundary.
-    ColumnSpec { version: 17, table: "meshes", column: "scratchpad", type_with_default: "TEXT NOT NULL DEFAULT ''", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 17,
+        table: "meshes",
+        column: "scratchpad",
+        type_with_default: "TEXT NOT NULL DEFAULT ''",
+        read_default: ReadDefault::Nullable,
+    },
     // v18 — OS-level sandbox toggle (#497/#498). Off by default (0).
-    ColumnSpec { version: 18, table: "meshes", column: "sandbox", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    ColumnSpec {
+        version: 18,
+        table: "meshes",
+        column: "sandbox",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
     // v22 — pre-spawn pool target (issue #611). ALTER-time default
     // is 0 (feature off); v24 changed the inline CREATE default to 1
     // (ADR 0020, pool on by default). The flip is captured by the
     // ONE_SHOT_BACKFILLS v24 entry on the upgrade path; pre-v22 reads
     // via COALESCE(col, 0) — the ALTER-time default — which is the
     // correct "feature off" semantics for those DBs.
-    ColumnSpec { version: 22, table: "meshes", column: "pre_spawn_pool_size", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    ColumnSpec {
+        version: 22,
+        table: "meshes",
+        column: "pre_spawn_pool_size",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
     // v25 — per-mesh accent colour (user-picked hex). Nullable.
-    ColumnSpec { version: 25, table: "meshes", column: "color", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
+    ColumnSpec {
+        version: 25,
+        table: "meshes",
+        column: "color",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
     // v26 — Autopilot Policy (issue #481).
-    ColumnSpec { version: 26, table: "meshes", column: "autopilot_enabled", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
-    ColumnSpec { version: 26, table: "meshes", column: "autopilot_trigger_label", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 26, table: "meshes", column: "autopilot_concurrency_limit", type_with_default: "INTEGER NOT NULL DEFAULT 2", read_default: ReadDefault::CoalesceInt(2) },
-    ColumnSpec { version: 26, table: "meshes", column: "autopilot_provider", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 26, table: "meshes", column: "autopilot_action_on_success", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
+    ColumnSpec {
+        version: 26,
+        table: "meshes",
+        column: "autopilot_enabled",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
+    ColumnSpec {
+        version: 26,
+        table: "meshes",
+        column: "autopilot_trigger_label",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 26,
+        table: "meshes",
+        column: "autopilot_concurrency_limit",
+        type_with_default: "INTEGER NOT NULL DEFAULT 2",
+        read_default: ReadDefault::CoalesceInt(2),
+    },
+    ColumnSpec {
+        version: 26,
+        table: "meshes",
+        column: "autopilot_provider",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 26,
+        table: "meshes",
+        column: "autopilot_action_on_success",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
     // v27 — per-context build/run commands (issue #802).
-    ColumnSpec { version: 27, table: "meshes", column: "root_build_command", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 27, table: "meshes", column: "root_run_command", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
+    ColumnSpec {
+        version: 27,
+        table: "meshes",
+        column: "root_build_command",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 27,
+        table: "meshes",
+        column: "root_run_command",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
     // v30 — Looping Autopilot config (wayfinder #990 / ticket #991).
     // autopilot_mode default 'issue_driven' matches the v29 behaviour
     // byte-for-byte so the upgrade is invisible to the existing
     // autopilot flow.
-    ColumnSpec { version: 30, table: "meshes", column: "autopilot_mode", type_with_default: "TEXT NOT NULL DEFAULT 'issue_driven'", read_default: ReadDefault::CoalesceText("issue_driven") },
-    ColumnSpec { version: 30, table: "meshes", column: "loop_initial_prompt", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 30, table: "meshes", column: "loop_suffix_prompt", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-    ColumnSpec { version: 30, table: "meshes", column: "loop_max_iterations", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 30, table: "meshes", column: "loop_interval_seconds", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
-    ColumnSpec { version: 30, table: "meshes", column: "loop_consecutive_failures", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "autopilot_mode",
+        type_with_default: "TEXT NOT NULL DEFAULT 'issue_driven'",
+        read_default: ReadDefault::CoalesceText("issue_driven"),
+    },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "loop_initial_prompt",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "loop_suffix_prompt",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "loop_max_iterations",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "loop_interval_seconds",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
+    ColumnSpec {
+        version: 30,
+        table: "meshes",
+        column: "loop_consecutive_failures",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
     // v36 — Circuit-run capacity contract (issue #1467). Distinct from
     // `autopilot_concurrency_limit` (legacy Autopilot agent-node cap, line 296).
     // One unit = one admitted circuit run, regardless of how many agent
@@ -385,125 +571,418 @@ const SPECS: &[ColumnSpec] = &[
     // NULL when reading this column. The migration runner's column-walk
     // adds the column safely for upgrade paths; fresh-DB inlines inherit
     // the same DEFAULT through this registry entry.
-    ColumnSpec { version: 36, table: "meshes", column: "circuit_run_capacity", type_with_default: "INTEGER NOT NULL DEFAULT 2", read_default: ReadDefault::CoalesceInt(2) },
+    ColumnSpec {
+        version: 36,
+        table: "meshes",
+        column: "circuit_run_capacity",
+        type_with_default: "INTEGER NOT NULL DEFAULT 2",
+        read_default: ReadDefault::CoalesceInt(2),
+    },
     // v37 — Configurable Worktree Node directories (issue #1519).
     // Nullable TEXT; empty/absent reads back as `None` (inherit for
     // meshes, legacy fallback for nodes). No COALESCE — NULL is the
     // meaningful "not configured" shape.
-    ColumnSpec { version: 37, table: "meshes", column: "worktree_directory", type_with_default: "TEXT", read_default: ReadDefault::CoalesceText("") },
-
+    ColumnSpec {
+        version: 37,
+        table: "meshes",
+        column: "worktree_directory",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::CoalesceText(""),
+    },
     // ============================================================
     // agent_nodes
     // ============================================================
     // Initial CREATE columns. No COALESCE in the projection (these
     // are read via `Option<i64>`/`Option<String>` directly — the
     // column's nullable storage IS the read-default).
-    ColumnSpec { version: 1, table: "agent_nodes", column: "id", type_with_default: "INTEGER PRIMARY KEY AUTOINCREMENT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "mesh_id", type_with_default: "INTEGER NOT NULL REFERENCES meshes(id)", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "name", type_with_default: "TEXT NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "path", type_with_default: "TEXT NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "branch", type_with_default: "TEXT NOT NULL DEFAULT 'main'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "env", type_with_default: "TEXT NOT NULL DEFAULT 'windows'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "provider", type_with_default: "TEXT NOT NULL DEFAULT 'anthropic'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "status", type_with_default: "TEXT NOT NULL DEFAULT 'idle'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "cli_session_id", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "worktree_name", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "agent_nodes", column: "created_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "id",
+        type_with_default: "INTEGER PRIMARY KEY AUTOINCREMENT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "mesh_id",
+        type_with_default: "INTEGER NOT NULL REFERENCES meshes(id)",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "name",
+        type_with_default: "TEXT NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "path",
+        type_with_default: "TEXT NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "branch",
+        type_with_default: "TEXT NOT NULL DEFAULT 'main'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "env",
+        type_with_default: "TEXT NOT NULL DEFAULT 'windows'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "provider",
+        type_with_default: "TEXT NOT NULL DEFAULT 'anthropic'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "status",
+        type_with_default: "TEXT NOT NULL DEFAULT 'idle'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "cli_session_id",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "worktree_name",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "agent_nodes",
+        column: "created_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
     // v9 — issue spawn linkage.
-    ColumnSpec { version: 9, table: "agent_nodes", column: "source_issue", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 9,
+        table: "agent_nodes",
+        column: "source_issue",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
     // v11 — worktree toggle.
-    ColumnSpec { version: 11, table: "agent_nodes", column: "use_worktree", type_with_default: "INTEGER NOT NULL DEFAULT 1", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 11,
+        table: "agent_nodes",
+        column: "use_worktree",
+        type_with_default: "INTEGER NOT NULL DEFAULT 1",
+        read_default: ReadDefault::Nullable,
+    },
     // v13 — drag-to-reorder grid position.
-    ColumnSpec { version: 13, table: "agent_nodes", column: "position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 13,
+        table: "agent_nodes",
+        column: "position",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::Nullable,
+    },
     // v14 — status-changed-at (ADR-0008 spine). Nullable so the
     // backfill (`UPDATE ... SET status_changed_at = created_at`) can
     // run on pre-v14 rows without a non-constant default (SQLite
     // can't ALTER-add a non-constant default).
-    ColumnSpec { version: 14, table: "agent_nodes", column: "status_changed_at", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 14,
+        table: "agent_nodes",
+        column: "status_changed_at",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // v15 — PR-spawn linkage (issue #420).
-    ColumnSpec { version: 15, table: "agent_nodes", column: "source_pr", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 15,
+        table: "agent_nodes",
+        column: "source_pr",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
     // v16 — fork-PR metadata (issue #443) + pinned SHA (issue #444).
-    ColumnSpec { version: 16, table: "agent_nodes", column: "head_repo_owner", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 16, table: "agent_nodes", column: "head_repo_clone_url", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 16, table: "agent_nodes", column: "source_pr_pinned_sha", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 16,
+        table: "agent_nodes",
+        column: "head_repo_owner",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 16,
+        table: "agent_nodes",
+        column: "head_repo_clone_url",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 16,
+        table: "agent_nodes",
+        column: "source_pr_pinned_sha",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // v29 — Pinned Grid view mode (wayfinder #982 / ticket #984).
-    ColumnSpec { version: 29, table: "agent_nodes", column: "is_pinned", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 29,
+        table: "agent_nodes",
+        column: "is_pinned",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::Nullable,
+    },
     // v35 — Hook/attention signal health (issue #1364 §3). Layered nullable
     // TEXT column: `ok` / `degraded` / `unavailable`, or NULL before the
     // first provisioning outcome or callback. Never a status — the node
     // lifecycle status stays the primary state, this field explains whether
     // the harness's lifecycle signals can be trusted.
-    ColumnSpec { version: 35, table: "agent_nodes", column: "signal_health", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 35,
+        table: "agent_nodes",
+        column: "signal_health",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // v37 — Exact resolved Worktree Node dir persisted at creation
     // (issue #1519). NULL = legacy `<mesh>/.claude/worktrees/<name>`
     // fallback (pre-#1519 rows + Root Nodes).
-    ColumnSpec { version: 37, table: "agent_nodes", column: "worktree_path", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 37,
+        table: "agent_nodes",
+        column: "worktree_path",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // v39 — Fresh-spawn generation anchor used by historic session recovery.
     // NULL means the node predates this field or has never been deliberately
     // reset to a fresh conversation.
-    ColumnSpec { version: 39, table: "agent_nodes", column: "session_started_at", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 39,
+        table: "agent_nodes",
+        column: "session_started_at",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
     // v44 — immutable saved spawn configuration snapshot used by the node.
-    ColumnSpec { version: 44, table: "agent_nodes", column: "spawn_configuration", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 46, table: "agent_nodes", column: "lifecycle_snapshot", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-
+    ColumnSpec {
+        version: 44,
+        table: "agent_nodes",
+        column: "spawn_configuration",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 46,
+        table: "agent_nodes",
+        column: "lifecycle_snapshot",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // ============================================================
     // autopilot_runs
     // ============================================================
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "node_id", type_with_default: "INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "mesh_id", type_with_default: "INTEGER NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "issue_number", type_with_default: "INTEGER NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "state", type_with_default: "TEXT NOT NULL DEFAULT 'implementing'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "attempts", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "pr_number", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "pr_url", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "created_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "autopilot_runs", column: "updated_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "node_id",
+        type_with_default: "INTEGER PRIMARY KEY REFERENCES agent_nodes(id) ON DELETE CASCADE",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "mesh_id",
+        type_with_default: "INTEGER NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "issue_number",
+        type_with_default: "INTEGER NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "state",
+        type_with_default: "TEXT NOT NULL DEFAULT 'implementing'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "attempts",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "pr_number",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "pr_url",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "created_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "autopilot_runs",
+        column: "updated_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
     // v31 — Looping Autopilot iteration marker (ticket #992). NULL
     // for issue-driven runs (the pre-v31 default; preserves every
     // existing row).
-    ColumnSpec { version: 31, table: "autopilot_runs", column: "loop_iteration", type_with_default: "INTEGER", read_default: ReadDefault::Nullable },
-
+    ColumnSpec {
+        version: 31,
+        table: "autopilot_runs",
+        column: "loop_iteration",
+        type_with_default: "INTEGER",
+        read_default: ReadDefault::Nullable,
+    },
     // ============================================================
     // autopilot_circuits
     // ============================================================
     // v40 - built-in review preset rows are durable execution templates,
     // but are not user-authored blueprints and stay hidden from the editor.
-    ColumnSpec { version: 40, table: "autopilot_circuits", column: "is_preset", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
-
+    ColumnSpec {
+        version: 40,
+        table: "autopilot_circuits",
+        column: "is_preset",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
     // autopilot_circuit_runs
     // ============================================================
     // v38: global per-mesh Circuit Run queue order. Kept off the run wire
     // model: the queue DTO exposes a 1-based rank instead of this storage key.
-    ColumnSpec { version: 38, table: "autopilot_circuit_runs", column: "queue_position", type_with_default: "INTEGER NOT NULL DEFAULT 0", read_default: ReadDefault::CoalesceInt(0) },
+    ColumnSpec {
+        version: 38,
+        table: "autopilot_circuit_runs",
+        column: "queue_position",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
     // v41 - relational source binding for title-bar-launched runs.
-    ColumnSpec { version: 41, table: "autopilot_circuit_runs", column: "source_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
-
+    ColumnSpec {
+        version: 41,
+        table: "autopilot_circuit_runs",
+        column: "source_agent_node_id",
+        type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL",
+        read_default: ReadDefault::Nullable,
+    },
     // v42 - durable presentation relationship for related circuit agents.
     // The worker derives this from the circuit graph once, at step attach
     // time; reads never inspect graph JSON or infer step names.
-    ColumnSpec { version: 42, table: "autopilot_circuit_run_steps", column: "parent_agent_node_id", type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL", read_default: ReadDefault::Nullable },
-
+    ColumnSpec {
+        version: 42,
+        table: "autopilot_circuit_run_steps",
+        column: "parent_agent_node_id",
+        type_with_default: "INTEGER REFERENCES agent_nodes(id) ON DELETE SET NULL",
+        read_default: ReadDefault::Nullable,
+    },
     // v45 - Circuit Run History provenance/disposition (issue #1909 / #1847).
     // Each event names the source that produced it and the disposition
     // Buildmesh recorded, so waits, capacity waits, configuration pins and
     // recovery are diagnosable uniformly. Nullable: pre-v45 rows carry
     // neither and must keep reading.
-    ColumnSpec { version: 45, table: "circuit_run_history", column: "source", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 45, table: "circuit_run_history", column: "disposition", type_with_default: "TEXT", read_default: ReadDefault::Nullable },
-
+    ColumnSpec {
+        version: 45,
+        table: "circuit_run_history",
+        column: "source",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 45,
+        table: "circuit_run_history",
+        column: "disposition",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
     // ============================================================
     // coordinator_drive_prompts
     // ============================================================
-    ColumnSpec { version: 1, table: "coordinator_drive_prompts", column: "node_id", type_with_default: "INTEGER NOT NULL", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "coordinator_drive_prompts", column: "idempotency_key", type_with_default: "TEXT NOT NULL", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 1,
+        table: "coordinator_drive_prompts",
+        column: "node_id",
+        type_with_default: "INTEGER NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "coordinator_drive_prompts",
+        column: "idempotency_key",
+        type_with_default: "TEXT NOT NULL",
+        read_default: ReadDefault::Nullable,
+    },
     // `verdict` was NOT NULL → DEFAULT '' in v32; that loosening does
     // not need a separate spec (no existing row violates a DEFAULT).
-    ColumnSpec { version: 1, table: "coordinator_drive_prompts", column: "verdict", type_with_default: "TEXT NOT NULL DEFAULT ''", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 1, table: "coordinator_drive_prompts", column: "created_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 1,
+        table: "coordinator_drive_prompts",
+        column: "verdict",
+        type_with_default: "TEXT NOT NULL DEFAULT ''",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 1,
+        table: "coordinator_drive_prompts",
+        column: "created_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
     // v32 — Coordinator drive idempotency hardening (issue #750).
-    ColumnSpec { version: 32, table: "coordinator_drive_prompts", column: "status", type_with_default: "TEXT NOT NULL DEFAULT 'pending'", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 32, table: "coordinator_drive_prompts", column: "claimed_at", type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))", read_default: ReadDefault::Nullable },
-    ColumnSpec { version: 32, table: "coordinator_drive_prompts", column: "prompt_hash", type_with_default: "TEXT NOT NULL DEFAULT ''", read_default: ReadDefault::Nullable },
+    ColumnSpec {
+        version: 32,
+        table: "coordinator_drive_prompts",
+        column: "status",
+        type_with_default: "TEXT NOT NULL DEFAULT 'pending'",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 32,
+        table: "coordinator_drive_prompts",
+        column: "claimed_at",
+        type_with_default: "TEXT NOT NULL DEFAULT (datetime('now'))",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 32,
+        table: "coordinator_drive_prompts",
+        column: "prompt_hash",
+        type_with_default: "TEXT NOT NULL DEFAULT ''",
+        read_default: ReadDefault::Nullable,
+    },
 ];
 
 /// One-shot backfills the runner runs in the version-gated pass.
@@ -807,7 +1286,9 @@ fn run_one_shot(conn: &Connection, backfill: &OneShotBackfill) -> SqlResult<()> 
 fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
     match step {
         AlwaysStep::ConsolidateContinuedReviews => {
-            if !table_present(conn, "autopilot_circuits")? || !table_present(conn, "autopilot_circuit_runs")? {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+            {
                 return Ok(());
             }
             let tx = conn.unchecked_transaction()?;
@@ -817,35 +1298,68 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                      JOIN autopilot_circuits c ON c.id=r.circuit_id
                      WHERE c.name='Continued review' AND c.description='Continue a failed review on its retained worktree'"
                 )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
                     .collect::<SqlResult<_>>()?;
                 rows
             };
             for (run_id, old_circuit_id, context_json) in candidates {
-                let mut parent = serde_json::from_str::<serde_json::Value>(&context_json).ok()
-                    .and_then(|context| context.get("recovery.from_run_id")?.as_str()?.parse::<i64>().ok());
+                let mut parent = serde_json::from_str::<serde_json::Value>(&context_json)
+                    .ok()
+                    .and_then(|context| {
+                        context
+                            .get("recovery.from_run_id")?
+                            .as_str()?
+                            .parse::<i64>()
+                            .ok()
+                    });
                 let mut visited = std::collections::HashSet::from([run_id]);
                 let mut original = None;
                 while let Some(parent_id) = parent {
-                    if !visited.insert(parent_id) { break; }
+                    if !visited.insert(parent_id) {
+                        break;
+                    }
                     let ancestor: Option<(i64, String)> = tx.query_row(
                         "SELECT circuit_id,context_json FROM autopilot_circuit_runs WHERE id=?1",
                         [parent_id], |row| Ok((row.get(0)?, row.get(1)?))
                     ).optional()?;
-                    let Some((circuit_id, ancestor_context)) = ancestor else { break; };
-                    parent = serde_json::from_str::<serde_json::Value>(&ancestor_context).ok()
-                        .and_then(|context| context.get("recovery.from_run_id")?.as_str()?.parse::<i64>().ok());
-                    if parent.is_none() { original = Some(circuit_id); }
+                    let Some((circuit_id, ancestor_context)) = ancestor else {
+                        break;
+                    };
+                    parent = serde_json::from_str::<serde_json::Value>(&ancestor_context)
+                        .ok()
+                        .and_then(|context| {
+                            context
+                                .get("recovery.from_run_id")?
+                                .as_str()?
+                                .parse::<i64>()
+                                .ok()
+                        });
+                    if parent.is_none() {
+                        original = Some(circuit_id);
+                    }
                 }
-                let Some(original_circuit_id) = original.filter(|id| *id != old_circuit_id) else { continue; };
-                let name: Option<String> = tx.query_row("SELECT name FROM autopilot_circuits WHERE id=?1",
-                    [original_circuit_id], |row| row.get(0)).optional()?;
-                let Some(name) = name else { continue; };
-                let mut context: serde_json::Value = serde_json::from_str(&context_json).unwrap_or_default();
+                let Some(original_circuit_id) = original.filter(|id| *id != old_circuit_id) else {
+                    continue;
+                };
+                let name: Option<String> = tx
+                    .query_row(
+                        "SELECT name FROM autopilot_circuits WHERE id=?1",
+                        [original_circuit_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(name) = name else {
+                    continue;
+                };
+                let mut context: serde_json::Value =
+                    serde_json::from_str(&context_json).unwrap_or_default();
                 context["circuit.id"] = original_circuit_id.to_string().into();
                 context["circuit.name"] = name.into();
-                tx.execute("UPDATE autopilot_circuit_runs SET circuit_id=?2,context_json=?3 WHERE id=?1",
-                    params![run_id, original_circuit_id, context.to_string()])?;
+                tx.execute(
+                    "UPDATE autopilot_circuit_runs SET circuit_id=?2,context_json=?3 WHERE id=?1",
+                    params![run_id, original_circuit_id, context.to_string()],
+                )?;
             }
             tx.execute(
                 "DELETE FROM autopilot_circuits WHERE name='Continued review'
@@ -943,7 +1457,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 // trigger installs. Both passes are idempotent.
                 return Ok(());
             }
-            conn.execute("DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range", [])?;
+            conn.execute(
+                "DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range",
+                [],
+            )?;
             conn.execute(
                 "CREATE TRIGGER meshes_circuit_run_capacity_range \
                  BEFORE INSERT ON meshes \
@@ -955,7 +1472,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                  END;",
                 [],
             )?;
-            conn.execute("DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range_update", [])?;
+            conn.execute(
+                "DROP TRIGGER IF EXISTS meshes_circuit_run_capacity_range_update",
+                [],
+            )?;
             conn.execute(
                 "CREATE TRIGGER meshes_circuit_run_capacity_range_update \
                  BEFORE UPDATE ON meshes \
@@ -1151,7 +1671,11 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
-                        tracing::warn!("evolve_to: cannot inspect review circuit {}: {}", id, error);
+                        tracing::warn!(
+                            "evolve_to: cannot inspect review circuit {}: {}",
+                            id,
+                            error
+                        );
                         retry_required = true;
                         continue;
                     }
@@ -1163,9 +1687,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 };
                 if changed {
                     let upgraded_json = graph.to_json().map_err(|error| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-                        ))
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            error,
+                        )))
                     })?;
                     conn.execute(
                         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
@@ -1205,16 +1730,13 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             }
 
             let circuits: Vec<(i64, String)> = {
-                let mut stmt = conn.prepare(
-                    "SELECT id, graph_json FROM autopilot_circuits ORDER BY id",
-                )?;
+                let mut stmt =
+                    conn.prepare("SELECT id, graph_json FROM autopilot_circuits ORDER BY id")?;
                 let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
                 rows.collect::<SqlResult<Vec<_>>>()?
             };
             for (id, graph_json) in circuits {
-                let mut graph = match crate::circuit::model::CircuitGraph::from_json(
-                    &graph_json,
-                ) {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
                         tracing::warn!(
@@ -1240,9 +1762,10 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 }
                 if changed {
                     let upgraded_json = graph.to_json().map_err(|error| {
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(
-                            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-                        ))
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            error,
+                        )))
                     })?;
                     conn.execute(
                         "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",

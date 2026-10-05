@@ -37,10 +37,20 @@ pub(crate) fn record_report_evidence(
     text: &str,
 ) -> ClassificationBinding {
     use sha2::{Digest, Sha256};
-    record_report_evidence_for_turn(run, owner, text, &format!("turn-{:x}", Sha256::digest(text.as_bytes())))
+    record_report_evidence_for_turn(
+        run,
+        owner,
+        text,
+        &format!("turn-{:x}", Sha256::digest(text.as_bytes())),
+    )
 }
 
-pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, text: &str, turn_id: &str) -> ClassificationBinding {
+pub(crate) fn record_report_evidence_for_turn(
+    run: &mut RunView,
+    owner: &str,
+    text: &str,
+    turn_id: &str,
+) -> ClassificationBinding {
     use sha2::{Digest, Sha256};
     let step = run.step(owner).expect("native evidence fixture owner");
     let agent_node_id = step
@@ -60,7 +70,8 @@ pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, te
         report_revision: None,
     };
     let input_guard = ObservationInputFence {
-                transcript_guard: None, report_guard: None,
+        transcript_guard: None,
+        report_guard: None,
         agent_node_id,
         input_stamp: format!("input-{turn_id}"),
         observed_at_ms: 1000,
@@ -111,24 +122,64 @@ pub(crate) fn record_report_evidence_for_turn(run: &mut RunView, owner: &str, te
 
 /// Graph-routing fixtures must supply terminal ownership evidence; a legacy
 /// process/status callback is deliberately insufficient for assigned work.
-pub(crate) fn advance_with_completion_evidence(run: &mut RunView, event: &CircuitEvent) -> Transition {
-    if let CircuitEvent::AgentFinished { agent_node_id, success: true, output } = event {
-        if let Some(step) = run.steps.iter().find(|step| step.status == super::stepper::StepStatus::Running
-            && step.agent_node_id == Some(*agent_node_id)) {
-            let identity = ObservationIdentity { run_id:run.run_id,step_id:step.node_id.clone(),attempt:step.attempt,
-                agent_node_id:*agent_node_id,session_incarnation:Some("100".into()),session_id:Some(format!("session-{agent_node_id}")),
-                turn_id:Some(format!("finished-{}",step.attempt)),report_revision:None };
-            let mut facts = vec![ObservedWorkFact::ForegroundTerminated, ObservedWorkFact::OwnershipCovered,
-                ObservedWorkFact::AssignedWorkCompleted];
+pub(crate) fn advance_with_completion_evidence(
+    run: &mut RunView,
+    event: &CircuitEvent,
+) -> Transition {
+    if let CircuitEvent::AgentFinished {
+        agent_node_id,
+        success: true,
+        output,
+    } = event
+    {
+        if let Some(step) = run.steps.iter().find(|step| {
+            step.status == super::stepper::StepStatus::Running
+                && step.agent_node_id == Some(*agent_node_id)
+        }) {
+            let identity = ObservationIdentity {
+                run_id: run.run_id,
+                step_id: step.node_id.clone(),
+                attempt: step.attempt,
+                agent_node_id: *agent_node_id,
+                session_incarnation: Some("100".into()),
+                session_id: Some(format!("session-{agent_node_id}")),
+                turn_id: Some(format!("finished-{}", step.attempt)),
+                report_revision: None,
+            };
+            let mut facts = vec![
+                ObservedWorkFact::ForegroundTerminated,
+                ObservedWorkFact::OwnershipCovered,
+                ObservedWorkFact::AssignedWorkCompleted,
+            ];
             if let Some(text) = output {
-                facts.push(ObservedWorkFact::AssistantReport { text:text.clone(), revision:"completion-report".into() });
+                facts.push(ObservedWorkFact::AssistantReport {
+                    text: text.clone(),
+                    revision: "completion-report".into(),
+                });
             }
             let observations = facts
-                .into_iter().enumerate().map(|(index,fact)| CircuitObservation { identity:identity.clone(),
-                    source:"synthetic_completion_adapter".into(),source_id:Some(index.to_string()),observed_at_ms:1000,
-                    authoritative:true,fact }).collect();
-            return advance(run,&CircuitEvent::ObservationBatch {receipt_id:0,expected:identity,observations,stale:false,input_guard:None});
+                .into_iter()
+                .enumerate()
+                .map(|(index, fact)| CircuitObservation {
+                    identity: identity.clone(),
+                    source: "synthetic_completion_adapter".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: 1000,
+                    authoritative: true,
+                    fact,
+                })
+                .collect();
+            return advance(
+                run,
+                &CircuitEvent::ObservationBatch {
+                    receipt_id: 0,
+                    expected: identity,
+                    observations,
+                    stale: false,
+                    input_guard: None,
+                },
+            );
         }
     }
-    advance(run,event)
+    advance(run, event)
 }
