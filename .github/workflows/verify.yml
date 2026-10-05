@@ -462,7 +462,7 @@ jobs:
           # and `commands-http` would claim those tests and the coverage gate
           # would fail. `commands::` (commands-http) keeps them.
           - label: remaining
-            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: --skip agent::sandbox:: --skip commands::diagnostics::"
+            args: "attention_autoclear:: close_cancel_tests:: diagnostics:: instance_guard:: models:: node_turn:: process_util:: pty:: review_contract:: sandbox:: secret_scrubber:: session_capture:: session_naming:: startup:: windowing:: --skip agent::sandbox:: --skip commands::diagnostics::"
 
     steps:
       - name: Checkout

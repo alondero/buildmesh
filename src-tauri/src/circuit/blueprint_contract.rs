@@ -235,10 +235,15 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 node_id: "follow_feedback",
                 must_contain: "{{node.reviewer.output}}",
             },
-            // Approval asks the implementation agent to squash-merge this PR.
+            // Approval asks the implementation agent to squash-merge this PR,
+            // bringing an out-of-date branch up to date first.
             PromptAssertion {
                 node_id: "merge",
                 must_contain: "gh pr merge {{pr.number}} --squash",
+            },
+            PromptAssertion {
+                node_id: "merge",
+                must_contain: "gh pr update-branch",
             },
         ],
     },

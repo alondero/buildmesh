@@ -298,7 +298,7 @@ const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgr
 const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
-const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'";
+const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%'";
 type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
 // ---------------------------------------------------------------------------
@@ -1675,7 +1675,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     continue;
                 };
                 let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
-                let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
+                let _is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1688,10 +1688,22 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                let changed = if is_preset {
-                    graph.upgrade_legacy_agent_review_prompts()
-                } else {
+                // Route by blueprint, not by preset flag: independent copies
+                // of the review blueprint are stored non-preset with no
+                // blueprint marker, and only the local-review upgrade can
+                // rewrite their stock merge text. Both upgrades replace
+                // exact stock texts only, so custom prompts are preserved
+                // on every path.
+                // Route by blueprint, not by preset flag: independent copies
+                // of the review blueprint are stored non-preset with no
+                // blueprint marker, and only the local-review upgrade can
+                // rewrite their stock merge text. Both upgrades replace
+                // exact stock texts only, so custom prompts are preserved
+                // on every path.
+                let changed = if graph.is_issue_driven_autopilot_review() {
                     graph.upgrade_legacy_issue_review_contract()
+                } else {
+                    graph.upgrade_legacy_agent_review_prompts()
                 };
                 if changed {
                     let upgraded_json = graph.to_json().map_err(|error| {
