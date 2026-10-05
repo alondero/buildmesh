@@ -222,7 +222,13 @@ The follow-up implementation in this worktree addresses the confirmed causes:
   PTY fallback still requires a live process and a recorded turn boundary.
 - Wait reasons and inactivity clocks persist per step/attempt. Defaults are
   15 minutes after yield, two hours without a new report while running, and one
-  hour for approval. Changes between active and yielded modes start a fresh
+  hour for approval. A harness may declare a shorter yielded budget (30-90
+  seconds) for reconciling a yield that has no classifier verdict yet; once the
+  classifier reports work remaining (or a continuation was sent) the wait
+  widens to the 15-minute yielded allowance, because the awaited report is the
+  agent's own (run 335 was parked Unverified 30 seconds after a WORKING
+  verdict, then the agent resumed). The wording reports sub-minute windows in
+  seconds. Changes between active and yielded modes start a fresh
   allowance. New report revisions refresh patience; polls and redraws do not.
   Pausing suppresses expiry and explicit resume grants a fresh wait allowance.
 - Classifier outages end the run after five attempts. A circuit-specific
