@@ -91,7 +91,12 @@ squash-merges. The run completes once that prompt is delivered: it does
 not wait for the merge.
 A completed run retires only the agents its graph closed, so the implementation
 agent stays open, and the circuit stops observing every agent it referenced.
-Failed and cancelled runs still retire their owned agents.
+A failed or cancelled run retires only its helper agents (the reviewer, which
+was launched for another agent). The implementation agent is never retired by
+the circuit: it stays open so its work, terminal and worktree are not lost. The
+helper/implementation line is the step's recorded parent: an agent with a
+parent was launched to assist another and is Autopilot's to retire; one with no
+parent is the implementation agent. Circuit deletion follows the same rule.
 
 By default, reviewers inherit the reviewed agent's harness. The app-wide
 **Reviewer provider** setting in Settings can override that fallback for

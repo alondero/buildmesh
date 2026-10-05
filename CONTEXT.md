@@ -180,7 +180,7 @@ The built-in local workflow for reviewing an Agent Node's work. It asks the Agen
 _Avoid_: Automated review loop, issue-driven PR review blueprint
 
 **Hand-back**:
-The end of a completed Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed or cancelled run retires its owned agents instead.
+The end of a completed Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed or cancelled run retires only its helper agents (such as the reviewer); the implementation agent stays open in every case.
 _Avoid_: Release, detach
 
 **Review-derived Circuit**:

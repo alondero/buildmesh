@@ -638,8 +638,8 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
         INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'cleanup','{}');
         INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json,source_agent_node_id)
             VALUES (1,1,1,'a','failed','{\"cleanup.pending\":\"1\"}',2), (2,1,1,'b','running','{}',NULL), (3,1,1,'c','failed','{}',NULL);
-        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status) VALUES
-            (1,'owned',1,'failed'),(1,'borrowed',2,'failed'),(1,'shared',3,'failed'),(2,'active',3,'running'),(3,'historic',4,'failed');").unwrap();
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status) VALUES
+            (1,'owned',1,2,'failed'),(1,'borrowed',2,NULL,'failed'),(1,'shared',3,2,'failed'),(2,'active',3,2,'running'),(3,'historic',4,2,'failed');").unwrap();
     assert_eq!(
         super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
         vec![1]
@@ -703,17 +703,109 @@ fn circuit_cleanup_retry_is_durable_and_excludes_borrowed_and_live_owners() {
     );
 }
 
+/// One run whose implementation agent (1, no parent) was reviewed by a helper
+/// reviewer (2, parented to it). Only the reviewer is Autopilot's to retire.
+fn implementer_and_reviewer_run(conn: &Connection, run_state: &str) {
+    conn.execute_batch(&format!(
+        "INSERT INTO meshes (id, name, path) VALUES (1, 'keep-open', '/repo');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES
+            (1,1,'implementer','/repo','ready'), (2,1,'reviewer','/repo','ready');
+        INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'keep-open','{{}}');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+            VALUES (1,1,1,'issue:9','{run_state}','{{}}');
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status)
+            VALUES (1,'implementer',1,NULL,'completed'), (1,'reviewer',2,1,'running');"
+    ))
+    .unwrap();
+}
+
+fn cleanup_requested(conn: &Connection, node_id: i64) -> i64 {
+    conn.query_row(
+        "SELECT COALESCE((SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id=?1), 0)",
+        [node_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_failed_run_retires_its_reviewer_but_never_the_implementation_agent() {
+    let mut conn = isolated_test_conn();
+    implementer_and_reviewer_run(&conn, "running");
+
+    commit_circuit_advance_locked(&mut conn, 1, Some("failed"), None, &[]).unwrap();
+
+    assert_eq!(cleanup_requested(&conn, 2), 1, "the reviewer is still retired");
+    assert_eq!(
+        cleanup_requested(&conn, 1),
+        0,
+        "the implementation agent stays open after a failed run"
+    );
+    assert_eq!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn).unwrap(),
+        vec![2]
+    );
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn cancelling_a_run_leaves_the_implementation_agent_open() {
+    let mut conn = isolated_test_conn();
+    implementer_and_reviewer_run(&conn, "running");
+
+    conn.execute_batch(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES
+            (3,1,'implementer-2','/repo','ready'), (4,1,'reviewer-2','/repo','ready');
+        INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
+            VALUES (2,1,1,'issue:10','running','{}');
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status)
+            VALUES (2,'implementer',3,NULL,'completed'), (2,'reviewer',4,3,'running');",
+    )
+    .unwrap();
+
+    let retired = cancel_circuit_run_locked(&mut conn, 1).unwrap();
+    assert_eq!(retired, vec![2], "only the reviewer is handed back for retirement");
+    assert_eq!(cleanup_requested(&conn, 1), 0);
+
+    let batch = cancel_circuit_runs_locked(&mut conn, &[2]).unwrap();
+    assert_eq!(batch.agents, vec![4], "batch cancel applies the same rule");
+    assert_eq!(cleanup_requested(&conn, 3), 0);
+}
+
+#[test]
+fn a_cleanup_request_recorded_for_an_implementation_agent_is_never_actioned_and_is_cleared() {
+    let conn = isolated_test_conn();
+    implementer_and_reviewer_run(&conn, "failed");
+    // Stale intent, as written by builds that retired every owned agent.
+    conn.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested) VALUES (1, 1)",
+        [],
+    )
+    .unwrap();
+
+    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+        .unwrap()
+        .is_empty());
+    assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
+        .unwrap()
+        .is_none());
+    super::circuit::clear_finished_circuit_cleanup_inner(&conn).unwrap();
+    assert_eq!(cleanup_requested(&conn, 1), 0);
+}
+
 #[test]
 fn circuit_spawn_generation_wins_cleanup_race_and_releases_for_retry() {
     let conn = Connection::open_in_memory().unwrap();
     super::init_schema(&conn).unwrap();
     conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'spawn-race', '/repo');
-        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready'), (2,1,'parent','/repo','ready');
         INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'spawn-race','{}');
         INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
             VALUES (1,1,1,'race','failed','{\"cleanup.pending\":\"1\"}');
-        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
-            VALUES (1,'owned',1,'failed');").unwrap();
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status)
+            VALUES (1,'owned',1,2,'failed');").unwrap();
 
     let cleanup_generation = super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
         .unwrap()
@@ -783,12 +875,12 @@ fn expired_spawn_lease_keeps_cleanup_request_for_the_next_sweep() {
     let conn = Connection::open_in_memory().unwrap();
     super::init_schema(&conn).unwrap();
     conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'lease-expiry', '/repo');
-        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready');
+        INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (1,1,'owned','/repo','ready'), (2,1,'parent','/repo','ready');
         INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'lease-expiry','{}');
         INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
             VALUES (1,1,1,'expiry','failed','{\"cleanup.pending\":\"1\"}');
-        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
-            VALUES (1,'owned',1,'failed');").unwrap();
+        INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status)
+            VALUES (1,'owned',1,2,'failed');").unwrap();
 
     let first = super::circuit::claim_circuit_agent_spawn_inner(&conn, 1)
         .unwrap()
@@ -972,6 +1064,12 @@ fn node_review_borrows_source_deduplicates_and_cancels_only_reviewer() {
             attempt: 1,
             fresh_attempt: false,
         }],
+    )
+    .unwrap();
+    // The reviewer is launched for the borrowed source, as the spawn seam records.
+    conn.execute(
+        "UPDATE autopilot_circuit_run_steps SET parent_agent_node_id = ?2 WHERE run_id = ?1 AND node_id = 'reviewer'",
+        params![run_id, source.id],
     )
     .unwrap();
     assert_eq!(
@@ -1634,9 +1732,16 @@ fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
     } else {
         panic!("missing feedback");
     }
-    let cleanup = claim_circuit_agent_cleanup_inner(&conn, source.id)
-        .unwrap()
-        .unwrap();
+    // The implementation agent is never claimed by new cleanup, but a request
+    // recorded by an older build can still be mid-flight when the user asks
+    // for another review; the recovery must wait for it rather than race it.
+    let cleanup = "legacy-cleanup".to_string();
+    conn.execute(
+        "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested, cleanup_generation, cleanup_expires_at)
+         VALUES (?1, 1, ?2, unixepoch() + 300)",
+        params![source.id, cleanup],
+    )
+    .unwrap();
     assert!(create_node_circuit_run_recovery_locked(&mut conn, plan, 1)
         .unwrap_err()
         .contains("still being stopped"));
@@ -2660,7 +2765,7 @@ fn completed_review_verdict_needing_attention_stays_in_the_recovery_window() {
 }
 
 #[test]
-fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
+fn cancelling_a_run_is_terminal_and_returns_only_helper_agents_for_cleanup() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cancel-mesh", "/tmp/circuit-cancel").unwrap();
     let circuit =
@@ -2669,20 +2774,32 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
     set_circuit_run_state_inner(&conn, run_id, "running").unwrap();
+    let step = |node_id: &str, agent_node_id| CircuitStepOp {
+        node_id: node_id.into(),
+        status: "running".into(),
+        outcome: None,
+        error: None,
+        agent_node_id: Some(agent_node_id),
+        attempt: 1,
+        fresh_attempt: false,
+    };
     commit_circuit_advance_locked(
         &mut conn,
         run_id,
         None,
         None,
-        &[CircuitStepOp {
-            node_id: "spawn".into(),
-            status: "running".into(),
-            outcome: None,
-            error: None,
-            agent_node_id: Some(991),
-            attempt: 1,
-            fresh_attempt: false,
-        }],
+        &[step("spawn", 991), step("reviewer", 992)],
+    )
+    .unwrap();
+    // 991 is the implementation agent; 992 was launched to review it.
+    conn.execute(
+        "INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (991, ?1, 'implementer', '/repo')",
+        [mesh.id],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE autopilot_circuit_run_steps SET parent_agent_node_id = 991 WHERE node_id = 'reviewer'",
+        [],
     )
     .unwrap();
 
@@ -2693,7 +2810,11 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     );
 
     let agents = cancel_circuit_run_locked(&mut conn, run_id).unwrap();
-    assert_eq!(agents, vec![991]);
+    assert_eq!(
+        agents,
+        vec![992],
+        "the implementation agent (991) stays open; only its reviewer is retired"
+    );
     assert_eq!(
         get_circuit_run_inner(&conn, run_id).unwrap().unwrap().state,
         "cancelled"
@@ -2708,8 +2829,8 @@ fn cancelling_a_run_is_terminal_and_returns_attached_agents_for_cleanup() {
     );
     assert_eq!(
         cancel_circuit_run_locked(&mut conn, run_id).unwrap(),
-        vec![991],
-        "cleanup retries must retain the ledger's attached agents"
+        vec![992],
+        "cleanup retries must retain the ledger's attached helper agents"
     );
     assert_eq!(
         list_circuit_run_ids_for_cleanup_inner(&conn, circuit.id).unwrap(),

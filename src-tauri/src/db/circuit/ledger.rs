@@ -997,11 +997,15 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
     let Some((state, source)) = row else {
         return Ok(CancelRunWrite { agents: vec![], source: None, cancelled: false });
     };
+    // Only helper agents (reviewers) are handed back for retirement; the
+    // implementation agent stays open when a run is cancelled.
     let agents = {
-        let mut stmt = tx.prepare(
-            "SELECT DISTINCT agent_node_id FROM autopilot_circuit_run_steps \
-             WHERE run_id = ?1 AND agent_node_id IS NOT NULL ORDER BY agent_node_id",
-        )?;
+        let mut stmt = tx.prepare(&format!(
+            "SELECT DISTINCT s.agent_node_id FROM autopilot_circuit_run_steps s \
+             WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL AND {} \
+             ORDER BY s.agent_node_id",
+            super::leases::RETIRABLE_STEP_AGENT
+        ))?;
         let rows = stmt
             .query_map(params![run_id], |row| row.get(0))?
             .collect::<SqlResult<Vec<i64>>>()?;
@@ -1017,14 +1021,18 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
             params![run_id, RunState::Cancelled.as_db_str()],
         )?;
         tx.execute(
-            "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+            &format!(
+                "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
              SELECT DISTINCT s.agent_node_id, 1
              FROM autopilot_circuit_run_steps s
              JOIN agent_nodes a ON a.id = s.agent_node_id
              WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
+               AND {}
                AND s.agent_node_id IS NOT (SELECT source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1)
              ON CONFLICT(node_id) DO UPDATE SET
                cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
+                super::leases::RETIRABLE_STEP_AGENT
+            ),
             params![run_id],
         )?;
     }
@@ -1605,15 +1613,19 @@ pub(crate) fn commit_circuit_advance_inner(
             .unwrap_or(false);
         if cleanup_requested {
             tx.execute(
-                "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+                &format!(
+                    "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
                  SELECT DISTINCT s.agent_node_id, 1
                  FROM autopilot_circuit_run_steps s
                  JOIN autopilot_circuit_runs r ON r.id = s.run_id
                  JOIN agent_nodes a ON a.id = s.agent_node_id
                  WHERE s.run_id = ?1 AND s.agent_node_id IS NOT NULL
+                   AND {}
                    AND s.agent_node_id IS NOT r.source_agent_node_id
                  ON CONFLICT(node_id) DO UPDATE SET
                    cleanup_requested = 1, retired = 0, updated_at = unixepoch()",
+                    super::leases::RETIRABLE_STEP_AGENT
+                ),
                 params![run_id],
             )?;
         }

@@ -185,6 +185,15 @@ pub(crate) fn count_retained_circuit_agent_nodes_total_inner(db: &Connection) ->
 
 const NODE_LEASE_TTL_SECS: i64 = 300;
 
+/// Which circuit agents Autopilot may retire when a run ends badly.
+///
+/// A step's agent with a parent was launched to review or assist another agent
+/// (the reviewer); Autopilot owns it and cleans it up. An agent with no parent
+/// is the run's implementation agent: the user's work. It stays open whatever
+/// happens to the run, and is closed only by an explicit `CloseAgentNode` once
+/// a squash-merge has been verified. Alias the step table as `s`.
+pub(crate) const RETIRABLE_STEP_AGENT: &str = "s.parent_agent_node_id IS NOT NULL";
+
 /// Failed associations remain the durable cleanup retry ledger. Historic
 /// terminal runs are not opted in unless their node-level cleanup request was
 /// recorded by the circuit terminal transition.
@@ -201,14 +210,17 @@ fn lifecycle_generation(node_id: i64, prefix: &str) -> String {
 
 fn import_legacy_cleanup_requests(conn: &Connection) -> SqlResult<()> {
     conn.execute(
-        "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
+        &format!(
+            "INSERT OR IGNORE INTO agent_node_lifecycle_leases (node_id, cleanup_requested)
          SELECT DISTINCT s.agent_node_id, 1
          FROM autopilot_circuit_runs r
          JOIN autopilot_circuit_run_steps s ON s.run_id = r.id
          JOIN agent_nodes a ON a.id = s.agent_node_id
          WHERE s.agent_node_id IS NOT NULL AND a.status != 'archived'
+           AND {RETIRABLE_STEP_AGENT}
            AND s.agent_node_id IS NOT r.source_agent_node_id
-           AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'",
+           AND json_extract(r.context_json, '$.\"cleanup.pending\"') = '1'"
+        ),
         [],
     )?;
     Ok(())
@@ -345,7 +357,8 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(conn: &Connection, node_id: i64)
     )?;
     let generation = lifecycle_generation(node_id, "cleanup");
     let updated = tx.execute(
-        "UPDATE agent_node_lifecycle_leases
+        &format!(
+            "UPDATE agent_node_lifecycle_leases
          SET cleanup_generation = ?2, cleanup_expires_at = unixepoch() + ?3,
              updated_at = unixepoch()
          WHERE node_id = ?1 AND cleanup_requested = 1 AND retired = 0
@@ -356,6 +369,7 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(conn: &Connection, node_id: i64)
              JOIN agent_nodes a ON a.id = s.agent_node_id
              WHERE s.agent_node_id = agent_node_lifecycle_leases.node_id
                AND r.state IN ('completed', 'failed', 'cancelled')
+               AND {RETIRABLE_STEP_AGENT}
                AND a.status != 'archived'
                AND a.id IS NOT r.source_agent_node_id
                AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
@@ -365,7 +379,8 @@ pub(crate) fn claim_circuit_agent_cleanup_inner(conn: &Connection, node_id: i64)
                    JOIN autopilot_circuit_runs active ON active.id = other.run_id
                    WHERE other.agent_node_id = a.id
                      AND active.state IN ('running', 'paused'))
-           )",
+           )"
+        ),
         params![node_id, generation, NODE_LEASE_TTL_SECS],
     )?;
     let result = if updated > 0 {
@@ -426,12 +441,20 @@ pub fn clear_finished_circuit_cleanup() -> SqlResult<()> {
 }
 
 pub(crate) fn clear_finished_circuit_cleanup_inner(conn: &Connection) -> SqlResult<()> {
+    // A request is finished once the node is archived, and also void when the
+    // node is not Autopilot's to retire (an implementation agent): builds that
+    // retired every owned agent may have left such intent behind.
     conn.execute(
-        "UPDATE agent_node_lifecycle_leases
+        &format!(
+            "UPDATE agent_node_lifecycle_leases
          SET cleanup_requested = 0, updated_at = unixepoch()
          WHERE cleanup_requested = 1 AND retired = 0
-           AND EXISTS (SELECT 1 FROM agent_nodes a WHERE a.id = node_id AND a.status = 'archived')
-           AND cleanup_generation IS NULL AND spawn_generation IS NULL",
+           AND (EXISTS (SELECT 1 FROM agent_nodes a WHERE a.id = node_id AND a.status = 'archived')
+                OR NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
+                               WHERE s.agent_node_id = agent_node_lifecycle_leases.node_id
+                                 AND {RETIRABLE_STEP_AGENT}))
+           AND cleanup_generation IS NULL AND spawn_generation IS NULL"
+        ),
         [],
     )?;
     Ok(())
@@ -439,12 +462,14 @@ pub(crate) fn clear_finished_circuit_cleanup_inner(conn: &Connection) -> SqlResu
 
 pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connection) -> SqlResult<Vec<i64>> {
     import_legacy_cleanup_requests(conn)?;
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT l.node_id FROM agent_node_lifecycle_leases l
          JOIN agent_nodes a ON a.id = l.node_id
          WHERE l.cleanup_requested = 1 AND l.retired = 0
            AND a.status != 'archived'
            AND l.cleanup_generation IS NULL AND l.spawn_generation IS NULL
+           AND EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
+               WHERE s.agent_node_id = l.node_id AND {RETIRABLE_STEP_AGENT})
            AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_runs borrowed
                WHERE borrowed.source_agent_node_id = l.node_id
                  AND borrowed.state IN ('pending', 'running', 'paused'))
@@ -452,7 +477,8 @@ pub(crate) fn failed_circuit_agents_for_cleanup_inner(conn: &rusqlite::Connectio
                JOIN autopilot_circuit_runs active ON active.id = other.run_id
                WHERE other.agent_node_id = l.node_id
                  AND active.state IN ('running', 'paused'))
-         ORDER BY l.node_id")?;
+         ORDER BY l.node_id"
+    ))?;
     let ids = stmt.query_map([], |row| row.get(0))?.collect();
     ids
 }
