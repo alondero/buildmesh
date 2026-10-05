@@ -151,10 +151,41 @@ test('rejects an unrecognised argument instead of checking nothing', () => {
   const dir = stage();
   try {
     setVersion(dir, '9.9.9-0');
-    for (const args of [['1.2.3'], ['--expct', '9.9.9-0'], ['--expect']]) {
+    // An unknown flag is the dangerous case: this gate is the release tag
+    // check, so a flag that is silently accepted degrades "must equal the tag"
+    // into "must agree with itself" without anything turning red.
+    for (const args of [
+      ['--totally-unknown-flag'],
+      ['--expct', '9.9.9-0'],
+      ['--expct', '--nope'],
+      ['1.2.3'],
+      ['--expect'],
+      ['--expect', '--nope'],
+    ]) {
       const result = run(dir, args);
       assert.equal(result.status, 1, `expected ${args.join(' ')} to be rejected`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reads the Cargo.toml version from [package] only', () => {
+  const dir = stage();
+  try {
+    setVersion(dir, '9.9.9-0');
+    // A [package] block with no version of its own, followed by a section that
+    // has one. An unbounded scan would report the later version and pass a
+    // file the writer refuses to produce.
+    writeFileSync(
+      join(dir, 'src-tauri', 'Cargo.toml'),
+      '[package]\nname = "buildmesh"\nedition = "2021"\n\n[dependencies]\nversion = "7.7.7"\n',
+    );
+    const result = run(dir);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Could not find a version in the \[package\] block/);
+    // The version must not have leaked in from the later section either.
+    assert.doesNotMatch(result.stderr, /7\.7\.7/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

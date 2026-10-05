@@ -30,24 +30,23 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const argv = process.argv.slice(2);
-const expectIndex = argv.indexOf('--expect');
-const expected = expectIndex === -1 ? null : argv[expectIndex + 1];
-if (expectIndex !== -1 && expected === undefined) {
-  fail('`--expect` needs a version, e.g. --expect 1.3.0');
-}
-// Reject anything unrecognised rather than ignoring it: a mistyped option that
-// silently checks nothing would turn this into a gate that always passes. The
-// one bare argument allowed is `--expect`'s value, and only when `--expect` is
-// actually present.
-const expectValueIndex = expectIndex === -1 ? -1 : expectIndex + 1;
-const unrecognised = argv.filter(
-  (arg, i) => !arg.startsWith('--') && i !== expectValueIndex,
-);
-if (unrecognised.length > 0) {
-  fail(
-    `Unknown argument${unrecognised.length > 1 ? 's' : ''} in: ${argv.join(' ')}. ` +
-      'Usage: node scripts/check-manifest-versions.mjs [--expect <version>]',
-  );
+
+const USAGE = 'Usage: node scripts/check-manifest-versions.mjs [--expect <version>]';
+
+// Walk the arguments instead of filtering them: a filter that only looks at the
+// `--` prefix passes every unknown flag straight through, which would turn
+// this gate from "must equal the release tag" into "must agree with itself"
+// after a mistyped flag name in release.yml.
+let expected = null;
+for (let i = 0; i < argv.length; i += 1) {
+  const arg = argv[i];
+  if (arg !== '--expect') fail(`Unknown argument \`${arg}\`. ${USAGE}`);
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith('--')) {
+    fail(`\`--expect\` needs a version, e.g. --expect 1.3.0. ${USAGE}`);
+  }
+  expected = value;
+  i += 1;
 }
 
 function fail(message) {
@@ -76,12 +75,20 @@ function jsonVersion(file) {
   return parsed.version;
 }
 
-// The first `version = "..."` in [package] — the crate's own version, not a
-// dependency's. Same shape as set-version.mjs's applyTomlBlock.
+// The crate's own `version = "..."`, bounded at the next section header the way
+// applyTomlBlock bounds the writer. An unbounded scan past `[package]` would
+// read a dependency's version out of a later block, so a state the writer
+// refuses to produce could still read green here.
 function cargoTomlVersion(file) {
-  const match = read(file).match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m);
-  if (!match) fail(`Could not find a version in the [package] block of ${file}.`);
-  return match[1];
+  const text = read(file);
+  const header = text.search(/^\[package\]/m);
+  if (header === -1) fail(`Could not find a [package] block in ${file}.`);
+  const bodyStart = header + text.slice(header).indexOf('\n') + 1;
+  const nextHeader = text.slice(bodyStart).search(/^\[/m);
+  const end = nextHeader === -1 ? text.length : bodyStart + nextHeader;
+  const version = text.slice(bodyStart, end).match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+  if (!version) fail(`Could not find a version in the [package] block of ${file}.`);
+  return version;
 }
 
 // Cargo.lock lists the crate like any other dependency, so the entry is found

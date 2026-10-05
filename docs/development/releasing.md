@@ -96,6 +96,34 @@ CI run it for you: the `Manifest versions` job in
 `release.yml` runs it with the tag as the expected version. It needs no
 `npm ci` and no build, so it is the cheapest gate in the graph.
 
+### Where the version check does and does not block a merge
+
+The `Manifest versions` job is **not** in the required-check ruleset, so
+understand what still stands behind it:
+
+- A bump made with `npm run version:set` always writes `package.json`, which
+  change-scope classifies as a frontend change, so the **required**
+  `Quality (Linux)` job runs the vitest suite and its version assertion fails
+  the pull request. This is the normal path and it is merge-blocking.
+- A hand edit that touches **only** Rust-side manifests (`src-tauri/Cargo.toml`,
+  `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`) classifies as `rust`, not
+  `frontend`. The vitest suite is then skipped, and nothing in the Rust graph
+  compares a version, so that pull request merges unless a human reads the red
+  `Manifest versions` job.
+- A release can never ship drift either way: the tag gate in `release.yml`
+  compares all five files against the tag before anything is built.
+
+Closing the middle case means promoting `Manifest versions` to a required
+check — one ruleset edit, with the command in
+[Required checks and branch protection](#required-checks-and-branch-protection).
+Until then, read that job's result on any pull request that edits a version.
+
+The workspace also holds `src-tauri/proc-macros/Cargo.toml`
+(`buildmesh_macros`), which is deliberately *not* one of the five: it is an
+unpublished path dependency with its own version line, and it is not part of
+the shipped app version. `npm run version:set` does not touch it, and
+`check:versions` does not read it.
+
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
 Release notes are versioned under [`docs/releases/`](../releases/) and drafted
@@ -121,7 +149,7 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
-| `Verification / Manifest versions` | no — fails the run, and the required `Quality (Linux)` vitest suite asserts the same thing | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. It is not a required check in the ruleset, but a version-bump pull request also trips the `Quality (Linux)` vitest assertion, so drift blocks the merge either way. |
+| `Verification / Manifest versions` | no — see the gap below | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. |
 | `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, and bundle budget always; the vitest unit + integration suites as well whenever the change-scope job (`Detect changes`) reports frontend changes. The fast frontend gate — it no longer compiles Rust. |
 | `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |

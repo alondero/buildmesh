@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { execSync, execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -195,15 +195,36 @@ function stagedVersions(dir: string) {
   };
 }
 
+function runStagedVersionSet(dir: string, version: string) {
+  try {
+    execFileSync(
+      process.execPath,
+      [path.join(dir, "scripts", "set-version.mjs"), version],
+      { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return { status: 0, stderr: "" };
+  } catch (e: unknown) {
+    const err = e as { status?: number; stderr?: string };
+    return { status: err.status ?? 1, stderr: String(err.stderr ?? "") };
+  }
+}
+
+// Every pinned dependency version in the staged lockfile, so a test can prove
+// none of them moved.
+function dependencyVersions(dir: string): Record<string, unknown> {
+  const lock = JSON.parse(readFileSync(path.join(dir, "package-lock.json"), "utf8"));
+  const entries = Object.entries(lock.packages)
+    .filter(([name]) => name !== "")
+    .map(([name, meta]) => [name, (meta as { version?: unknown }).version]);
+  return Object.fromEntries(entries);
+}
+
 describe("version:set fanout", () => {
   it("bumps every version site, including both in the lockfile", () => {
     const dir = stageManifestTree();
     try {
-      execFileSync(
-        process.execPath,
-        [path.join(dir, "scripts", "set-version.mjs"), "9.9.9-0"],
-        { cwd: dir, encoding: "utf8" },
-      );
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+      expect(result.status, result.stderr).toBe(0);
       const versions = stagedVersions(dir);
       for (const [site, value] of Object.entries(versions)) {
         expect(value, `${site} was not bumped`).toBe("9.9.9-0");
@@ -217,14 +238,59 @@ describe("version:set fanout", () => {
     const before = manifestVersions();
     const dir = stageManifestTree();
     try {
-      execFileSync(
-        process.execPath,
-        [path.join(dir, "scripts", "set-version.mjs"), "9.9.9-0"],
-        { cwd: dir, encoding: "utf8" },
-      );
+      runStagedVersionSet(dir, "9.9.9-0");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
     expect(manifestVersions()).toEqual(before);
+  });
+
+  // The corruption path the unbounded search opened: with no version on the
+  // `packages[""]` entry, a search over the rest of the file falls through to
+  // the first dependency and rewrites *its* pinned version — a lockfile whose
+  // resolved versions no longer match reality, which breaks `npm ci`, reported
+  // as a successful bump. The second site is bounded to the `""` entry, so the
+  // bump has to fail and write nothing.
+  it("fails instead of rewriting a dependency when the root lockfile entry has no version", () => {
+    const dir = stageManifestTree();
+    try {
+      const file = path.join(dir, "package-lock.json");
+      const lock = JSON.parse(readFileSync(file, "utf8"));
+      delete (lock.packages[""] as { version?: string }).version;
+      writeFileSync(file, `${JSON.stringify(lock, null, 2)}\n`);
+      const lockBefore = readFileSync(file, "utf8");
+      const depsBefore = dependencyVersions(dir);
+
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/package-lock\.json/);
+      // Nothing written: the failure happens before any file is written.
+      expect(readFileSync(file, "utf8")).toBe(lockBefore);
+      expect(dependencyVersions(dir)).toEqual(depsBefore);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails rather than half-updating when the lockfile has no packages map", () => {
+    const dir = stageManifestTree();
+    try {
+      // lockfileVersion 1 shape: a top-level version and no `packages` map, so
+      // the second site does not exist to be written.
+      const file = path.join(dir, "package-lock.json");
+      writeFileSync(
+        file,
+        `${JSON.stringify({ name: "app", version: "1.3.0", lockfileVersion: 1 }, null, 2)}\n`,
+      );
+      const before = readFileSync(file, "utf8");
+      const result = runStagedVersionSet(dir, "9.9.9-0");
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toMatch(/package-lock\.json/);
+      // Not even the top-level mirror moves: the target is rejected whole.
+      expect(readFileSync(file, "utf8")).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
