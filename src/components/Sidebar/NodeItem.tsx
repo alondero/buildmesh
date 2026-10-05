@@ -19,7 +19,7 @@ import { dropdownId } from '../../lib/dropdownId';
 import { addToast } from '../../stores/toastStore';
 import { formatError } from '../../lib/errorUtils';
 import { getCircuitNodePresentation, hasActiveCircuitOwnership } from '../../lib/circuitNodePresentation';
-import { CircuitNodeIndicatorCell } from '../shared/CircuitNodeIndicator';
+import { NodeStatusGlyph } from '../shared/NodeStatusGlyph';
 
 // Issue #776 — Regenerate is the entry point for the new "restart this
 // node" flow wired up in ticket 03 of #774. We disable it (rather than
@@ -417,13 +417,13 @@ function NodeItemView({ node, meshColor, providerList, onSelectNode, onDeleteNod
         ${isActive ? 'border border-accent-cyan/50' : 'border border-transparent bg-[var(--mesh-bg)] hover:bg-[var(--mesh-bg-hover)]'}
       `}
     >
-      <span
-        className={`${config.color} inline-flex h-3 w-3 shrink-0 items-center justify-center text-xs leading-none`}
-        title={config.title}
-      >
-        {config.dot}
-      </span>
-      <CircuitNodeIndicatorCell presentation={circuitPresentation} />
+      <NodeStatusGlyph
+        shape={config.glyph}
+        colorClass={config.color}
+        statusLabel={config.label}
+        statusTitle={config.title}
+        circuit={circuitPresentation}
+      />
       {/* Issue #1364 §3 — node-level status-reporting fault (see GridNodeHeader). */}
       {isSignalHealthProblem(node.signal_health) && <SignalHealthBadge compact health={node.signal_health} />}
       <ProviderIcon providerId={node.provider} className="h-3 w-3 opacity-90" />

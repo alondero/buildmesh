@@ -34,7 +34,8 @@ import { isMac } from '../../lib/platform';
 import { AgentReviewButton } from './AgentReviewButton';
 import type { ActivityStatus } from '../../lib/nodeActivities';
 import { getCircuitNodePresentation, hasActiveCircuitOwnership, type CircuitIndicatorTone, type CircuitOutcome } from '../../lib/circuitNodePresentation';
-import { CircuitIndicatorGlyph, CircuitNodeIndicatorCell } from '../shared/CircuitNodeIndicator';
+import { CircuitIndicatorGlyph } from '../shared/CircuitNodeIndicator';
+import { NodeStatusGlyph } from '../shared/NodeStatusGlyph';
 import { useMuseSessionTelemetry } from '../../hooks/useMuseSessionTelemetry';
 import { ObservedSessionTelemetry } from './ObservedSessionTelemetry';
 
@@ -128,8 +129,23 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   // `unverified` deliberately earns no badge (DESIGN.md principle 6). The
   // activity label still wins the visible text, so only the note is appended.
   const healthNote = signalHealthNote(node.signal_health);
-  const statusDotLabel = activity?.label ?? getNodeStatusConfig(node).label;
-  const statusDotTitle = healthNote ? `${statusDotLabel}. ${healthNote}` : statusDotLabel;
+  const statusGlyphLabel = activity?.label ?? getNodeStatusConfig(node).label;
+  const statusGlyphTitle = healthNote ? `${statusGlyphLabel}. ${healthNote}` : statusGlyphLabel;
+  // Card-level activity tones recolour the circle, but the shape stays the
+  // title node's own status. The only tones that override the shape are
+  // 'error' and 'warning': they label the card 'Needs attention' or 'Needs
+  // input', and an idle ring or a thin archived ring would contradict that
+  // copy. 'active' tones (Running, Starting, Waiting for background work,
+  // Implementing, Reviewing) keep the title-node shape so a grouped pending
+  // member still draws the dashed pulsing circle that DESIGN.md documents.
+  const statusConfig = getNodeStatusConfig(titleNode);
+  const statusGlyphShape = activity?.tone === 'error' || activity?.tone === 'warning'
+    ? 'solid'
+    : statusConfig.glyph;
+  const statusGlyphColor = activity?.tone === 'error' ? 'text-status-error'
+    : activity?.tone === 'warning' ? 'text-status-warning'
+    : activity?.tone === 'active' ? 'text-accent-cyan'
+    : statusConfig.color;
   const compactHeader = width < HEADER_TIER_BREAKPOINTS.compact;
   const toggleShortcutHint = `${isMac ? '⌘' : 'Alt'}+G`;
   const handleToggleSolo = () => {
@@ -158,12 +174,12 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const showChanges = () => { activateNode(node.id); openProbeTab('review'); };
   // Scope the mesh-scoped Probe to this node's mesh before focusing, so the run
   // is present in the snapshot the tab loads (the grid can show nodes from
-  // several meshes). Shared by the menu row and the title-bar Pilot light.
+  // several meshes). Shared by the menu row and the title-bar glyph.
   const openCircuitRun = (runId: number) => {
     useMeshStore.getState().selectMesh(node.mesh_id);
     useUIStore.getState().focusCircuitRun(runId);
   };
-  // A visible Pilot light backed by Circuit ownership is the quick link to that
+  // A glyph with a Circuit ring backed by ownership is the quick link to that
   // run in the Circuits Probe.
   const circuitRunAction = circuitPresentation && circuitOwnership
     ? { label: 'Open this Circuit run in the Circuits Probe.', onActivate: () => openCircuitRun(circuitOwnership.run_id) }
@@ -177,10 +193,9 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
       className={`flex shrink-0 min-w-0 overflow-hidden items-center gap-1.5 border-b border-border-default px-2 py-1 ${dragHandleProps ? 'touch-none cursor-grab active:cursor-grabbing' : ''}`}
       style={{ backgroundColor: `${meshColor.hex}14` }}>
       <div className="flex min-w-0 flex-1 items-center gap-1.5">
-        <span role="status" aria-label={statusDotLabel}
-          title={statusDotTitle}
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${activity?.tone === 'error' ? 'bg-status-error' : activity?.tone === 'warning' ? 'bg-status-warning' : activity?.tone === 'active' ? 'bg-accent-cyan' : getNodeStatusConfig(titleNode).bgColor}`} />
-        <CircuitNodeIndicatorCell presentation={circuitPresentation} action={circuitRunAction} />
+        <NodeStatusGlyph shape={statusGlyphShape} colorClass={statusGlyphColor}
+          statusLabel={statusGlyphLabel} statusTitle={statusGlyphTitle}
+          circuit={circuitPresentation} action={circuitRunAction} />
         {!activity && <ProviderIcon providerId={node.provider} className="h-3.5 w-3.5 shrink-0" />}
         <span onPointerDown={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}
           title={titleNode.name} className="min-w-0 truncate text-sm font-semibold text-text-primary">

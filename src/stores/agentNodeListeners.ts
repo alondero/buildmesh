@@ -104,7 +104,7 @@ export interface AgentNodeActionSurface {
 const SESSION_ID_KEY = 'session_id';
 
 /// Non-terminal run states: ownership is still live, so the satellite re-read
-/// keeps the Pilot light current without a full node refetch.
+/// keeps the node glyph's Circuit ring current without a full node refetch.
 const LIVE_CIRCUIT_RUN_STATES = new Set(['pending', 'running', 'paused']);
 
 /// Circuit run states after which the run's remaining agents have been swept.

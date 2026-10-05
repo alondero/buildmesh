@@ -208,6 +208,29 @@ Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
 retained, and the previous global agent cap and custom wrap-up template are carried
 forward. Old mesh-level Autopilot settings have no effect on Circuit launches.
 
+## Read a node's status mark
+
+Each node in the sidebar and on its card title bar has one small mark. The
+**circle** is what the agent is doing: solid for running, a hollow ring for
+idle, a dashed ring while starting, a ring with a dot (pulsing) for a node
+that needs attention, a red cross for an error, a ring with a slash for lost,
+half-filled for suspended, a ring with a dot for a node whose pull request is
+open, and the same ring with a dot for a node that is just ready.
+
+Idle and running share cyan but differ in shape (hollow ring vs solid
+circle), so they are told apart by shape alone. `pending` and `spawning`
+both draw a dashed muted ring (the same "Starting…" state from two code
+paths); `completed` and `ready` both draw a green ringed dot (the
+pre-existing ✓/green grouping). Hover the mark for its label.
+
+When a Circuit is driving the node, a **ring** circles the mark. A violet comet
+that moves round it means the Circuit is working. A held amber half ring means it
+is waiting, a red dashed ring means it needs attention, and a closed green ring
+means it finished. Hover the mark for a sentence describing both. If your
+operating system is set to reduce motion, the comet stays still at the top of the
+ring instead of circling. On a card title bar, click the mark to open that run in
+the Circuits tab.
+
 ## Understand a circuit checkpoint
 
 An **Unverified Checkpoint** means Buildmesh cannot currently establish the
