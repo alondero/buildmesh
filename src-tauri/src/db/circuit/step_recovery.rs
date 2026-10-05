@@ -37,7 +37,7 @@ pub enum RecoveryAction {
 pub struct RunRecoveryOption {
     pub action: RecoveryAction,
     pub available: bool,
-    /// Why the action is not available, in plain words and with what to do about it.
+    // Why the action is not available, in plain words and with what to do about it.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unavailable_reason: Option<String>,
@@ -50,7 +50,7 @@ pub struct RunRecovery {
     pub node_id: String,
     #[ts(as = "i32")]
     pub attempt: i32,
-    /// `failed`, or `cancelled` when the agent the step was waiting on was closed.
+    // `failed`, or `cancelled` when the agent the step was waiting on was closed.
     pub status: String,
     pub error: Option<String>,
     pub options: Vec<RunRecoveryOption>,
@@ -63,11 +63,11 @@ pub struct RecoveryRequest {
     pub run_id: i64,
     pub node_id: String,
     pub attempt: i32,
-    /// The latest history id the person saw, so a stale click is refused.
+    // The latest history id the person saw, so a stale click is refused.
     #[ts(as = "i32")]
     pub expected_revision: i64,
     pub action: RecoveryAction,
-    /// Required to continue (it is an attestation); optional for a retry.
+    // Required to continue (it is an attestation); optional for a retry.
     #[serde(default)]
     pub reason: String,
 }

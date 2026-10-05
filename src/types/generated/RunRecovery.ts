@@ -4,8 +4,4 @@ import type { RunRecoveryOption } from "./RunRecoveryOption";
 /**
  * What a person can do about a failed run, anchored on the step that failed.
  */
-export type RunRecovery = { node_id: string, attempt: number, 
-/**
- * `failed`, or `cancelled` when the agent the step was waiting on was closed.
- */
-status: string, error: string | null, options: Array<RunRecoveryOption>, };
+export type RunRecovery = { node_id: string, attempt: number, status: string, error: string | null, options: Array<RunRecoveryOption>, };
