@@ -20,6 +20,28 @@ pub enum EventMsg {
         #[ts(as = "i32")]
         session_id: i64,
     },
+    /// The node's PTY input queue refused an inbound mobile keystroke
+    /// (issue #1530) because the agent is not draining its input.
+    ///
+    /// The WS input direction is fire-and-forget — there is no inbound
+    /// channel to acknowledge a write on — so without this event a phone that
+    /// typed into a wedged agent would simply lose the keystroke, which is the
+    /// exact failure #1530 exists to close. The client shows a stalled-input
+    /// state and knows to re-send. `queued_bytes`/`queued_messages` let it
+    /// explain *why* the write stalled rather than just that it did.
+    #[serde(rename = "terminal-input-stalled")]
+    TerminalInputStalled {
+        #[ts(as = "i32")]
+        session_id: i64,
+        /// Bytes buffered in the node's PTY input queue at the moment of the
+        /// refusal. A `u32`, not a `u64`: the queue is capped at 1 MiB, so this
+        /// can never exceed a `u32`, and `u64` would generate a TypeScript
+        /// `bigint` that `JSON.parse` can never actually produce on the wire.
+        /// The client gets a plain number it can use in a tooltip.
+        queued_bytes: u32,
+        #[ts(as = "i32")]
+        queued_messages: i32,
+    },
     /// Normalized lifecycle event (issue #1364) — the same wire shape the
     /// desktop receives as the `agent-lifecycle` Tauri event, so both clients
     /// patch the affected node identically. Boxed: the full envelope dwarfs

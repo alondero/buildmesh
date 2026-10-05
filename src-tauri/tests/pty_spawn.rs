@@ -23,7 +23,7 @@ use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use buildmesh_lib::agent::process::{AgentProcess, PROCESS_REGISTRY};
+use buildmesh_lib::agent::process::{AgentProcess, InputQueueGauge, PROCESS_REGISTRY};
 use buildmesh_lib::agent::provider::{SpawnRecipe, WindowsShell};
 use buildmesh_lib::agent::spawn::{open_pty_pair, pump_pty_output, spawn_child};
 use buildmesh_lib::agent::spawn_environment;
@@ -41,16 +41,23 @@ fn make_test_writer_thread(
 ) -> (
     std::sync::mpsc::SyncSender<Vec<u8>>,
     std::thread::JoinHandle<()>,
+    Arc<InputQueueGauge>,
 ) {
     let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+    // Issue #1530: the writer thread releases each buffer's byte accounting as
+    // it drains, mirroring the production `pty_writer_thread` so the fixture
+    // exercises the real gauge rather than a stubbed one.
+    let queue = Arc::new(InputQueueGauge::default());
+    let writer_queue = Arc::clone(&queue);
     let handle = std::thread::spawn(move || {
         let mut writer = writer;
         while let Ok(bytes) = writer_rx.recv() {
+            writer_queue.release(bytes.len());
             let _ = writer.write_all(&bytes);
             let _ = writer.flush();
         }
     });
-    (writer_tx, handle)
+    (writer_tx, handle, queue)
 }
 
 struct ChunkedReader {
@@ -118,12 +125,13 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
-    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
+    let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(writer_handle),
             master,
             reader_alive.clone(),
@@ -349,12 +357,13 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         reader_alive_t.store(false, Ordering::SeqCst);
     });
 
-    let (writer_tx, _writer_thread) = make_test_writer_thread(writer);
+    let (writer_tx, _writer_thread, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(_writer_thread),
             master,
             reader_alive.clone(),
@@ -436,12 +445,13 @@ fn windows_kill_session_closes_master() {
         reader_alive_t.store(false, Ordering::SeqCst);
     });
 
-    let (writer_tx, _writer_thread) = make_test_writer_thread(writer);
+    let (writer_tx, _writer_thread, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(_writer_thread),
             master,
             reader_alive.clone(),
@@ -629,12 +639,13 @@ fn windows_pi_interactive_tui() {
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
-    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
+    let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(writer_handle),
             master,
             reader_alive.clone(),
@@ -730,12 +741,13 @@ fn wsl_pi_interactive_tui() {
     drop(pair.slave);
 
     let reader_alive = Arc::new(AtomicBool::new(true));
-    let (writer_tx, writer_handle) = make_test_writer_thread(writer);
+    let (writer_tx, writer_handle, queue) = make_test_writer_thread(writer);
     PROCESS_REGISTRY.insert(
         session_id,
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(writer_handle),
             master,
             reader_alive.clone(),

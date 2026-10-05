@@ -2,6 +2,11 @@ import { Channel } from '@tauri-apps/api/core';
 import { _invoke } from './tauri/_invoke';
 import { emit } from '@tauri-apps/api/event';
 import { deleteDefaultProviderPromise, clearDefaultProviderPromises } from './providerCache';
+// Issue #1530 — the one ordered retry buffer for PTY input, owned here at
+// the transport seam. It is the only thing that reacts to a `backpressured`
+// disposition, so no call site can invent its own recovery.
+import { TerminalInputQueue, type InputStall } from './terminalInputQueue';
+import type { InputOutcome } from '../types/generated/InputOutcome';
 // The cross-surface invalidation event is owned by the provider facet
 // (same layer); this facade re-emits it after default-provider writes
 // so open spawn clusters refresh.
@@ -331,9 +336,43 @@ export const isAgentRunning = (sessionId: number) =>
 export const sendToAgent = (sessionId: number, input: string) =>
   _invoke('send_to_agent', { sessionId, input });
 
-/** Raw write to the agent's PTY (no submit/newline handling — cf. `sendToAgent`). */
+/** Raw write to the agent's PTY (no submit/newline handling — cf. `sendToAgent`).
+ *
+ * Bypasses the ordered retry buffer on purpose: this is the transport
+ * itself, used by the queue and by tests that need to observe a refused
+ * write. Product callers use `writeToAgent` below.
+ */
+export const writeToAgentRaw = (sessionId: number, data: string) =>
+  _invoke<InputOutcome>('write_to_agent', { sessionId, data });
+
+const terminalInputQueue = new TerminalInputQueue({ write: writeToAgentRaw });
+
+/**
+ * Watch for a session whose input is being held rather than delivered.
+ *
+ * The transport owns the buffer, so the UI subscribes here instead of the
+ * transport reaching into a store. Reports only once bytes have been held
+ * past the queue's threshold, so a normal burst of typing shows nothing.
+ */
+export const subscribeTerminalInputStall = (listener: (stall: InputStall | null) => void) =>
+  terminalInputQueue.subscribeStall(listener);
+
+/** Forget everything pending for a session (node closed, mesh torn down). */
+export const cancelTerminalInput = (sessionId: number) => terminalInputQueue.cancel(sessionId);
+
+/**
+ * Write to the agent's PTY through the one ordered retry buffer (issue #1530).
+ *
+ * Every product caller uses this rather than the raw invoke, so no call site
+ * can invent its own backpressure behaviour: the buffer preserves input
+ * order per session, retries a refused write with the identical bytes (never
+ * a duplicate — a refusal means the bytes were never queued), and settles
+ * with the disposition that ultimately applied. A rejected IPC call still
+ * rejects, so `pasteClipboard` can tell "could not try" from "tried and was
+ * refused".
+ */
 export const writeToAgent = (sessionId: number, data: string) =>
-  _invoke('write_to_agent', { sessionId, data });
+  terminalInputQueue.enqueue(sessionId, data);
 
 /**
  * Hand `text` over to an existing agent (`handover_to_agent`). Not a

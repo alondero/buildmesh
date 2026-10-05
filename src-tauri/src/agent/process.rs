@@ -32,13 +32,21 @@ pub struct AgentProcess {
     /// ConPTY pipe could park the async runtime for the entire write
     /// duration, reintroducing the latency this PR is meant to fix.
     /// `SyncSender` is bounded so a stuck agent doesn't grow memory
-    /// without limit; full sends are dropped with a warn-level log.
+    /// without limit. A full send is now reported as
+    /// [`InputDisposition::Backpressured`] to the caller and the bytes are
+    /// held by the client's ordered retry buffer — never dropped with a
+    /// success returned (issue #1530).
     /// Wrapped in `Option` so teardown can `take()` it — dropping the
     /// last sender unblocks the writer thread's `recv()` (issue #1531).
     /// Holding a live sender while joining the writer pays the two-second
     /// fallback every time. Private: callers enqueue through
     /// [`AgentProcessRegistry::write_bytes`].
     writer_tx: Mutex<Option<std::sync::mpsc::SyncSender<Vec<u8>>>>,
+    /// Byte/message accounting for `writer_tx` (issue #1530). `Arc` because
+    /// the writer thread holds its own clone to release each buffer as it
+    /// drains — `SyncSender` has no introspection, so this is the only way to
+    /// enforce `PTY_INPUT_QUEUE_BYTE_CAPACITY` or report queue usage.
+    queue: Arc<InputQueueGauge>,
     input_version: std::sync::atomic::AtomicU64,
     last_submit_ms: std::sync::atomic::AtomicI64,
     retired: AtomicBool,
@@ -125,7 +133,10 @@ pub(crate) struct InputStamp {
 
 #[path = "terminal_input.rs"]
 mod terminal_input;
-pub use terminal_input::InputActivity;
+pub use terminal_input::{
+    InputActivity, InputDisposition, InputOutcome, InputQueueGauge, InputWriteError,
+    PTY_INPUT_QUEUE_BYTE_CAPACITY,
+};
 use terminal_input::{TerminalInput, UNKNOWN_INPUT_BUFFER_LEN};
 
 #[derive(Clone, Copy)]
@@ -175,6 +186,7 @@ impl AgentProcess {
     pub fn new(
         child: Box<dyn Child + Send + Sync>,
         writer_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+        queue: Arc<InputQueueGauge>,
         writer_handle: Option<JoinHandle<()>>,
         master: Box<dyn MasterPty + Send>,
         reader_alive: Arc<AtomicBool>,
@@ -187,6 +199,7 @@ impl AgentProcess {
         Self {
             child: Arc::new(Mutex::new(child)),
             writer_tx: Mutex::new(Some(writer_tx)),
+            queue,
             input_version: std::sync::atomic::AtomicU64::new(0),
             last_submit_ms: std::sync::atomic::AtomicI64::new(0),
             retired: AtomicBool::new(false),
@@ -205,7 +218,7 @@ impl AgentProcess {
     }
 
     /// Non-blocking enqueue onto the dedicated writer thread.
-    fn enqueue_input(&self, data: Vec<u8>, framing: InputFraming) -> Result<InputActivity, std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input(&self, data: Vec<u8>, framing: InputFraming) -> Result<InputActivity, InputWriteError> {
         self.enqueue_input_if_current(data, None, framing).map(|(_, activity)| activity)
     }
 
@@ -231,9 +244,9 @@ impl AgentProcess {
             && !self.input_decoder.lock().unwrap().has_pending_sequence()
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>, framing: InputFraming) -> Result<(Option<InputStamp>, InputActivity), std::sync::mpsc::TrySendError<Vec<u8>>> {
+    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>, framing: InputFraming) -> Result<(Option<InputStamp>, InputActivity), InputWriteError> {
         let guard = self.writer_tx.lock().unwrap();
-        if self.retired.load(Ordering::SeqCst) { return Err(std::sync::mpsc::TrySendError::Disconnected(data)); }
+        if self.retired.load(Ordering::SeqCst) { return Err(InputWriteError::Closed); }
         if expected.is_some_and(|expected| !self.owns_staged_draft(&expected)) {
             return Ok((None, InputActivity::default()));
         }
@@ -245,9 +258,28 @@ impl AgentProcess {
             InputFraming::ByteStream => next.accept(&data),
             InputFraming::TerminalEvent => next.accept_event(&data),
         };
-        match guard.as_ref() {
-            Some(tx) => tx.try_send(data)?,
-            None => return Err(std::sync::mpsc::TrySendError::Disconnected(data)),
+        // Issue #1530: bound the queue by bytes as well as messages, and
+        // report a refusal instead of dropping the buffer behind a success.
+        // The reservation is made under `writer_tx` (held above), so a
+        // concurrent enqueue cannot slip between the headroom check and the
+        // reservation, and the `try_send` result rolls it back exactly.
+        let len = data.len();
+        if !self.queue.admits(len) { return Err(InputWriteError::Backpressured); }
+        self.queue.reserve(len);
+        let sent = match guard.as_ref() {
+            Some(tx) => tx.try_send(data),
+            None => return Err(InputWriteError::Closed),
+        };
+        match sent {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                self.queue.release(len);
+                return Err(InputWriteError::Backpressured);
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                self.queue.release(len);
+                return Err(InputWriteError::Closed);
+            }
         }
         let version = if activity.user_input {
             self.input_version.fetch_add(1, Ordering::Relaxed) + 1
@@ -255,6 +287,11 @@ impl AgentProcess {
         if activity.submitted { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
         *input = next;
         Ok((Some(InputStamp { generation: self.generation, version }), activity))
+    }
+
+    /// Live accounting for this agent's PTY input queue, for diagnostics.
+    pub fn input_queue(&self) -> (usize, u64) {
+        self.queue.snapshot()
     }
 
     /// Stash the reader thread's `JoinHandle` on the registry entry.
@@ -288,14 +325,18 @@ impl AgentProcess {
     /// (issue #1531).
     pub fn close_input(&self) {
         drop(self.writer_tx.lock().unwrap().take());
+        // Whatever is still buffered can never be drained now, so zero the
+        // accounting rather than leave a phantom backlog that the next
+        // incarnation of this session would appear to inherit (issue #1530).
+        self.queue.reset();
     }
 }
 
 /// Trait abstracting the process registry methods needed by http_server.
 pub trait ProcessRegistryApi: Send + Sync {
-    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String>;
+    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String>;
     /// One complete terminal input event; callers must not split keyboard events.
-    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String>;
+    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String>;
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String>;
 }
 
@@ -334,16 +375,27 @@ impl AgentProcessRegistry {
         self.inner.get(session_id)
     }
 
-    pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
-        self.write_input_with_framing(session_id, data, InputFraming::ByteStream).map(|_| ())
+    pub fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String> {
+        self.write_input_with_framing(session_id, data, InputFraming::ByteStream)
     }
 
     /// Desktop IPC and mobile WebSocket preserve each complete xterm onData event.
-    pub fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String> {
+    pub fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String> {
         self.write_input_with_framing(session_id, data, InputFraming::TerminalEvent)
     }
 
-    fn write_input_with_framing(&self, session_id: i64, data: &[u8], framing: InputFraming) -> Result<InputActivity, String> {
+    /// Total PTY input queue depth and bytes across every live agent. Read by
+    /// the diagnostics sampler — the queue bound is only meaningful if its
+    /// actual usage is observable, and it must fall back to zero once the
+    /// writers drain (issue #1530).
+    pub fn input_queue_totals(&self) -> (usize, u64) {
+        self.inner.iter().fold((0, 0), |(messages, bytes), (_, agent)| {
+            let (agent_messages, agent_bytes) = agent.input_queue();
+            (messages + agent_messages, bytes + agent_bytes)
+        })
+    }
+
+    fn write_input_with_framing(&self, session_id: i64, data: &[u8], framing: InputFraming) -> Result<InputOutcome, String> {
         let agent = self
             .get(&session_id)
             .ok_or_else(|| "Agent not running".to_string())?;
@@ -358,51 +410,61 @@ impl AgentProcessRegistry {
         //
         // `try_send` (not `send`) so a stuck agent can't back-pressure
         // the async runtime. A full channel means the writer thread is
-        // still draining a slow PTY; we drop the new bytes with a warn
-        // (the user can re-type). The bound is 64 messages. A paste is
-        // one message of whatever size the caller passed (issue #1498);
-        // do not split it into keystroke-sized writes.
-        let send_result = agent.enqueue_input(data.to_vec(), framing);
-        let activity = match send_result {
-            Ok(activity) => activity,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+        // still draining a slow PTY — that is a *typed outcome*, never a
+        // silent drop: pre-#1530 this branch logged a warning, discarded
+        // the bytes, and returned `Ok(())`, so a user could be told their
+        // prompt had arrived while it had vanished. The caller now gets
+        // `InputDisposition::Backpressured`, keeps the exact bytes, and
+        // the one ordered retry buffer at the client seam decides when to
+        // try again. The bound is 64 messages *and*
+        // `PTY_INPUT_QUEUE_BYTE_CAPACITY` bytes; a paste is one message of
+        // whatever size the caller passed (issue #1498) and is never split.
+        let outcome = match agent.enqueue_input(data.to_vec(), framing) {
+            Ok(activity) => InputOutcome::accepted(activity),
+            Err(InputWriteError::Backpressured) => {
+                let (queued_messages, queued_bytes) = agent.input_queue();
                 tracing::warn!(
                     session_id,
-                    "PTY writer channel full; dropping {} bytes (agent is slow to consume the PTY)",
+                    queued_messages,
+                    queued_bytes,
+                    "PTY input queue full; rejected {} bytes (agent is slow to consume the PTY)",
                     data.len()
                 );
-                return Ok(InputActivity::default());
-                // Drop the bytes and still return Ok — the user can re-type;
-                // failing the call would surface as a confusing "Agent not
-                // running" toast and silently lose keystrokes.
+                // No decoder advance, no activity, no telemetry — the buffer
+                // is simply not ours any more. The client still holds it.
+                return Ok(InputOutcome::backpressured());
             }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            Err(InputWriteError::Closed) => {
                 // The writer thread has exited (kill_session has run and
                 // the registry entry is mid-removal). Signal the caller
                 // the same way the old code did on a pipe failure.
                 return Err("Agent not running".to_string());
             }
+            Err(InputWriteError::InvalidStamp) => {
+                return Err("Invalid input ownership stamp".to_string());
+            }
         };
-        if !activity.user_input { return Ok(activity); }
+        let activity = outcome.activity;
+        if !activity.user_input { return Ok(outcome); }
         // Mark THIS MESH as active so the background warm-pool worker holds
         // off its idle refills for this mesh's pool while the user is typing
         // into the terminal (issue #613 AC2; issue #634 scopes the activity
         // per-mesh so typing into mesh A's terminal doesn't prevent mesh B's
-        // pool from being refilled). Recorded after a successful enqueue so
-        // a dropped (full-channel) write doesn't count as activity.
+        // pool from being refilled). Recorded after an accepted enqueue, so
+        // a rejected (backpressured) write never counts as activity
+        // (issue #1530).
         crate::services::pool_worker::note_activity_for_mesh(agent.mesh_id);
         // Emit the `first_user_input` checkpoint exactly once per session.
-        // We do this AFTER a successful enqueue so a failed PTY write
-        // (broken pipe, etc.) does NOT claim "user input accepted". The
-        // helper is the only place the flag flips and the log line fires —
-        // see its doc comment for the atomic contract and the
-        // coordinator-drive caveat.
+        // We do this AFTER an accepted enqueue so a rejected or failed PTY
+        // write does NOT claim "user input accepted". The helper is the only
+        // place the flag flips and the log line fires — see its doc comment
+        // for the atomic contract and the coordinator-drive caveat.
         record_first_input_if_first(
             &agent.first_user_input_logged,
             agent.spawn_start,
             session_id,
         );
-        Ok(activity)
+        Ok(outcome)
     }
 
     pub(crate) fn input_stamp(&self, session_id: i64) -> Option<String> {
@@ -443,10 +505,17 @@ impl AgentProcessRegistry {
 
     /// Compare and enqueue under the same writer lock as ordinary keystrokes.
     /// A partial draft invalidates a continuation even before Enter is pressed.
-    pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, String> {
-        let agent = self.get(&session_id).ok_or_else(|| "Agent not running".to_string())?;
-        let expected = InputStamp::decode(expected).ok_or_else(|| "Invalid input ownership stamp".to_string())?;
-        agent.enqueue_input_if_current(data.to_vec(), Some(expected), InputFraming::ByteStream).map_err(|e| e.to_string())
+    ///
+    /// `Ok(None)` is the *guard lost* signal only — the caller still owns the
+    /// draft no longer, so retrying is pointless. Backpressure is a separate
+    /// [`InputWriteError::Backpressured`] rather than a third `None` meaning,
+    /// because the circuit treats `None` as "someone else owns this draft,
+    /// never submit it automatically" and a mere full queue must not be
+    /// mistaken for that (issue #1530).
+    pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, InputWriteError> {
+        let agent = self.get(&session_id).ok_or(InputWriteError::Closed)?;
+        let expected = InputStamp::decode(expected).ok_or(InputWriteError::InvalidStamp)?;
+        agent.enqueue_input_if_current(data.to_vec(), Some(expected), InputFraming::ByteStream)
             .map(|(stamp, _)| stamp.map(InputStamp::encode))
     }
 
@@ -745,10 +814,10 @@ pub(crate) fn record_first_input_if_first(
 }
 
 impl ProcessRegistryApi for AgentProcessRegistry {
-    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<(), String> {
+    fn write_bytes(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String> {
         AgentProcessRegistry::write_bytes(self, session_id, data)
     }
-    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputActivity, String> {
+    fn write_input(&self, session_id: i64, data: &[u8]) -> Result<InputOutcome, String> {
         AgentProcessRegistry::write_input(self, session_id, data)
     }
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
@@ -860,6 +929,7 @@ pub fn watch_child_exit(
 #[cfg(test)]
 pub(crate) mod testing {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     /// A fresh registry holding one live stand-in agent for `session_id`, plus
     /// the receiver for every chunk written to that agent's PTY. The
@@ -878,6 +948,94 @@ pub(crate) mod testing {
         *registry.get(&session_id).unwrap().writer_tx.lock().unwrap() = Some(tx);
         (registry, rx)
     }
+
+    /// A PTY writer that is deliberately wedged: it takes buffers off the
+    /// channel and then parks, standing in for an agent that has stopped
+    /// reading its input. This is the condition issue #1530 is about — a real
+    /// full queue, not a simulated `TrySendError`.
+    pub(crate) struct BlockedWriter {
+        /// Buffers the writer has taken off the channel, including one it is
+        /// currently parked on. Distinct from `written` because the gate is
+        /// closed until a test opens it — a test waiting for the writer to
+        /// *park* needs to observe the take, not the completed write.
+        taken: Arc<AtomicUsize>,
+        written: Arc<Mutex<Vec<Vec<u8>>>>,
+        open: Arc<(Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl BlockedWriter {
+        /// Unpark the writer and wait for it to finish `expected` buffers.
+        /// Returns what actually reached the PTY, in order.
+        pub(crate) fn release_and_collect(&self, expected: usize) -> Vec<Vec<u8>> {
+            {
+                let (lock, cv) = &*self.open;
+                *lock.lock().unwrap() = true;
+                cv.notify_all();
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let written = self.written.lock().unwrap().len();
+                if written >= expected {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "writer never finished {expected} buffers (got {written})"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            self.written.lock().unwrap().clone()
+        }
+
+        /// How many buffers the writer has taken off the channel so far.
+        pub(crate) fn taken(&self) -> usize {
+            self.taken.load(Ordering::SeqCst)
+        }
+    }
+
+    /// A registry whose PTY input queue fills because the writer is blocked.
+    ///
+    /// Built on the real [`AgentProcess`] and the real enqueue path — only the
+    /// channel consumer is swapped — so the byte ceiling, the message ceiling
+    /// and the gauge are all the production ones (issue #1530). Lives here
+    /// rather than in `mod tests` so a transport-level test (`http::routes::
+    /// nodes`) can force a genuine refusal without duplicating the fixture.
+    pub(crate) fn blocked_writer_registry(
+        session_id: i64,
+        capacity: usize,
+    ) -> (Arc<AgentProcessRegistry>, Arc<BlockedWriter>) {
+        let registry = Arc::new(AgentProcessRegistry::new());
+        super::tests::insert_trivial_agent(&registry, session_id);
+        let agent = registry.get(&session_id).unwrap();
+        let taken = Arc::new(AtomicUsize::new(0));
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let open = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(capacity);
+        *agent.writer_tx.lock().unwrap() = Some(tx);
+        let drain_taken = Arc::clone(&taken);
+        let drain_written = Arc::clone(&written);
+        let drain_open = Arc::clone(&open);
+        let drain_queue = Arc::clone(&agent.queue);
+        std::thread::spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                drain_queue.release(bytes.len());
+                // Count the take *before* parking, so a test can observe that
+                // the writer is holding a buffer.
+                drain_taken.fetch_add(1, Ordering::SeqCst);
+                let (lock, cv) = &*drain_open;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+                drop(open);
+                drain_written.lock().unwrap().push(bytes);
+            }
+        });
+        (
+            registry,
+            Arc::new(BlockedWriter { taken, written, open }),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -888,6 +1046,23 @@ mod tests {
     use crate::agent::spawn_environment;
     use crate::models::EnvType;
     use std::io::Write;
+
+    /// The activity from a write the queue **accepted**.
+    ///
+    /// `write_input` answers `Ok` for an accepted write and also for a refused
+    /// one (a refusal carries default activity), so pinning only the activity
+    /// would let "the queue dropped it" read as "it decoded to nothing" — the
+    /// exact ambiguity issue #1530 exists to remove. Every decoding assertion
+    /// goes through here so the disposition is checked too.
+    fn accepted_activity(registry: &AgentProcessRegistry, id: i64, data: &[u8]) -> InputActivity {
+        let outcome = registry.write_input(id, data).unwrap();
+        assert_eq!(
+            outcome.disposition,
+            InputDisposition::Accepted,
+            "expected the queue to accept {data:?}"
+        );
+        outcome.activity
+    }
 
     #[test]
     fn terminal_protocol_preserves_registry_report_fence_across_packets() {
@@ -900,7 +1075,7 @@ mod tests {
         let stamp = registry.input_stamp(id).unwrap();
         for packet in [b"\x1b[I".as_slice(), b"\x1b[O", b"\x1b[12;34R", b"\x1b[?1;2c", b"\x1b[<0;24;12M"] {
             for byte in packet {
-                assert_eq!(registry.write_input(id, &[*byte]).unwrap(), InputActivity::default());
+                assert_eq!(accepted_activity(&registry, id, &[*byte]), InputActivity::default());
                 assert_eq!(rx.recv().unwrap(), vec![*byte]);
             }
             assert_eq!(registry.input_stamp(id).as_ref(), Some(&stamp));
@@ -938,7 +1113,7 @@ mod tests {
             assert!(rx.try_recv().is_err());
 
             let last_submit = agent.last_submit_ms.load(Ordering::Relaxed);
-            assert_eq!(registry.write_input(id, &[boundary]).unwrap(), InputActivity {
+            assert_eq!(accepted_activity(&registry, id, &[boundary]), InputActivity {
                 user_input: true, submitted: boundary == b'\r',
             });
             assert_eq!(rx.recv().unwrap(), vec![boundary]);
@@ -953,7 +1128,7 @@ mod tests {
                 assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), last_submit);
             }
         }
-        assert!(!registry.write_input(id, b"\x1b\r").unwrap().submitted);
+        assert!(!accepted_activity(&registry, id, b"\x1b\r").submitted);
         assert_eq!(rx.recv().unwrap(), b"\x1b\r");
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
         registry.write_input(id, b"\x03").unwrap();
@@ -973,17 +1148,28 @@ mod tests {
         let id = -930_024;
         let registry = AgentProcessRegistry::new();
         insert_trivial_agent(&registry, id);
+        // Capacity 1 on purpose, so the `\x03` below genuinely cannot be
+        // queued. That was always the intent of this fixture, but pre-#1530 the
+        // loss was invisible: the write came back `Ok` with default activity.
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
         let original = registry.input_stamp(id).unwrap();
         registry.write_input(id, b"\x1b").unwrap();
-        assert_eq!(registry.write_input(id, b"\x03").unwrap(), InputActivity::default());
+        // Issue #1530: the refused clear is *reported*, not swallowed. The
+        // assertion used to be `activity == default`, which a silent drop and a
+        // genuine no-op decoder answer identically — exactly the ambiguity that
+        // let a dropped prompt read as delivered.
+        assert_eq!(
+            registry.write_input(id, b"\x03").unwrap().disposition,
+            InputDisposition::Backpressured,
+            "a full input queue must be reported, not dropped behind a success"
+        );
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
         assert_eq!(rx.recv().unwrap(), b"\x1b");
-        assert!(rx.try_recv().is_err());
+        assert!(rx.try_recv().is_err(), "the refused clear must never have been queued");
         assert!(!registry.commit_recovered_turn(id, &original, i64::MAX,
             || panic!("dropped clear cannot authorize recovery")).unwrap());
-        assert_eq!(registry.write_input(id, b"\x03").unwrap(), InputActivity { user_input: true, submitted: false });
+        assert_eq!(accepted_activity(&registry, id, b"\x03"), InputActivity { user_input: true, submitted: false });
         assert_eq!(rx.recv().unwrap(), b"\x03");
         assert!(registry.input_stamp(id).is_some());
         registry.kill_session(id);
@@ -998,39 +1184,57 @@ mod tests {
         let agent = registry.get(&id).unwrap();
         *agent.writer_tx.lock().unwrap() = Some(tx);
         let original = registry.input_stamp(id).unwrap();
-        assert_eq!(registry.write_input(id, b"draft").unwrap(), InputActivity { user_input: true, submitted: false });
+        assert_eq!(accepted_activity(&registry, id, b"draft"), InputActivity { user_input: true, submitted: false });
         rx.recv().unwrap();
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
         registry.write_input(id, b"\x03").unwrap();
         rx.recv().unwrap();
         for packet in [b"\x1b[20".as_slice(), b"0~", b"line\n", b"\x1b[201", b"~"] {
-            assert!(!registry.write_input(id, packet).unwrap().submitted);
+            assert!(!accepted_activity(&registry, id, packet).submitted);
             rx.recv().unwrap();
         }
         assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), 0);
         assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
         assert!(!registry.commit_recovered_turn(id, &original, i64::MAX, || panic!("new draft invalidates old report")).unwrap());
-        assert_eq!(registry.write_input(id, b"\r").unwrap(), InputActivity { user_input: true, submitted: true });
+        assert_eq!(accepted_activity(&registry, id, b"\r"), InputActivity { user_input: true, submitted: true });
         rx.recv().unwrap();
         assert!(agent.last_submit_ms.load(Ordering::Relaxed) > 0);
         assert_ne!(registry.input_stamp(id).unwrap(), original);
         registry.kill_session(id);
     }
 
+    /// Raw registry input must leave the staged-draft stream unclaimable while
+    /// an escape sequence is open.
+    ///
+    /// The claim in this test's name is about the *stream*, and that is what it
+    /// now asserts. The old assertion — that the stamp is byte-identical to a
+    /// pre-write capture — passed only because the cap-1 fixture dropped these
+    /// writes: a dropped write leaves the prompt pristine, which looked the
+    /// same as "the decoder considered the bytes and stayed uncertain". Send
+    /// them for real and the decoder reports `UnknownInput`, because an
+    /// unterminated `\x1b[A` makes the prompt uncertain. That is the stricter
+    /// and more useful guarantee: the circuit cannot append to, or submit, a
+    /// prompt whose boundaries it cannot prove.
     #[test]
     fn dropped_registry_input_does_not_advance_stream_or_activity() {
         let registry = AgentProcessRegistry::new();
         let id = -930_022;
         insert_trivial_agent(&registry, id);
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
         *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
-        let original = registry.input_stamp(id).unwrap();
-        registry.write_input(id, b"\x1b[").unwrap();
-        assert_eq!(registry.write_input(id, b"A").unwrap(), InputActivity::default());
-        assert_eq!(rx.recv().unwrap(), b"\x1b[");
-        assert_eq!(registry.write_input(id, b"I").unwrap(), InputActivity::default());
-        assert_eq!(rx.recv().unwrap(), b"I");
-        assert_eq!(registry.input_stamp(id).as_ref(), Some(&original));
+        registry.write_bytes(id, b"\x1b[").unwrap();
+        rx.recv().unwrap();
+        registry.write_bytes(id, b"A").unwrap();
+        rx.recv().unwrap();
+        registry.write_bytes(id, b"I").unwrap();
+        rx.recv().unwrap();
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput),
+            "an unterminated escape sequence must leave the prompt uncertain, not stamped"
+        );
+        assert!(registry.input_stamp(id).is_none(),
+            "no usable stamp exists while the sequence is open");
         registry.kill_session(id);
     }
 
@@ -1212,10 +1416,19 @@ mod tests {
         let writer = pair.master.take_writer().expect("take writer");
         let writer_exited = Arc::new(AtomicBool::new(false));
         let writer_exited_thread = writer_exited.clone();
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        // Capacity matches production (`PTY_WRITER_CHANNEL_CAPACITY`) on purpose.
+        // A capacity of 1 made these decoding fixtures depend on the writer
+        // thread winning a scheduling race, and the pre-#1530 silent drop hid
+        // the flakiness by reporting a full queue as a successful write. These
+        // tests are about input decoding, not about queue saturation — the
+        // saturation path has its own fixtures.
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let queue = Arc::new(InputQueueGauge::default());
+        let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
             let mut writer = writer;
             while let Ok(bytes) = writer_rx.recv() {
+                writer_queue.release(bytes.len());
                 let _ = writer.write_all(&bytes);
                 let _ = writer.flush();
             }
@@ -1226,6 +1439,7 @@ mod tests {
             AgentProcess::new(
                 child,
                 writer_tx,
+                queue,
                 Some(writer_thread),
                 pair.master,
                 Arc::new(AtomicBool::new(true)),
@@ -1237,6 +1451,177 @@ mod tests {
             ),
         );
         (generation, writer_exited)
+    }
+
+    use testing::blocked_writer_registry;
+
+    /// Fill the queue and confirm the next write is *reported*, not swallowed.
+    ///
+    /// This is the issue's headline regression: pre-fix the same sequence
+    /// dropped the bytes and returned `Ok`, so a caller recorded a prompt as
+    /// delivered while the agent never saw it.
+    #[test]
+    fn a_saturated_queue_reports_backpressure_and_leaves_telemetry_untouched() {
+        let id = -930_030;
+        // Capacity 1: the writer takes the first buffer and parks, so the second
+        // fills the single slot and the third is refused.
+        let (registry, writer) = blocked_writer_registry(id, 1);
+        let agent = registry.get(&id).unwrap();
+        assert_eq!(registry.input_queue_totals(), (0, 0), "baseline is an empty queue");
+
+        // Fill the queue with *empty* buffers. They occupy a message slot each
+        // without producing any input activity, which keeps the first-user-input
+        // checkpoint unset — so the assertion after the refusal proves the
+        // refused write is what left telemetry untouched, rather than an earlier
+        // accepted keystroke having already set it.
+        assert!(registry.write_bytes(id, b"").unwrap().is_accepted());
+        wait_for(|| writer.taken() == 1, "writer to park on the first buffer");
+        assert!(registry.write_bytes(id, b"").unwrap().is_accepted());
+        assert_eq!(agent.input_queue(), (1, 0), "one slot still buffered, zero bytes");
+        assert!(
+            !agent.first_user_input_logged.load(Ordering::SeqCst),
+            "an empty buffer is not user input, so the checkpoint is still unset"
+        );
+
+        let stamp_before = registry
+            .input_stamp_result(id)
+            .expect("an empty prompt with no pending sequence has a stamp");
+
+        let refused = registry.write_input(id, b"lost prompt").unwrap();
+        assert_eq!(
+            refused.disposition,
+            InputDisposition::Backpressured,
+            "a full queue must be reported, never reported as success"
+        );
+        assert_eq!(refused.activity, InputActivity::default());
+
+        // The refusal must leave every downstream signal untouched: no decoder
+        // advance, no first-user-input checkpoint, no activity.
+        assert!(!agent.first_user_input_logged.load(Ordering::SeqCst),
+            "a refused write must not claim the user typed");
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Ok(stamp_before),
+            "the refused bytes must not have staged a draft: had they been applied, \
+             the 11-byte prompt would report Err(Draft) instead"
+        );
+
+        // And it must not have quietly joined the queue either.
+        assert_eq!(agent.input_queue(), (1, 0), "a refusal must not be accounted as queued");
+        assert!(!writer.release_and_collect(2).iter().any(|chunk| chunk == b"lost prompt"),
+            "the refused buffer must never reach the PTY");
+        registry.kill_session(id);
+    }
+
+    /// Drain, retry, and land every byte exactly once and in order.
+    #[test]
+    fn a_drained_queue_accepts_the_retry_with_exact_bytes_and_no_duplicate() {
+        let id = -930_031;
+        // Capacity 1: the writer parks holding `alpha`, `beta` fills the only
+        // free slot, and `gamma` is the refusal under test.
+        let (registry, writer) = blocked_writer_registry(id, 1);
+        let agent = registry.get(&id).unwrap();
+
+        assert!(registry.write_input(id, b"alpha").unwrap().is_accepted());
+        wait_for(|| writer.taken() == 1, "writer to park");
+        assert!(registry.write_input(id, b"beta").unwrap().is_accepted());
+        let refused = registry.write_input(id, b"gamma").unwrap();
+        assert_eq!(refused.disposition, InputDisposition::Backpressured);
+        // The first byte of a partially-drained "gamma" would prove a split.
+        assert_eq!(agent.input_queue(), (1, 4));
+
+        // Drain, then retry the identical bytes. A refusal never queued them,
+        // so re-sending cannot duplicate.
+        writer.release_and_collect(2);
+        wait_for(|| agent.input_queue() == (0, 0), "queue to return to baseline");
+        let retry = registry.write_input(id, b"gamma").unwrap();
+        assert!(retry.is_accepted(), "a drained queue must accept the retry");
+
+        let delivered = writer.release_and_collect(3);
+        assert_eq!(delivered, vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
+            "exact bytes, original order, no duplicate");
+        assert_eq!(agent.input_queue(), (0, 0), "byte usage returns to baseline after draining");
+        registry.kill_session(id);
+    }
+
+    /// The byte ceiling must refuse a write that the message ceiling would let
+    /// through, and — critically — must not make an oversized paste
+    /// undeliverable (issue #1498: a real 17,508-byte paste is one entry).
+    #[test]
+    fn the_byte_ceiling_refuses_a_backlog_a_paste_can_still_be_sent_through() {
+        let id = -930_032;
+        let (registry, writer) = blocked_writer_registry(id, 64);
+        let agent = registry.get(&id).unwrap();
+        // 32 KiB a message: 64 of these is 2 MiB, well past the 1 MiB byte
+        // ceiling, so it is the *byte* bound that stops the loop below — not
+        // the 64-message bound. That gap is exactly the pairing this test
+        // exists to prove is load-bearing.
+        let chunk = vec![b'y'; 32 * 1024];
+
+        let mut accepted = 0;
+        while registry.write_input(id, &chunk).unwrap().is_accepted() {
+            accepted += 1;
+            let (_messages, bytes) = agent.input_queue();
+            assert!(
+                bytes <= PTY_INPUT_QUEUE_BYTE_CAPACITY as u64,
+                "the byte ceiling must hold, saw {bytes}"
+            );
+            assert!(accepted <= 64, "the fixture should never need the message bound");
+        }
+        assert!(accepted > 1, "the fixture must build a real backlog, got {accepted}");
+        assert!(
+            accepted < 64,
+            "the byte ceiling should bite before the 64-message bound; it stopped after {accepted}"
+        );
+        wait_for(|| writer.taken() >= 1, "writer to park");
+
+        // A half-cap paste is refused on top of that backlog, even though the
+        // message bound still has room.
+        let oversize = vec![b'x'; PTY_INPUT_QUEUE_BYTE_CAPACITY / 2 + 1];
+        let refusal = registry.write_input(id, &oversize).unwrap();
+        assert_eq!(refusal.disposition, InputDisposition::Backpressured,
+            "a backlog under the message bound but over the byte bound must still be refused");
+        let (_messages, bytes) = agent.input_queue();
+        assert!(bytes <= PTY_INPUT_QUEUE_BYTE_CAPACITY as u64,
+            "the byte ceiling must hold: {bytes} > {PTY_INPUT_QUEUE_BYTE_CAPACITY}");
+
+        // With the queue drained, a buffer larger than the whole cap is still
+        // admitted whole. Rejecting it would mean no paste of any size could be
+        // sent, and splitting it would break issue #1498.
+        writer.release_and_collect(accepted);
+        wait_for(|| agent.input_queue() == (0, 0), "queue to drain");
+        assert!(registry.write_input(id, &oversize).unwrap().is_accepted(),
+            "an oversized paste must be admitted whole once the queue is empty");
+        assert_eq!(writer.release_and_collect(accepted + 1).last().unwrap().len(), oversize.len());
+        registry.kill_session(id);
+    }
+
+    /// A #1498-sized bracketed paste stays one accepted logical write even
+    /// while the byte ceiling is in force.
+    #[test]
+    fn a_large_bracket_paste_stays_one_accepted_write() {
+        let id = -930_033;
+        let (registry, writer) = blocked_writer_registry(id, 64);
+        let mut paste = b"\x1b[200~".to_vec();
+        paste.extend(std::iter::repeat_n(b'p', 17_508 - 12));
+        paste.extend_from_slice(b"\x1b[201~");
+        assert_eq!(paste.len(), 17_508);
+
+        assert!(registry.write_input(id, &paste).unwrap().is_accepted());
+        let delivered = writer.release_and_collect(1);
+        assert_eq!(delivered.len(), 1, "a paste must never be split into several writes");
+        assert_eq!(delivered[0], paste, "the paste must arrive byte-for-byte");
+        registry.kill_session(id);
+    }
+
+    /// Poll until `condition` holds, so a test never depends on how fast a
+    /// writer thread gets scheduled.
+    fn wait_for(mut condition: impl FnMut() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !condition() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     #[test]
@@ -1415,10 +1800,19 @@ mod tests {
         // ordering. The test only asserts `deliberate_kill` propagation,
         // not the writer thread behaviour, but the registry now requires
         // the channel field to be present.
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        // Capacity matches production (`PTY_WRITER_CHANNEL_CAPACITY`) on purpose.
+        // A capacity of 1 made these decoding fixtures depend on the writer
+        // thread winning a scheduling race, and the pre-#1530 silent drop hid
+        // the flakiness by reporting a full queue as a successful write. These
+        // tests are about input decoding, not about queue saturation — the
+        // saturation path has its own fixtures.
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let queue = Arc::new(InputQueueGauge::default());
+        let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
             let mut writer = writer;
             while let Ok(bytes) = writer_rx.recv() {
+                writer_queue.release(bytes.len());
                 let _ = writer.write_all(&bytes);
                 let _ = writer.flush();
             }
@@ -1428,6 +1822,7 @@ mod tests {
             AgentProcess::new(
                 child,
                 writer_tx,
+                queue,
                 Some(writer_thread),
                 pair.master,
                 Arc::new(AtomicBool::new(true)),
@@ -1483,10 +1878,19 @@ mod tests {
 
         let writer_exited = Arc::new(AtomicBool::new(false));
         let writer_exited_thread = writer_exited.clone();
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+        // Capacity matches production (`PTY_WRITER_CHANNEL_CAPACITY`) on purpose.
+        // A capacity of 1 made these decoding fixtures depend on the writer
+        // thread winning a scheduling race, and the pre-#1530 silent drop hid
+        // the flakiness by reporting a full queue as a successful write. These
+        // tests are about input decoding, not about queue saturation — the
+        // saturation path has its own fixtures.
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let queue = Arc::new(InputQueueGauge::default());
+        let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
             let mut writer = writer;
             while let Ok(bytes) = writer_rx.recv() {
+                writer_queue.release(bytes.len());
                 let _ = writer.write_all(&bytes);
                 let _ = writer.flush();
             }
@@ -1499,6 +1903,7 @@ mod tests {
             AgentProcess::new(
                 child,
                 writer_tx,
+                queue,
                 Some(writer_thread),
                 pair.master,
                 Arc::new(AtomicBool::new(true)),
@@ -1825,7 +2230,7 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 }
 
 #[command]
-pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<(), String> {
+pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<InputOutcome, String> {
     // Issue #1122 (progressive text entry latency).
     //
     // The previous implementation offloaded the entire body — PTY write
@@ -1855,14 +2260,19 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     // write must not claim "user input accepted", otherwise the
     // post-exit detector would see no signal for the dead child and the
     // status flip would land on a session that never received the byte.
-    let activity = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
+    //
+    // The typed outcome is returned to the caller rather than flattened to
+    // `Ok(())` (issue #1530): a `Backpressured` result is the client's cue to
+    // hold the exact bytes in its ordered retry buffer instead of believing
+    // the prompt was delivered.
+    let outcome = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
     // Any accepted keystroke means the user is engaged with this node —
     // the stale-mark hypothesis behind auto-clear (issue #878) no longer
     // holds, and the keystroke's own echo must not count toward the
-    // resume burst.
-    if activity.user_input { crate::attention_autoclear::disarm(session_id); }
-    if !activity.submitted {
-        return Ok(());
+    // resume burst. A refused write engaged nobody, so it must not disarm.
+    if outcome.activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    if !outcome.is_accepted() || !outcome.activity.submitted {
+        return Ok(outcome);
     }
     let published = crate::commands::run_blocking("write_to_agent_signal", move || {
         write_to_agent_signal_blocking(session_id)
@@ -1872,7 +2282,7 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
         let sink = session_lifecycle::AppSessionLifecycleSink { app: &app };
         publish_submitted_input(&sink, payload);
     }
-    Ok(())
+    Ok(outcome)
 }
 
 /// Publish a resume envelope that was already committed on the blocking pool.
@@ -1929,9 +2339,10 @@ pub(crate) fn write_to_agent_signal_blocking(
 /// never received the byte.
 #[cfg(test)]
 pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
-    let activity = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
-    if activity.user_input { crate::attention_autoclear::disarm(session_id); }
-    let should_signal = activity.submitted
+    let outcome = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
+    if outcome.activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    let should_signal = outcome.is_accepted()
+        && outcome.activity.submitted
         && !should_skip_attention_signals(session_id);
     if should_signal {
         session_lifecycle::on_attention_cleared(&session_lifecycle::DbOnlySink, session_id).ok();
@@ -1961,7 +2372,7 @@ pub(super) fn provider_is_plain_terminal(provider: &str) -> bool {
 }
 
 #[command]
-pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Result<(), String> {
+pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Result<InputOutcome, String> {
     write_to_agent(app, session_id, format!("{}\n", input)).await
 }
 

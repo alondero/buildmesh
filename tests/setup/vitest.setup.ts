@@ -195,10 +195,20 @@ if (typeof HTMLCanvasElement !== 'undefined') {
 // ============================================================
 
 // Mock invoke - used for write_to_agent, list_agent_nodes, etc.
+//
+// Issue #1530: `write_to_agent` answers a typed `InputOutcome`. Default it to
+// `accepted`, because a bare `{}` reads as "refused" to the transport's
+// ordered retry buffer — which would then spin on retries in every test that
+// types into a terminal. Tests that want to exercise a refusal override the
+// mock for that call.
 vi.mock('@tauri-apps/api/core', async () => {
   const { MockChannel } = await import('./tauriChannel');
   return {
-    invoke: vi.fn().mockResolvedValue({}),
+    invoke: vi.fn(async (cmd: string) =>
+      cmd === 'write_to_agent'
+        ? { disposition: 'accepted', activity: { user_input: true, submitted: false } }
+        : {},
+    ),
     Channel: MockChannel,
   };
 });

@@ -14,6 +14,8 @@ fn sample_fixture() -> Sample {
         },
         watchers: 6,
         pty_sessions: 6,
+        pty_queue_messages: 0,
+        pty_queue_bytes: 0,
         git_changed_total: 142,
         git_changed_delta: 20,
         elapsed_secs: 5.0,
@@ -41,6 +43,11 @@ fn format_line_renders_expected_fields() {
     assert!(line.contains("child_procs=6"));
     assert!(line.contains("watchers=6"));
     assert!(line.contains("pty=6"));
+    // Issue #1530: the PTY input queue's own depth and bytes are on the line,
+    // so a refused prompt is diagnosable after the fact. The fixture is idle,
+    // so both read zero and any non-zero here would be a gauge leak.
+    assert!(line.contains("pty_qmsg=0"), "queue depth on the DIAG line: {line}");
+    assert!(line.contains("pty_qbytes=0"), "queue bytes on the DIAG line: {line}");
     // 20 emits over a 5 s interval → 4.0 per second.
     assert!(
         line.contains("git_changed=142(+20/4.0ps)"),

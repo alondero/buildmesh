@@ -95,6 +95,15 @@ pub enum DriveError {
     NotLive,
     /// The PTY write itself failed after the liveness check passed.
     WriteFailed(String),
+    /// The node's PTY input queue refused the prompt because the agent is not
+    /// draining its input (issue #1530). The prompt was **never queued**, so
+    /// this must never finalize a ledger row as delivered — a retry with the
+    /// same idempotency key is safe, and is the correct response.
+    ///
+    /// Kept distinct from `WriteFailed` because the two demand different
+    /// client behaviour: `Backpressured` is transient and self-healing, while
+    /// a `WriteFailed` usually means the node is gone.
+    Backpressured,
     /// The idempotency ledger could not be consulted, so we cannot prove the
     /// prompt hasn't already landed. We refuse to send rather than risk a double
     /// delivery — fail *safe*, not fail open (issue #320 review). The caller
@@ -140,7 +149,11 @@ pub trait DriveTarget {
     /// node must not have its status flipped on a write — see [`AgentDriver`].
     fn is_plain_terminal(&self, node_id: i64) -> bool;
     /// Write the (already newline-terminated) payload into the node's PTY.
-    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<(), String>;
+    ///
+    /// Returns the disposition rather than a bare `Ok(())` so a drive can tell
+    /// "queued" from "refused by a full queue" (issue #1530). `Err` is a hard
+    /// failure; `Ok(Backpressured)` is a refusal that is safe to retry.
+    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String>;
     /// Clear attention for the node — flip it `Running` and fan out
     /// `attention-cleared`, mirroring the mobile drive primitive.
     fn clear_attention(&self, node_id: i64);
@@ -190,9 +203,21 @@ impl<T: DriveTarget> AgentDriver for PtyDriver<T> {
         // Newline submits the prompt, exactly as `send_to_agent` does for a
         // human keystroke — the PTY's stdin *is* the input box.
         let payload = format!("{prompt}\n");
-        self.target
-            .write_prompt(node_id, &payload)
-            .map_err(DriveError::WriteFailed)?;
+        // Issue #1530: only an *accepted* write may clear attention or lead to
+        // a delivered verdict. Pre-fix, a full PTY input queue returned
+        // `Ok(())` here, so the drive went on to clear the node's attention
+        // and the orchestrator recorded `Delivered` for a prompt that had
+        // never been queued.
+        match self.target.write_prompt(node_id, &payload) {
+            Ok(crate::agent::process::InputDisposition::Accepted) => {}
+            Ok(crate::agent::process::InputDisposition::Backpressured) => {
+                return Err(DriveError::Backpressured);
+            }
+            Ok(crate::agent::process::InputDisposition::Closed) => {
+                return Err(DriveError::WriteFailed("Agent not running".to_string()));
+            }
+            Err(e) => return Err(DriveError::WriteFailed(e)),
+        }
         // A plain terminal has no LLM attention state to clear; flipping it to
         // Running would paint a spurious "Running" badge on a shell sitting at a
         // prompt. This mirrors the desktop write path's
@@ -216,8 +241,10 @@ impl DriveTarget for RegistryTarget {
         crate::db::get_agent_node_by_id(node_id).ok().map(|n| n.status)
     }
 
-    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<(), String> {
-        crate::agent::process::PROCESS_REGISTRY.write_bytes(node_id, payload.as_bytes())
+    fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String> {
+        crate::agent::process::PROCESS_REGISTRY
+            .write_bytes(node_id, payload.as_bytes())
+            .map(|outcome| outcome.disposition)
     }
 
     fn is_plain_terminal(&self, node_id: i64) -> bool {
@@ -317,10 +344,17 @@ pub enum ClaimOutcome {
 /// `InProgress` to the route.
 ///
 /// Recording happens only *after* a successful send: a `NotLive` /
-/// `WriteFailed` drive calls [`IdempotencyStore::release_claim`] so a genuine
-/// failure is retried rather than cached, while a `Delivered` or `Unverified`
-/// send finalizes the row — re-sending it is the double-delivery #178
-/// forbids.
+/// `WriteFailed` / `Backpressured` drive calls
+/// [`IdempotencyStore::release_claim`] so a genuine failure is retried rather
+/// than cached, while a `Delivered` or `Unverified` send finalizes the row —
+/// re-sending it is the double-delivery #178 forbids.
+///
+/// Issue #1530 makes the `Backpressured` case load-bearing rather than
+/// incidental: the orchestrator's `Ok(prior)` arm is the only thing that
+/// finalizes a verdict, so a prompt the PTY queue refused must reach the
+/// `Err` arm and take `release_claim`. A retry with the same idempotency key
+/// is then the correct client behaviour, and no row ever records a delivery
+/// that did not happen.
 ///
 /// `drive_node_idempotent` is the pure orchestrator: no I/O of its own, just
 /// the `(store, driver) -> outcome` decision tree, so the
@@ -510,6 +544,10 @@ mod tests {
         status: Option<SessionStatus>,
         plain_terminal: bool,
         fail_write: bool,
+        /// Issue #1530: when set, every write is *refused* by a full PTY input
+        /// queue rather than queued. The prompt must not be recorded as
+        /// delivered, and no attempt must reach the ledger's finalize.
+        backpressured: bool,
         writes: RefCell<Vec<(i64, String)>>,
         cleared: RefCell<Vec<i64>>,
     }
@@ -524,12 +562,18 @@ mod tests {
         fn is_plain_terminal(&self, _node_id: i64) -> bool {
             self.plain_terminal
         }
-        fn write_prompt(&self, node_id: i64, payload: &str) -> Result<(), String> {
+        fn write_prompt(&self, node_id: i64, payload: &str) -> Result<crate::agent::process::InputDisposition, String> {
             if self.fail_write {
                 return Err("pty gone".to_string());
             }
+            // Recorded either way: the *attempt* is what the test inspects, and
+            // a refused attempt must be visibly distinct from a delivered one.
             self.writes.borrow_mut().push((node_id, payload.to_string()));
-            Ok(())
+            Ok(if self.backpressured {
+                crate::agent::process::InputDisposition::Backpressured
+            } else {
+                crate::agent::process::InputDisposition::Accepted
+            })
         }
         fn clear_attention(&self, node_id: i64) {
             self.cleared.borrow_mut().push(node_id);
@@ -792,6 +836,62 @@ mod tests {
             1,
             "a duplicate key must not send the prompt a second time"
         );
+    }
+
+    /// Issue #1530: a prompt the PTY input queue refused must never be recorded
+    /// as delivered.
+    ///
+    /// Pre-fix the full-queue case returned `Ok(())` from the registry, so this
+    /// same call would have cleared the node's attention and written a
+    /// `delivered` verdict into the ledger for a prompt the agent never saw --
+    /// and every retry with that key would then replay the false delivery
+    /// forever. The retry half of this test is the real proof: it can only
+    /// deliver because the claim was released rather than finalized.
+    #[test]
+    fn a_backpressured_drive_releases_its_claim_and_never_records_delivery() {
+        let store = FakeStore::default();
+        let stalled = driver_with(FakeTarget {
+            live: true,
+            status: Some(SessionStatus::AwaitingInput),
+            backpressured: true,
+            ..Default::default()
+        });
+
+        let error =
+            drive_node_idempotent(&store, &stalled, 7, "key-stalled", "work on issue 23")
+                .expect_err("a refused write must not report a verdict");
+        assert_eq!(error, DriveError::Backpressured);
+        assert!(stalled.target.cleared.borrow().is_empty(),
+            "a prompt that was never queued must not clear the node's attention");
+        assert!(store.recorded.borrow().is_empty(),
+            "the pending claim must be released, not finalized: {:?}", store.recorded.borrow());
+
+        // The node recovers. The identical key now drives for real, which is
+        // only possible because no cached verdict stands in the way.
+        let healthy = awaiting_driver();
+        let outcome =
+            drive_node_idempotent(&store, &healthy, 7, "key-stalled", "work on issue 23").unwrap();
+        assert_eq!(outcome, DriveOutcome { verdict: Verdict::Delivered, replayed: false });
+        assert_eq!(healthy.target.writes.borrow().len(), 1,
+            "the retry must deliver exactly once");
+    }
+
+    /// A drive whose writer thread is gone is terminal, not retryable — the
+    /// distinction from `Backpressured` is what tells a client whether to
+    /// re-send the same key or mint a new one.
+    #[test]
+    fn a_closed_queue_is_reported_as_a_write_failure_not_as_backpressure() {
+        let store = FakeStore::default();
+        let driver = driver_with(FakeTarget {
+            live: true,
+            status: Some(SessionStatus::AwaitingInput),
+            fail_write: true,
+            ..Default::default()
+        });
+        let error = drive_node_idempotent(&store, &driver, 7, "key-closed", "hello")
+            .expect_err("a dead writer must not report a verdict");
+        assert_eq!(error, DriveError::WriteFailed("pty gone".to_string()));
+        assert!(store.recorded.borrow().is_empty(), "the claim is released for a retry");
     }
 
     /// A distinct key drives again — idempotency dedupes retries, not genuinely

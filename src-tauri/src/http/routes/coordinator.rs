@@ -179,6 +179,17 @@ pub async fn prompt(req: &ParsedRequest) -> Response {
         Err(drive::DriveError::WriteFailed(e)) => {
             Response::json_error("500 Internal Server Error", &e)
         }
+        // Issue #1530: the node's PTY input queue refused the prompt. The
+        // prompt was never queued, so the ledger claim was released and a
+        // retry with the same key is safe. 503 + `Retry-After` matches the
+        // "transient and safe to retry" precedent below.
+        Err(drive::DriveError::Backpressured) => {
+            Response::json(
+                "503 Service Unavailable",
+                r#"{"error":"input_backpressured: the agent is not reading its input; retry with the same idempotency_key"}"#,
+            )
+            .with_header("Retry-After", "1")
+        }
         // The ledger couldn't be consulted, so we refused to risk a double-send.
         // 503 tells the Coordinator this is transient and safe to retry.
         Err(drive::DriveError::LedgerUnavailable(e)) => {

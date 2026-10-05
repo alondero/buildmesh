@@ -20,6 +20,7 @@ import { getNodeStatusConfig, isSignalHealthProblem, signalHealthNote } from '..
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { SignalHealthBadge } from '../shared/SignalHealthBadge';
+import { StalledInputBadge } from '../shared/StalledInputBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
@@ -98,6 +99,11 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
   const circuitOwnership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
+  // Issue #1530 — the transport holds at most one session's input, and the
+  // store keeps the single slot. Only this node's own stall is shown here so
+  // the badge can never appear on a node whose input is flowing.
+  const stalledInput = useAgentNodeStore(s => s.stalledInput);
+  const stalledHere = stalledInput && stalledInput.nodeId === nodeId ? stalledInput : null;
   const meshesById = useMeshStore(s => s.meshesById);
   const isSingleMode = useUIStore(s => s.viewMode === 'single');
   const setViewMode = useUIStore(s => s.setViewMode);
@@ -185,6 +191,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         </span>
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
+        {stalledHere && <StalledInputBadge compact={compactHeader} stall={stalledHere} />}
       </div>
         {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onReveal?.(); }}
