@@ -735,7 +735,11 @@ fn a_failed_run_retires_its_reviewer_but_never_the_implementation_agent() {
 
     commit_circuit_advance_locked(&mut conn, 1, Some("failed"), None, &[]).unwrap();
 
-    assert_eq!(cleanup_requested(&conn, 2), 1, "the reviewer is still retired");
+    assert_eq!(
+        cleanup_requested(&conn, 2),
+        1,
+        "the reviewer is still retired"
+    );
     assert_eq!(
         cleanup_requested(&conn, 1),
         0,
@@ -766,7 +770,11 @@ fn cancelling_a_run_leaves_the_implementation_agent_open() {
     .unwrap();
 
     let retired = cancel_circuit_run_locked(&mut conn, 1).unwrap();
-    assert_eq!(retired, vec![2], "only the reviewer is handed back for retirement");
+    assert_eq!(
+        retired,
+        vec![2],
+        "only the reviewer is handed back for retirement"
+    );
     assert_eq!(cleanup_requested(&conn, 1), 0);
 
     let batch = cancel_circuit_runs_locked(&mut conn, &[2]).unwrap();
@@ -801,9 +809,11 @@ fn a_cleanup_request_recorded_for_an_implementation_agent_is_never_actioned_and_
     )
     .unwrap();
 
-    assert!(super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
-        .unwrap()
-        .is_empty());
+    assert!(
+        super::circuit::failed_circuit_agents_for_cleanup_inner(&conn)
+            .unwrap()
+            .is_empty()
+    );
     assert!(super::circuit::claim_circuit_agent_cleanup_inner(&conn, 1)
         .unwrap()
         .is_none());

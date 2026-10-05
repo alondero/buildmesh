@@ -1,7 +1,7 @@
 //! Autopilot Circuits ledger: blueprint/run/step CRUD and the engine's
 //! atomic [`commit_circuit_advance`] seam (spec #1205).
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
@@ -29,22 +29,40 @@ fn normalize_reviewer_provider(value: Option<String>) -> Result<Option<String>, 
     normalize_prepared_reviewer(value, &crate::preferences::AppPreferences::default())
 }
 
-fn validate_prepared_reviewer(value: &str, preferences: &crate::preferences::AppPreferences) -> Result<(), String> {
+fn validate_prepared_reviewer(
+    value: &str,
+    preferences: &crate::preferences::AppPreferences,
+) -> Result<(), String> {
     let value = value.trim();
-    if value.is_empty() { return Ok(()); }
-    let option = match preferences.spawn_configurations.iter().find(|c| c.id == value) {
+    if value.is_empty() {
+        return Ok(());
+    }
+    let option = match preferences
+        .spawn_configurations
+        .iter()
+        .find(|c| c.id == value)
+    {
         Some(configuration) => configuration.spawn_option_id.as_str(),
-        None if value.starts_with("launch/") => return Err("Launch Configuration no longer exists; select another configuration".into()),
+        None if value.starts_with("launch/") => {
+            return Err(
+                "Launch Configuration no longer exists; select another configuration".into(),
+            )
+        }
         None => value,
     };
     let id = crate::agent::provider::SpawnOptionId::from(option);
     match crate::circuit::compatibility::reviewer_harness_reason(id.harness_id()) {
-        Some(reason) => Err(crate::circuit::compatibility::reviewer_refusal_message(&reason)),
+        Some(reason) => Err(crate::circuit::compatibility::reviewer_refusal_message(
+            &reason,
+        )),
         None => Ok(()),
     }
 }
 
-fn normalize_prepared_reviewer(value: Option<String>, preferences: &crate::preferences::AppPreferences) -> Result<Option<String>, String> {
+fn normalize_prepared_reviewer(
+    value: Option<String>,
+    preferences: &crate::preferences::AppPreferences,
+) -> Result<Option<String>, String> {
     let Some(value) = value else { return Ok(None) };
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -141,7 +159,12 @@ pub fn create_node_circuit_run(
     // Mint (acquires the writer mutex).
     let mut db = crate::db::write_conn();
     create_node_circuit_run_with_recovery_locked(
-        &mut db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None,
+        &mut db,
+        node_id,
+        selected_circuit_id,
+        max_rounds,
+        (reviewer_provider, Some(&preferences)),
+        None,
     )
 }
 
@@ -168,7 +191,12 @@ pub(crate) fn create_node_circuit_run_locked(
 ) -> Result<i64, String> {
     let preferences = crate::preferences::load().unwrap_or_default();
     create_node_circuit_run_with_recovery_locked(
-        db, node_id, selected_circuit_id, max_rounds, (reviewer_provider, Some(&preferences)), None,
+        db,
+        node_id,
+        selected_circuit_id,
+        max_rounds,
+        (reviewer_provider, Some(&preferences)),
+        None,
     )
 }
 
@@ -184,12 +212,18 @@ pub(crate) fn create_node_circuit_run_recovery_locked(
     // command now extends the failed run instead of calling this helper.
     let recovery = match super::recovery::continuation_target_inner(db, recovery.run_id)? {
         super::recovery::ContinuationTarget::Existing(id) => return Ok(id),
-        super::recovery::ContinuationTarget::Failed(id) if id != recovery.run_id =>
-            super::recovery::review_recovery_inner(db, id, max_rounds)?,
+        super::recovery::ContinuationTarget::Failed(id) if id != recovery.run_id => {
+            super::recovery::review_recovery_inner(db, id, max_rounds)?
+        }
         _ => recovery,
     };
     create_node_circuit_run_with_recovery_locked(
-        db, recovery.source_id, None, max_rounds, (None, None), Some(recovery),
+        db,
+        recovery.source_id,
+        None,
+        max_rounds,
+        (None, None),
+        Some(recovery),
     )
 }
 
@@ -208,7 +242,8 @@ pub(crate) fn find_live_run_for_source_inner(
              LIMIT 1",
             RunState::SQL_IN_LIVE
         ),
-        params![node_id], |row| row.get(0),
+        params![node_id],
+        |row| row.get(0),
     )
     .optional()
 }
@@ -225,14 +260,24 @@ fn create_node_circuit_run_with_recovery_locked(
     let (reviewer_provider, preferences) = reviewer;
     let app_reviewer = preferences.and_then(|p| p.reviewer_provider.clone());
     let reviewer_override = if selected_circuit_id.is_none() && recovery.is_none() {
-        resolve_preset_reviewer(reviewer_provider, app_reviewer.clone(), preferences.expect("fresh review preferences prepared before locking"))?
+        resolve_preset_reviewer(
+            reviewer_provider,
+            app_reviewer.clone(),
+            preferences.expect("fresh review preferences prepared before locking"),
+        )?
     } else {
         None
     };
     let tx = db.transaction().map_err(|e| e.to_string())?;
-    let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id).map_err(|e| e.to_string())?;
-    if crate::db::legacy_retirement::pending_inner(&tx, node_id).map_err(|error| error.to_string())? {
-        return Err("Legacy retirement is still stopping the source node. Retry after cleanup finishes.".into());
+    let node = crate::db::agent_node::get_agent_node_by_id_inner(&tx, node_id)
+        .map_err(|e| e.to_string())?;
+    if crate::db::legacy_retirement::pending_inner(&tx, node_id)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(
+            "Legacy retirement is still stopping the source node. Retry after cleanup finishes."
+                .into(),
+        );
     }
     if recovery.is_some() {
         // An already-live source can still be owned by terminal cleanup.
@@ -246,20 +291,33 @@ fn create_node_circuit_run_with_recovery_locked(
             return Err("The implementation agent is still being stopped. Try Continue review again in a moment.".into());
         }
     }
-    let existing: Option<i64> = find_live_run_for_source_inner(&tx, node_id)
-        .map_err(|e| e.to_string())?;
-    if let Some(id) = existing { return Ok(id); }
-    let owned: bool = tx.query_row(
-        &format!(
-            "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
+    let existing: Option<i64> =
+        find_live_run_for_source_inner(&tx, node_id).map_err(|e| e.to_string())?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    let owned: bool = tx
+        .query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_run_steps s \
              JOIN autopilot_circuit_runs r ON r.id = s.run_id \
              WHERE s.agent_node_id = ?1 AND r.state IN ({}))",
-            RunState::SQL_IN_LIVE
-        ),
-        params![node_id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if owned { return Err("This agent is already controlled by an active Circuit run.".into()); }
-    if !matches!(node.status, crate::models::SessionStatus::Running | crate::models::SessionStatus::AwaitingInput | crate::models::SessionStatus::Completed | crate::models::SessionStatus::Ready) {
+                RunState::SQL_IN_LIVE
+            ),
+            params![node_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if owned {
+        return Err("This agent is already controlled by an active Circuit run.".into());
+    }
+    if !matches!(
+        node.status,
+        crate::models::SessionStatus::Running
+            | crate::models::SessionStatus::AwaitingInput
+            | crate::models::SessionStatus::Completed
+            | crate::models::SessionStatus::Ready
+    ) {
         return Err("Resume the agent before starting a review.".into());
     }
     let review_config: Option<(Option<String>, Option<String>)> = if selected_circuit_id.is_none() {
@@ -274,12 +332,18 @@ fn create_node_circuit_run_with_recovery_locked(
     let (circuit_id, name) = if let Some(recovery) = &recovery {
         super::recovery::recovery_circuit_inner(&tx, node.mesh_id, recovery)?
     } else if let Some(id) = selected_circuit_id {
-        let circuit = get_autopilot_circuit_inner(&tx, id).map_err(|e| e.to_string())?
+        let circuit = get_autopilot_circuit_inner(&tx, id)
+            .map_err(|e| e.to_string())?
             .ok_or("Circuit no longer exists")?;
         let graph = crate::circuit::model::CircuitGraph::from_json(&circuit.graph_json)?;
         graph.validate()?;
-        if circuit.mesh_id != node.mesh_id || graph.roots().is_empty()
-            || graph.roots().iter().any(|n| !matches!(n.kind, crate::circuit::model::CircuitNodeKind::Manual)) {
+        if circuit.mesh_id != node.mesh_id
+            || graph.roots().is_empty()
+            || graph
+                .roots()
+                .iter()
+                .any(|n| !matches!(n.kind, crate::circuit::model::CircuitNodeKind::Manual))
+        {
             return Err("Select a manual Circuit from this agent's Mesh.".into());
         }
         (id, circuit.name)
@@ -293,13 +357,16 @@ fn create_node_circuit_run_with_recovery_locked(
         graph.validate()?;
         let name = format!("Review agent {}", node_id);
         let description = "Review an existing agent and return findings until approved";
-        let existing: Option<(i64, String)> = tx.query_row(
-            "SELECT id, name FROM autopilot_circuits
+        let existing: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT id, name FROM autopilot_circuits
              WHERE mesh_id = ?1 AND is_preset = 1
              ORDER BY id LIMIT 1",
-            params![node.mesh_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ).optional().map_err(|e| e.to_string())?;
+                params![node.mesh_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
         if let Some((id, existing_name)) = existing {
             (id, existing_name)
         } else {
@@ -308,7 +375,8 @@ fn create_node_circuit_run_with_recovery_locked(
                  (mesh_id, name, description, enabled, concurrency_limit, graph_json, is_preset)
                  VALUES (?1, ?2, ?3, 0, 2, ?4, 1)",
                 params![node.mesh_id, name, description, graph.to_json()?],
-            ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
             (tx.last_insert_rowid(), name)
         }
     };
@@ -317,8 +385,16 @@ fn create_node_circuit_run_with_recovery_locked(
     context.set("review.provider", app_reviewer.as_deref().unwrap_or(""));
     context.set("source.agent_id", node_id.to_string());
     context.set("source.name", &node.name);
-    context.set("source.path", crate::env::node_working_path(&node).spawn_path);
-    let base_ref: String = tx.query_row("SELECT base_ref FROM meshes WHERE id = ?1", params![node.mesh_id], |r| r.get(0))
+    context.set(
+        "source.path",
+        crate::env::node_working_path(&node).spawn_path,
+    );
+    let base_ref: String = tx
+        .query_row(
+            "SELECT base_ref FROM meshes WHERE id = ?1",
+            params![node.mesh_id],
+            |r| r.get(0),
+        )
         .map_err(|e| e.to_string())?;
     context.set("source.base_ref", base_ref);
     if selected_circuit_id.is_none() && recovery.is_none() {
@@ -326,26 +402,52 @@ fn create_node_circuit_run_with_recovery_locked(
             context.set("review.provider", provider);
         }
         context.set("source.review_preset", "1");
-        context.set("source.provider", node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()));
+        context.set(
+            "source.provider",
+            node.launch_configuration
+                .as_ref()
+                .map_or(node.provider.as_str(), |c| c.id.as_str()),
+        );
         context.set(
             "source.model",
-            node.launch_configuration.as_ref().map(|c| c.model.as_deref()).unwrap_or_else(|| review_config
+            node.launch_configuration
                 .as_ref()
-                .and_then(|(model, _)| model.as_deref()))
+                .map(|c| c.model.as_deref())
+                .unwrap_or_else(|| {
+                    review_config
+                        .as_ref()
+                        .and_then(|(model, _)| model.as_deref())
+                })
                 .unwrap_or(""),
         );
         context.set(
             "source.effort",
-            node.launch_configuration.as_ref().map(|c| c.effort.as_deref()).unwrap_or_else(|| review_config
+            node.launch_configuration
                 .as_ref()
-                .and_then(|(_, effort)| effort.as_deref()))
+                .map(|c| c.effort.as_deref())
+                .unwrap_or_else(|| {
+                    review_config
+                        .as_ref()
+                        .and_then(|(_, effort)| effort.as_deref())
+                })
                 .unwrap_or(""),
         );
     }
     if let Some(recovery) = &recovery {
-        for (key, value) in &recovery.frozen_launches { context.set(key, value); }
+        for (key, value) in &recovery.frozen_launches {
+            context.set(key, value);
+        }
     } else if let Some(preferences) = preferences {
-        pin_review_launches(&tx, circuit_id, node.launch_configuration.as_ref().map_or(node.provider.as_str(), |c| c.id.as_str()), node.launch_configuration.as_ref(), preferences, &mut context)?;
+        pin_review_launches(
+            &tx,
+            circuit_id,
+            node.launch_configuration
+                .as_ref()
+                .map_or(node.provider.as_str(), |c| c.id.as_str()),
+            node.launch_configuration.as_ref(),
+            preferences,
+            &mut context,
+        )?;
     }
     context.set("retry.attempt", "1");
     if let Some(recovery) = &recovery {
@@ -371,10 +473,17 @@ fn create_node_circuit_run_with_recovery_locked(
     // — its ledger stays immutable. A continuation is an operator recovery
     // action, so the entry names its source and disposition (issue #1909).
     if let Some(continued_from) = continued_from {
-        super::evidence::append_history(&tx, run_id, None, None, "review_continuation",
+        super::evidence::append_history(
+            &tx,
+            run_id,
+            None,
+            None,
+            "review_continuation",
             &serde_json::json!({ "from_run_id": continued_from }).to_string(),
             Some(super::evidence::SOURCE_OPERATOR),
-            Some(super::evidence::DISPOSITION_APPLIED)).map_err(|e| e.to_string())?;
+            Some(super::evidence::DISPOSITION_APPLIED),
+        )
+        .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(run_id)
@@ -390,37 +499,83 @@ fn pin_review_launches(
 ) -> Result<(), String> {
     use crate::circuit::model::{CircuitGraph, CircuitNodeKind};
     use crate::preferences::launch_configurations::{capture, snapshot, LaunchOverrides};
-    let inherited_configuration = source_configuration.filter(|source| !preferences.spawn_configurations.iter().any(|c| c.id == source.id));
+    let inherited_configuration = source_configuration.filter(|source| {
+        !preferences
+            .spawn_configurations
+            .iter()
+            .any(|c| c.id == source.id)
+    });
     let mut preferences = preferences.clone();
-    if let Some(configuration) = inherited_configuration { preferences.spawn_configurations.push(configuration.clone()); }
-    let circuit = get_autopilot_circuit_inner(db, circuit_id).map_err(|e| e.to_string())?.ok_or("Circuit no longer exists")?;
+    if let Some(configuration) = inherited_configuration {
+        preferences.spawn_configurations.push(configuration.clone());
+    }
+    let circuit = get_autopilot_circuit_inner(db, circuit_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Circuit no longer exists")?;
     let graph = CircuitGraph::from_json(&circuit.graph_json)?;
     for node in &graph.nodes {
-        let CircuitNodeKind::SpawnAgentNode { provider, model, effort, extra_args, .. } = &node.kind else { continue; };
+        let CircuitNodeKind::SpawnAgentNode {
+            provider,
+            model,
+            effort,
+            extra_args,
+            ..
+        } = &node.kind
+        else {
+            continue;
+        };
         if !graph.nodes.iter().any(|gate| matches!(&gate.kind, CircuitNodeKind::ReviewVerdict { target_node_id } if target_node_id.as_deref() == Some(&node.id))) { continue; }
         let preset = context.get("source.review_preset") == Some("1");
-        let parent_selection = graph.nearest_upstream_agent_step(&node.id).and_then(|id| graph.node(&id)).and_then(|parent| match &parent.kind {
-            CircuitNodeKind::SpawnAgentNode { provider, .. } => provider.as_deref().filter(|p| !p.trim().is_empty()),
-            _ => None,
-        });
-        let selection = provider.as_deref().filter(|_| !preset).filter(|p| !p.trim().is_empty())
-            .or_else(|| context.get("review.provider").filter(|p| !p.trim().is_empty()))
-            .or_else(|| context.get("source.provider")).or(parent_selection).unwrap_or(source_provider);
+        let parent_selection = graph
+            .nearest_upstream_agent_step(&node.id)
+            .and_then(|id| graph.node(&id))
+            .and_then(|parent| match &parent.kind {
+                CircuitNodeKind::SpawnAgentNode { provider, .. } => {
+                    provider.as_deref().filter(|p| !p.trim().is_empty())
+                }
+                _ => None,
+            });
+        let selection = provider
+            .as_deref()
+            .filter(|_| !preset)
+            .filter(|p| !p.trim().is_empty())
+            .or_else(|| {
+                context
+                    .get("review.provider")
+                    .filter(|p| !p.trim().is_empty())
+            })
+            .or_else(|| context.get("source.provider"))
+            .or(parent_selection)
+            .unwrap_or(source_provider);
         let overrides = LaunchOverrides {
-            model: model.clone().filter(|_| !preset), effort: effort.clone().filter(|_| !preset), extra_args: extra_args.clone(),
+            model: model.clone().filter(|_| !preset),
+            effort: effort.clone().filter(|_| !preset),
+            extra_args: extra_args.clone(),
         };
         let mut launch_preferences = preferences.clone();
-        if let Some(plan) = inherited_configuration.filter(|c| c.id == selection).and_then(|c| c.resolved.as_ref()) {
-            launch_preferences.harness_profiles.retain(|h| h.id != plan.harness.id);
-            launch_preferences.harness_profiles.push(plan.harness.clone());
+        if let Some(plan) = inherited_configuration
+            .filter(|c| c.id == selection)
+            .and_then(|c| c.resolved.as_ref())
+        {
+            launch_preferences
+                .harness_profiles
+                .retain(|h| h.id != plan.harness.id);
+            launch_preferences
+                .harness_profiles
+                .push(plan.harness.clone());
             if let Some(route) = &plan.route {
-                launch_preferences.provider_pairings.retain(|r| r.harness_id != route.harness_id || r.provider_id != route.provider_id);
+                launch_preferences.provider_pairings.retain(|r| {
+                    r.harness_id != route.harness_id || r.provider_id != route.provider_id
+                });
                 launch_preferences.provider_pairings.push(route.clone());
             }
         }
         let plan = capture(&launch_preferences, selection, &overrides)?;
         let key = format!("review.launch.{}", node.id);
-        context.set(&key, serde_json::to_string(&snapshot(plan)).map_err(|e| e.to_string())?);
+        context.set(
+            &key,
+            serde_json::to_string(&snapshot(plan)).map_err(|e| e.to_string())?,
+        );
     }
     Ok(())
 }
@@ -433,7 +588,14 @@ pub fn create_autopilot_circuit(
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
     let db = crate::db::write_conn();
-    create_autopilot_circuit_inner(&db, mesh_id, name, description, concurrency_limit, graph_json)
+    create_autopilot_circuit_inner(
+        &db,
+        mesh_id,
+        name,
+        description,
+        concurrency_limit,
+        graph_json,
+    )
 }
 
 pub fn copy_review_blueprint(circuit_id: i64, name: &str) -> Result<AutopilotCircuit, String> {
@@ -441,19 +603,36 @@ pub fn copy_review_blueprint(circuit_id: i64, name: &str) -> Result<AutopilotCir
     copy_review_blueprint_locked(&mut db, circuit_id, name)
 }
 
-pub(crate) fn copy_review_blueprint_locked(db: &mut Connection, circuit_id: i64, name: &str) -> Result<AutopilotCircuit, String> {
-    if name.trim().is_empty() { return Err("Give the Circuit a name.".into()); }
+pub(crate) fn copy_review_blueprint_locked(
+    db: &mut Connection,
+    circuit_id: i64,
+    name: &str,
+) -> Result<AutopilotCircuit, String> {
+    if name.trim().is_empty() {
+        return Err("Give the Circuit a name.".into());
+    }
     let tx = db.transaction().map_err(|error| error.to_string())?;
-    let original = get_autopilot_circuit_inner(&tx,circuit_id).map_err(|error| error.to_string())?
-        .filter(|circuit| circuit.is_preset).ok_or("Select a built-in Review Blueprint to copy.")?;
+    let original = get_autopilot_circuit_inner(&tx, circuit_id)
+        .map_err(|error| error.to_string())?
+        .filter(|circuit| circuit.is_preset)
+        .ok_or("Select a built-in Review Blueprint to copy.")?;
     let mut graph = crate::circuit::model::CircuitGraph::from_json(&original.graph_json)?;
     let roots: Vec<String> = graph.roots().iter().map(|node| node.id.clone()).collect();
     for node in &mut graph.nodes {
-        if roots.contains(&node.id) { node.kind = crate::circuit::model::CircuitNodeKind::Manual; }
+        if roots.contains(&node.id) {
+            node.kind = crate::circuit::model::CircuitNodeKind::Manual;
+        }
     }
     graph.validate()?;
-    let copied = create_autopilot_circuit_inner(&tx,original.mesh_id,name.trim(),"Independent copy of the Review Blueprint",original.concurrency_limit,&graph.to_json()?)
-        .map_err(|error| error.to_string())?;
+    let copied = create_autopilot_circuit_inner(
+        &tx,
+        original.mesh_id,
+        name.trim(),
+        "Independent copy of the Review Blueprint",
+        original.concurrency_limit,
+        &graph.to_json()?,
+    )
+    .map_err(|error| error.to_string())?;
     tx.commit().map_err(|error| error.to_string())?;
     Ok(copied)
 }
@@ -593,9 +772,8 @@ pub(crate) fn list_circuit_trigger_identities_inner(
     db: &Connection,
     circuit_id: i64,
 ) -> SqlResult<Vec<String>> {
-    let mut stmt = db.prepare(
-        "SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1",
-    )?;
+    let mut stmt =
+        db.prepare("SELECT trigger_identity FROM autopilot_circuit_runs WHERE circuit_id = ?1")?;
     let rows = stmt.query_map(params![circuit_id], |row| row.get(0))?;
     rows.collect()
 }
@@ -615,7 +793,8 @@ pub(super) fn ensure_review_blueprint(mesh_id: i64) -> SqlResult<()> {
 
 pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> SqlResult<()> {
     let graph = crate::circuit::model::CircuitGraph::agent_review(None, None, 3)
-        .to_json().map_err(rusqlite::Error::InvalidParameterName)?;
+        .to_json()
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,concurrency_limit,graph_json,is_preset)
         SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,2,?2,1
         WHERE EXISTS(SELECT 1 FROM meshes WHERE id=?1)
@@ -645,8 +824,9 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
          WHERE mesh_id = ?1
          ORDER BY id",
     )?;
-    let circuits: Vec<AutopilotCircuit> =
-        stmt.query_map(params![mesh_id], map_circuit_row)?.collect::<SqlResult<_>>()?;
+    let circuits: Vec<AutopilotCircuit> = stmt
+        .query_map(params![mesh_id], map_circuit_row)?
+        .collect::<SqlResult<_>>()?;
     if circuits.is_empty() {
         return Ok(vec![]);
     }
@@ -701,19 +881,22 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         RunState::SQL_IN_ADMITTED
     ))?;
     let visible_runs: Vec<AutopilotCircuitRun> = stmt
-        .query_map(params![runs_per_circuit.max(0), RECOVERY_RUNS_PER_CIRCUIT], |row| {
-            Ok(AutopilotCircuitRun {
-                id: row.get(0)?,
-                circuit_id: row.get(1)?,
-                mesh_id: row.get(2)?,
-                trigger_identity: row.get(3)?,
-                state: row.get(4)?,
-                context_json: row.get(5)?,
-                source_agent_node_id: row.get(6)?,
-                created_at: row.get(7)?,
-                updated_at: row.get(8)?,
-            })
-        })?
+        .query_map(
+            params![runs_per_circuit.max(0), RECOVERY_RUNS_PER_CIRCUIT],
+            |row| {
+                Ok(AutopilotCircuitRun {
+                    id: row.get(0)?,
+                    circuit_id: row.get(1)?,
+                    mesh_id: row.get(2)?,
+                    trigger_identity: row.get(3)?,
+                    state: row.get(4)?,
+                    context_json: row.get(5)?,
+                    source_agent_node_id: row.get(6)?,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        )?
         .collect::<SqlResult<_>>()?;
 
     let mut runs_by_circuit: std::collections::HashMap<i64, Vec<AutopilotCircuitRun>> =
@@ -722,16 +905,24 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
         runs_by_circuit.entry(run.circuit_id).or_default().push(run);
     }
 
-    let run_ids: Vec<i64> = runs_by_circuit.values().flatten().map(|run| run.id).collect();
-    let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> = std::collections::HashMap::new();
+    let run_ids: Vec<i64> = runs_by_circuit
+        .values()
+        .flatten()
+        .map(|run| run.id)
+        .collect();
+    let mut steps_by_run: std::collections::HashMap<i64, Vec<AutopilotCircuitRunStep>> =
+        std::collections::HashMap::new();
     if !run_ids.is_empty() {
-        let placeholders = std::iter::repeat_n("?", run_ids.len()).collect::<Vec<_>>().join(",");
+        let placeholders = std::iter::repeat_n("?", run_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
         let mut step_stmt = db.prepare(&format!(
             "SELECT id, run_id, node_id, agent_node_id, status, attempt, \
                     outcome, error_message, started_at, completed_at \
              FROM autopilot_circuit_run_steps WHERE run_id IN ({placeholders}) ORDER BY run_id, id"
         ))?;
-        let step_rows = step_stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), map_step_row)?;
+        let step_rows =
+            step_stmt.query_map(rusqlite::params_from_iter(run_ids.iter()), map_step_row)?;
         for step in step_rows {
             let step = step?;
             steps_by_run.entry(step.run_id).or_default().push(step);
@@ -741,10 +932,13 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     let mut out = Vec::with_capacity(circuits.len());
     for circuit in circuits {
         let runs = runs_by_circuit.remove(&circuit.id).unwrap_or_default();
-        let ledgers = runs.into_iter().map(|run| CircuitRunLedger {
-            steps: steps_by_run.remove(&run.id).unwrap_or_default(),
-            run,
-        }).collect();
+        let ledgers = runs
+            .into_iter()
+            .map(|run| CircuitRunLedger {
+                steps: steps_by_run.remove(&run.id).unwrap_or_default(),
+                run,
+            })
+            .collect();
         out.push((circuit, ledgers));
     }
     Ok(out)
@@ -765,7 +959,9 @@ pub(crate) fn set_autopilot_circuit_enabled_inner(
         "UPDATE autopilot_circuits SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1 AND is_preset = 0",
         params![id, i64::from(enabled)],
     )?;
-    if changed == 0 { return Err(rusqlite::Error::QueryReturnedNoRows); }
+    if changed == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
     Ok(())
 }
 
@@ -834,9 +1030,16 @@ pub fn delete_autopilot_circuit(id: i64) -> SqlResult<()> {
 pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> SqlResult<()> {
     let tx = db.transaction()?;
     if get_autopilot_circuit_inner(&tx, id)?.is_some_and(|circuit| circuit.is_preset) {
-        return Err(rusqlite::Error::InvalidParameterName("Built-in Review Blueprints are read-only".into()));
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Built-in Review Blueprints are read-only".into(),
+        ));
     }
-    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshot_history", "circuit_run_snapshots"] {
+    for table in [
+        "circuit_run_history",
+        "circuit_effects",
+        "circuit_run_snapshot_history",
+        "circuit_run_snapshots",
+    ] {
         tx.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1)"), [id])?;
     }
     tx.execute(
@@ -849,7 +1052,10 @@ pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> S
              (SELECT id FROM autopilot_circuit_runs WHERE circuit_id = ?1)",
         params![id],
     )?;
-    tx.execute("DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1", params![id])?;
+    tx.execute(
+        "DELETE FROM autopilot_circuit_runs WHERE circuit_id = ?1",
+        params![id],
+    )?;
     tx.execute("DELETE FROM autopilot_circuits WHERE id = ?1", params![id])?;
     tx.commit()
 }
@@ -858,7 +1064,12 @@ pub(crate) fn delete_autopilot_circuit_locked(db: &mut Connection, id: i64) -> S
 /// Called from [`super::delete_mesh`] inside ITS mutex acquisition —
 /// `_inner(&Connection)` discipline, no second lock.
 pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) -> SqlResult<()> {
-    for table in ["circuit_run_history", "circuit_effects", "circuit_run_snapshot_history", "circuit_run_snapshots"] {
+    for table in [
+        "circuit_run_history",
+        "circuit_effects",
+        "circuit_run_snapshot_history",
+        "circuit_run_snapshots",
+    ] {
         conn.execute(&format!("DELETE FROM {table} WHERE run_id IN (SELECT id FROM autopilot_circuit_runs WHERE mesh_id=?1)"), [mesh_id])?;
     }
     conn.execute(
@@ -871,8 +1082,14 @@ pub(crate) fn delete_circuits_for_mesh_inner(conn: &Connection, mesh_id: i64) ->
              (SELECT id FROM autopilot_circuit_runs WHERE mesh_id = ?1)",
         params![mesh_id],
     )?;
-    conn.execute("DELETE FROM autopilot_circuit_runs WHERE mesh_id = ?1", params![mesh_id])?;
-    conn.execute("DELETE FROM autopilot_circuits WHERE mesh_id = ?1", params![mesh_id])?;
+    conn.execute(
+        "DELETE FROM autopilot_circuit_runs WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
+    conn.execute(
+        "DELETE FROM autopilot_circuits WHERE mesh_id = ?1",
+        params![mesh_id],
+    )?;
     Ok(())
 }
 
@@ -898,7 +1115,14 @@ pub fn create_circuit_run(
 ) -> SqlResult<i64> {
     let preferences = crate::preferences::load().map_err(rusqlite::Error::InvalidParameterName)?;
     let mut db = crate::db::write_conn();
-    create_circuit_run_prepared_locked(&mut db, circuit_id, mesh_id, trigger_identity, context_json, &preferences)
+    create_circuit_run_prepared_locked(
+        &mut db,
+        circuit_id,
+        mesh_id,
+        trigger_identity,
+        context_json,
+        &preferences,
+    )
 }
 
 /// Per-test isolated variant of [`create_circuit_run`] (issue #1691).
@@ -913,7 +1137,14 @@ pub(crate) fn create_circuit_run_locked(
     trigger_identity: &str,
     context_json: &str,
 ) -> SqlResult<i64> {
-    create_circuit_run_prepared_locked(db, circuit_id, mesh_id, trigger_identity, context_json, &crate::preferences::AppPreferences::default())
+    create_circuit_run_prepared_locked(
+        db,
+        circuit_id,
+        mesh_id,
+        trigger_identity,
+        context_json,
+        &crate::preferences::AppPreferences::default(),
+    )
 }
 
 pub(crate) fn create_circuit_run_prepared_locked(
@@ -925,19 +1156,50 @@ pub(crate) fn create_circuit_run_prepared_locked(
     preferences: &crate::preferences::AppPreferences,
 ) -> SqlResult<i64> {
     let tx = db.transaction()?;
-    if let Some(id) = tx.query_row("SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1 AND trigger_identity=?2",
-        params![circuit_id, trigger_identity], |row| row.get::<_, i64>(0)).optional()? { return Ok(id); }
-    let mut context = crate::circuit::context::CircuitContext::from_json(context_json).map_err(rusqlite::Error::InvalidParameterName)?;
+    if let Some(id) = tx
+        .query_row(
+            "SELECT id FROM autopilot_circuit_runs WHERE circuit_id=?1 AND trigger_identity=?2",
+            params![circuit_id, trigger_identity],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let mut context = crate::circuit::context::CircuitContext::from_json(context_json)
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     if let Some(source) = context.source_agent_id() {
-        if crate::db::legacy_retirement::pending_inner(&tx, source)? { return Err(rusqlite::Error::InvalidQuery); }
+        if crate::db::legacy_retirement::pending_inner(&tx, source)? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
-    let default_provider: Option<String> = tx.query_row("SELECT default_provider FROM meshes WHERE id=?1", [mesh_id], |row| row.get(0))?;
-    let source_provider = crate::preferences::resolve_default_provider(None, default_provider, preferences.default_provider.clone());
+    let default_provider: Option<String> = tx.query_row(
+        "SELECT default_provider FROM meshes WHERE id=?1",
+        [mesh_id],
+        |row| row.get(0),
+    )?;
+    let source_provider = crate::preferences::resolve_default_provider(
+        None,
+        default_provider,
+        preferences.default_provider.clone(),
+    );
     if context.get("review.provider").is_none() {
-        if let Some(provider) = preferences.reviewer_provider.as_deref() { context.set("review.provider", provider); }
+        if let Some(provider) = preferences.reviewer_provider.as_deref() {
+            context.set("review.provider", provider);
+        }
     }
-    pin_review_launches(&tx, circuit_id, &source_provider, None, preferences, &mut context).map_err(rusqlite::Error::InvalidParameterName)?;
-    let context_json = context.to_json().map_err(rusqlite::Error::InvalidParameterName)?;
+    pin_review_launches(
+        &tx,
+        circuit_id,
+        &source_provider,
+        None,
+        preferences,
+        &mut context,
+    )
+    .map_err(rusqlite::Error::InvalidParameterName)?;
+    let context_json = context
+        .to_json()
+        .map_err(rusqlite::Error::InvalidParameterName)?;
     let next_position: i64 = tx.query_row(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM autopilot_circuit_runs WHERE mesh_id = ?1",
         params![mesh_id],
@@ -947,7 +1209,13 @@ pub(crate) fn create_circuit_run_prepared_locked(
         "INSERT OR IGNORE INTO autopilot_circuit_runs \
              (circuit_id, mesh_id, trigger_identity, context_json, queue_position) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![circuit_id, mesh_id, trigger_identity, context_json, next_position],
+        params![
+            circuit_id,
+            mesh_id,
+            trigger_identity,
+            context_json,
+            next_position
+        ],
     )?;
     let id = tx.query_row(
         "SELECT id FROM autopilot_circuit_runs \
@@ -989,13 +1257,19 @@ struct CancelRunWrite {
 }
 
 fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRunWrite> {
-    let row: Option<(String, Option<i64>)> = tx.query_row(
-        "SELECT state, source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1",
-        params![run_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).optional()?;
+    let row: Option<(String, Option<i64>)> = tx
+        .query_row(
+            "SELECT state, source_agent_node_id FROM autopilot_circuit_runs WHERE id = ?1",
+            params![run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
     let Some((state, source)) = row else {
-        return Ok(CancelRunWrite { agents: vec![], source: None, cancelled: false });
+        return Ok(CancelRunWrite {
+            agents: vec![],
+            source: None,
+            cancelled: false,
+        });
     };
     // Only helper agents (reviewers) are handed back for retirement; the
     // implementation agent stays open when a run is cancelled.
@@ -1055,7 +1329,11 @@ fn cancel_circuit_run_inner(tx: &Connection, run_id: i64) -> SqlResult<CancelRun
         params![run_id],
     )?;
     let cancelled = RunState::is_live_db_str(&state);
-    Ok(CancelRunWrite { agents, source, cancelled })
+    Ok(CancelRunWrite {
+        agents,
+        source,
+        cancelled,
+    })
 }
 
 /// Batch cancel for queue/activity hygiene: every listed run is
@@ -1110,7 +1388,11 @@ pub(crate) fn cancel_circuit_runs_locked(
     sources.dedup();
     cancelled.sort_unstable();
     tx.commit()?;
-    Ok(BatchCancelResult { agents, sources, cancelled })
+    Ok(BatchCancelResult {
+        agents,
+        sources,
+        cancelled,
+    })
 }
 
 /// Runs whose attached agents may still need retiring while a circuit is
@@ -1406,9 +1688,7 @@ pub fn commit_circuit_advance(
 ) -> SqlResult<()> {
     let mut db = crate::db::write_conn();
     let tx = db.transaction()?;
-    let result = commit_circuit_advance_inner(
-        &tx, run_id, run_state, context_json, step_ops,
-    )?;
+    let result = commit_circuit_advance_inner(&tx, run_id, run_state, context_json, step_ops)?;
     tx.commit()?;
     drop(db);
     if result.terminal_woke {
@@ -1432,9 +1712,7 @@ pub(crate) fn commit_circuit_advance_locked(
     step_ops: &[CircuitStepOp],
 ) -> SqlResult<()> {
     let tx = conn.transaction()?;
-    let _woke = commit_circuit_advance_inner(
-        &tx, run_id, run_state, context_json, step_ops,
-    )?;
+    let _woke = commit_circuit_advance_inner(&tx, run_id, run_state, context_json, step_ops)?;
     tx.commit()?;
     Ok(())
 }
@@ -1479,22 +1757,34 @@ pub(crate) fn commit_circuit_advance_inner(
             "DELETE FROM autopilot_circuit_run_agent_leases WHERE run_id = ?1",
             params![run_id],
         )?;
-        return Ok(CircuitAdvanceCommit { applied: false, terminal_woke: false });
+        return Ok(CircuitAdvanceCommit {
+            applied: false,
+            terminal_woke: false,
+        });
     }
     let prior_context_json = if run_state.map(is_terminal_run_state).unwrap_or(false) {
         tx.query_row(
             "SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1",
             params![run_id],
             |row| row.get::<_, String>(0),
-        ).optional()?
+        )
+        .optional()?
     } else {
         None
     };
     let mut terminal_woke = false;
     if let Some(state) = run_state {
         if durable_state.as_deref() != Some(state) {
-            super::evidence::append_history(tx, run_id, None, None, "run_transition", state,
-                Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
+            super::evidence::append_history(
+                tx,
+                run_id,
+                None,
+                None,
+                "run_transition",
+                state,
+                Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                Some(super::evidence::DISPOSITION_APPLIED),
+            )?;
         }
     }
     if let Some(context) = context_json {
@@ -1535,15 +1825,30 @@ pub(crate) fn commit_circuit_advance_inner(
         (None, None) => {}
     }
     for op in step_ops {
-        super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "step_transition", &op.status,
-            Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(super::evidence::DISPOSITION_APPLIED))?;
+        super::evidence::append_history(
+            tx,
+            run_id,
+            Some(&op.node_id),
+            Some(op.attempt),
+            "step_transition",
+            &op.status,
+            Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+            Some(super::evidence::DISPOSITION_APPLIED),
+        )?;
         if op.status == "unverified" {
             if let Some(Some(reason)) = &op.error {
                 // The current error is replaced on recheck/cancellation. Keep
                 // the original delivery or evidence failure diagnosable.
-                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt),
-                    "checkpoint_reason", &crate::secret_scrubber::SecretScrubber::scrub(reason),
-                    Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some("waiting"))?;
+                super::evidence::append_history(
+                    tx,
+                    run_id,
+                    Some(&op.node_id),
+                    Some(op.attempt),
+                    "checkpoint_reason",
+                    &crate::secret_scrubber::SecretScrubber::scrub(reason),
+                    Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                    Some("waiting"),
+                )?;
             }
         }
         let effect_state = match op.status.as_str() {
@@ -1555,8 +1860,16 @@ pub(crate) fn commit_circuit_advance_inner(
             let changed = tx.execute("UPDATE circuit_effects SET state=?4 WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='possible_dispatch'",
                 params![run_id, op.node_id, op.attempt, state])?;
             if changed > 0 {
-                super::evidence::append_history(tx, run_id, Some(&op.node_id), Some(op.attempt), "effect_result", state,
-                    Some(super::evidence::SOURCE_CIRCUIT_WORKER), Some(state))?;
+                super::evidence::append_history(
+                    tx,
+                    run_id,
+                    Some(&op.node_id),
+                    Some(op.attempt),
+                    "effect_result",
+                    state,
+                    Some(super::evidence::SOURCE_CIRCUIT_WORKER),
+                    Some(state),
+                )?;
             }
         }
         let outcome_val = op.outcome.clone().flatten();
@@ -1607,10 +1920,17 @@ pub(crate) fn commit_circuit_advance_inner(
         // legacy context marker is consumed as an input only; it is never
         // persisted back into the historical ledger.
         let state = run_state.unwrap_or_default();
-        let cleanup_requested = state == "failed" || state == "cancelled" || context_json.or(prior_context_json.as_deref())
-            .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
-            .and_then(|ctx| ctx.get("cleanup.pending").and_then(|v| v.as_str()).map(|v| v == "1"))
-            .unwrap_or(false);
+        let cleanup_requested = state == "failed"
+            || state == "cancelled"
+            || context_json
+                .or(prior_context_json.as_deref())
+                .and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
+                .and_then(|ctx| {
+                    ctx.get("cleanup.pending")
+                        .and_then(|v| v.as_str())
+                        .map(|v| v == "1")
+                })
+                .unwrap_or(false);
         if cleanup_requested {
             tx.execute(
                 &format!(
@@ -1634,7 +1954,10 @@ pub(crate) fn commit_circuit_advance_inner(
             params![run_id],
         )?;
     }
-    Ok(CircuitAdvanceCommit { applied: true, terminal_woke })
+    Ok(CircuitAdvanceCommit {
+        applied: true,
+        terminal_woke,
+    })
 }
 
 pub(crate) struct CircuitAdvanceCommit {
@@ -1654,7 +1977,11 @@ pub fn set_circuit_step_agent_node_with_parent(
 ) -> SqlResult<bool> {
     let db = crate::db::write_conn();
     set_circuit_step_agent_node_with_parent_inner(
-        &db, run_id, node_id, agent_node_id, parent_agent_node_id,
+        &db,
+        run_id,
+        node_id,
+        agent_node_id,
+        parent_agent_node_id,
     )
 }
 
@@ -1792,49 +2119,135 @@ mod reviewer_tests {
 
     #[test]
     fn circuit_review_inherits_source_snapshot_without_a_saved_configuration() {
-        use crate::preferences::launch_configurations::{capture, snapshot};
         use crate::circuit::context::CircuitContext;
+        use crate::preferences::launch_configurations::{capture, snapshot};
         for harness in ["codex", "retained-codex"] {
-        let mut db = Connection::open_in_memory().unwrap();
-        crate::db::init_schema(&db).unwrap();
-        let mesh = crate::db::create_mesh_inner(&db, "source snapshot", "/tmp/source-snapshot").unwrap();
-        let source = crate::db::create_agent_node_inner(&db, mesh.id, "Source", &mesh.path, "main", crate::models::EnvType::Windows,
-            harness, None, None, None, None, false, None, None, None).unwrap();
-        crate::db::update_agent_node_status_inner(&db, source.id, crate::models::SessionStatus::Ready).unwrap();
-        let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.harness_profiles.push(crate::preferences::HarnessProfile { id: harness.into(), name: "Retained Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
-        let launch = snapshot(capture(&prefs, harness, &crate::preferences::launch_configurations::LaunchOverrides {
-            model: Some("gpt-6-luna".into()), effort: Some("low".into()), extra_args: None,
-        }).unwrap());
-        assert_eq!(launch.id, format!("launch/{harness}"));
-        prefs.harness_profiles.clear();
-        assert!(prefs.spawn_configurations.is_empty());
-        db.execute("UPDATE agent_nodes SET spawn_configuration=?1 WHERE id=?2", params![serde_json::to_string(&launch).unwrap(), source.id]).unwrap();
-        let run = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&prefs)), None).unwrap();
-        let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
-        let context = CircuitContext::from_json(&stored.context_json).unwrap();
-        let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
-        assert_eq!(configuration.model.as_deref(), Some("gpt-6-luna"));
-        assert_eq!(configuration.spawn_option_id, harness);
-        assert_eq!(configuration.resolved.unwrap().harness.name, "Retained Codex");
+            let mut db = Connection::open_in_memory().unwrap();
+            crate::db::init_schema(&db).unwrap();
+            let mesh = crate::db::create_mesh_inner(&db, "source snapshot", "/tmp/source-snapshot")
+                .unwrap();
+            let source = crate::db::create_agent_node_inner(
+                &db,
+                mesh.id,
+                "Source",
+                &mesh.path,
+                "main",
+                crate::models::EnvType::Windows,
+                harness,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            crate::db::update_agent_node_status_inner(
+                &db,
+                source.id,
+                crate::models::SessionStatus::Ready,
+            )
+            .unwrap();
+            let mut prefs = crate::preferences::AppPreferences::default();
+            prefs
+                .harness_profiles
+                .push(crate::preferences::HarnessProfile {
+                    id: harness.into(),
+                    name: "Retained Codex".into(),
+                    harness: "codex".into(),
+                    runtime: None,
+                    wsl_distro: None,
+                    executable: None,
+                });
+            let launch = snapshot(
+                capture(
+                    &prefs,
+                    harness,
+                    &crate::preferences::launch_configurations::LaunchOverrides {
+                        model: Some("gpt-6-luna".into()),
+                        effort: Some("low".into()),
+                        extra_args: None,
+                    },
+                )
+                .unwrap(),
+            );
+            assert_eq!(launch.id, format!("launch/{harness}"));
+            prefs.harness_profiles.clear();
+            assert!(prefs.spawn_configurations.is_empty());
+            db.execute(
+                "UPDATE agent_nodes SET spawn_configuration=?1 WHERE id=?2",
+                params![serde_json::to_string(&launch).unwrap(), source.id],
+            )
+            .unwrap();
+            let run = create_node_circuit_run_with_recovery_locked(
+                &mut db,
+                source.id,
+                None,
+                2,
+                (None, Some(&prefs)),
+                None,
+            )
+            .unwrap();
+            let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
+            let context = CircuitContext::from_json(&stored.context_json).unwrap();
+            let configuration: crate::preferences::spawn_configurations::SpawnConfiguration =
+                serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
+            assert_eq!(configuration.model.as_deref(), Some("gpt-6-luna"));
+            assert_eq!(configuration.spawn_option_id, harness);
+            assert_eq!(
+                configuration.resolved.unwrap().harness.name,
+                "Retained Codex"
+            );
         }
     }
 
     #[test]
     fn circuit_issue_review_ignores_retired_provider_when_pinning_parent_selection() {
-        use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind}};
+        use crate::circuit::{
+            context::CircuitContext,
+            model::{CircuitGraph, CircuitNodeKind},
+        };
         for explicit in [None, Some("kimi")] {
             let mut db = Connection::open_in_memory().unwrap();
             crate::db::init_schema(&db).unwrap();
-            let mesh = crate::db::create_mesh_inner(&db, "parent precedence", "/tmp/parent-precedence").unwrap();
+            let mesh =
+                crate::db::create_mesh_inner(&db, "parent precedence", "/tmp/parent-precedence")
+                    .unwrap();
             db.execute("UPDATE meshes SET default_provider='claude', autopilot_provider='codex' WHERE id=?1", [mesh.id]).unwrap();
             let mut graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
-            if let CircuitNodeKind::SpawnAgentNode { provider, .. } = &mut graph.nodes.iter_mut().find(|n| n.id == "implementer").unwrap().kind { *provider = explicit.map(str::to_string); }
-            let circuit = create_autopilot_circuit_inner(&db, mesh.id, "Review", "", 2, &graph.to_json().unwrap()).unwrap();
-            let run = create_circuit_run_prepared_locked(&mut db, circuit.id, mesh.id, "issue:17", "{}", &Default::default()).unwrap();
+            if let CircuitNodeKind::SpawnAgentNode { provider, .. } = &mut graph
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == "implementer")
+                .unwrap()
+                .kind
+            {
+                *provider = explicit.map(str::to_string);
+            }
+            let circuit = create_autopilot_circuit_inner(
+                &db,
+                mesh.id,
+                "Review",
+                "",
+                2,
+                &graph.to_json().unwrap(),
+            )
+            .unwrap();
+            let run = create_circuit_run_prepared_locked(
+                &mut db,
+                circuit.id,
+                mesh.id,
+                "issue:17",
+                "{}",
+                &Default::default(),
+            )
+            .unwrap();
             let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
             let context = CircuitContext::from_json(&stored.context_json).unwrap();
-            let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
+            let configuration: crate::preferences::spawn_configurations::SpawnConfiguration =
+                serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
             assert_eq!(configuration.spawn_option_id, explicit.unwrap_or("claude"));
         }
     }
@@ -1845,21 +2258,56 @@ mod reviewer_tests {
         use crate::preferences::spawn_configurations::SpawnConfiguration;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
-        let mesh = crate::db::create_mesh_inner(&db, "trigger snapshot", "/tmp/trigger-snapshot").unwrap();
+        let mesh =
+            crate::db::create_mesh_inner(&db, "trigger snapshot", "/tmp/trigger-snapshot").unwrap();
         let graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
-        let circuit = create_autopilot_circuit_inner(&db, mesh.id, "Review", "", 2, &graph.to_json().unwrap()).unwrap();
+        let circuit = create_autopilot_circuit_inner(
+            &db,
+            mesh.id,
+            "Review",
+            "",
+            2,
+            &graph.to_json().unwrap(),
+        )
+        .unwrap();
         let mut prefs = crate::preferences::AppPreferences::default();
         prefs.reviewer_provider = Some("codex".into());
-        prefs.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
-        let run = create_circuit_run_prepared_locked(&mut db, circuit.id, mesh.id, "issue:17", "{}", &prefs).unwrap();
+        prefs.harness_defaults.insert(
+            "codex".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("low".into()),
+            },
+        );
+        let run = create_circuit_run_prepared_locked(
+            &mut db, circuit.id, mesh.id, "issue:17", "{}", &prefs,
+        )
+        .unwrap();
         prefs.reviewer_provider = Some("launch/deleted".into());
-        assert_eq!(create_circuit_run_prepared_locked(&mut db, circuit.id, mesh.id, "issue:17", "{}", &prefs).unwrap(), run);
-        assert!(create_circuit_run_prepared_locked(&mut db, circuit.id, mesh.id, "issue:18", "{}", &prefs).is_err());
-        let rows: i64 = db.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| r.get(0)).unwrap();
-        assert_eq!(rows, 1, "invalid configuration must not leave a runnable partial run");
+        assert_eq!(
+            create_circuit_run_prepared_locked(
+                &mut db, circuit.id, mesh.id, "issue:17", "{}", &prefs
+            )
+            .unwrap(),
+            run
+        );
+        assert!(create_circuit_run_prepared_locked(
+            &mut db, circuit.id, mesh.id, "issue:18", "{}", &prefs
+        )
+        .is_err());
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "invalid configuration must not leave a runnable partial run"
+        );
         let stored = get_circuit_run_inner(&db, run).unwrap().unwrap();
         let context = CircuitContext::from_json(&stored.context_json).unwrap();
-        let configuration: SpawnConfiguration = serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
+        let configuration: SpawnConfiguration =
+            serde_json::from_str(context.get("review.launch.reviewer").unwrap()).unwrap();
         assert_eq!(configuration.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(configuration.resolved.unwrap().harness.harness, "codex");
     }
@@ -1870,27 +2318,82 @@ mod reviewer_tests {
         use crate::preferences::spawn_configurations::SpawnConfiguration;
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
-        let mesh = crate::db::create_mesh_inner(&db, "frozen review", "/tmp/frozen-review").unwrap();
-        let source = crate::db::create_agent_node_inner(&db, mesh.id, "Source", &mesh.path, "main", crate::models::EnvType::Windows,
-            "codex", None, None, None, None, false, None, None, None).unwrap();
-        crate::db::update_agent_node_status_inner(&db, source.id, crate::models::SessionStatus::Ready).unwrap();
+        let mesh =
+            crate::db::create_mesh_inner(&db, "frozen review", "/tmp/frozen-review").unwrap();
+        let source = crate::db::create_agent_node_inner(
+            &db,
+            mesh.id,
+            "Source",
+            &mesh.path,
+            "main",
+            crate::models::EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::update_agent_node_status_inner(
+            &db,
+            source.id,
+            crate::models::SessionStatus::Ready,
+        )
+        .unwrap();
         let mut preferences = crate::preferences::AppPreferences::default();
         preferences.reviewer_provider = Some("codex".into());
-        preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
-        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
+        preferences.harness_defaults.insert(
+            "codex".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("low".into()),
+            },
+        );
+        let first = create_node_circuit_run_with_recovery_locked(
+            &mut db,
+            source.id,
+            None,
+            2,
+            (None, Some(&preferences)),
+            None,
+        )
+        .unwrap();
         let read_snapshot = |db: &Connection, id| {
             let run = get_circuit_run_inner(db, id).unwrap().unwrap();
             let context = CircuitContext::from_json(&run.context_json).unwrap();
-            serde_json::from_str::<SpawnConfiguration>(context.get("review.launch.reviewer").expect("snapshot at run creation")).unwrap()
+            serde_json::from_str::<SpawnConfiguration>(
+                context
+                    .get("review.launch.reviewer")
+                    .expect("snapshot at run creation"),
+            )
+            .unwrap()
         };
         let frozen = read_snapshot(&db, first);
         assert_eq!(frozen.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(frozen.effort.as_deref(), Some("low"));
         assert_eq!(frozen.resolved.as_ref().unwrap().harness.harness, "codex");
-        preferences.harness_defaults.get_mut("codex").unwrap().model = Some("changed-default".into());
-        commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
-            node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
-        }]).unwrap();
+        preferences.harness_defaults.get_mut("codex").unwrap().model =
+            Some("changed-default".into());
+        commit_circuit_advance_locked(
+            &mut db,
+            first,
+            Some("failed"),
+            None,
+            &[crate::db::CircuitStepOp {
+                node_id: "verdict".into(),
+                status: "failed".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
         // Recovery history (issue #1909): the successor's own history records
@@ -1899,20 +2402,55 @@ mod reviewer_tests {
             "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
             params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
+        assert_eq!(
+            (recorded_source.as_deref(), disposition.as_deref()),
+            (Some("operator"), Some("applied"))
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(),
+            Some(first)
+        );
         let predecessor_rows: i64 = db.query_row(
             "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind IN ('recovery','review_continuation')",
             params![first], |row| row.get(0),
         ).unwrap();
-        assert_eq!(predecessor_rows, 0, "the failed ancestor's ledger stays immutable");
-        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
-        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()));
-        assert_eq!(serde_json::to_value(read_snapshot(&db, successor)).unwrap(), serde_json::to_value(&frozen).unwrap());
-        assert_eq!(serde_json::to_value(read_snapshot(&db, first)).unwrap(), serde_json::to_value(&frozen).unwrap());
+        assert_eq!(
+            predecessor_rows, 0,
+            "the failed ancestor's ledger stays immutable"
+        );
+        let successor_context = CircuitContext::from_json(
+            &get_circuit_run_inner(&db, successor)
+                .unwrap()
+                .unwrap()
+                .context_json,
+        )
+        .unwrap();
+        assert_eq!(
+            successor_context.get("recovery.from_run_id"),
+            Some(first.to_string().as_str())
+        );
+        assert_eq!(
+            serde_json::to_value(read_snapshot(&db, successor)).unwrap(),
+            serde_json::to_value(&frozen).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(read_snapshot(&db, first)).unwrap(),
+            serde_json::to_value(&frozen).unwrap()
+        );
         cancel_circuit_run_locked(&mut db, successor).unwrap();
-        let fresh = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
-        assert_eq!(read_snapshot(&db, fresh).model.as_deref(), Some("changed-default"));
+        let fresh = create_node_circuit_run_with_recovery_locked(
+            &mut db,
+            source.id,
+            None,
+            2,
+            (None, Some(&preferences)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read_snapshot(&db, fresh).model.as_deref(),
+            Some("changed-default")
+        );
     }
 
     /// Issue #1909 acceptance: the continuation history survives a restart, and
@@ -1923,25 +2461,83 @@ mod reviewer_tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut db = Connection::open(file.path()).unwrap();
         crate::db::init_schema(&db).unwrap();
-        let mesh = crate::db::create_mesh_inner(&db, "recovery reopen", "/tmp/recovery-reopen").unwrap();
-        let source = crate::db::create_agent_node_inner(&db, mesh.id, "Source", &mesh.path, "main", crate::models::EnvType::Windows,
-            "codex", None, None, None, None, false, None, None, None).unwrap();
-        crate::db::update_agent_node_status_inner(&db, source.id, crate::models::SessionStatus::Ready).unwrap();
+        let mesh =
+            crate::db::create_mesh_inner(&db, "recovery reopen", "/tmp/recovery-reopen").unwrap();
+        let source = crate::db::create_agent_node_inner(
+            &db,
+            mesh.id,
+            "Source",
+            &mesh.path,
+            "main",
+            crate::models::EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        crate::db::update_agent_node_status_inner(
+            &db,
+            source.id,
+            crate::models::SessionStatus::Ready,
+        )
+        .unwrap();
         let mut preferences = crate::preferences::AppPreferences::default();
         preferences.reviewer_provider = Some("codex".into());
-        preferences.harness_defaults.insert("codex".into(), crate::preferences::HarnessConfigValue { model: Some("gpt-6-luna".into()), effort: Some("low".into()) });
-        let first = create_node_circuit_run_with_recovery_locked(&mut db, source.id, None, 2, (None, Some(&preferences)), None).unwrap();
-        commit_circuit_advance_locked(&mut db, first, Some("failed"), None, &[crate::db::CircuitStepOp {
-            node_id: "verdict".into(), status: "failed".into(), outcome: None, error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
-        }]).unwrap();
+        preferences.harness_defaults.insert(
+            "codex".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("gpt-6-luna".into()),
+                effort: Some("low".into()),
+            },
+        );
+        let first = create_node_circuit_run_with_recovery_locked(
+            &mut db,
+            source.id,
+            None,
+            2,
+            (None, Some(&preferences)),
+            None,
+        )
+        .unwrap();
+        commit_circuit_advance_locked(
+            &mut db,
+            first,
+            Some("failed"),
+            None,
+            &[crate::db::CircuitStepOp {
+                node_id: "verdict".into(),
+                status: "failed".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
-        db.execute_batch("CREATE TRIGGER reject_recovery_history BEFORE INSERT ON circuit_run_history
+        db.execute_batch(
+            "CREATE TRIGGER reject_recovery_history BEFORE INSERT ON circuit_run_history
             WHEN NEW.kind='review_continuation'
-            BEGIN SELECT RAISE(ABORT,'injected continuation history failure'); END;").unwrap();
+            BEGIN SELECT RAISE(ABORT,'injected continuation history failure'); END;",
+        )
+        .unwrap();
         assert!(create_node_circuit_run_recovery_locked(&mut db, recovery, 2).is_err());
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row.get::<_, i64>(0)).unwrap(), 1,
-            "failed recovery must not leave a successor without its history");
-        db.execute_batch("DROP TRIGGER reject_recovery_history").unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "failed recovery must not leave a successor without its history"
+        );
+        db.execute_batch("DROP TRIGGER reject_recovery_history")
+            .unwrap();
         let recovery = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
         let successor = create_node_circuit_run_recovery_locked(&mut db, recovery, 2).unwrap();
         drop(db);
@@ -1952,21 +2548,57 @@ mod reviewer_tests {
             "SELECT detail, source, disposition FROM circuit_run_history WHERE run_id=?1 AND kind='review_continuation'",
             params![successor], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!((recorded_source.as_deref(), disposition.as_deref()), (Some("operator"), Some("applied")));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(), Some(first));
-        let successor_context = CircuitContext::from_json(&get_circuit_run_inner(&db, successor).unwrap().unwrap().context_json).unwrap();
-        assert_eq!(successor_context.get("recovery.from_run_id"), Some(first.to_string().as_str()), "reopened successor still points back at its predecessor");
+        assert_eq!(
+            (recorded_source.as_deref(), disposition.as_deref()),
+            (Some("operator"), Some("applied"))
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&detail).unwrap()["from_run_id"].as_i64(),
+            Some(first)
+        );
+        let successor_context = CircuitContext::from_json(
+            &get_circuit_run_inner(&db, successor)
+                .unwrap()
+                .unwrap()
+                .context_json,
+        )
+        .unwrap();
+        assert_eq!(
+            successor_context.get("recovery.from_run_id"),
+            Some(first.to_string().as_str()),
+            "reopened successor still points back at its predecessor"
+        );
         let retry = super::super::recovery::review_recovery_inner(&db, first, 2).unwrap();
-        assert_eq!(create_node_circuit_run_recovery_locked(&mut db, retry, 2).unwrap(), successor,
-            "restarting and repeating Continue review returns the existing successor");
+        assert_eq!(
+            create_node_circuit_run_recovery_locked(&mut db, retry, 2).unwrap(),
+            successor,
+            "restarting and repeating Continue review returns the existing successor"
+        );
         let graph = super::super::evidence::run_graph(&db, successor).unwrap();
-        assert!(graph.node("implementer").is_none(), "review continuation never replays implementation");
-        assert!(!graph.nodes.iter().any(|node| matches!(node.kind,
-            crate::circuit::model::CircuitNodeKind::GithubAction {
-                action: crate::circuit::model::GithubActionKind::OpenPr, ..
-            })), "review continuation never replays PR publication");
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1", [successor], |row| row.get::<_, i64>(0)).unwrap(), 0,
-            "an unopened successor has not dispatched any external effect");
+        assert!(
+            graph.node("implementer").is_none(),
+            "review continuation never replays implementation"
+        );
+        assert!(
+            !graph.nodes.iter().any(|node| matches!(
+                node.kind,
+                crate::circuit::model::CircuitNodeKind::GithubAction {
+                    action: crate::circuit::model::GithubActionKind::OpenPr,
+                    ..
+                }
+            )),
+            "review continuation never replays PR publication"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM circuit_effects WHERE run_id=?1",
+                [successor],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0,
+            "an unopened successor has not dispatched any external effect"
+        );
     }
 
     /// Issue #1816: every harness with neither an attention hook nor a
@@ -1982,8 +2614,7 @@ mod reviewer_tests {
     fn reviewer_gate_matches_attention_compatibility_for_every_harness() {
         for provider in Provider::all() {
             let caps = capabilities_for(provider.adapter());
-            let blocked =
-                caps.is_plain_terminal || !harness_has_turn_signal(&caps);
+            let blocked = caps.is_plain_terminal || !harness_has_turn_signal(&caps);
             let id = provider.to_string();
             match normalize_reviewer_provider(Some(id.clone())) {
                 Ok(_) => assert!(
@@ -1991,10 +2622,7 @@ mod reviewer_tests {
                     "{id:?} was accepted but has no turn-completion signal"
                 ),
                 Err(err) => {
-                    assert!(
-                        blocked,
-                        "{id:?} was rejected but can yield a turn: {err:?}"
-                    );
+                    assert!(blocked, "{id:?} was rejected but can yield a turn: {err:?}");
                     if caps.is_plain_terminal {
                         assert!(
                             err.contains("Terminal"),
@@ -2015,11 +2643,16 @@ mod reviewer_tests {
     /// composite, and case variants all route through the harness half).
     #[test]
     fn reviewer_terminal_keeps_distinct_message() {
-        for picked in ["terminal", "  terminal  ", "terminal:minimax", "Terminal", "TERMINAL:foo"] {
+        for picked in [
+            "terminal",
+            "  terminal  ",
+            "terminal:minimax",
+            "Terminal",
+            "TERMINAL:foo",
+        ] {
             let err = normalize_reviewer_provider(Some(picked.into())).unwrap_err();
             assert_eq!(
-                err,
-                "Terminal cannot be used as the reviewer provider.",
+                err, "Terminal cannot be used as the reviewer provider.",
                 "{picked:?} must keep the Terminal message"
             );
         }
@@ -2060,10 +2693,20 @@ mod reviewer_tests {
     #[test]
     fn reviewer_accepts_eligible_unknown_and_blank() {
         for picked in [
-            "claude", "anthropic", "claude_code", "codex", "agy", "antigravity",
-            "opencode", "commandcode", "cmd", "muse", "codex:minimax",
+            "claude",
+            "anthropic",
+            "claude_code",
+            "codex",
+            "agy",
+            "antigravity",
+            "opencode",
+            "commandcode",
+            "cmd",
+            "muse",
+            "codex:minimax",
             // Issue #1775: Cline now provisions an attention hook.
-            "cline", "cline:minimax",
+            "cline",
+            "cline:minimax",
         ] {
             let got = normalize_reviewer_provider(Some(picked.into())).unwrap();
             assert_eq!(got.as_deref(), Some(picked), "{picked:?} must pass through");
@@ -2076,7 +2719,10 @@ mod reviewer_tests {
             );
         }
         assert_eq!(normalize_reviewer_provider(None).unwrap(), None);
-        assert_eq!(normalize_reviewer_provider(Some("   ".into())).unwrap(), None);
+        assert_eq!(
+            normalize_reviewer_provider(Some("   ".into())).unwrap(),
+            None
+        );
     }
 
     /// Issue #1816 review (inherit path): on a blank override the run
@@ -2089,25 +2735,43 @@ mod reviewer_tests {
     fn preset_reviewer_gates_override_then_stored_app_wide_value() {
         // Override wins; stored value never consulted.
         assert_eq!(
-            resolve_preset_reviewer(Some("codex".into()), Some("freebuff".into()), &Default::default()).unwrap().as_deref(),
+            resolve_preset_reviewer(
+                Some("codex".into()),
+                Some("freebuff".into()),
+                &Default::default()
+            )
+            .unwrap()
+            .as_deref(),
             Some("codex")
         );
         // Ineligible override refused with the harness-named reason.
-        let err = resolve_preset_reviewer(Some("freebuff".into()), None, &Default::default()).unwrap_err();
+        let err = resolve_preset_reviewer(Some("freebuff".into()), None, &Default::default())
+            .unwrap_err();
         assert!(err.contains("Freebuff"), "got {err:?}");
-        assert!(!err.contains("Settings"), "override refusal must not blame Settings, got {err:?}");
+        assert!(
+            !err.contains("Settings"),
+            "override refusal must not blame Settings, got {err:?}"
+        );
         // Blank override + ineligible stored value: refuse with guidance.
         for blank in [None, Some("   ".to_string())] {
-            let err = resolve_preset_reviewer(blank, Some("freebuff".into()), &Default::default()).unwrap_err();
+            let err = resolve_preset_reviewer(blank, Some("freebuff".into()), &Default::default())
+                .unwrap_err();
             assert!(err.contains("Freebuff"), "got {err:?}");
-            assert!(err.contains("Settings"), "stale-value refusal must name Settings, got {err:?}");
+            assert!(
+                err.contains("Settings"),
+                "stale-value refusal must name Settings, got {err:?}"
+            );
         }
         // Blank override + eligible stored value: inherit (None).
         assert_eq!(
-            resolve_preset_reviewer(Some("  ".into()), Some("codex".into()), &Default::default()).unwrap(),
+            resolve_preset_reviewer(Some("  ".into()), Some("codex".into()), &Default::default())
+                .unwrap(),
             None
         );
         // Blank override + no stored value: inherit (None).
-        assert_eq!(resolve_preset_reviewer(None, None, &Default::default()).unwrap(), None);
+        assert_eq!(
+            resolve_preset_reviewer(None, None, &Default::default()).unwrap(),
+            None
+        );
     }
 }

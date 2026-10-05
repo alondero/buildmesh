@@ -2043,9 +2043,9 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     // is not failed, and nothing is attested on its behalf.
                     run.context.set(
                         "merge.unconfirmed_reason",
-                        error
-                            .clone()
-                            .unwrap_or_else(|| "GitHub did not report the pull request as merged".to_string()),
+                        error.clone().unwrap_or_else(|| {
+                            "GitHub did not report the pull request as merged".to_string()
+                        }),
                     );
                     t.context_changed = true;
                     complete_with_outcome(run, &mut t, node_id, StepOutcome::Failed);
@@ -4505,8 +4505,16 @@ mod tests {
                 ],
                 edges: vec![
                     edge("t", "verify", Default::default()),
-                    edge("verify", "merged", EdgeCondition::OnOutcome(StepOutcome::Completed)),
-                    edge("verify", "unmerged", EdgeCondition::OnOutcome(StepOutcome::Failed)),
+                    edge(
+                        "verify",
+                        "merged",
+                        EdgeCondition::OnOutcome(StepOutcome::Completed),
+                    ),
+                    edge(
+                        "verify",
+                        "unmerged",
+                        EdgeCondition::OnOutcome(StepOutcome::Failed),
+                    ),
                 ],
             },
             state: RunState::Pending,
@@ -4538,7 +4546,11 @@ mod tests {
 
         let answered = advance(
             &mut run,
-            &github_result("verify", false, Some("PR #314 is still open and has not been merged")),
+            &github_result(
+                "verify",
+                false,
+                Some("PR #314 is still open and has not been merged"),
+            ),
         );
         let settled = advance(&mut run, &tick(2, 2));
 
@@ -4548,21 +4560,29 @@ mod tests {
             Some(StepOutcome::Failed),
             "the answer is routed as the Failed outcome"
         );
-        assert!(run.step("merged").is_none(), "the merged branch is not taken");
+        assert!(
+            run.step("merged").is_none(),
+            "the merged branch is not taken"
+        );
         assert_eq!(status_of(&run, "unmerged"), StepStatus::Completed);
-        assert_eq!(run.state, RunState::Completed, "the run is handed back, not failed");
+        assert_eq!(
+            run.state,
+            RunState::Completed,
+            "the run is handed back, not failed"
+        );
         assert_eq!(
             run.context.get("merge.unconfirmed_reason"),
             Some("PR #314 is still open and has not been merged")
         );
-        let message = answered
-            .effects
-            .iter()
-            .chain(&settled.effects)
-            .find_map(|effect| match effect {
-                Effect::Notify { message } => Some(message.clone()),
-                _ => None,
-            });
+        let message =
+            answered
+                .effects
+                .iter()
+                .chain(&settled.effects)
+                .find_map(|effect| match effect {
+                    Effect::Notify { message } => Some(message.clone()),
+                    _ => None,
+                });
         assert!(
             message.is_some_and(|m| m.contains("still open")),
             "the person is told why: {:?} / {:?}",
@@ -7830,7 +7850,10 @@ mod tests {
                     && prompt.contains("gh pr update-branch 314"))));
         let delivered = acknowledge_prompt(&mut run, "merge");
         assert!(
-            delivered.effects.iter().all(|effect| !closes_implementer(effect)),
+            delivered
+                .effects
+                .iter()
+                .all(|effect| !closes_implementer(effect)),
             "asking for the merge never closes the implementer: {:?}",
             delivered.effects
         );
@@ -7913,13 +7936,19 @@ mod tests {
         .effects;
         effects.extend(advance(&mut run, &tick(8, 8)).effects);
 
-        assert!(effects.iter().all(|effect| !closes_implementer(effect)), "{effects:?}");
+        assert!(
+            effects.iter().all(|effect| !closes_implementer(effect)),
+            "{effects:?}"
+        );
         assert!(run.step("close_implementer").is_none());
         assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
-        assert!(effects.iter().any(|effect| matches!(effect,
+        assert!(
+            effects.iter().any(|effect| matches!(effect,
             Effect::Notify { message }
                 if message.contains("not confirmed") && message.contains("still open")
-                    && message.contains("left open"))), "{effects:?}");
+                    && message.contains("left open"))),
+            "{effects:?}"
+        );
         assert_eq!(
             run.state,
             RunState::Completed,
@@ -7945,7 +7974,10 @@ mod tests {
         effects.extend(advance(&mut run, &tick(8, 8)).effects);
 
         assert!(run.step("merge_verify").is_none(), "GitHub is never asked");
-        assert!(effects.iter().all(|effect| !closes_implementer(effect)), "{effects:?}");
+        assert!(
+            effects.iter().all(|effect| !closes_implementer(effect)),
+            "{effects:?}"
+        );
         assert!(effects.iter().any(|effect| matches!(effect,
             Effect::Notify { message }
                 if message.contains("could not complete the squash-merge") && message.contains("left open"))),
@@ -7972,7 +8004,10 @@ mod tests {
 
         assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
         assert!(run.step("merge_verify").is_none());
-        assert!(working.effects.iter().all(|effect| !closes_implementer(effect)));
+        assert!(working
+            .effects
+            .iter()
+            .all(|effect| !closes_implementer(effect)));
         assert_eq!(run.state, RunState::Running);
     }
 
@@ -8023,7 +8058,11 @@ mod tests {
         assert_eq!(run.state, RunState::Running, "admission reopens the run");
         advance(&mut run, &tick(8, 8));
         assert_eq!(status_of(&run, "finish"), StepStatus::Running);
-        assert_eq!(run.step("finish").unwrap().attempt, 2, "it is a new attempt");
+        assert_eq!(
+            run.step("finish").unwrap().attempt,
+            2,
+            "it is a new attempt"
+        );
 
         let sent = advance(
             &mut run,

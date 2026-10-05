@@ -1095,7 +1095,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::ConsolidateContinuedReviews,
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
     AlwaysStep::UpgradeReviewPublicationFlow,
-AlwaysStep::UpgradeMergeVerification,
+    AlwaysStep::UpgradeMergeVerification,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1895,7 +1895,11 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
-                        tracing::warn!("evolve_to: cannot inspect circuit {} for merge verification: {}", id, error);
+                        tracing::warn!(
+                            "evolve_to: cannot inspect circuit {} for merge verification: {}",
+                            id,
+                            error
+                        );
                         continue;
                     }
                 };

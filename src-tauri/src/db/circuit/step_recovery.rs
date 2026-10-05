@@ -76,7 +76,9 @@ pub struct RecoveryRequest {
 /// step cancelled with a reason of its own (an agent closed under it).
 pub(crate) fn problem_step(steps: &[AutopilotCircuitRunStep]) -> Option<&AutopilotCircuitRunStep> {
     let has_error = |step: &&AutopilotCircuitRunStep| {
-        step.error_message.as_deref().is_some_and(|text| !text.trim().is_empty())
+        step.error_message
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
     };
     steps
         .iter()
@@ -84,7 +86,11 @@ pub(crate) fn problem_step(steps: &[AutopilotCircuitRunStep]) -> Option<&Autopil
         .or_else(|| {
             steps.iter().filter(has_error).find(|step| {
                 step.status == "cancelled"
-                    && !step.error_message.as_deref().unwrap_or("").starts_with(SIBLING_SWEEP_NOTE)
+                    && !step
+                        .error_message
+                        .as_deref()
+                        .unwrap_or("")
+                        .starts_with(SIBLING_SWEEP_NOTE)
             })
         })
 }
@@ -150,9 +156,9 @@ fn retry_refusal(kind: &CircuitNodeKind, agent: &AgentCondition) -> Option<Strin
             AgentCondition::Closed => Some(
                 "The agent for this step was closed. Resume it from Archive, then retry.".into(),
             ),
-            AgentCondition::Gone | AgentCondition::Missing => Some(
-                "The agent for this step no longer exists, so it cannot be run again.".into(),
-            ),
+            AgentCondition::Gone | AgentCondition::Missing => {
+                Some("The agent for this step no longer exists, so it cannot be run again.".into())
+            }
         },
         _ => None,
     }
@@ -204,8 +210,8 @@ fn reopen_blocker(
     graph: &CircuitGraph,
 ) -> Result<Option<String>, String> {
     if let Some(source) = run.source_agent_node_id {
-        if let Some(other) = super::ledger::find_live_run_for_source_inner(db, source)
-            .map_err(|e| e.to_string())?
+        if let Some(other) =
+            super::ledger::find_live_run_for_source_inner(db, source).map_err(|e| e.to_string())?
         {
             return Ok(Some(format!("Run #{other} is already using this agent.")));
         }
@@ -232,13 +238,22 @@ fn reopen_blocker(
     // start beside it.
     for step in steps.iter().filter(|step| {
         step.status == "cancelled"
-            && step.error_message.as_deref().unwrap_or("").starts_with(SIBLING_SWEEP_NOTE)
+            && step
+                .error_message
+                .as_deref()
+                .unwrap_or("")
+                .starts_with(SIBLING_SWEEP_NOTE)
     }) {
         let is_spawn = matches!(
             graph.node(&step.node_id).map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { .. })
         );
-        if is_spawn && matches!(agent_condition(db, step.agent_node_id)?, AgentCondition::Live) {
+        if is_spawn
+            && matches!(
+                agent_condition(db, step.agent_node_id)?,
+                AgentCondition::Live
+            )
+        {
             return Ok(Some(format!(
                 "The {} agent is still open from before the failure. Close it first.",
                 step.node_id
@@ -286,7 +301,10 @@ pub(crate) fn build_recovery(
         error: step.error_message.clone(),
         options: vec![
             option(RecoveryAction::Retry, retry_refusal(&node.kind, &condition)),
-            option(RecoveryAction::Continue, continue_refusal(&node.kind, &condition)),
+            option(
+                RecoveryAction::Continue,
+                continue_refusal(&node.kind, &condition),
+            ),
         ],
     }))
 }
@@ -322,10 +340,13 @@ pub(crate) fn recover_failed_run_locked(
     if run.state != "failed" {
         return Err("Only a failed run can be recovered this way.".into());
     }
-    let steps = super::ledger::list_circuit_run_steps_inner(&tx, run.id).map_err(|e| e.to_string())?;
+    let steps =
+        super::ledger::list_circuit_run_steps_inner(&tx, run.id).map_err(|e| e.to_string())?;
     let graph = run_graph(&tx, run.id)?;
     let recovery = build_recovery(&tx, &run, &graph, &steps)?
-        .filter(|recovery| recovery.node_id == request.node_id && recovery.attempt == request.attempt)
+        .filter(|recovery| {
+            recovery.node_id == request.node_id && recovery.attempt == request.attempt
+        })
         .ok_or("This failure changed. Refresh before acting.")?;
     let option = recovery
         .options
@@ -401,7 +422,10 @@ pub(crate) fn recover_failed_run_locked(
                 params![run.id, request.node_id],
             )
             .map_err(|e| e.to_string())?;
-            context.insert(format!("node.{}.status", request.node_id), "completed".into());
+            context.insert(
+                format!("node.{}.status", request.node_id),
+                "completed".into(),
+            );
             append_history(
                 &tx,
                 run.id,
@@ -452,8 +476,11 @@ mod tests {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
             .to_json()
             .unwrap();
-        conn.execute("INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/repo')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'm', '/repo')",
+            [],
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1, 1, 'c', ?1)",
             [graph],
@@ -509,8 +536,22 @@ mod tests {
         add_run(conn, 1, "failed", None);
         add_step(conn, 1, "trigger", "completed", None, None);
         add_step(conn, 1, "implementer", "completed", Some(10), None);
-        add_step(conn, 1, "implementation_classifier", "completed", None, None);
-        add_step(conn, 1, "finish", "failed", None, Some("Prompt delivery failed"));
+        add_step(
+            conn,
+            1,
+            "implementation_classifier",
+            "completed",
+            None,
+            None,
+        );
+        add_step(
+            conn,
+            1,
+            "finish",
+            "failed",
+            None,
+            Some("Prompt delivery failed"),
+        );
         add_step(
             conn,
             1,
@@ -519,8 +560,17 @@ mod tests {
             None,
             Some("Cancelled because the circuit run failed."),
         );
-        append_history(conn, 1, None, None, "run_transition", "failed", Some("circuit_worker"), Some("applied"))
-            .unwrap();
+        append_history(
+            conn,
+            1,
+            None,
+            None,
+            "run_transition",
+            "failed",
+            Some("circuit_worker"),
+            Some("applied"),
+        )
+        .unwrap();
     }
 
     fn revision(conn: &Connection, run: i64) -> i64 {
@@ -532,7 +582,12 @@ mod tests {
         .unwrap()
     }
 
-    fn request(conn: &Connection, node: &str, action: RecoveryAction, reason: &str) -> RecoveryRequest {
+    fn request(
+        conn: &Connection,
+        node: &str,
+        action: RecoveryAction,
+        reason: &str,
+    ) -> RecoveryRequest {
         RecoveryRequest {
             run_id: 1,
             node_id: node.into(),
@@ -554,14 +609,20 @@ mod tests {
     }
 
     fn recovery(conn: &Connection) -> Option<RunRecovery> {
-        let run = super::super::ledger::get_circuit_run_inner(conn, 1).unwrap().unwrap();
+        let run = super::super::ledger::get_circuit_run_inner(conn, 1)
+            .unwrap()
+            .unwrap();
         let graph = run_graph(conn, 1).unwrap();
         let steps = super::super::ledger::list_circuit_run_steps_inner(conn, 1).unwrap();
         build_recovery(conn, &run, &graph, &steps).unwrap()
     }
 
     fn option(recovery: &RunRecovery, action: RecoveryAction) -> &RunRecoveryOption {
-        recovery.options.iter().find(|option| option.action == action).unwrap()
+        recovery
+            .options
+            .iter()
+            .find(|option| option.action == action)
+            .unwrap()
     }
 
     fn step_row(conn: &Connection, node: &str) -> (String, i32, Option<String>, Option<String>) {
@@ -574,8 +635,12 @@ mod tests {
     }
 
     fn run_state(conn: &Connection) -> String {
-        conn.query_row("SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get(0))
-            .unwrap()
+        conn.query_row(
+            "SELECT state FROM autopilot_circuit_runs WHERE id=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -601,8 +666,15 @@ mod tests {
 
         assert_eq!(run_state(&conn), "pending", "the run re-enters the queue");
         let (status, attempt, outcome, error) = step_row(&conn, "finish");
-        assert_eq!((status.as_str(), attempt, outcome, error), ("pending_slot", 2, None, None));
-        assert_eq!(step_row(&conn, "implementer").0, "completed", "finished work is not redone");
+        assert_eq!(
+            (status.as_str(), attempt, outcome, error),
+            ("pending_slot", 2, None, None)
+        );
+        assert_eq!(
+            step_row(&conn, "implementer").0,
+            "completed",
+            "finished work is not redone"
+        );
         let swept: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='finish_classifier'",
@@ -610,31 +682,60 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(swept, 0, "a step cancelled by the failure is recreated, not left to fail the run again");
+        assert_eq!(
+            swept, 0,
+            "a step cancelled by the failure is recreated, not left to fail the run again"
+        );
 
         let context: std::collections::BTreeMap<String, String> = serde_json::from_str(
             &conn
-                .query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, String>(0))
+                .query_row(
+                    "SELECT context_json FROM autopilot_circuit_runs WHERE id=1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
                 .unwrap(),
         )
         .unwrap();
-        assert!(!context.contains_key("node.finish.output"), "the step is judged afresh");
-        assert_eq!(context.get("node.implementer.output").map(String::as_str), Some("kept"));
+        assert!(
+            !context.contains_key("node.finish.output"),
+            "the step is judged afresh"
+        );
+        assert_eq!(
+            context.get("node.implementer.output").map(String::as_str),
+            Some("kept")
+        );
         assert_eq!(context.get("pr.number").map(String::as_str), Some("7"));
-        assert_eq!(context.get("operator.recovered").map(String::as_str), Some("1"));
+        assert_eq!(
+            context.get("operator.recovered").map(String::as_str),
+            Some("1")
+        );
 
         let history: Vec<(String, Option<i32>, Option<String>)> = conn
-            .prepare("SELECT kind, attempt, source FROM circuit_run_history WHERE run_id=1 AND id > ?1")
+            .prepare(
+                "SELECT kind, attempt, source FROM circuit_run_history WHERE run_id=1 AND id > ?1",
+            )
             .unwrap()
             .query_map([before], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(history, vec![("operator_retry".into(), Some(2), Some("operator".into()))]);
+        assert_eq!(
+            history,
+            vec![("operator_retry".into(), Some(2), Some("operator".into()))]
+        );
         let entries: i64 = conn
-            .query_row("SELECT COUNT(*) FROM circuit_run_history WHERE run_id=1", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=1",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
-        assert_eq!(entries, before + 1, "earlier history is untouched and one entry is added");
+        assert_eq!(
+            entries,
+            before + 1,
+            "earlier history is untouched and one entry is added"
+        );
     }
 
     #[test]
@@ -642,16 +743,27 @@ mod tests {
         let mut conn = fixture();
         failed_finish_run(&conn);
 
-        let missing_reason = recover(&mut conn, "finish", RecoveryAction::Continue, "  ")
-        .unwrap_err();
-        assert!(missing_reason.contains("Say what you did"), "{missing_reason}");
+        let missing_reason =
+            recover(&mut conn, "finish", RecoveryAction::Continue, "  ").unwrap_err();
+        assert!(
+            missing_reason.contains("Say what you did"),
+            "{missing_reason}"
+        );
         assert_eq!(run_state(&conn), "failed", "nothing changed");
 
-        recover(&mut conn, "finish", RecoveryAction::Continue, "I pasted the finish prompt myself")
+        recover(
+            &mut conn,
+            "finish",
+            RecoveryAction::Continue,
+            "I pasted the finish prompt myself",
+        )
         .unwrap();
 
         let (status, _, outcome, error) = step_row(&conn, "finish");
-        assert_eq!((status.as_str(), outcome.as_deref(), error), ("completed", Some("completed"), None));
+        assert_eq!(
+            (status.as_str(), outcome.as_deref(), error),
+            ("completed", Some("completed"), None)
+        );
         assert_eq!(run_state(&conn), "pending");
         let detail: String = conn
             .query_row(
@@ -684,21 +796,35 @@ mod tests {
             None,
             Some("piloted agent node was closed"),
         );
-        conn.execute("UPDATE agent_nodes SET status='archived' WHERE id=10", []).unwrap();
+        conn.execute("UPDATE agent_nodes SET status='archived' WHERE id=10", [])
+            .unwrap();
 
         let closed = recovery(&conn).unwrap();
         assert_eq!(closed.node_id, "implementation_classifier");
         assert_eq!(closed.status, "cancelled");
         let retry = option(&closed, RecoveryAction::Retry);
         assert!(!retry.available);
-        assert!(retry.unavailable_reason.as_deref().unwrap().contains("Resume it from Archive"));
-        assert!(option(&closed, RecoveryAction::Continue).available, "the person can still vouch for finished work");
-        let refused = recover(&mut conn, "implementation_classifier", RecoveryAction::Retry, "")
+        assert!(retry
+            .unavailable_reason
+            .as_deref()
+            .unwrap()
+            .contains("Resume it from Archive"));
+        assert!(
+            option(&closed, RecoveryAction::Continue).available,
+            "the person can still vouch for finished work"
+        );
+        let refused = recover(
+            &mut conn,
+            "implementation_classifier",
+            RecoveryAction::Retry,
+            "",
+        )
         .unwrap_err();
         assert!(refused.contains("Resume it from Archive"));
         assert_eq!(run_state(&conn), "failed");
 
-        conn.execute("UPDATE agent_nodes SET status='running' WHERE id=10", []).unwrap();
+        conn.execute("UPDATE agent_nodes SET status='running' WHERE id=10", [])
+            .unwrap();
         assert!(option(&recovery(&conn).unwrap(), RecoveryAction::Retry).available);
     }
 
@@ -720,7 +846,11 @@ mod tests {
         for action in [RecoveryAction::Retry, RecoveryAction::Continue] {
             let option = option(&recovery, action);
             assert!(!option.available, "{action:?}");
-            assert!(option.unavailable_reason.as_deref().unwrap().contains("no longer exists"));
+            assert!(option
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("no longer exists"));
         }
     }
 
@@ -730,16 +860,35 @@ mod tests {
         add_run(&conn, 1, "failed", None);
         add_step(&conn, 1, "implementer", "completed", Some(10), None);
         add_step(&conn, 1, "reviewer", "completed", Some(11), None);
-        add_step(&conn, 1, "review_classifier", "failed", None, Some("classifier unavailable"));
+        add_step(
+            &conn,
+            1,
+            "review_classifier",
+            "failed",
+            None,
+            Some("classifier unavailable"),
+        );
 
         let recovery = recovery(&conn).unwrap();
         assert_eq!(recovery.node_id, "review_classifier");
         let cont = option(&recovery, RecoveryAction::Continue);
         assert!(!cont.available);
-        assert!(cont.unavailable_reason.as_deref().unwrap().contains("Review again"));
-        assert!(option(&recovery, RecoveryAction::Retry).available, "re-reading the reviewer's report is fine");
+        assert!(cont
+            .unavailable_reason
+            .as_deref()
+            .unwrap()
+            .contains("Review again"));
+        assert!(
+            option(&recovery, RecoveryAction::Retry).available,
+            "re-reading the reviewer's report is fine"
+        );
 
-        let refused = recover(&mut conn, "review_classifier", RecoveryAction::Continue, "looks good to me")
+        let refused = recover(
+            &mut conn,
+            "review_classifier",
+            RecoveryAction::Continue,
+            "looks good to me",
+        )
         .unwrap_err();
         assert!(refused.contains("Review again"));
         assert_eq!(run_state(&conn), "failed");
@@ -750,16 +899,30 @@ mod tests {
         let conn = fixture();
         add_run(&conn, 1, "failed", None);
         add_step(&conn, 1, "implementer", "completed", Some(10), None);
-        add_step(&conn, 1, "open_pr", "failed", None, Some("no open pull request for the branch"));
+        add_step(
+            &conn,
+            1,
+            "open_pr",
+            "failed",
+            None,
+            Some("no open pull request for the branch"),
+        );
         let pr = recovery(&conn).unwrap();
         assert!(!option(&pr, RecoveryAction::Continue).available);
         assert!(option(&pr, RecoveryAction::Retry).available);
 
-        conn.execute("DELETE FROM autopilot_circuit_run_steps WHERE node_id='open_pr'", []).unwrap();
+        conn.execute(
+            "DELETE FROM autopilot_circuit_run_steps WHERE node_id='open_pr'",
+            [],
+        )
+        .unwrap();
         add_step(&conn, 1, "reviewer", "failed", None, Some("spawn failed"));
         let spawn = recovery(&conn).unwrap();
         assert!(!option(&spawn, RecoveryAction::Continue).available);
-        assert!(option(&spawn, RecoveryAction::Retry).available, "no agent is open for it, so it can start fresh");
+        assert!(
+            option(&spawn, RecoveryAction::Retry).available,
+            "no agent is open for it, so it can start fresh"
+        );
     }
 
     #[test]
@@ -767,8 +930,16 @@ mod tests {
         let mut conn = fixture();
         add_run(&conn, 1, "failed", None);
         add_step(&conn, 1, "implementer", "completed", Some(10), None);
-        add_step(&conn, 1, "reviewer", "failed", Some(11), Some("process exited"));
-        conn.execute("UPDATE agent_nodes SET status='archived' WHERE id=11", []).unwrap();
+        add_step(
+            &conn,
+            1,
+            "reviewer",
+            "failed",
+            Some(11),
+            Some("process exited"),
+        );
+        conn.execute("UPDATE agent_nodes SET status='archived' WHERE id=11", [])
+            .unwrap();
 
         recover(&mut conn, "reviewer", RecoveryAction::Retry, "").unwrap();
 
@@ -789,7 +960,10 @@ mod tests {
         add_run(&conn, 1, "failed", None);
         add_step(&conn, 1, "reviewer", "completed", Some(11), None);
         add_step(&conn, 1, "review_classifier", "completed", None, None);
-        assert!(recovery(&conn).is_none(), "that case has its own Review again");
+        assert!(
+            recovery(&conn).is_none(),
+            "that case has its own Review again"
+        );
     }
 
     #[test]
@@ -802,13 +976,20 @@ mod tests {
         assert!(error.contains("changed"), "{error}");
 
         for state in ["running", "completed", "cancelled", "pending"] {
-            conn.execute("UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1", [state]).unwrap();
-            let error = recover(&mut conn, "finish", RecoveryAction::Retry, "")
-                .unwrap_err();
+            conn.execute(
+                "UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1",
+                [state],
+            )
+            .unwrap();
+            let error = recover(&mut conn, "finish", RecoveryAction::Retry, "").unwrap_err();
             assert!(error.contains("Only a failed run"), "{state}: {error}");
         }
 
-        conn.execute("UPDATE autopilot_circuit_runs SET state='failed' WHERE id=1", []).unwrap();
+        conn.execute(
+            "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=1",
+            [],
+        )
+        .unwrap();
         let mut elsewhere = request(&conn, "finish_classifier", RecoveryAction::Retry, "");
         elsewhere.node_id = "finish_classifier".into();
         let error = recover_failed_run_locked(&mut conn, &elsewhere).unwrap_err();
@@ -829,10 +1010,15 @@ mod tests {
         .unwrap();
         let busy = recovery(&conn).unwrap();
         for option in &busy.options {
-            assert!(option.unavailable_reason.as_deref().unwrap().contains("Run #2"));
+            assert!(option
+                .unavailable_reason
+                .as_deref()
+                .unwrap()
+                .contains("Run #2"));
         }
 
-        conn.execute("DELETE FROM autopilot_circuit_runs WHERE id=2", []).unwrap();
+        conn.execute("DELETE FROM autopilot_circuit_runs WHERE id=2", [])
+            .unwrap();
         conn.execute(
             "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested) VALUES (10, 1)",
             [],
@@ -853,8 +1039,13 @@ mod tests {
         let attention = super::super::evidence::attention_inner(&conn, 1).unwrap();
 
         assert_eq!(attention.revision, revision(&conn, 1));
-        assert!(attention.checkpoints.is_empty(), "a failed run has no live checkpoint");
-        let recovery = attention.recovery.expect("the failed step is offered for recovery");
+        assert!(
+            attention.checkpoints.is_empty(),
+            "a failed run has no live checkpoint"
+        );
+        let recovery = attention
+            .recovery
+            .expect("the failed step is offered for recovery");
         assert_eq!(recovery.node_id, "finish");
         let json = serde_json::to_value(&recovery).unwrap();
         assert_eq!(json["options"][0]["action"], "retry");
@@ -870,11 +1061,21 @@ mod tests {
         let conn = fixture();
         add_run(&conn, 1, "running", None);
         add_step(&conn, 1, "implementer", "completed", Some(10), None);
-        add_step(&conn, 1, "finish", "unverified", Some(10), Some("Prompt delivery is unverified"));
+        add_step(
+            &conn,
+            1,
+            "finish",
+            "unverified",
+            Some(10),
+            Some("Prompt delivery is unverified"),
+        );
 
         let attention = super::super::evidence::attention_inner(&conn, 1).unwrap();
 
-        assert!(attention.recovery.is_none(), "recovery is only for a failed run");
+        assert!(
+            attention.recovery.is_none(),
+            "recovery is only for a failed run"
+        );
         assert_eq!(attention.checkpoints.len(), 1);
         assert_eq!(attention.checkpoints[0].node_id, "finish");
         assert!(!attention.checkpoints[0].actions.is_empty());
@@ -886,12 +1087,22 @@ mod tests {
         add_run(&conn, 1, "failed", None);
         add_step(&conn, 1, "implementer", "completed", Some(10), None);
         add_step(&conn, 1, "finish", "failed", None, Some("boom"));
-        add_step(&conn, 1, "reviewer", "cancelled", Some(11), Some("Cancelled because the circuit run failed."));
+        add_step(
+            &conn,
+            1,
+            "reviewer",
+            "cancelled",
+            Some(11),
+            Some("Cancelled because the circuit run failed."),
+        );
 
         let recovery = recovery(&conn).unwrap();
         for option in &recovery.options {
             let reason = option.unavailable_reason.as_deref().unwrap();
-            assert!(reason.contains("reviewer") && reason.contains("Close it first"), "{reason}");
+            assert!(
+                reason.contains("reviewer") && reason.contains("Close it first"),
+                "{reason}"
+            );
         }
     }
 }

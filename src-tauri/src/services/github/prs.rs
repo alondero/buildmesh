@@ -7,7 +7,8 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
 use super::sync::{
-    graphql_repository_or_error, rest_failure, GitHubClient, GitHubError, HTTP_WRITE_REQUEST_TIMEOUT,
+    graphql_repository_or_error, rest_failure, GitHubClient, GitHubError,
+    HTTP_WRITE_REQUEST_TIMEOUT,
 };
 
 /// What GitHub says happened to one pull request.
@@ -1995,7 +1996,10 @@ pub(crate) mod tests {
                             .ok()
                             .and_then(|s| s.canonical_reason().map(str::to_string))
                             .unwrap_or_else(|| "Error".to_string());
-                        (format!("HTTP/1.1 {status} {reason}\r\n"), body.as_bytes().to_vec())
+                        (
+                            format!("HTTP/1.1 {status} {reason}\r\n"),
+                            body.as_bytes().to_vec(),
+                        )
                     }
                     Scripted::PullHead => {
                         assert!(

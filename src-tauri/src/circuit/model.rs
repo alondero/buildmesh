@@ -1515,7 +1515,11 @@ impl CircuitGraph {
             to: "complete".into(),
             condition: EdgeCondition::Always,
         });
-        graph.replace_stock_text("complete", Self::PR_MERGED_MESSAGE, Self::PR_APPROVED_MESSAGE);
+        graph.replace_stock_text(
+            "complete",
+            Self::PR_MERGED_MESSAGE,
+            Self::PR_APPROVED_MESSAGE,
+        );
         graph
     }
 
@@ -1543,7 +1547,11 @@ impl CircuitGraph {
                 upgraded.edges.push(edge.clone());
             }
         }
-        upgraded.replace_stock_text("complete", Self::PR_APPROVED_MESSAGE, Self::PR_MERGED_MESSAGE);
+        upgraded.replace_stock_text(
+            "complete",
+            Self::PR_APPROVED_MESSAGE,
+            Self::PR_MERGED_MESSAGE,
+        );
         if !upgraded.has_review_topology_of(&canonical) {
             return false;
         }
@@ -2736,7 +2744,10 @@ mod tests {
         );
         assert_eq!(g.children("close_approved"), vec!["merge".to_string()]);
         assert_eq!(g.children("merge"), vec!["merge_wait".to_string()]);
-        assert_eq!(g.children("close_implementer"), vec!["complete".to_string()]);
+        assert_eq!(
+            g.children("close_implementer"),
+            vec!["complete".to_string()]
+        );
         assert!(matches!(
             g.node("complete").map(|n| &n.kind),
             Some(CircuitNodeKind::Notify { message }) if message.contains("squash-merged")
@@ -2760,9 +2771,17 @@ mod tests {
             })
             .map(|node| node.id.as_str())
             .collect();
-        assert_eq!(closers, vec!["close_implementer"], "one close, nowhere else");
+        assert_eq!(
+            closers,
+            vec!["close_implementer"],
+            "one close, nowhere else"
+        );
 
-        let into_close: Vec<_> = g.edges.iter().filter(|e| e.to == "close_implementer").collect();
+        let into_close: Vec<_> = g
+            .edges
+            .iter()
+            .filter(|e| e.to == "close_implementer")
+            .collect();
         assert_eq!(into_close.len(), 1);
         assert_eq!(into_close[0].from, "merge_verify");
         assert_eq!(
@@ -2772,7 +2791,10 @@ mod tests {
         );
         assert!(matches!(
             g.node("merge_verify").map(|n| &n.kind),
-            Some(CircuitNodeKind::GithubAction { action: GithubActionKind::ConfirmPrMerged, .. })
+            Some(CircuitNodeKind::GithubAction {
+                action: GithubActionKind::ConfirmPrMerged,
+                ..
+            })
         ));
 
         // The unhappy endings never reach the close and say the agent stays open.
@@ -2789,7 +2811,11 @@ mod tests {
             })
         };
         assert!(routed("merge_wait", "merge_blocked", StepOutcome::Blocked));
-        assert!(routed("merge_verify", "merge_unconfirmed", StepOutcome::Failed));
+        assert!(routed(
+            "merge_verify",
+            "merge_unconfirmed",
+            StepOutcome::Failed
+        ));
     }
 
     #[test]
@@ -2812,8 +2838,10 @@ mod tests {
 
         // A customized completion message survives.
         let mut custom = crate::circuit::test_support::publication_flow_issue_review();
-        if let Some(CircuitNode { kind: CircuitNodeKind::Notify { message }, .. }) =
-            custom.nodes.iter_mut().find(|node| node.id == "complete")
+        if let Some(CircuitNode {
+            kind: CircuitNodeKind::Notify { message },
+            ..
+        }) = custom.nodes.iter_mut().find(|node| node.id == "complete")
         {
             *message = "Shipped!".into();
         }
@@ -2827,7 +2855,9 @@ mod tests {
         let mut extra = crate::circuit::test_support::publication_flow_issue_review();
         extra.nodes.push(CircuitNode {
             id: "announce".into(),
-            kind: CircuitNodeKind::Notify { message: "custom".into() },
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
         });
         extra.edges.push(CircuitEdge {
             from: "complete".into(),
@@ -2856,7 +2886,10 @@ mod tests {
         local.replace_stock_text(
             "merge",
             &crate::review_contract::merge_approved_pr("your pull request for this work", ""),
-            &crate::review_contract::legacy_merge_approved_pr("your pull request for this work", ""),
+            &crate::review_contract::legacy_merge_approved_pr(
+                "your pull request for this work",
+                "",
+            ),
         );
         assert!(local.upgrade_merge_prompt());
         assert!(matches!(
@@ -2867,7 +2900,10 @@ mod tests {
         let mut custom = crate::circuit::test_support::publication_flow_issue_review();
         custom.replace_stock_text(
             "merge",
-            &crate::review_contract::legacy_merge_approved_pr("PR #{{pr.number}} ({{pr.url}})", " {{pr.number}}"),
+            &crate::review_contract::legacy_merge_approved_pr(
+                "PR #{{pr.number}} ({{pr.url}})",
+                " {{pr.number}}",
+            ),
             "Merge it however you like.",
         );
         assert!(!custom.upgrade_merge_prompt());

@@ -2162,7 +2162,8 @@ pub(super) fn execute_effects(
                     Ok(_) => {
                         // An agent no step identifies as a helper is treated as
                         // the user's work, the safer reading.
-                        let is_helper = db::circuit::agent_is_circuit_helper(target).unwrap_or(false);
+                        let is_helper =
+                            db::circuit::agent_is_circuit_helper(target).unwrap_or(false);
                         let safety = if is_helper {
                             Ok(crate::git::worktree::WorktreeCloseSafety {
                                 worktree_path: None,

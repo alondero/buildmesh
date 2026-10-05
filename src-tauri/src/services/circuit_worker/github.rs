@@ -5,7 +5,6 @@ use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::{CircuitEvent, RunView};
 use crate::db;
 
-
 /// Determine the target (issue vs PR number) for a GitHub action.
 /// If the action is CloseIssue, it explicitly requires an issue trigger.
 /// If this node has an upstream OpenPr node in its lineage, it targets that PR (pr.number).
@@ -108,7 +107,9 @@ pub(super) fn confirm_pr_merged(
         Ok(state) if state.state == "closed" => {
             failure(format!("PR #{number} was closed without being merged"))
         }
-        Ok(_) => failure(format!("PR #{number} is still open and has not been merged")),
+        Ok(_) => failure(format!(
+            "PR #{number} is still open and has not been merged"
+        )),
     }
 }
 
@@ -348,12 +349,8 @@ pub(super) fn call_github_effect(
     use crate::services::github::GitHubClient;
 
     if action == GithubActionKind::OpenPr
-        && crate::circuit::stepper::resolve_upstream_spawn_agent(
-            &view.graph,
-            &view.steps,
-            node_id,
-        )
-        .is_none()
+        && crate::circuit::stepper::resolve_upstream_spawn_agent(&view.graph, &view.steps, node_id)
+            .is_none()
     {
         return Err(
             "OpenPr cannot recover: its upstream spawned agent association is missing".into(),
@@ -469,7 +466,8 @@ pub(super) fn call_github_effect(
                         repo: repo.clone(),
                         head: head.to_string(),
                     };
-                    let detail = serde_json::to_string(&target).map_err(|error| error.to_string())?;
+                    let detail =
+                        serde_json::to_string(&target).map_err(|error| error.to_string())?;
                     target_revision = Some(db::circuit::evidence::record_effect_target(
                         active.run.id,
                         node_id,
@@ -677,9 +675,11 @@ mod tests {
         assert!(recheck_open_pr_target(&target, |_, _, _| Ok(None))
             .unwrap_err()
             .contains("did not create one"));
-        assert!(recheck_open_pr_target(&target, |_, _, _| Ok(Some(pull_request("other"))))
-            .unwrap_err()
-            .contains("remains unverified"));
+        assert!(
+            recheck_open_pr_target(&target, |_, _, _| Ok(Some(pull_request("other"))))
+                .unwrap_err()
+                .contains("remains unverified")
+        );
         let incomplete = OpenPrEffectTarget {
             head: String::new(),
             ..target
