@@ -1,7 +1,16 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { useMeshStore } from '../../src/stores/meshStore';
+import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { useToastStore } from '../../src/stores/toastStore';
+import { SCOPE_NOTICE_PROVIDER, meshDeletedScopeNotice } from '../../src/lib/scopeNotices';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
+
+const DELETED_MESH: Mesh = {
+  id: 1, name: 'doomed', path: '/repo/1', branch: 'main', position: 0,
+  color: null, layout: 'grid', use_worktree: false, created_at: '2026-01-01',
+  github_owner: null, github_repo: null, github_last_synced: null, pre_spawn_pool_size: 0,
+};
+const OTHER_MESH: Mesh = { ...DELETED_MESH, id: 2, name: 'survivor', path: '/repo/2', position: 1 };
 
 const mockInvoke = invoke as ReturnType<typeof vi.fn>;
 
@@ -115,6 +124,7 @@ describe('useMeshStore', () => {
     agentStoreMock.state.nodesById = {};
     agentStoreMock.state.nodeIds = [];
     agentStoreMock.state.activeNodeId = null;
+    useToastStore.setState({ toasts: [] });
     vi.clearAllMocks();
   });
 
@@ -286,6 +296,67 @@ describe('useMeshStore', () => {
       await useMeshStore.getState().deleteMesh(1);
 
       expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    });
+
+    // #2076 — "scope changes announce themselves". Deleting the Mesh the
+    // user is looking at clears `selectedMeshId`, which the mesh→mode
+    // subscription turns into All Nodes: a scope change the user did not
+    // ask for, made silently. This is the only remaining selection-clear
+    // of that kind (#2072 removed the re-click-deselect gesture).
+    it('announces the scope move when the deleted Mesh was the selected one', async () => {
+      useMeshStore.setState({
+        meshes: [DELETED_MESH],
+        meshesById: new Map([[1, DELETED_MESH]]),
+        selectedMeshId: 1,
+      });
+      useToastStore.setState({ toasts: [] });
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      const ok = await useMeshStore.getState().deleteMesh(1);
+
+      expect(ok).toBe(true);
+      const toasts = useToastStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0].provider).toBe(SCOPE_NOTICE_PROVIDER);
+      expect(toasts[0].message).toBe(meshDeletedScopeNotice('doomed'));
+      expect(toasts[0].severity).toBe('info');
+      // The live path is untouched by the notice: the delete committed and
+      // the selection cleared.
+      expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    });
+
+    it('announces nothing when a different Mesh was deleted', async () => {
+      useMeshStore.setState({
+        meshes: [DELETED_MESH, OTHER_MESH],
+        meshesById: new Map([[1, DELETED_MESH], [2, OTHER_MESH]]),
+        selectedMeshId: 2,
+      });
+      useToastStore.setState({ toasts: [] });
+      mockInvoke
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce([]);
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+      expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    });
+
+    it('announces nothing when the backend delete fails — no scope changed', async () => {
+      useMeshStore.setState({
+        meshes: [DELETED_MESH],
+        meshesById: new Map([[1, DELETED_MESH]]),
+        selectedMeshId: 1,
+      });
+      useToastStore.setState({ toasts: [] });
+      mockInvoke.mockRejectedValueOnce(new Error('Not found'));
+
+      await useMeshStore.getState().deleteMesh(1);
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+      expect(useMeshStore.getState().selectedMeshId).toBe(1);
     });
 
     it('nulls activeNodeId when it pointed at a doomed node', async () => {

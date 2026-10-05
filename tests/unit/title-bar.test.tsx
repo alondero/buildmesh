@@ -574,6 +574,7 @@ describe('TitleBar (bespoke window chrome)', () => {
         gridSearchQuery: '',
         gridProviderFilter: null,
         gridStatusFilter: null,
+        openScopePickerRequest: 0,
       });
       seedAgentNodes([NODE, NODE_OTHER_MESH, NODE_SAME_MESH]);
     });
@@ -726,6 +727,51 @@ describe('TitleBar (bespoke window chrome)', () => {
         // Nothing is selected in the All Nodes view, so no row claims to be
         // the current scope.
         expect(within(picker).getByRole('button', { name: 'demo-1' }).getAttribute('aria-current')).toBeNull();
+      });
+
+      // #2076 — the Mesh Grid segment cannot reach into this component, so
+      // it bumps `uiStore.openScopePickerRequest` and the indicator reacts
+      // in a layout effect: the same request-counter channel
+      // `focusGridSearchRequest` already uses for `GridControls`.
+      it('opens on an open request, and opening never chooses a Mesh', async () => {
+        await renderTitleBar();
+        const trigger = screen.getByTestId('scope-indicator');
+        expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+
+        // Asking is not choosing: the panel is open with both Meshes listed
+        // and the selection untouched, so the canvas keeps its honest
+        // "no Mesh selected" state behind the panel.
+        expect(screen.getByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+      });
+
+      it('re-opens on the next request after a dismissal', async () => {
+        // No idempotency guard on the counter: a second Mesh Grid press must
+        // bump again, or a user who dismissed the panel could never get it
+        // back without a mode change.
+        await renderTitleBar();
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        expect(useUIStore.getState().openScopePickerRequest).toBe(2);
+      });
+
+      it('stays closed on mount — the request counter starts at zero', async () => {
+        await renderTitleBar();
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
       });
 
       it('marks the selected Mesh as the current scope in the picker', async () => {

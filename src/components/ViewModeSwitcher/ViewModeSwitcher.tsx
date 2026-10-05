@@ -1,3 +1,4 @@
+import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore, type ViewMode } from '../../stores/uiStore';
 
 /**
@@ -12,11 +13,13 @@ import { useUIStore, type ViewMode } from '../../stores/uiStore';
  * Segment semantics:
  *   - Single:    solo the active node (subsumes the old maximize toggle).
  *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection the
- *                segment only sets the mode and the grid renders its "no
- *                Mesh selected" empty state — #2071 deleted the fallback
- *                that used to select the active node's mesh (or the first
- *                loaded one) on the user's behalf. (A Mesh picker here is
- *                #2076's job, not this one's.)
+ *                segment asks for one instead of picking it (#2076): it sets
+ *                the mode — so the canvas still lands in the Mesh Grid's
+ *                "no Mesh selected" empty state, which #2071 made a real
+ *                state after deleting the fallback that used to select the
+ *                active node's mesh (or the first loaded one) for the user —
+ *                and requests the title bar's Mesh picker so choosing a scope
+ *                is an explicit act.
  *   - Pinned:    cross-mesh filter over is_pinned; never touches
  *                selectedMeshId.
  *   - All Nodes: clear the mesh selection — the only route out of Mesh
@@ -123,11 +126,21 @@ export function ViewModeSwitcher() {
   const setViewMode = useUIStore(state => state.setViewMode);
 
   const handleSelect = (mode: ViewMode) => {
-    // #2071 — Mesh Grid has no branch here any more. The mode is set and
-    // the Mesh comes from the sidebar alone: choosing one here (the active
-    // node's mesh, else the first loaded) showed the user a scope they
-    // never picked, and the fallback chain is deleted. With no selection
-    // the grid renders its "no mesh selected" empty state.
+    // #2071/#2076 — Mesh Grid picks no Mesh. The mode is set and the Mesh
+    // comes from the sidebar alone; #2071 deleted the fallback chain
+    // (the active node's mesh, else the first loaded) that showed the user
+    // a scope they never chose. With no selection this segment ASKS: it
+    // requests the title bar's Mesh picker, which lists every Mesh and
+    // chooses nothing. The mode still flips first — the notice never
+    // suppresses the path it describes, and the canvas keeps its honest
+    // "no Mesh selected" state behind the panel.
+    if (mode === 'mesh') {
+      setViewMode(mode);
+      if (useMeshStore.getState().selectedMeshId === null) {
+        useUIStore.getState().requestOpenScopePicker();
+      }
+      return;
+    }
     if (mode === 'filtered') {
       // #1609 — switch first, then request focus. The request counter
       // pattern (App.tsx `focus-grid-search`) means the consumer's layout
@@ -137,8 +150,13 @@ export function ViewModeSwitcher() {
       // search. Re-clicking while already in Filtered re-arms the request
       // — the user's intent when clicking a segment they're already on is
       // "get me to the search box".
-      if (useUIStore.getState().viewMode !== 'filtered') setViewMode('filtered');
-      useUIStore.getState().requestFocusGridSearch();
+      //
+      // #2076 — both halves of the gesture (the mode flip, the focus
+      // request) and the cross-Mesh-results notice live in one store
+      // action, because "the notice fires once per escape" is a property of
+      // the gesture, not of each caller. Calling it is also why the notice
+      // cannot fire on a re-click from Filtered: no escape happens then.
+      useUIStore.getState().enterFilteredFromSearch();
       return;
     }
     setViewMode(mode);
