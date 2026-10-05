@@ -401,6 +401,18 @@ pub(super) fn spawn_step_timeout_ms(kind: Option<&CircuitNodeKind>) -> Option<i6
     }
 }
 
+/// Whether the classifier's latest verdict for this attempt says the agent
+/// still has work (`working`) or was sent a continuation (`continue`).
+fn classifier_reported_work_remaining(view: &RunView, step: &StepView) -> bool {
+    let prefix = format!("node.{}", step.node_id);
+    view.context.get(&format!("{prefix}.evaluated_attempt"))
+        == Some(step.attempt.to_string().as_str())
+        && matches!(
+            view.context.get(&format!("{prefix}.classification")),
+            Some("working" | "continue")
+        )
+}
+
 #[cfg(test)]
 pub(super) fn observe_waits(view: &RunView, events: &mut Vec<CircuitEvent>) {
     observe_waits_with(
@@ -454,14 +466,17 @@ pub(super) fn observe_waits_with(
                         .into()
                 })
             };
-            (
-                reason,
-                if yielded {
-                    wait.yielded_budget_ms
-                } else {
-                    wait.active_budget_ms
-                },
-            )
+            let budget = if !yielded {
+                wait.active_budget_ms
+            } else if classifier_reported_work_remaining(view, step) {
+                // The harness budget bounds reconciling a yield that has no
+                // verdict yet. After the classifier says work remains, the
+                // awaited report is the agent's own, which can take minutes.
+                wait.yielded_budget_ms.max(YIELDED_WAIT_MS)
+            } else {
+                wait.yielded_budget_ms
+            };
+            (reason, budget)
         } else {
             (
                 "Waiting for step prerequisites; no agent is attached.".into(),
