@@ -20,6 +20,7 @@ import { getNodeStatusConfig, isSignalHealthProblem, signalHealthNote } from '..
 import { canResumeSuspendedNode, hasLostConversation } from '../../lib/suspended';
 import { MissingSessionIdBadge } from '../shared/MissingSessionIdBadge';
 import { SignalHealthBadge } from '../shared/SignalHealthBadge';
+import { StalledInputBadge } from '../shared/StalledInputBadge';
 import type { SpawnOption } from '../../lib/groups';
 import { getMeshColor } from '../../lib/meshColors';
 import type { CircuitAgentOwnership } from '../../types/generated/CircuitAgentOwnership';
@@ -98,6 +99,9 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
   const toggleNodePinned = useAgentNodeStore(s => s.toggleNodePinned);
   const spawnAgent = useAgentNodeStore(s => s.spawnAgent);
   const circuitOwnership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
+  // Issue #1530 — stalled input is tracked per node, so this header reads only
+  // its own entry and can never show (or hide) another node's stall.
+  const stall = useAgentNodeStore(s => s.stalledInputs[nodeId] ?? null);
   const meshesById = useMeshStore(s => s.meshesById);
   const isSingleMode = useUIStore(s => s.viewMode === 'single');
   const setViewMode = useUIStore(s => s.setViewMode);
@@ -185,6 +189,7 @@ export function GridNodeHeader({ nodeId, titleNodeId = nodeId, activity, attenti
         </span>
         {lostConversation && <MissingSessionIdBadge compact={compactHeader} />}
         {signalUnavailable && <SignalHealthBadge compact={compactHeader} health={node.signal_health} />}
+        {stall && <StalledInputBadge compact={compactHeader} stall={stall} />}
       </div>
         {attentionOutcome && <button type="button" onPointerDown={event => event.stopPropagation()}
         onClick={event => { event.stopPropagation(); onReveal?.(); }}

@@ -324,12 +324,36 @@ pub fn is_agent_already_running(session_id: &i64) -> bool {
 /// pipe — the channel is then disconnected, subsequent `try_send`s
 /// return `Disconnected`, and `write_bytes` surfaces "Agent not
 /// running" to the caller).
+/// Zeroes a queue gauge on every exit path from [`pty_writer_thread`].
+///
+/// The thread can leave in three ways — the channel closed cleanly, a
+/// `write_all` error, or a `flush` error — and on the error paths the buffers
+/// still sitting in `rx` are dropped when the receiver is, without their byte
+/// accounting ever being released. Without this guard those bytes would stay on
+/// the `DIAG` line as a phantom backlog for as long as the registry entry
+/// survives, which outlives the writer thread (issue #1530 review).
+struct ResetGaugeOnDrop(std::sync::Arc<crate::agent::process::InputQueueGauge>);
+
+impl Drop for ResetGaugeOnDrop {
+    fn drop(&mut self) {
+        self.0.reset();
+    }
+}
+
 pub(super) fn pty_writer_thread(
     session_id: i64,
     mut writer: Box<dyn std::io::Write + Send>,
     rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    queue: std::sync::Arc<crate::agent::process::InputQueueGauge>,
 ) {
+    // Armed before the first `recv`, so every `return` below resets the gauge.
+    let _reset_on_drop = ResetGaugeOnDrop(std::sync::Arc::clone(&queue));
     while let Ok(bytes) = rx.recv() {
+        // Release the byte accounting as the buffer is handed off, not after
+        // the write returns: `write_all` on a full ConPTY pipe can block for a
+        // long time, and the queue should read as drained the moment the
+        // writer has taken ownership (issue #1530).
+        queue.release(bytes.len());
         if let Err(e) = writer.write_all(&bytes) {
             tracing::warn!(session_id, "PTY writer thread exiting on write error: {e}");
             return;
@@ -341,7 +365,8 @@ pub(super) fn pty_writer_thread(
     }
     // Channel closed cleanly (`close_input` dropped the sender). The
     // writer's `Drop` closes the underlying PTY pipe, so the agent's
-    // stdin EOFs and the agent CLI exits cleanly.
+    // stdin EOFs and the agent CLI exits cleanly. The drop guard zeroes
+    // anything still counted as buffered.
     tracing::debug!(session_id, "PTY writer thread exiting (channel closed)");
 }
 
@@ -350,11 +375,17 @@ pub(super) fn pty_writer_thread(
 /// messages: one `write_to_agent` call is one message, and a paste
 /// stays one message even when it is tens of kilobytes (issue #1498
 /// traced a 17,508-byte paste). Do not split a paste to manufacture
-/// smaller messages. A full channel surfaces as a `warn!` log and the
-/// bytes are dropped (the user can re-type); the alternative — blocking
-/// the async runtime on a full bounded channel — would defeat the
-/// whole reason the dedicated thread exists.
-pub(super) const PTY_WRITER_CHANNEL_CAPACITY: usize = 64;
+/// smaller messages.
+///
+/// A message count is not a memory bound, so it is paired with
+/// [`crate::agent::process::PTY_INPUT_QUEUE_BYTE_CAPACITY`] — see
+/// `InputQueueGauge` for why the byte ceiling is tracked explicitly
+/// (issue #1530). A refusal is reported to the caller as
+/// [`crate::agent::process::InputDisposition::Backpressured`]; it is
+/// never dropped behind a success. The alternative — blocking the async
+/// runtime on a full bounded channel — would defeat the whole reason the
+/// dedicated thread exists.
+pub const PTY_WRITER_CHANNEL_CAPACITY: usize = 64;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn register_agent(
@@ -376,9 +407,14 @@ pub(super) fn register_agent(
     // sender side.
     let (writer_tx, writer_rx) =
         std::sync::mpsc::sync_channel::<Vec<u8>>(PTY_WRITER_CHANNEL_CAPACITY);
+    // The gauge is shared, not moved: the registry entry keeps one handle and
+    // the writer thread the other, so the enqueue side can reserve and the
+    // drain side can release (issue #1530).
+    let queue = std::sync::Arc::new(crate::agent::process::InputQueueGauge::default());
+    let writer_queue = std::sync::Arc::clone(&queue);
     let writer_handle = std::thread::Builder::new()
         .name(format!("pty-writer-{session_id}"))
-        .spawn(move || pty_writer_thread(session_id, writer, writer_rx))
+        .spawn(move || pty_writer_thread(session_id, writer, writer_rx, writer_queue))
         .expect("failed to spawn PTY writer thread");
 
     PROCESS_REGISTRY.insert(
@@ -386,6 +422,7 @@ pub(super) fn register_agent(
         AgentProcess::new(
             child,
             writer_tx,
+            queue,
             Some(writer_handle),
             master,
             reader_alive,

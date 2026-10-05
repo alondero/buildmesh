@@ -822,6 +822,10 @@ fn register_live_agent(
     let process = crate::agent::process::AgentProcess::new(
         child,
         writer_tx,
+        // Issue #1530: the byte gauge the enqueue path bounds against. This
+        // fixture never drains the channel — it exists to prove the crash
+        // reaps the process tree — so a fresh gauge is all it needs.
+        std::sync::Arc::new(crate::agent::process::InputQueueGauge::default()),
         None,
         pair.master,
         Arc::new(AtomicBool::new(true)),

@@ -34,7 +34,9 @@ pub use prepare::DEFAULT_WORKTREE_MODE;
 pub(crate) fn is_spawn_in_flight(node_id: i64) -> bool {
     prepare::SPAWNS_IN_FLIGHT.lock().contains(&node_id)
 }
-pub use process::{inject_attention_hook, is_agent_already_running, spawn_child};
+pub use process::{
+    inject_attention_hook, is_agent_already_running, spawn_child, PTY_WRITER_CHANNEL_CAPACITY,
+};
 #[cfg(test)]
 pub(crate) use reader::maybe_buffer_for_naming;
 pub use reader::{open_pty_pair, pump_pty_output, SessionIdMode, EARLY_EXIT_WINDOW};

@@ -44,6 +44,28 @@ provider pickers stay disabled while the check runs and are enabled once it
 finishes. If a load fails, use **Retry** in the banner; the rest of Settings
 remains usable while it does.
 
+## A node shows an "Input queued" warning
+
+A clock glyph next to a node's name means Buildmesh is holding your keystrokes
+instead of delivering them, because the agent has stopped reading its input.
+The badge appears only after the delay has lasted long enough to matter — a
+brief pause while typing normally shows nothing at all.
+
+Your keystrokes are **not lost**. Buildmesh keeps them in order and retries
+automatically, and the badge clears itself as soon as the agent starts reading
+again. Nothing needs to be re-sent unless the badge is still there after the
+agent has caught up.
+
+The usual cause is an agent process that is busy, paused at a debugger or
+permission prompt, or blocked in a long synchronous call, so it is not reading
+its input stream. Give the agent a moment or send it a control character
+(usually Ctrl+C) to interrupt it; the queue drains as soon as it resumes.
+
+If the badge never clears, check the diagnostics log for the `pty_qmsg=` and
+`pty_qbytes=` fields on the `DIAG` line: a byte count that climbs and then
+returns to zero is a transient stall, one that stays high means the agent is
+genuinely stuck, and a non-zero count with no queued work means a stuck
+counter. Include that line in a [report](#what-to-include-in-a-report).
 ## "Buildmesh couldn't read your settings"
 
 Settings shows a warning panel because `preferences.json` could not be turned

@@ -538,7 +538,11 @@ fn handle_write_to_agent(args: &serde_json::Value, app: AppHandle) -> String {
     ));
 
     match result {
-        Ok(()) => JsonRpcResponse::success(&serde_json::json!({ "node_id": node_id })),
+        // The disposition is echoed so a harness can assert the write was
+        // genuinely accepted rather than refused behind a 200 (issue #1530).
+        Ok(outcome) => JsonRpcResponse::success(
+            &serde_json::json!({ "node_id": node_id, "disposition": outcome.disposition }),
+        ),
         Err(error) => JsonRpcResponse::error(&error),
     }
 }

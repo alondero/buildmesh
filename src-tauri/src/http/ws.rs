@@ -261,10 +261,15 @@ pub(crate) fn write_mobile_input_with_sink(
     lifecycle_sink: &dyn crate::agent::session_lifecycle::SessionLifecycleSink,
     node_id: i64,
     text: &str,
-) -> Result<(), String> {
-    let activity = registry.write_input(node_id, text.as_bytes())?;
-    run_autoclear_side_effects(lifecycle_sink, node_id, activity);
-    Ok(())
+) -> Result<crate::agent::process::InputOutcome, String> {
+    let outcome = registry.write_input(node_id, text.as_bytes())?;
+    // Only an accepted write may clear attention (issue #1530). A backpressured
+    // buffer never reached the agent, so treating it as a resumed turn would
+    // paint a node as running for input that does not exist.
+    if outcome.is_accepted() {
+        run_autoclear_side_effects(lifecycle_sink, node_id, outcome.activity);
+    }
+    Ok(outcome)
 }
 
 /// Write a raw keystroke sequence to a node's PTY and run the attention
@@ -294,7 +299,7 @@ pub(crate) fn write_mobile_input(
     registry: &dyn ProcessRegistryApi,
     node_id: i64,
     text: &str,
-) -> Result<(), String> {
+) -> Result<crate::agent::process::InputOutcome, String> {
     if let Some(app) = super::app_handle() {
         let sink = crate::agent::session_lifecycle::AppSessionLifecycleSink { app };
         write_mobile_input_with_sink(registry, &sink, node_id, text)
@@ -341,8 +346,35 @@ fn forward_mobile_input_with(registry: &dyn ProcessRegistryApi, node_id: i64, te
     // helper use bare text ("hello") which has no CR/LF — the autoclear
     // side-effect never runs, so the sink type (`AppSessionLifecycleSink`
     // in production, `DbOnlySink` in the test seam) is irrelevant.
-    if let Err(e) = write_mobile_input(registry, node_id, text) {
-        tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
+    match write_mobile_input(registry, node_id, text) {
+        Ok(outcome) if outcome.is_accepted() => {}
+        // Issue #1530: the socket cannot acknowledge an inbound write, so the
+        // only honest channel back to the phone is this broadcast. Without it
+        // a stalled agent would swallow keystrokes invisibly.
+        Ok(_) => {
+            // Read the depth through the injected registry so this path is
+            // testable with a mock, rather than off the process-global one.
+            let (queued_messages, queued_bytes) = registry.input_queue(node_id);
+            tracing::warn!(
+                node_id,
+                queued_messages,
+                queued_bytes,
+                "mobile input stalled: PTY input queue full, {} bytes refused",
+                text.len()
+            );
+            super::events::emit(super::events::EventMsg::TerminalInputStalled {
+                session_id: node_id,
+                // A saturating cast rather than `as`: the queue is capped at
+                // 1 MiB, but the cast must not wrap if that ever changes — a
+                // wrapped byte count would tell the phone the queue is nearly
+                // empty while it is in fact refusing input.
+                queued_bytes: u32::try_from(queued_bytes).unwrap_or(u32::MAX),
+                queued_messages: queued_messages.clamp(0, i32::MAX as usize) as i32,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("Mobile input forward failed for {}: {}", node_id, e);
+        }
     }
 }
 
@@ -873,6 +905,10 @@ mod tests {
         last_resize: std::sync::Mutex<(u16, u16)>,
         should_fail: bool,
         activity: crate::agent::process::InputActivity,
+        disposition: crate::agent::process::InputDisposition,
+        /// What `input_queue` reports, so the stalled-input event can be
+        /// asserted end to end without the process-global registry.
+        queue_depth: (usize, u64),
     }
 
     impl MockRegistry {
@@ -884,6 +920,8 @@ mod tests {
                 last_resize: std::sync::Mutex::new((0, 0)),
                 should_fail: false,
                 activity: crate::agent::process::InputActivity { user_input: true, submitted: false },
+                disposition: crate::agent::process::InputDisposition::Accepted,
+                queue_depth: (0, 0),
             }
         }
         fn failing() -> Self {
@@ -898,20 +936,43 @@ mod tests {
                 ..Self::new()
             }
         }
+        /// A refusal that *claims* to be a submit.
+        ///
+        /// Deliberately unrealistic: a real refused write carries default
+        /// activity, so this shape can only occur if the code under test fails
+        /// to gate on the disposition. That is exactly what makes it a useful
+        /// fixture — the autoclear test can only pass because
+        /// `write_mobile_input_with_sink` checks `is_accepted()`, not because
+        /// the mock happened to carry empty activity.
+        fn submitted_backpressured() -> Self {
+            Self {
+                disposition: crate::agent::process::InputDisposition::Backpressured,
+                ..Self::submitted()
+            }
+        }
     }
 
     impl ProcessRegistryApi for MockRegistry {
-        fn write_input(&self, session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputActivity, String> {
+        fn write_input(&self, session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputOutcome, String> {
             self.write_bytes(session_id, data)?;
-            Ok(self.activity)
+            Ok(crate::agent::process::InputOutcome {
+                disposition: self.disposition,
+                activity: self.activity,
+            })
         }
-        fn write_bytes(&self, _session_id: i64, data: &[u8]) -> Result<(), String> {
+        fn write_bytes(&self, _session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputOutcome, String> {
             if self.should_fail {
                 return Err("mock error".into());
             }
             self.write_called.store(true, AtomicOrdering::SeqCst);
             *self.last_write_data.lock().unwrap() = data.to_vec();
-            Ok(())
+            Ok(crate::agent::process::InputOutcome {
+                disposition: self.disposition,
+                activity: self.activity,
+            })
+        }
+        fn input_queue(&self, _session_id: i64) -> (usize, u64) {
+            self.queue_depth
         }
         fn resize_pty(&self, _session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
             if self.should_fail {
@@ -936,6 +997,97 @@ mod tests {
         let mock = MockRegistry::failing();
         forward_mobile_input_with(&mock, 1, "hello");
         assert!(!mock.write_called.load(AtomicOrdering::SeqCst));
+    }
+
+    /// Issue #1530: a refused write must not run the attention autoclear.
+    ///
+    /// Autoclear fires on input containing CR/LF, i.e. a *submit*. If a
+    /// full-queue refusal ran it anyway, the node would be marked as no longer
+    /// awaiting input for a prompt that never reached it — the phone would see
+    /// the spinner stop and no answer ever appear.
+    ///
+    /// The fixture is a refusal that *claims* to be a submit, so this fails
+    /// loudly if the disposition gate is ever removed.
+    #[test]
+    fn a_backpressured_mobile_write_does_not_run_the_attention_autoclear() {
+        let mock = MockRegistry::submitted_backpressured();
+        let sink = crate::agent::session_lifecycle::testing::RecordingSink::new();
+        // `\r` is a submit, so the accepted path below is the one that would
+        // clear attention.
+        let outcome =
+            write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
+        assert_eq!(outcome.disposition, crate::agent::process::InputDisposition::Backpressured);
+        assert!(mock.write_called.load(AtomicOrdering::SeqCst), "the write was attempted");
+        assert!(
+            sink.attention_cleared().is_empty(),
+            "a prompt that was never queued must not clear attention, got {:?}",
+            sink.attention_cleared()
+        );
+    }
+
+    /// The same input on an accepted write does clear attention, so the test
+    /// above is pinning the backpressure branch rather than a fixture that
+    /// never could have cleared anything.
+    #[test]
+    fn an_accepted_mobile_write_still_clears_attention() {
+        let mock = MockRegistry::submitted();
+        let sink = crate::agent::session_lifecycle::testing::RecordingSink::new();
+        let outcome =
+            write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
+        assert!(outcome.is_accepted());
+        assert_eq!(
+            sink.attention_cleared(),
+            vec![1],
+            "an accepted submit must still clear the node's attention"
+        );
+    }
+
+    /// A backpressured WebSocket write announces the stall on the event
+    /// broadcast, and says how deep the queue was.
+    ///
+    /// Issue #1530 review: this path used to read the process-global registry
+    /// directly, so it could not be asserted through a mock. With `input_queue`
+    /// on the trait, the whole path — refusal, depth lookup, emitted payload —
+    /// is observable here.
+    #[test]
+    fn a_backpressured_websocket_write_emits_a_stalled_input_event() {
+        let mut mock = MockRegistry::new();
+        mock.disposition = crate::agent::process::InputDisposition::Backpressured;
+        mock.queue_depth = (3, 96);
+        let mut events = super::super::events::subscribe();
+
+        forward_mobile_input_with(&mock, 42, "hello");
+
+        let emitted = events.try_recv().expect("a stalled-input event");
+        match emitted {
+            super::super::events::EventMsg::TerminalInputStalled {
+                session_id,
+                queued_messages,
+                queued_bytes,
+            } => {
+                assert_eq!(session_id, 42);
+                assert_eq!(queued_messages, 3, "the event must carry the registry's own depth");
+                assert_eq!(queued_bytes, 96);
+            }
+            // `EventMsg` deliberately has no `Debug`, so the "wrong variant"
+            // case is reported by shape rather than by printing the value.
+            _ => panic!("expected a terminal-input-stalled event on the broadcast"),
+        }
+    }
+
+    /// A refused write must still reach the phone, and an accepted one must not
+    /// claim to be stalled.
+    #[test]
+    fn an_accepted_websocket_write_emits_no_stalled_input_event() {
+        let mock = MockRegistry::new();
+        let mut events = super::super::events::subscribe();
+
+        forward_mobile_input_with(&mock, 42, "hello");
+
+        assert!(
+            events.try_recv().is_err(),
+            "a delivered keystroke must not raise a stall"
+        );
     }
 
     /// The production wrapper resolves its sink and delegates to the same
