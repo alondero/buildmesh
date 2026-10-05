@@ -8,8 +8,8 @@
 
 use crate::preferences::{
     self, AppPreferences, CapabilityMaskForResolver, HarnessConfigField, HarnessConfigValue,
-    HarnessProfile, ModelTiers, PairingVerification, ProviderAccount, ProviderPairing,
-    ResolvedCascadeView,
+    HarnessProfile, ModelTiers, PairingVerification, PreferencesHealth, ProviderAccount,
+    ProviderPairing, RecoveryOutcome, ResolvedCascadeView,
 };
 use crate::preferences::resolver::cascade::{
     apply_capability_mask, field_inputs, harness_config_str,
@@ -20,10 +20,85 @@ use tauri::{command, AppHandle, Emitter};
 use ts_rs::TS;
 
 /// Read the persisted buildmesh-wide preferences. Always returns a value —
-/// a missing or malformed file yields `AppPreferences::default()`.
+/// a missing file yields `AppPreferences::default()`.
+///
+/// A **corrupt** file also yields defaults (issue #1523) so read-only
+/// callers — spawn routing, the circuit classifier, the usage panel — keep
+/// working against a file the user can still repair. The difference is that
+/// the defaults are never published as the writable cache: every mutating
+/// command re-reads the file and fails with `PREFERENCES_CORRUPT` rather
+/// than replacing the user's data. Call [`get_preferences_health`] to learn
+/// which of the two happened.
 #[command]
 pub fn get_app_preferences() -> Result<AppPreferences, String> {
     preferences::load()
+}
+
+// ---------------------------------------------------------------------------
+// Corrupt-file recovery (issue #1523)
+// ---------------------------------------------------------------------------
+
+/// Whether `preferences.json` is missing, healthy, or corrupt — the signal
+/// the Settings pane renders its recovery panel from.
+///
+/// A *successful* result carrying the status, not an `Err`: a corrupt file
+/// is a state the user must act on, and folding it into an error string
+/// would force the UI to classify it by matching prose.
+#[command]
+pub fn get_preferences_health() -> Result<PreferencesHealth, String> {
+    preferences::health()
+}
+
+/// Put the last-known-good backup back over a corrupt `preferences.json`,
+/// archiving whatever is there first.
+///
+/// The non-destructive recovery: the archived copy keeps the original bytes
+/// even if the backup turns out to be less useful than expected, and the
+/// backup is only restored after it has been proven to deserialize. Emits
+/// `provider-list-changed` because the restored preferences can change every
+/// spawn surface's provider list.
+#[command]
+pub fn restore_preferences_backup(app: AppHandle) -> Result<RecoveryOutcome, String> {
+    let outcome = preferences::restore_backup()?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(outcome)
+}
+
+/// Archive the current `preferences.json` and start from defaults.
+///
+/// The **only** path that replaces data the app could not read, and it is
+/// destructive by design — the UI must confirm it, and the confirmation has
+/// to say what is lost. The archive means "reset" is recoverable too: the
+/// returned `archive_path` tells the user where the original bytes went.
+#[command]
+pub fn reset_app_preferences(app: AppHandle) -> Result<RecoveryOutcome, String> {
+    let outcome = preferences::reset()?;
+    let _ = app.emit("provider-list-changed", ());
+    Ok(outcome)
+}
+
+/// Open the folder holding `preferences.json` in the OS file manager, so a
+/// user can inspect, back up, or hand-repair the file themselves.
+///
+/// The *directory* is opened, not the file: a file manager asked to open a
+/// `.json` hands it to whatever application claims the extension, which
+/// would launch an editor rather than show the folder.
+#[command]
+pub async fn open_preferences_location() -> Result<(), String> {
+    let directory = preferences::preferences_directory()?;
+    crate::commands::run_blocking("open_preferences_location", move || {
+        // A corrupt file implies the directory exists, but this command is
+        // reachable from the wire — don't hand an arbitrary string to the
+        // shell-looking spawn the file-manager helper performs.
+        if !directory.is_dir() {
+            return Err(format!(
+                "preferences folder does not exist: {}",
+                directory.display()
+            ));
+        }
+        crate::commands::file_tree::open_host_directory_in_file_manager(&directory)
+    })
+    .await
 }
 
 /// Set the buildmesh-wide default provider. Pass `None` (or an empty string,

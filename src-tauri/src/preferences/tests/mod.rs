@@ -21,6 +21,7 @@ mod harness_tests;
 mod migrations_tests;
 mod pairings_tests;
 mod pairing_compat_tests;
+mod recovery_tests;
 mod storage_tests;
 
 static TEST_DIR_COUNTER: std::sync::atomic::AtomicUsize =

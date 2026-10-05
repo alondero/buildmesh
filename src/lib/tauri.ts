@@ -16,6 +16,11 @@ import type { AgentNode } from '../stores/agentNodeStore';
 import type { Mesh } from '../stores/meshStore';
 import type { AiContextStatus } from '../types/generated/AiContextStatus';
 import type { AppPreferences } from '../types/generated/AppPreferences';
+import type { CorruptionInfo } from '../types/generated/CorruptionInfo';
+import type { CorruptionReason } from '../types/generated/CorruptionReason';
+import type { PreferencesHealth } from '../types/generated/PreferencesHealth';
+import type { PreferencesStatus } from '../types/generated/PreferencesStatus';
+import type { RecoveryOutcome } from '../types/generated/RecoveryOutcome';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../types/generated/DeviceSession';
@@ -887,9 +892,40 @@ export const resizeBuildRun = (nodeId: number, rows: number, cols: number) =>
 // `google_cloud_project` field is included to match the Rust struct in full
 // even though the current settings UI only reads two fields.
 export type { AppPreferences };
+export type { CorruptionInfo, CorruptionReason, PreferencesHealth, PreferencesStatus, RecoveryOutcome };
 
 export const getAppPreferences = () =>
   _invoke<AppPreferences>('get_app_preferences');
+
+// ── Corrupt-file recovery (issue #1523) ───────────────────────────────────
+//
+// `get_app_preferences` still returns defaults for an unreadable file so
+// every read-only surface keeps working; `get_preferences_health` is the
+// separate, *successful* call that says whether those defaults are real
+// settings or a stand-in. Keeping it a distinct command is deliberate —
+// folding corruption into an `Err` would force the UI to classify the
+// failure by matching error prose.
+
+export const getPreferencesHealth = () =>
+  _invoke<PreferencesHealth>('get_preferences_health');
+
+/** Put the last-known-good backup back over a corrupt file, archiving
+ *  whatever is on disk first. The non-destructive recovery. */
+export const restorePreferencesBackup = () =>
+  _invoke<RecoveryOutcome>('restore_preferences_backup');
+
+/** Archive the current file and start from defaults. Destructive by design:
+ *  the caller must confirm it, and the returned `archive_path` says where the
+ *  original bytes went. */
+export const resetAppPreferences = () =>
+  _invoke<RecoveryOutcome>('reset_app_preferences');
+
+/** Open the folder holding `preferences.json` in the OS file manager. The
+ *  directory, not the file — a file manager hands a `.json` to whatever
+ *  application claims the extension, which launches an editor instead of
+ *  showing the folder. */
+export const openPreferencesLocation = () =>
+  _invoke('open_preferences_location');
 
 /** Pass `null` (or an empty string, which the backend filters out) to clear
  *  the override and fall back to the hardcoded `anthropic` default. */
