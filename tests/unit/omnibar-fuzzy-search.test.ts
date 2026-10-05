@@ -590,6 +590,22 @@ describe('indexMeshes (issue #1410 §1)', () => {
     expect(entry.subtitle).toContain('/work/buildmesh');
   });
 
+  it('names the action in the label while the bare name stays the primary field (issue #2077)', () => {
+    const [entry] = indexMeshes([mesh]);
+    // Executing this row is a scope change, so the label says so — the
+    // palette's verb-phrase convention, like "Open GitHub Issues in
+    // ProjectY" and "Spawn Claude Code on ProjectY".
+    expect(entry.label).toBe('Go to Mesh: buildmesh');
+    // Search still ranks a Mesh-name query on the bare name, so the row keeps
+    // the exact-prefix bonus at index 0 instead of behind "Go to Mesh: ".
+    expect(entry.fields[0]).toMatchObject({ text: 'buildmesh', weight: 'primary' });
+  });
+
+  it('surfaces the go-to-Mesh entry for a Mesh-name query', () => {
+    const [result] = searchItems(indexMeshes([mesh]), 'buildmesh');
+    expect(result.item.label).toBe('Go to Mesh: buildmesh');
+  });
+
   it('matches against the path field', () => {
     const items = indexMeshes([mesh]);
     expect(searchItems(items, 'work/buildmesh')).toHaveLength(1);
