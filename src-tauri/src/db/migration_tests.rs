@@ -460,6 +460,147 @@ mod tests {
     }
 
     #[test]
+    fn review_contract_upgrade_rearms_for_merge_only_legacy_graphs() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'merge-migration', 'C:/merge-migration')",
+            [],
+        ).unwrap();
+
+        // Issue-review preset whose only legacy marker is the merge text: the
+        // reviewer keeps current stock (which matches no predicate clause)
+        // and the feedback is customized (likewise), so only the merge
+        // clause can match this row.
+        let mut issue =
+            crate::circuit::model::CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        for node in &mut issue.nodes {
+            if node.id == "follow_feedback" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom team feedback process".to_string();
+                }
+            }
+            if node.id == "merge" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = crate::review_contract::legacy_merge_prompt(
+                        "PR #{{pr.number}} ({{pr.url}})",
+                        " {{pr.number}}",
+                    );
+                }
+            }
+        }
+        // Independent review-blueprint copy: non-preset, no blueprint marker,
+        // with customized reviewer/feedback and only the local merge text as
+        // its legacy marker.
+        let mut copy =
+            crate::circuit::model::CircuitGraph::agent_review_with_provider(None, None, None, 3);
+        assert!(!copy.is_issue_driven_autopilot_review());
+        for node in &mut copy.nodes {
+            if node.id == "reviewer" {
+                if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom reviewer instructions".to_string();
+                }
+            }
+            if node.id == "feedback" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom feedback instructions".to_string();
+                }
+            }
+            if node.id == "merge" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = crate::review_contract::legacy_merge_prompt(
+                        "your pull request for this work",
+                        "",
+                    );
+                }
+            }
+        }
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'issue-preset', ?1, 1), (2, 1, 'review-copy', ?2, 0)",
+            [issue.to_json().unwrap(), copy.to_json().unwrap()],
+        ).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), ('review_contract_prompt_upgrade_v1', 'complete')",
+            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let upgraded_issue: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let issue_graph = crate::circuit::model::CircuitGraph::from_json(&upgraded_issue).unwrap();
+        assert!(
+            matches!(
+                issue_graph.node("merge").map(|node| &node.kind),
+                Some(crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. })
+                    if prompt == &crate::circuit::model::CircuitGraph::pr_merge_prompt()
+            ),
+            "preset issue-review merge text must upgrade even though the flag was complete"
+        );
+        let upgraded_copy: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let copy_graph = crate::circuit::model::CircuitGraph::from_json(&upgraded_copy).unwrap();
+        assert!(
+            matches!(
+                copy_graph.node("merge").map(|node| &node.kind),
+                Some(crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. })
+                    if prompt.contains("gh pr update-branch")
+                        && !prompt.contains("Do not make further changes")
+            ),
+            "non-preset review copy merge text must upgrade via the local-review path"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "complete"
+        );
+
+        // No legacy markers remain, so a later startup must not rescan.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let stable_issue: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stable_copy: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stable_issue, upgraded_issue);
+        assert_eq!(stable_copy, upgraded_copy);
+    }
+
+    #[test]
     fn review_contract_upgrade_defers_unreadable_legacy_graphs() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
