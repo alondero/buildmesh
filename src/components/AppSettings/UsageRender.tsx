@@ -31,6 +31,7 @@ import type { UsageWindow, BillingBalance, UsageAmount, UsageMeter } from '../..
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { SafeLink } from '../shared/SafeLink';
 import { formatRelativeAge } from '../../lib/time';
+import { getUsageWindowPacePercent } from '../../lib/usagePace';
 
 /** A single subscription-quota window as a labeled fill bar. The "0%
  *  renders as a real figure" rule is the issue #537 regression — a `> 0`
@@ -42,17 +43,33 @@ export function UsageBar({ window }: { window: UsageWindow }) {
   const percent = window.usedPercent ?? 0;
   const color = percent > 80 ? 'bg-status-error' : percent > 60 ? 'bg-status-warning' : 'bg-accent-cyan';
   const display = window.usedPercent != null ? `${percent.toFixed(1)}%` : 'Unavailable';
+  // Period-pace tick: where "now" sits in the window's period, so the
+  // user can see whether usage is ahead of or behind the period so far.
+  // Null (unknown label, missing/stale reset) renders no tick — the bar
+  // stays exactly as before rather than showing an invented marker.
+  const pace = getUsageWindowPacePercent(window);
   return (
     <div className="mt-2 first:mt-0">
       <div className="flex justify-between items-baseline gap-2 text-xs mb-1">
         <span className="text-text-secondary truncate" title={window.label}>{window.label}</span>
         <span className="font-mono text-text-muted shrink-0">{display}</span>
       </div>
-      <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
-        <div
-          className={`h-full ${color} rounded-full transition-[width] duration-300`}
-          style={{ width: `${Math.min(percent, 100)}%` }}
-        />
+      <div className="relative">
+        <div className="h-1.5 bg-bg-card rounded-full overflow-hidden">
+          <div
+            className={`h-full ${color} rounded-full transition-[width] duration-300`}
+            style={{ width: `${Math.min(percent, 100)}%` }}
+          />
+        </div>
+        {pace != null && (
+          <div
+            data-testid="usage-pace-tick"
+            title={`Period ${pace.toFixed(0)}% elapsed`}
+            aria-hidden="true"
+            className="absolute -top-0.5 -bottom-0.5 w-0.5 -ml-px rounded-full bg-text-primary/80 pointer-events-none"
+            style={{ left: `${pace}%` }}
+          />
+        )}
       </div>
       {window.resetsAt && (
         <p className="text-2xs text-text-muted mt-1 tabular-nums">Resets: {new Date(window.resetsAt).toLocaleString()}</p>
