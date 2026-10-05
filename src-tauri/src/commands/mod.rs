@@ -32,6 +32,7 @@ pub mod build_run;
 pub mod circuit;
 pub mod coordinator;
 pub mod devices;
+pub mod diagnostics;
 pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;

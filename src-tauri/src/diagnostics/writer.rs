@@ -8,11 +8,11 @@
 //! `debug`-level build storm can write a lot in one wall-clock hour, so a
 //! time-based cap (e.g. hourly files) would not actually bound the size.
 //!
-//! The core is a plain [`std::io::Write`] so it can back the async
-//! `tracing_appender::non_blocking` wrapper for the main log (which keeps its
-//! fixed `buildmesh.log` name — the `/use`, `/verify`, `/verify-ui` skills and
-//! the `scripts/*log*.ps1` helpers tail that exact path). The diagnostics
-//! sampler additionally uses [`RotatingWriter::write_line`], which prepends a
+//! The core is a plain [`std::io::Write`] so it can back the main log's
+//! synchronous [`SharedLog`](crate::startup) wrapper (which keeps its fixed
+//! `buildmesh.log` name — the `/use`, `/verify`, `/verify-ui` skills and the
+//! `scripts/*log*.ps1` helpers tail that exact path). The diagnostics sampler
+//! additionally uses [`RotatingWriter::write_line`], which prepends a
 //! timestamp and periodically `sync_all`s so the timeline survives a hard
 //! reboot.
 
@@ -74,6 +74,19 @@ impl RotatingWriter {
             self.lines_since_sync = 0;
         }
         Ok(())
+    }
+
+    /// Force the live file to disk.
+    ///
+    /// `write_line`'s `sync_all` cadence is every [`SYNC_EVERY`] lines, which is
+    /// right for a continuous sampler but not for a record that has to survive
+    /// a process ending immediately after it: `panic = "abort"` kills the
+    /// process via `__fastfail` and a normal startup failure returns `Err` out
+    /// of `setup`, in both cases before the OS file buffer would be flushed.
+    /// The startup-failure line and the panic hooks use this for that reason.
+    pub fn sync(&mut self) -> std::io::Result<()> {
+        self.file.flush()?;
+        self.file.sync_all()
     }
 
     /// Rotate `path` → `path.1` (shuffling existing generations up and dropping

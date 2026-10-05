@@ -19,6 +19,7 @@ import type { AppPreferences } from '../types/generated/AppPreferences';
 import type { BranchInfo } from '../types/generated/BranchInfo';
 import type { CoordinatorStatus } from '../types/generated/CoordinatorStatus';
 import type { DeviceSession } from '../types/generated/DeviceSession';
+import type { DiagnosticPaths } from '../types/generated/DiagnosticPaths';
 import type { DiffHunk } from '../types/generated/DiffHunk';
 import type { DiffLine } from '../types/generated/DiffLine';
 import type { DiffResult } from '../types/generated/DiffResult';
@@ -722,6 +723,12 @@ export const toHostPath = (path: string) =>
  *  may reject, and callers fall back to `navigator.clipboard.readText()`. */
 export const readClipboard = () =>
   _invoke<string>('read_clipboard');
+
+/** The absolute log/profile locations this process resolved at startup
+ *  (issue #1525). The backend opened these files before the database, so this
+ *  is the only source that can tell a user where their log actually is. */
+export const getDiagnosticPaths = () =>
+  _invoke<DiagnosticPaths>('get_diagnostic_paths');
 
 // ── Agent PTY transport ────────────────────────────────────────────────────
 //

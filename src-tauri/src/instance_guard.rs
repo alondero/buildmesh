@@ -523,39 +523,6 @@ fn append_ownership_line(profile_dir: &Path, line: &str) -> std::io::Result<()> 
     writer.write_line(line)
 }
 
-/// Show a modal error to the user when ownership could not be established.
-///
-/// A Win32 message box rather than the dialog plugin: this runs inside Tauri's
-/// `setup`, on the main thread, where the plugin's `blocking_show` deadlocks.
-/// `panic = "abort"` builds have no console either, so a message box is the only
-/// thing left that can actually reach the user before the process exits.
-#[cfg(target_os = "windows")]
-pub fn show_fatal_startup_error(reason: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
-
-    let text = wide(reason);
-    let caption = wide("Buildmesh");
-    // SAFETY: both strings are NUL-terminated by `wide`, and a null owner HWND
-    // asks for an application-modal box rather than one tied to a window that
-    // has not finished loading.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            caption.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        );
-    }
-}
-
-/// Off Windows there is no message box to raise from a `windows_subsystem`
-/// build, so the reason goes to stderr (and to the profile's ownership log
-/// written by the caller). A dev/console launch shows it there.
-#[cfg(not(target_os = "windows"))]
-pub fn show_fatal_startup_error(reason: &str) {
-    eprintln!("{reason}");
-}
-
 // ---------------------------------------------------------------------------
 // Platform layer
 // ---------------------------------------------------------------------------

@@ -38,7 +38,6 @@ anyhow = "1"
 git2 = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
 once_cell = "1"
 regex = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -120,13 +119,22 @@ ts-rs = { version = "12", features = ["chrono-impl"] }
 # `SetWindowSubclass`). `System_Threading` + `Security` are the named mutex
 # behind `instance_guard`'s one-process-per-profile claim: `CreateMutexW` is
 # gated on `Security` in windows-sys because of its SECURITY_ATTRIBUTES
-# parameter, which we pass as null.
+# parameter, which we pass as null. `System_Memory` + `System_DataExchange`
+# back `startup::present`'s "Copy details" button on the fatal-startup error
+# surface (issue #1525): `GlobalAlloc`/`GlobalLock`/`GlobalUnlock` stage the
+# UTF-16 text, `OpenClipboard`/`EmptyClipboard`/`SetClipboardData` own the
+# transfer, and `GlobalFree` (already covered by `Foundation`) reclaims the
+# block on every failure path. That surface cannot use a Tauri command or the
+# dialog plugin — it runs inside `setup`, before the event loop has started
+# and before the database exists, which is the whole reason it exists.
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Security",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
