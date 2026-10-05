@@ -144,6 +144,23 @@ describe('useUIStore', () => {
         expect(useMeshStore.getState().selectedMeshId).toBe(7);
       });
 
+      it('is enforced by the setter for every cross-Mesh mode it is entered from (#2072)', () => {
+        // #2072 made All Nodes the only route out of Mesh scope, so the
+        // invariant has to hold no matter which mode the user was in when
+        // they switched — otherwise a caller that skips `setViewMode` would
+        // leave All Nodes paired with a highlighted Mesh. Driven through the
+        // setter, not through the sidebar, because the invariant lives here.
+        for (const mode of ['mesh', 'pinned', 'filtered', 'single'] as const) {
+          useMeshStore.setState({ selectedMeshId: 7 });
+          useUIStore.getState().setViewMode(mode);
+          expect(useMeshStore.getState().selectedMeshId).toBe(7);
+
+          useUIStore.getState().setViewMode('all');
+          expect(useUIStore.getState().viewMode).toBe('all');
+          expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        }
+      });
+
     });
 
     describe('boot derivation (ticket #983)', () => {

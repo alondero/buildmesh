@@ -729,11 +729,11 @@ export const useUIStore = create<UIState>((set, get) => {
 });
 
 // Sidebar sync — "one filter, two controls" (wayfinder #982 / ticket #983,
-// re-click-deselect → 'all' per ticket #986). Selecting a mesh in the
-// sidebar switches the canvas to Mesh Grid for that mesh; clearing the
-// selection switches to All Nodes. Pinned mode never writes selectedMeshId,
-// but a sidebar mesh click always means "show me this mesh", so the sync
-// applies in whatever mode the canvas is in.
+// re-click-deselect → 'all' per ticket #986, removed by #2072). Selecting a
+// mesh in the sidebar switches the canvas to Mesh Grid for that mesh;
+// clearing the selection switches to All Nodes. Pinned mode never writes
+// selectedMeshId, but a sidebar mesh click always means "show me this mesh",
+// so the sync applies in whatever mode the canvas is in.
 //
 // The viewMode-equality guard kills the re-entrant cycle: when
 // `setViewMode('all')` itself calls `selectMesh(null)` (issue #1002), the

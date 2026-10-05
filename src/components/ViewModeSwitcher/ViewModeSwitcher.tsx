@@ -19,9 +19,9 @@ import { useUIStore, type ViewMode } from '../../stores/uiStore';
  *                #2076's job, not this one's.)
  *   - Pinned:    cross-mesh filter over is_pinned; never touches
  *                selectedMeshId.
- *   - All Nodes: clear the mesh selection (the same state the sidebar's
- *                re-click-deselect gesture produces) — the sync flips the
- *                mode to 'all'.
+ *   - All Nodes: clear the mesh selection — the only route out of Mesh
+ *                scope since #2072 removed the sidebar's re-click-deselect
+ *                gesture. The sync flips the mode to 'all'.
  *   - Filtered:  cross-mesh view narrowed by the Grid Controls (the Search
  *                Nodes bar renders next to the switcher only in this mode,
  *                #1609). Clicking the segment focuses that search — the
