@@ -2071,24 +2071,14 @@ mod tests {
     }
 
     /// v36 — Defense-in-depth range constraint on `meshes.circuit_run_capacity`.
-    /// Module-scope serial mutex (#1224 pattern) so concurrent DB tests
-    /// don't race on the process-global writer connection. The test uses
-    /// a unique mesh name (`p_unique`) to avoid collisions with other
-    /// tests' rows; the trigger fires on raw INSERT/UPDATE so the test
-    /// doesn't need any production DB calls.
+    /// A per-test database (#2048) replaces the module-scope serial mutex this
+    /// needed for the process-global writer connection. The test uses a unique
+    /// mesh name (`p_unique`) to avoid collisions with other tests' rows; the
+    /// trigger fires on raw INSERT/UPDATE so the test doesn't need any
+    /// production DB calls.
     #[test]
     fn circuit_run_capacity_trigger_blocks_out_of_range_writes() {
-        use std::sync::Mutex;
-        static SERIAL: Mutex<()> = Mutex::new(());
-        let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-        let path = std::env::temp_dir().join(format!(
-            "buildmesh_circuit_run_capacity_trigger_{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        crate::db::init(&path).unwrap();
+        let _db = crate::db::test_support::isolated();
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2155,7 +2145,5 @@ mod tests {
             rusqlite::params![&ok_name, 8i32],
         )
         .expect("in-range update must succeed");
-
-        std::fs::remove_file(&path).ok();
     }
 }

@@ -644,6 +644,11 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn listener_shutdown_closes_root_and_device_websockets_but_not_other_listeners() {
         use crate::http::ws_ticket::{self, WsTarget};
         use futures_util::StreamExt;
@@ -659,7 +664,7 @@ mod tests {
             surface: "events".into(),
             node_id: None,
         };
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let device_id = {
             let conn = crate::db::write_conn();
             crate::db::pair_device_session_inner(&conn, None, None)
@@ -745,9 +750,43 @@ mod tests {
             .unwrap_or(0)
     }
 
+    /// Serialises this module's tests and gives them the process-global
+    /// database.
+    ///
+    /// These start real listeners through `tauri::async_runtime::spawn`, so
+    /// their acceptor and handler bodies reach the database from
+    /// Tauri-managed threads where a `thread_local!` install is invisible.
+    /// `test_support::adopt` cannot bridge a runtime the test does not own.
+    ///
+    /// Sharing the global database is correct here, and much narrower than it
+    /// used to be: these and the `http::routes::session` tests are the only
+    /// ones left that reach for it.
+    static SERVER_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn shared_db() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let path = std::env::temp_dir().join(format!(
+                "buildmesh_http_server_test_{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let _ = crate::db::init(&path);
+        });
+        SERVER_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn revoked_device_cannot_open_an_already_minted_websocket_ticket() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let id = {
             let conn = crate::db::write_conn();
             crate::db::pair_device_session_inner(&conn, None, None)

@@ -1253,9 +1253,8 @@ mod tests {
     //   * Positive (happy-path) tests exercise `create` / `create_pending`
     //     with `source_pr = None` and assert the persisted row reads back
     //     `source_pr = None`. These need a real DB row, so they call
-    //     `fresh_mesh()`, which installs this test's own database
-    //     (`db::test_support::isolated`, issue #2048) and creates a mesh
-    //     inside it.
+    //     `fresh_mesh()`, which creates a mesh inside this test's own
+    //     database (`db::test_support::isolated`, issue #2048).
     //
     //   * Negative `#[should_panic]` tests call the wrappers with
     //     `source_pr = Some(_)`. The assertion fires before any DB call, so
@@ -1263,12 +1262,13 @@ mod tests {
     //     wrapper boundary with zero infrastructure.
     // -------------------------------------------------------------------
 
-    // DB init routes through `fresh_mesh` -> `db::test_support::isolated`.
+    // Each test below installs its own database with `db::test_support::isolated`.
 
     #[test]
     fn spawn_configurations_snapshot_reaches_idle_and_pending_nodes() {
         use crate::preferences::spawn_configurations::SpawnConfiguration;
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let mut configuration = SpawnConfiguration {
             id: "sol".into(), name: "Sol Max".into(), spawn_option_id: "codex".into(),
             model: Some("gpt-5.6-sol".into()), effort: None, extra_args: Some("--search".into()),
@@ -1303,25 +1303,26 @@ mod tests {
     /// tests can't collide on the `meshes.path` UNIQUE constraint.
     ///
     /// The guard travels back to the test body because `isolated()` is
-    /// re-entrant but its last guard to drop uninstalls the database
-    /// (issue #2048): a helper that installed the database and dropped the
-    /// guard on return would leave the rest of the test reading the
-    /// process-global database, or panicking with "database not initialized".
-    fn fresh_mesh() -> (i64, crate::db::test_support::IsolatedDb) {
-        let guard = crate::db::test_support::isolated();
+    /// the caller installs it (issue #2048) and holds the guard: a helper that
+    /// installed the database and dropped the guard on return would leave the
+    /// rest of the test reading the process-global database, or panicking with
+    /// "database not initialized". Returning the guard in a tuple would invite
+    /// `let (mesh_id, _) = fresh_mesh()`, which drops it immediately.
+    fn fresh_mesh() -> i64 {
         let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
         let path = format!("/tmp/buildmesh_invariant_test_{}", id);
         let mesh_id = crate::db::create_mesh(&format!("invariant-{}", id), &path)
             .expect("fresh_mesh: create_mesh should succeed")
             .id;
-        (mesh_id, guard)
+        mesh_id
     }
 
     #[test]
     fn create_returns_node_with_source_pr_none() {
         // The wrapper contract: passing `source_pr = None` for an
         // issue-spawn / hand-spawn call persists `source_pr = None`.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create(
             mesh_id,
@@ -1355,7 +1356,8 @@ mod tests {
         // `create_pending` is the fast stage-1 of the two-stage issue-spawn
         // flow — it must also persist `source_pr = None` so stage-2's
         // `node.source_pr.is_some()` branch doesn't accidentally fire.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create_pending(
             mesh_id,
@@ -1390,7 +1392,8 @@ mod tests {
         // Optional step 4 from the issue: when `source_issue = Some(N)`,
         // `source_pr` must still come back as `None` — the two source
         // fields are independent columns on the row.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create(
             mesh_id,
@@ -1493,7 +1496,8 @@ mod tests {
         // row, so a regression that drops the explicit branch, or mangles the
         // provider column, fails the assertion rather than silently regressing
         // the mobile/desktop row shape.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let explicit_branch_row = create_blocking(
             mesh_id,
@@ -1546,7 +1550,8 @@ mod tests {
         // from "ready-to-resume idle". Without this pin, a future
         // refactor that flattens the helper to always-Idle would
         // silently break the desktop flow.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create_blocking(
             mesh_id,
@@ -1624,7 +1629,8 @@ mod tests {
         // landing on `"main"` because the per-test mesh path
         // (`/tmp/buildmesh_invariant_test_<id>`) doesn't exist as a
         // git repo and `get_default_branch_blocking` falls back.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create_blocking(
             mesh_id,
@@ -1654,7 +1660,8 @@ mod tests {
         // Pinned here so a future refactor that drops the argument
         // (silently swallowing the caller intent) fails this test
         // before shipping.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create_blocking(
             mesh_id,
@@ -1691,7 +1698,8 @@ mod tests {
         // DOES forward the override. Pin BOTH paths so a future
         // refactor that re-introduces the asymmetric drop fails this
         // test.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
 
         let node = create_blocking(
             mesh_id,
@@ -1911,7 +1919,8 @@ mod tests {
         // to swap the Model Provider on respawn. Verify the column write
         // persists and reads back the new value, and that a re-write is
         // idempotent (the function comment claims it as a property).
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let node = create(
             mesh_id,
             "/tmp/buildmesh_provider_test",
@@ -1950,7 +1959,8 @@ mod tests {
         // error toast. Exercise that exact order for both `remove_worktree`
         // values, then repeat it against the now-missing row.
         for remove_worktree in [false, true] {
-            let (mesh_id, _db) = fresh_mesh();
+            let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
             let node = create(
                 mesh_id,
                 &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
@@ -2008,7 +2018,8 @@ mod tests {
     #[test]
     fn regenerate_load_blocking_returns_old_provider_and_skip_kill() {
         // Idle node: provider is captured verbatim, kill is NOT skipped.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let idle_node = create(
             mesh_id,
             "/tmp/buildmesh_regen_load_idle",
@@ -2057,7 +2068,8 @@ mod tests {
         // The status guard from `validate_status_eligible` must surface
         // as an error so the command boundary can map it to the user's
         // "regenerate unavailable: node is in X state" toast.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let node = create(
             mesh_id,
             "/tmp/buildmesh_regen_load_spawning",
@@ -2094,7 +2106,8 @@ mod tests {
         // apply_blocking must write the new provider AND report
         // `resume = true` (because `decide_resume` continues the
         // session for same-harness swaps).
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let node = create(
             mesh_id,
             "/tmp/buildmesh_regen_apply",
@@ -2132,7 +2145,8 @@ mod tests {
         crate::preferences::init_for_tests(prefs_dir.path().into());
         // Claude → Codex: the captured Claude session id is not a valid
         // Codex id, so the apply step must report `resume = false`.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let node = create(
             mesh_id,
             "/tmp/buildmesh_regen_apply_cross",
@@ -2161,7 +2175,8 @@ mod tests {
         // The reload helper is the final hop in the orchestrator — it
         // must return the current row so the command can hand it back
         // to the frontend store.
-        let (mesh_id, _db) = fresh_mesh();
+        let _db = crate::db::test_support::isolated();
+        let mesh_id = fresh_mesh();
         let node = create(
             mesh_id,
             "/tmp/buildmesh_regen_reload",

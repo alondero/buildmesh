@@ -1042,7 +1042,7 @@ mod tests {
         // entry point, which is the function the issue targets (and the
         // only one that takes `write_conn()`).
         let (gc_done_tx, gc_done_rx) = std::sync::mpsc::channel::<()>();
-        let gc_db = _db.clone();
+        let gc_db = _db.handle();
         let gc_handle = std::thread::spawn(move || {
             // Adopt this test's database on the GC thread; without it the
             // production entry point would resolve the process-global

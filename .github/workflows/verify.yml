@@ -584,12 +584,12 @@ jobs:
             --log cargo-nonshard-tests.log \
             --label "Rust export, documentation, and integration tests" \
             -- bash -euo pipefail -c '
-              cargo test --locked --lib export_bindings -- --test-threads=1
-              cargo test --locked --doc -- --test-threads=1
+              cargo test --locked --lib export_bindings
+              cargo test --locked --doc
               for test_file in tests/*.rs; do
                 test_target="${test_file##*/}"
                 test_target="${test_target%.rs}"
-                cargo test --locked --test "$test_target" -- --test-threads=1
+                cargo test --locked --test "$test_target"
               done
             '
         working-directory: src-tauri
@@ -792,10 +792,10 @@ jobs:
 
       - name: Verify Windows ConPTY frame ordering
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames -- --test-threads=1
+        run: cargo test --locked --lib conpty_preserves_synchronized_cursor_frames
         working-directory: src-tauri
 
       - name: Verify Windows background inference
         if: runner.os == 'Windows'
-        run: cargo test --locked --lib agent::background::tests -- --test-threads=1
+        run: cargo test --locked --lib agent::background::tests
         working-directory: src-tauri

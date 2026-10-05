@@ -158,21 +158,22 @@ fn open_isolated_at(db_path: &Path) -> SqlResult<&'static super::Database> {
 /// Per-process scratch directory for the file-backed installs of
 /// [`isolated_file`].
 ///
-/// A run's databases are grouped under one directory so the next run can
-/// reclaim all of them in a single `remove_dir_all`. The previous run's
-/// processes are gone, so their leaked connections no longer hold the files
-/// open and the removal succeeds.
+/// The PID keeps concurrent runs apart: `scripts/rust-test-shards.mjs` runs
+/// several test binaries at once, and they all share one temp directory.
+///
+/// This directory is **not** reclaimed by the next run, and that is deliberate.
+/// The `remove_dir_all` here can only ever target the *current* PID's name,
+/// which does not exist yet, so pretending otherwise would document a cleanup
+/// that never happens. What does clean up is [`IsolatedDbGuard`]'s drop, which
+/// removes the files it created: on Unix an unlinked open file is fine, while
+/// on Windows the leaked connections still hold them open and the removal is a
+/// no-op. A Windows run therefore leaves one small directory behind for the OS
+/// temp cleaner. Only the handful of tests that need real fsync costs or a
+/// reopenable path reach this path at all; everything else is in memory and
+/// writes nothing.
 fn scratch_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "buildmesh_lib_test_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
-    })
-    .clone()
+    DIR.get_or_init(|| std::env::temp_dir().join(format!("buildmesh_lib_test_{}", std::process::id()))).clone()
 }
 
 /// The SQLite sidecar files a database path can leave behind, in the order
@@ -213,7 +214,8 @@ fn ensure_preferences_dir() {
 /// that returns it, and silently swallowing it would mask a real schema or
 /// open failure as a downstream "database not initialized" panic far from the
 /// cause.
-pub fn isolated() -> IsolatedDb {
+#[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
+pub fn isolated() -> IsolatedDbGuard {
     install(next_database_uri(), Vec::new())
 }
 
@@ -226,9 +228,10 @@ pub fn isolated() -> IsolatedDb {
 /// before/after comparison meaningless. `db::mesh_tests`' batch bench is the
 /// case this exists for.
 ///
-/// The file lives in a per-process scratch directory that the next run
-/// reclaims in one step — see [`scratch_dir`].
-pub fn isolated_file() -> IsolatedDb {
+/// The file lives in a per-process scratch directory; see [`scratch_dir`] for
+/// what is cleaned up when (and what is not).
+#[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
+pub fn isolated_file() -> IsolatedDbGuard {
     let ordinal = NEXT_ORDINAL.fetch_add(1, Ordering::Relaxed);
     let scratch = scratch_dir();
     if let Err(error) = std::fs::create_dir_all(&scratch) {
@@ -239,11 +242,11 @@ pub fn isolated_file() -> IsolatedDb {
 }
 
 /// Shared install path for [`isolated`] and [`isolated_file`].
-fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDb {
+fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
     ensure_preferences_dir();
     match claim_depth() {
         // A nested call inside a shared helper: keep the caller's database.
-        Some(current) => current,
+        Some(current) => IsolatedDbGuard { handle: current },
         None => {
             let db = open_isolated_at(&db_path).unwrap_or_else(|error| {
                 panic!(
@@ -252,7 +255,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDb {
                     db_path.display()
                 )
             });
-            let handle = IsolatedDb {
+            let handle = IsolatedDbHandle {
                 db,
                 files: Arc::new(files),
             };
@@ -264,7 +267,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDb {
                     owner: true,
                 });
             });
-            handle
+            IsolatedDbGuard { handle }
         }
     }
 }
@@ -280,21 +283,36 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDb {
 /// exercises such a path has to say so explicitly:
 ///
 /// ```ignore
-/// let db = db::test_support::isolated();
-/// let on_worker = db.clone();
+/// let _db = db::test_support::isolated();
+/// let on_worker = _db.handle();
 /// let handle = std::thread::spawn(move || {
 ///     let _adopted = db::test_support::adopt(&on_worker);
 ///     db::delete_orphaned_claimed_warm_worktrees();
 /// });
 /// ```
 ///
+/// Adopting a *different* database than the thread already has installed is a
+/// bug in the test rather than something to paper over, so this panics instead
+/// of silently resolving to the thread's existing database.
+///
 /// The adopting thread is not the creator, so it does not delete a
 /// file-backed database's files when its guard drops — the creating test's
 /// guard still owns that.
-pub fn adopt(handle: &IsolatedDb) -> IsolatedDb {
+pub fn adopt(handle: &IsolatedDbHandle) -> IsolatedDbGuard {
+    // Checked *before* claiming depth, so a panic leaves the thread's depth
+    // balanced. A libtest worker thread is reused by later tests, and an
+    // unbalanced count would keep the install alive into them.
+    if let Some(current) = installed_db() {
+        assert!(
+            std::ptr::eq(current, handle.db),
+            "db::test_support::adopt: this thread already has a different isolated database \
+             installed; adopting another one in the same thread cannot work"
+        );
+    }
     match claim_depth() {
-        Some(current) => current,
+        Some(current) => IsolatedDbGuard { handle: current },
         None => {
+            let handle = handle.clone();
             INSTALLED.with(|slot| {
                 *slot.borrow_mut() = Some(Installed {
                     db: handle.db,
@@ -303,43 +321,71 @@ pub fn adopt(handle: &IsolatedDb) -> IsolatedDb {
                     owner: false,
                 });
             });
-            handle.clone()
+            IsolatedDbGuard { handle }
         }
     }
 }
 
 /// Claim one unit of depth on this thread's existing install, if it has one.
 ///
-/// Returns the current handle when the thread already has a database (the
-/// caller reuses it), or `None` when the caller must install one.
-fn claim_depth() -> Option<IsolatedDb> {
+/// Returns a handle to the installed database so the caller can reuse it, or
+/// `None` when the caller must install one.
+fn claim_depth() -> Option<IsolatedDbHandle> {
     INSTALLED.with(|slot| {
         let mut slot = slot.borrow_mut();
         let installed = slot.as_mut()?;
         installed.depth += 1;
-        Some(IsolatedDb {
+        Some(IsolatedDbHandle {
             db: installed.db,
             files: Arc::clone(&installed.files),
         })
     })
 }
 
-/// RAII handle to the database [`isolated`] installed for this thread.
+/// A name for an isolated database that can be moved to another thread.
 ///
-/// Cloning a handle does not claim depth — a clone is a way to *name* the
-/// database on another thread ([`adopt`]), not a second reference keeping it
-/// installed. Dropping the last guard on a thread uninstalls that thread's
-/// install, so the next test to run on the same libtest worker thread starts
-/// from an empty schema. The `Database` itself is leaked rather than freed —
-/// see the module docs — so a guard governs *which* database the thread
-/// resolves, not the lifetime of the allocation.
+/// This is what [`adopt`] consumes. It is `Clone` + `Send` and deliberately
+/// **not** an RAII guard: dropping a handle must not uninstall anything, or
+/// `let handle = guard.handle();` followed by an unrelated drop would tear the
+/// database out from under the test. Use [`IsolatedDbGuard`] to keep an install
+/// alive and [`IsolatedDbHandle`] only to reach it from a spawned thread.
 #[derive(Clone)]
-pub struct IsolatedDb {
+pub struct IsolatedDbHandle {
     db: &'static super::Database,
     files: Arc<Vec<PathBuf>>,
 }
 
-impl Drop for IsolatedDb {
+// `adopt` moves a handle into a spawned closure, so this has to hold.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<IsolatedDbHandle>();
+};
+
+/// RAII guard keeping this thread's isolated database installed.
+///
+/// The guard is single-owner and is *not* `Clone`, so it cannot be dropped by
+/// accident from a copied value; to reach the database from a spawned thread,
+/// take an [`IsolatedDbHandle`] with [`IsolatedDbGuard::handle`] instead.
+///
+/// Dropping the last guard on a thread uninstalls that thread's install, so
+/// the next test to run on the same libtest worker thread starts from an empty
+/// schema. The `Database` itself is leaked rather than freed — see the module
+/// docs — so a guard governs *which* database the thread resolves, not the
+/// lifetime of the allocation.
+#[must_use = "the guard keeps the test's database installed; bind it (`let _db = ...`) and drop it when the test ends"]
+pub struct IsolatedDbGuard {
+    handle: IsolatedDbHandle,
+}
+
+impl IsolatedDbGuard {
+    /// A movable name for this database, for use with [`adopt`] on another
+    /// thread. Dropping the returned handle does not uninstall anything.
+    pub fn handle(&self) -> IsolatedDbHandle {
+        self.handle.clone()
+    }
+}
+
+impl Drop for IsolatedDbGuard {
     fn drop(&mut self) {
         INSTALLED.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -354,10 +400,9 @@ impl Drop for IsolatedDb {
                 // what hold them open anyway.
                 if installed.owner {
                     for file in installed.files.iter() {
-                        // Best effort by design: the leaked connections still
-                        // hold a file-backed database open on Windows, so the
-                        // next run's scratch-directory reclaim is what
-                        // actually clears these.
+                        // Best effort: on Unix the open file can be unlinked,
+                        // on Windows the leaked connections keep it locked and
+                        // the directory is left to the OS temp cleaner.
                         let _ = std::fs::remove_file(file);
                     }
                 }
@@ -449,7 +494,7 @@ mod tests {
     fn adopted_thread_resolves_the_tests_database() {
         let _db = isolated();
         crate::db::create_mesh("owned", "C:/adopt-owned").unwrap();
-        let on_worker = _db.clone();
+        let on_worker = _db.handle();
 
         let seen = std::thread::spawn(move || {
             let _adopted = adopt(&on_worker);
@@ -467,6 +512,49 @@ mod tests {
             vec!["owned".to_string()],
             "an adopted thread must resolve the test's database, not an empty or shared one"
         );
+    }
+
+    /// A handle is a *name* for a database, not a claim on it. Dropping one —
+    /// or dropping a clone of one — must leave the install standing, which is
+    /// what lets a caller move a handle into a spawned closure without the move
+    /// itself uninstalling anything.
+    #[test]
+    fn dropping_a_handle_does_not_uninstall_the_database() {
+        let _db = isolated();
+        crate::db::create_mesh("kept", "C:/handle-drop").unwrap();
+
+        let handle = _db.handle();
+        let clone = handle.clone();
+        drop(handle);
+        drop(clone);
+
+        assert_eq!(
+            crate::db::list_meshes().unwrap().len(),
+            1,
+            "dropping a handle must not uninstall the database its guard installed"
+        );
+    }
+
+    /// Adopting a database the thread does not already have is a test bug, not
+    /// something to absorb silently. Pinned here because the failure mode is
+    /// otherwise invisible: the thread would quietly keep resolving its
+    /// *existing* database and the assertions would pass against the wrong rows.
+    #[test]
+    #[should_panic(expected = "already has a different isolated database")]
+    fn adopting_a_foreign_database_is_rejected() {
+        // Take a handle to one database, then let its guard drop so this thread
+        // stops resolving it. The `Database` itself is leaked, so the handle
+        // still names a live (if no longer installed) database.
+        let foreign = {
+            let guard = isolated();
+            guard.handle()
+        };
+
+        // A different install now owns this thread.
+        let _current = isolated();
+        crate::db::create_mesh("current", "C:/adopt-foreign-current").unwrap();
+
+        let _adopted = adopt(&foreign);
     }
 
     /// `db::init` must still open exactly one process-global database, and a

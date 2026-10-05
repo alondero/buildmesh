@@ -1147,7 +1147,7 @@ fn watchdog_native_completion_recovers_without_quiet_or_classifier_but_fences_ol
 
 #[test]
 fn circuit_status_projection_retains_yield_without_completing_assigned_work() {
-    init_temp_db_at("circuit-evidence-projection");
+    let _db = install_temp_db();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_str().unwrap();
     let mesh = db::create_mesh("evidence-projection", path).unwrap();
@@ -1237,7 +1237,7 @@ fn circuit_status_projection_retains_yield_without_completing_assigned_work() {
 
 #[test]
 fn review_handoff_without_transcript_or_native_evidence_remains_unverified() {
-    init_temp_db_at("review-no-transcript");
+    let _db = install_temp_db();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().to_str().unwrap();
     let mesh = db::create_mesh("review-no-transcript", path).unwrap();
@@ -2874,7 +2874,7 @@ fn may_admit_run_running_and_paused_unconditional_pass() {
 /// `db::count_active_circuit_runs` (no shadow helpers).
 #[test]
 fn may_admit_run_pending_saturated_mesh_defers() {
-    let path = init_temp_db_at("may_admit_defer");
+    let _db = install_temp_db();
     let mesh = crate::db::create_mesh("may-admit-defer", "/tmp/may-admit-defer").unwrap();
     // Two admitted runs saturate the expected review-flow capacity.
     crate::db::set_mesh_circuit_run_capacity(mesh.id, 2).unwrap();
@@ -2972,29 +2972,22 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         "after terminal — third pending must admit (FIFO promotion)",
     );
 
-    std::fs::remove_file(&path).ok();
 }
 
-/// Temp-dir DB init, used by the run-admission integration tests
-/// in this module. Mirrors the pattern in `db::circuit_tests`
-/// (process-global DB, `--test-threads=1`).
-fn init_temp_db_at(tag: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "buildmesh_circuit_worker_test_{}_{}.db",
-        tag,
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    crate::db::init(&path).unwrap();
-    crate::preferences::init_for_tests(path.with_extension("preferences"));
-    path
+/// Install this test's private database.
+///
+/// Used by the run-admission integration tests in this module. The caller
+/// must bind the returned guard (`let _db = install_temp_db();`) for the rest
+/// of the test: it is what keeps the database installed. This replaced a
+/// process-global temp-file database (issue #2048), which also means there is
+/// no file path to clean up and no separate preferences directory to seed.
+fn install_temp_db() -> crate::db::test_support::IsolatedDbGuard {
+    crate::db::test_support::isolated()
 }
 
 #[test]
 fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
-    init_temp_db_at("archive-recovery");
+    let _db = install_temp_db();
     let worktree = tempfile::tempdir().unwrap();
     let file = worktree.path().join("unfinished.txt");
     std::fs::write(&file, "uncommitted implementation").unwrap();
@@ -3113,7 +3106,7 @@ fn global_agent_reservation_counts_occupied_pool_slots() {
 
 #[test]
 fn observed_capacity_ignores_legacy_mesh_node_cap() {
-    let path = init_temp_db_at("observe_capacity_legacy_mesh_cap");
+    let _db = install_temp_db();
     let mesh = crate::db::create_mesh("observe-capacity", "/tmp/observe-capacity").unwrap();
     crate::db::write_conn()
         .execute(
@@ -3154,7 +3147,6 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
         other => panic!("expected a capacity tick, got {other:?}"),
     }
 
-    std::fs::remove_file(&path).ok();
 }
 
 /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,
@@ -4921,7 +4913,7 @@ fn step_parent_resolution_handles_review_graphs_and_source_fallback() {
 
 #[test]
 fn issue_review_spawn_seam_persists_parent_and_inherits_provider() {
-    let path = init_temp_db_at("issue-review-parent-provider");
+    let _db = install_temp_db();
     let mesh = db::create_mesh(
         "issue-review-parent-provider",
         "/tmp/issue-review-parent-provider",
@@ -5050,7 +5042,6 @@ fn issue_review_spawn_seam_persists_parent_and_inherits_provider() {
         .find(|row| row.0 == reviewer.id && row.1 == run_id)
         .and_then(|row| row.5);
     assert_eq!(persisted_parent, Some(source.id));
-    std::fs::remove_file(path).ok();
 }
 
 /// The cascade layer-1 (explicit) override slot must carry the per-node
@@ -5360,7 +5351,7 @@ fn register_test_agent_with_provider(mesh_id: i64, path: &str, name: &str, provi
 /// at the first-observation window instead of the active budget.
 #[test]
 fn observe_waits_flags_an_agent_without_session_identity_or_report() {
-    init_temp_db_at("wait-unobserved");
+    let _db = install_temp_db();
     let mesh = db::create_mesh("wait-unobserved", "/tmp/wait-unobserved").unwrap();
     let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
     let view = spawn_wait_view(agent_id, None);
@@ -5396,7 +5387,7 @@ fn observe_waits_flags_an_agent_without_session_identity_or_report() {
 /// running, so it must not be reported as unobserved.
 #[test]
 fn observe_waits_marks_a_session_identity_as_observed() {
-    init_temp_db_at("wait-observed");
+    let _db = install_temp_db();
     let mesh = db::create_mesh("wait-observed", "/tmp/wait-observed").unwrap();
     let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
     db::write_conn()
@@ -5429,7 +5420,7 @@ fn observe_waits_marks_a_session_identity_as_observed() {
 /// override so it takes precedence over the unobserved fast fail.
 #[test]
 fn observe_waits_reports_an_explicit_step_budget() {
-    init_temp_db_at("wait-explicit-budget");
+    let _db = install_temp_db();
     let mesh = db::create_mesh("wait-explicit-budget", "/tmp/wait-explicit-budget").unwrap();
     let agent_id = register_test_agent(mesh.id, &mesh.path, "worker");
     let view = spawn_wait_view(agent_id, Some(1800));
@@ -5461,7 +5452,7 @@ fn observe_waits_reports_an_explicit_step_budget() {
 /// active budget. The give-up is surfaced, not absorbed.
 #[test]
 fn observe_waits_marks_a_muse_agent_without_identity_as_unobserved() {
-    init_temp_db_at("wait-muse-unobserved");
+    let _db = install_temp_db();
     let mesh = db::create_mesh("wait-muse-unobserved", "/tmp/wait-muse-unobserved").unwrap();
     let agent_id = register_test_agent_with_provider(mesh.id, &mesh.path, "muse-worker", "muse");
     let view = spawn_wait_view(agent_id, None);

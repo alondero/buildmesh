@@ -13,6 +13,36 @@ mod tests {
     use super::*;
     use crate::http::router::{dispatch, DispatchResult};
 
+    /// Serialises this module's two router tests.
+    ///
+    /// Unlike most DB tests, these cannot use `db::test_support::isolated`:
+    /// the handlers run their body through `commands::run_blocking`, which
+    /// offloads onto a Tauri-managed `spawn_blocking` thread. A `thread_local!`
+    /// install is invisible there, so the handler would panic with "database
+    /// not initialized" and answer 503. `adopt` cannot bridge it either — the
+    /// test does not own that runtime.
+    ///
+    /// Sharing the process-global database is therefore correct here, and much
+    /// narrower than it used to be: these are the only tests left that reach for
+    /// it, so this lock is enough to keep them from colliding.
+    static SESSION_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn shared_db() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let path = std::env::temp_dir().join(format!(
+                "buildmesh_http_session_test_{}.db",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            let _ = crate::db::init(&path);
+        });
+        SESSION_DB_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     async fn send(path: &str, headers: &str) -> Response {
         let mut req = ParsedRequest::test_post(path, b"");
         req.secure = true;
@@ -24,8 +54,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn pairing_refresh_and_revocation_cross_the_real_router() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let root = {
             let conn = crate::db::write_conn();
             crate::db::get_or_create_root_token_inner(&conn).unwrap()
@@ -119,8 +154,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn cross_origin_pairing_is_rejected_before_consuming_the_invitation() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let ticket = crate::http::pairing::mint();
         assert_eq!(
             send(

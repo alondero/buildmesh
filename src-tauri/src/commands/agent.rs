@@ -1151,7 +1151,7 @@ mod tests {
     /// reuses this database rather than replacing it — but dropping the last
     /// guard uninstalls it, and the rest of the test would then read the
     /// process-global database, or panic with "database not initialized".
-    fn ensure_pr_db() -> crate::db::test_support::IsolatedDb {
+    fn ensure_pr_db() -> crate::db::test_support::IsolatedDbGuard {
         crate::db::test_support::isolated()
     }
 

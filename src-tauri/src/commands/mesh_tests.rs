@@ -15,7 +15,7 @@ mod tests {
 
     /// Install this test's private database and hand back the guard the test
     /// body holds for its remaining statements.
-    fn ensure_db() -> crate::db::test_support::IsolatedDb {
+    fn ensure_db() -> crate::db::test_support::IsolatedDbGuard {
         crate::db::test_support::isolated()
     }
 

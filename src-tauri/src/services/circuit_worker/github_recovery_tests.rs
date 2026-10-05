@@ -95,7 +95,7 @@ fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
 /// crash restart by reopening the database by path, which only means anything
 /// if there is a file to reopen.
 struct OpenPrFixture {
-    _db: crate::db::test_support::IsolatedDb,
+    _db: crate::db::test_support::IsolatedDbGuard,
     active: crate::db::ActiveCircuitRun,
     view: RunView,
     run_id: i64,
@@ -311,7 +311,7 @@ fn open_pr_blocked_lookup_cannot_commit_after_cancellation() {
     // The lookup runs on its own thread, and a `thread_local!` database
     // install does not follow the thread: the worker has to adopt this test's
     // database or it resolves the process-global one (issue #2048).
-    let lookup_db = fixture._db.clone();
+    let lookup_db = fixture._db.handle();
     let lookup = std::thread::spawn(move || {
         let _adopted = crate::db::test_support::adopt(&lookup_db);
         let event =
@@ -554,7 +554,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     let thread_active = active.clone();
     // As above: the dispatch thread adopts this test's database, because the
     // per-thread install does not follow a spawned thread (issue #2048).
-    let lookup_db = fixture._db.clone();
+    let lookup_db = fixture._db.handle();
     let lookup = std::thread::spawn(move || {
         let _adopted = crate::db::test_support::adopt(&lookup_db);
         // Production orchestration only: `run_github_effect_pass` runs the
@@ -793,7 +793,7 @@ fn dispatch_pull_request_json() -> serde_json::Value {
 /// `dispatch_fixture`, because dropping it inside the helper would uninstall
 /// the database before the test body ran.
 struct DispatchFixture {
-    _db: crate::db::test_support::IsolatedDb,
+    _db: crate::db::test_support::IsolatedDbGuard,
     run_id: i64,
     view: RunView,
     _dir: tempfile::TempDir,

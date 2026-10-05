@@ -1788,7 +1788,7 @@ mod tests {
     /// the sink *call*; this one proves the DB *column*.
     ///
     /// Tests using this sink must initialise the global DB via
-    /// `crate::db::test_support::ensure_db_for_tests()`; otherwise
+    /// `crate::db::test_support::isolated()`; otherwise
     /// `db::is_initialized()` returns false and the write no-ops.
     struct DbWritingSink;
     impl ProvisionSink for DbWritingSink {
@@ -1806,7 +1806,7 @@ mod tests {
         }
     }
 
-    // DB init routes through `db::test_support::ensure_db_for_tests`.
+    // DB init routes through `db::test_support::isolated`.
 
     /// End-to-end regression for #1080. A Manual spawn that claims a warm
     /// pool entry must persist the pool's pre-assigned slug into BOTH
