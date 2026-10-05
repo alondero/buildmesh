@@ -9,6 +9,7 @@ import {
   useAgentNodeStore,
   type AgentNode,
 } from '../../src/stores/agentNodeStore';
+import * as api from '../../src/lib/tauri';
 import { attachAgentNodeListeners } from '../../src/stores/agentNodeListeners';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromptStore';
@@ -1863,8 +1864,7 @@ describe('useAgentNodeStore', () => {
       useAgentNodeStore.setState({ stalledInputs: {} });
     });
 
-    it('keeps one node stalled when a different node clears', () => {
-      const { setStalledInput, stalledInputs } = useAgentNodeStore.getState();
+    it('keeps one node stalled when a different node clears', () => {      const { setStalledInput, stalledInputs } = useAgentNodeStore.getState();
 
       setStalledInput(1, { nodeId: 1, pendingBytes: 200, attempts: 3 });
       setStalledInput(2, { nodeId: 2, pendingBytes: 50, attempts: 1 });
@@ -1901,6 +1901,49 @@ describe('useAgentNodeStore', () => {
         pendingBytes: 40,
         attempts: 2,
       });
+    });
+
+    // The transport's `cancelTerminalInput` had been exported but never
+    // called, so a dead node's buffered keystrokes were retried against a
+    // process that no longer existed. These drive the real retry buffer: with
+    // the backend refusing the write, the buffer parks holding the bytes, and
+    // only an explicit cancel can settle it promptly. Left un-wired, the buffer
+    // instead grinds through its whole 40-attempt budget over ~30 seconds and
+    // only then reports `closed`, so the timing bound is what makes this a
+    // real assertion rather than a coincidence.
+    it.each([
+      ['killAgent', (id: number) => useAgentNodeStore.getState().killAgent(id)],
+      ['deleteAgentNode', (id: number) => useAgentNodeStore.getState().deleteAgentNode(id)],
+    ])('%s releases the transport lane for a dying node', async (_name, act) => {
+      const id = 987_654;
+      // No worktree and a null safety path, so Phase 1 completes without
+      // raising the close-confirmation prompt and the teardown leg is reached.
+      seedAgentNodes([makeNode({ id, use_worktree: false })]);
+      mockInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'write_to_agent') {
+          return Promise.resolve({
+            disposition: 'backpressured',
+            activity: { user_input: false, submitted: false },
+          });
+        }
+        if (cmd === 'get_worktree_close_safety') {
+          return Promise.resolve(makeSafety({ worktree_path: null }));
+        }
+        if (cmd === 'list_agent_nodes') return Promise.resolve([]);
+        return Promise.resolve(undefined);
+      });
+
+      const pending = api.writeToAgent(id, 'held bytes');
+      await vi.waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith('write_to_agent', expect.anything());
+      });
+
+      const settled = Promise.race([
+        pending.then((outcome) => outcome.disposition),
+        new Promise((resolve) => setTimeout(() => resolve('still-holding'), 1_000)),
+      ]);
+      await act(id);
+      expect(await settled, 'the lane must be cancelled, not left retrying a dead node').toBe('closed');
     });
   });
 });

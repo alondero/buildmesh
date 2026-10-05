@@ -119,7 +119,14 @@ const DEFAULT_MAX_ATTEMPTS = 40;
 const DEFAULT_BASE_DELAY_MS = 50;
 const DEFAULT_MAX_DELAY_MS = 1_000;
 
-const ACCEPTED: InputOutcome = { disposition: 'accepted', activity: { user_input: false, submitted: false } };
+const CLOSED: InputOutcome = { disposition: 'closed', activity: { user_input: false, submitted: false } };
+
+/** Bytes the lane is still holding. Shared by the report and the probe. */
+function pendingBytes(lane: Lane): number {
+  let total = 0;
+  for (const buffer of lane.queue) total += buffer.length;
+  return total;
+}
 
 /**
  * Is this a disposition the backend contract actually produces?
@@ -201,7 +208,7 @@ export class TerminalInputQueue {
     // an unhandled rejection here would be noise on a path that is already
     // closing.
     lane.cancelled = true;
-    for (const waiter of lane.waiters) waiter.resolve({ ...ACCEPTED, disposition: 'closed' });
+    for (const waiter of lane.waiters) waiter.resolve(CLOSED);
     lane.queue.length = 0;
     lane.waiters.length = 0;
     this.clearStall(nodeId, lane);
@@ -214,7 +221,7 @@ export class TerminalInputQueue {
     if (!lane) return null;
     return {
       nodeId,
-      pendingBytes: lane.queue.reduce((total, buffer) => total + buffer.length, 0),
+      pendingBytes: pendingBytes(lane),
       attempts: lane.attempts,
     };
   }
@@ -265,7 +272,7 @@ export class TerminalInputQueue {
           `terminal input: write_to_agent returned an unrecognised response for node ${nodeId}; ` +
             'treating the write as not delivered',
         );
-        outcome = { ...ACCEPTED, disposition: 'closed' };
+        outcome = CLOSED;
       } else {
         outcome = raw;
       }
@@ -322,7 +329,7 @@ export class TerminalInputQueue {
       // the user their input was lost, rather than dropping it silently.
       lane.busy = false;
       lane.attempts = 0;
-      this.settleHead(lane, { ...ACCEPTED, disposition: 'closed' });
+      this.settleHead(lane, CLOSED);
       this.retireIfEmpty(nodeId, lane);
       this.continueDrain(nodeId, lane);
       return;
@@ -384,18 +391,18 @@ export class TerminalInputQueue {
   private reportStallIfHeld(nodeId: number, lane: Lane): void {
     if (lane.heldSinceMs === null) return;
     if (!lane.stallReported && this.now() - lane.heldSinceMs < this.stallThresholdMs) return;
-    const pendingBytes = lane.queue.reduce((total, buffer) => total + buffer.length, 0);
+    const pending = pendingBytes(lane);
     if (
       lane.stallReported &&
-      lane.reportedBytes === pendingBytes &&
+      lane.reportedBytes === pending &&
       lane.reportedAttempts === lane.attempts
     ) {
       return;
     }
     lane.stallReported = true;
-    lane.reportedBytes = pendingBytes;
+    lane.reportedBytes = pending;
     lane.reportedAttempts = lane.attempts;
-    this.notifyStall(nodeId, { nodeId, pendingBytes, attempts: lane.attempts });
+    this.notifyStall(nodeId, { nodeId, pendingBytes: pending, attempts: lane.attempts });
   }
 
   /**

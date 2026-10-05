@@ -1014,8 +1014,17 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
     // a kill_agent rejection skip delete_agent_node, or the node would vanish
     // from the UI while its row and worktree survive and resurrect on the
     // next fetch.
+    //
+    // Issue #1530: this calls `api.killAgent` directly, so it does not pass
+    // through the `killAgent` action that releases the transport's retry lane.
+    // Release it here, next to the kill that makes the buffered bytes
+    // undeliverable. Deliberately *not* at the top of this function: the
+    // worktree-safety prompt above can still be cancelled, and dropping a live
+    // node's in-flight keystrokes because the user opened a close dialog would
+    // trade one silent loss for another.
     try {
       await api.killAgent(id);
+      api.cancelTerminalInput(id);
     } catch (e) {
       console.warn('[agentNodeStore] kill_agent failed during close, continuing', e);
     }
@@ -1302,6 +1311,11 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   killAgent: async (nodeId) => {
     try {
       await api.killAgent(nodeId);
+      // Issue #1530 — the agent's PTY is gone, so anything the transport's
+      // retry buffer is still holding for it can never be delivered. Cancel the
+      // lane instead of leaving it to retry against a dead process: the
+      // keystrokes settle as `closed` and the lane is released.
+      api.cancelTerminalInput(nodeId);
       await get().fetchAgentNodes();
     } catch (e) {
       set({ error: formatError(e) });
