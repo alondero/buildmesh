@@ -575,6 +575,18 @@ const UNOBSERVED_WAIT_MS: i64 = 15 * 60_000;
 const UNOBSERVED_AGENT_REASON: &str =
     "agent produced no session identity or report within 15 minutes — inspect the agent terminal";
 
+/// An evidence window in operator wording. Per-harness yielded budgets are
+/// under a minute, so whole-minute division would report them as "0 minutes".
+fn describe_window(ms: i64) -> String {
+    let seconds = ms / 1_000;
+    if seconds > 0 && seconds % 60 == 0 {
+        let minutes = seconds / 60;
+        format!("{minutes} minute{}", if minutes == 1 { "" } else { "s" })
+    } else {
+        format!("{seconds} second{}", if seconds == 1 { "" } else { "s" })
+    }
+}
+
 /// Run-context key prefix for a step's wait bookkeeping.
 fn wait_prefix(node_id: &str) -> String {
     format!("node.{node_id}.wait")
@@ -1385,7 +1397,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 } else {
                     reason
                 };
-                unverify_step(run, &mut t, node_id, format!("Evidence window ended after {} minutes: {detail}. Recheck evidence after inspecting the agent.", timeout_ms / 60_000));
+                unverify_step(run, &mut t, node_id, format!("Evidence window ended after {}: {detail}. Recheck evidence after inspecting the agent.", describe_window(*timeout_ms)));
                 return t;
             }
             if let Some(step) = run.step_mut(node_id) {
@@ -5084,6 +5096,54 @@ mod tests {
             .as_ref()
             .unwrap()
             .contains("Evidence window ended after 30 minutes"));
+    }
+
+    #[test]
+    fn circuit_sub_minute_evidence_window_is_reported_in_seconds() {
+        // Run 335 parked its classifier on a 30-second window and told the
+        // operator "Evidence window ended after 0 minutes" (integer minutes).
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed_with(0, Some("rev-1"), 30_000));
+        advance(&mut run, &wait_observed_with(30_000, Some("rev-1"), 30_000));
+        assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+        let error = run.step("classify").unwrap().error.clone().unwrap();
+        assert!(
+            error.contains("Evidence window ended after 30 seconds:"),
+            "{error}"
+        );
+        assert!(!error.contains("0 minutes"), "{error}");
+    }
+
+    #[test]
+    fn circuit_whole_minute_evidence_window_uses_singular_and_plural_minutes() {
+        for (budget_ms, expected) in [
+            (60_000, "after 1 minute:"),
+            (1_800_000, "after 30 minutes:"),
+            (90_000, "after 90 seconds:"),
+        ] {
+            let mut run = gate_run(
+                "classify",
+                CircuitNodeKind::LlmTurnClassifier {
+                    target_node_id: None,
+                },
+                &[],
+            );
+            fire_to_gate(&mut run, "classify");
+            advance(&mut run, &wait_observed_with(0, Some("rev-1"), budget_ms));
+            advance(
+                &mut run,
+                &wait_observed_with(budget_ms, Some("rev-1"), budget_ms),
+            );
+            let error = run.step("classify").unwrap().error.clone().unwrap();
+            assert!(error.contains(expected), "{budget_ms}: {error}");
+        }
     }
 
     #[test]
