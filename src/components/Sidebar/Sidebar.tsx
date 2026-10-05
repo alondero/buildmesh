@@ -170,9 +170,22 @@ export function Sidebar() {
   // are stable zustand actions, and the two pieces of render state read here
   // (`selectedMeshId`, `openDropdownFor`) go through `getState`/functional
   // updates instead of the dependency array.
+  //
+  // Issue #2072 — a Mesh click means "show me this Mesh", never "leave this
+  // Mesh". Re-clicking the highlighted Mesh keeps both halves of the scope:
+  // in Mesh Grid it is a plain no-op, and from a cross-Mesh View Mode it
+  // returns the canvas to that Mesh's grid. All Nodes is the only way out
+  // (it clears the selection inside `setViewMode`). The mesh→mode
+  // subscription below short-circuits on an unchanged selection, so the
+  // restore has to go through the View Mode setter.
   const handleSelectMesh = useCallback((meshId: number) => {
-    const current = useMeshStore.getState().selectedMeshId;
-    selectMesh(current === meshId ? null : meshId);
+    if (useMeshStore.getState().selectedMeshId === meshId) {
+      if (useUIStore.getState().viewMode !== 'mesh') {
+        useUIStore.getState().setViewMode('mesh');
+      }
+      return;
+    }
+    selectMesh(meshId);
   }, [selectMesh]);
   const handleToggleDropdown = useCallback((mesh: Mesh) => {
     const key = dropdownId('mesh', mesh.id);
