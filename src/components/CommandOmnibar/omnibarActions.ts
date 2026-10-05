@@ -186,10 +186,9 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // Id shape is `probe-in-mesh:<tab>:<meshId>` — "Open <Destination> in
     // <Mesh>". Mesh-lens destinations read their mesh from `meshStore`, so
     // the item's mesh must be selected first (the same retargeting the
-    // `issue:`/`pull:` branch below performs). A stale per-tab pin would
-    // keep winning over the fresh selection, so it is cleared: the command
-    // is a navigation ("show me Y"), not a pin request, and the probe
-    // returns to following selection afterwards.
+    // `issue:`/`pull:` branch below performs). Issue #2073 removed the
+    // per-tab pin, so selecting the mesh is all this route needs: the
+    // destination then follows that selection.
     const body = id.slice('probe-in-mesh:'.length);
     const sep = body.lastIndexOf(':');
     if (sep === -1) return;
@@ -199,7 +198,6 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(meshId)) return;
-    useUIStore.getState().clearProbeContextPin(tab);
     const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
     useMeshStore.getState().selectMesh(mesh.id);
     if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
@@ -211,20 +209,14 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // The Probe's GitHub tabs read their mesh from `meshStore`, so an item
     // belonging to a mesh other than the currently selected one must
     // select its mesh first — otherwise the user lands on the tab showing
-    // a DIFFERENT mesh's issues (issue #1411 review). A stale per-tab pin
-    // would keep winning over the fresh selection, so the target tab's
-    // pin is cleared first — same rationale the `probe-in-mesh:` branch
-    // above uses.
+    // a DIFFERENT mesh's issues (issue #1411 review). Selecting the mesh is
+    // the whole retargeting now — issue #2073 removed the pin that could
+    // otherwise keep winning over the fresh selection.
     const [, meshPart, numberPart] = id.split(':');
     const meshId = Number(meshPart);
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
-    if (id.startsWith('issue:')) {
-      useUIStore.getState().clearProbeContextPin('issues');
-    } else {
-      useUIStore.getState().clearProbeContextPin('pulls');
-    }
     const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
     useMeshStore.getState().selectMesh(mesh.id);
     if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');

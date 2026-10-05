@@ -69,7 +69,6 @@ describe('ProbePanel', () => {
       probeTab: 'files',
       probeWorkingSet: { tabs: [], mru: [] },
       activeDiffFile: null,
-      probeContextPins: {},
     });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_git_status') return Promise.resolve(FILES);
@@ -164,25 +163,21 @@ describe('ProbePanel', () => {
     expect(screen.getByRole('region', { name: 'Probe panel' }).textContent).not.toContain('demo');
   });
 
-  it('pins the current Mesh subject and exposes the pinned mode', () => {
-    useUIStore.setState({ probeOpen: true, probeTab: 'properties' });
-    render(<ProbePanel />);
+  it('offers no pin control — the header subject always follows selection (issue #2073)', () => {
+    // Probe Context Pins are removed: a destination can no longer be pinned to
+    // a subject that disagrees with the sidebar selection, so the header has no
+    // pin/unpin affordance at all. The mode line is therefore always one of the
+    // two fixed-vs-following labels.
+    for (const tab of ['properties', 'files', 'review'] as const) {
+      useUIStore.setState({ probeOpen: true, probeTab: tab });
+      const { unmount } = render(<ProbePanel />);
 
-    const pinButton = screen.getByRole('button', { name: 'Pin context' });
-    fireEvent.click(pinButton);
-
-    expect(useUIStore.getState().probeContextPins.properties).toEqual({
-      tab: 'properties',
-      lens: 'mesh',
-      meshId: MESH.id,
-      nodeId: null,
-    });
-    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Pinned context');
-    expect(screen.getByRole('button', { name: 'Unpin context' })).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: 'Unpin context' }));
-    expect(useUIStore.getState().probeContextPins.properties).toBeUndefined();
-    expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
+      expect(screen.queryByTestId('probe-context-pin')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Pin context' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Unpin context' })).toBeNull();
+      expect(screen.getByTestId('probe-context-mode').textContent).toBe('Following selection');
+      unmount();
+    }
   });
 
   it('omits the mesh-name subheading when no project is active', () => {
@@ -310,7 +305,6 @@ describe('useUIStore.openProbeTab (issue #375, the next 5 tabs rely on this)', (
       probeTab: 'files',
       probeWorkingSet: { tabs: [], mru: [] },
       activeDiffFile: null,
-      probeContextPins: {},
     });
   });
 
