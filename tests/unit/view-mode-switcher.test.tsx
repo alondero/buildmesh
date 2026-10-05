@@ -11,8 +11,9 @@
  * search box.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { ViewModeSwitcher } from '../../src/components/ViewModeSwitcher/ViewModeSwitcher';
+import { ScopeIndicator } from '../../src/components/TitleBar/ScopeIndicator';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
@@ -162,6 +163,56 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
       render(<ViewModeSwitcher />);
       fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
       expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
+    });
+  });
+
+  // #2074 — the switcher picks the View Mode, the indicator beside it names
+  // the scope that mode produces. They are two views of ONE derived scope
+  // (#2071), so a segment click must re-label the indicator in the same act.
+  describe('scope indicator agreement (#2074)', () => {
+    /** Render the switcher and the indicator as they sit in the title bar. */
+    function renderToolbar() {
+      return render(
+        <>
+          <ViewModeSwitcher />
+          <ScopeIndicator />
+        </>,
+      );
+    }
+
+    it('re-labels the indicator for each cross-Mesh segment, count included', () => {
+      seedAgentNodes([NODE_A, NODE_B]);
+      renderToolbar();
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('All meshes · 2 nodes');
+
+      fireEvent.click(screen.getByRole('button', { name: /pinned/i }));
+      // Neither fixture node is pinned: an honest 0, which is what tells an
+      // empty scope apart from a broken render.
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Pinned across meshes · 0 nodes');
+
+      fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Filtered across meshes · 2 of 2 nodes');
+    });
+
+    it('names the Mesh Grid scope only once a Mesh is selected — the segment still picks nothing', () => {
+      seedAgentNodes([NODE_A, NODE_B]);
+      useMeshStore.setState({
+        meshes: [MESH_1, MESH_2],
+        meshesById: new Map([[1, MESH_1], [2, MESH_2]]),
+        selectedMeshId: null,
+      });
+      renderToolbar();
+
+      fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
+      expect(useMeshStore.getState().selectedMeshId).toBeNull();
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('No mesh selected');
+
+      // The sidebar's selection is the only thing that names a Mesh scope
+      // (#2072 made the selection sticky), and the indicator reads it.
+      act(() => {
+        useMeshStore.getState().selectMesh(2);
+      });
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-2');
     });
   });
 });
