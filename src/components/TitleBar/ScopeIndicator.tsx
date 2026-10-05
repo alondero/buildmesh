@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { useAgentNodeStore, useAllAgentNodes, type AgentNode } from '../../stores/agentNodeStore';
 import { useMeshStore, type Mesh } from '../../stores/meshStore';
@@ -41,6 +41,24 @@ import { dropdownId } from '../../lib/dropdownId';
  * holds plain buttons, so Tab order, Enter and Escape work without a roving
  * tabindex — the same contract `TitleBarOverflow` and `ZoomControl` already
  * establish for this cluster.
+ *
+ * ## Opening on request (#2076)
+ *
+ * `open` is local state, so a producer outside this component cannot set it.
+ * Entering Mesh Grid with no Mesh selected is exactly that case: the switcher
+ * segment sets the mode and asks for the picker instead of choosing a Mesh
+ * for the user (#2071 deleted the guess), and the request arrives as a bump of
+ * `useUIStore.openScopePickerRequest` — the same request-counter channel
+ * `focusGridSearchRequest` already uses to drive `GridControls`. The effect
+ * runs on every distinct bump, so a user who dismisses the panel and presses
+ * the segment again gets it back. `openScopePickerRequest === 0` covers the
+ * initial mount: a cold start must not pop a panel nobody asked for.
+ *
+ * Opening is not choosing. The request opens the panel and nothing else —
+ * `selectedMeshId` is untouched, so the canvas keeps the honest "no Mesh
+ * selected" state (#2071) behind it. Focus is left where the press put it (on
+ * the switcher segment); the panel is next in DOM order, so Tab reaches its
+ * buttons, and Escape returns focus to this trigger.
  *
  * ## Width ladder
  *
@@ -242,6 +260,11 @@ export function ScopeIndicator() {
 
   const viewMode = useUIStore(s => s.viewMode);
   const lastNonSingleMode = useUIStore(s => s.lastNonSingleMode);
+  // The open request (#2076) — a monotonically increasing counter the Mesh
+  // Grid segment bumps. Read through the same store subscription as
+  // everything else here, so there is no ref or event channel to keep in
+  // step with this component.
+  const openPickerRequest = useUIStore(s => s.openScopePickerRequest);
   const gridSearchQuery = useUIStore(s => s.gridSearchQuery);
   const gridProviderFilter = useUIStore(s => s.gridProviderFilter);
   const gridStatusFilter = useUIStore(s => s.gridStatusFilter);
@@ -290,6 +313,16 @@ export function ScopeIndicator() {
 
   useClickOutside(open ? PICKER_ID : null, () => setOpen(false));
   useEscapeKey(closeAndReturnFocus, open);
+
+  // Open the picker on every distinct request (#2076). `useLayoutEffect` so
+  // the panel is mounted before paint — same timing as the search-focus
+  // request in `GridControls`. Deliberately no focus move: the press belongs
+  // to the switcher segment, and focusing this trigger would make the next
+  // Enter close the panel the user was just handed.
+  useLayoutEffect(() => {
+    if (openPickerRequest === 0) return;
+    setOpen(true);
+  }, [openPickerRequest]);
 
   return (
     <div className="relative flex shrink-0 items-center" data-dropdown-for={open ? PICKER_ID : undefined}>

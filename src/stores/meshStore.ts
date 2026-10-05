@@ -1,6 +1,8 @@
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
 import * as api from '../lib/tauri';
+import { addToast } from './toastStore';
+import { SCOPE_NOTICE_PROVIDER, meshDeletedScopeNotice } from '../lib/scopeNotices';
 import type { Mesh } from '../types/generated/Mesh';
 // Issue #1247 — `deleteMesh` now also (a) refetches the agent-node list so
 // ghost rows drop out of the grid + sidebar, (b) disposes the xterm for
@@ -199,6 +201,10 @@ export const useMeshStore = create<MeshState>((set) => {
       const n = agentStoreBefore.nodesById[nid];
       if (n && n.mesh_id === id) doomedNodeIds.push(nid);
     }
+    // #2076 — the scope notice names the Mesh, so read the name BEFORE the
+    // post-delete refetch drops it from `meshesById`. The id fallback keeps
+    // the copy honest for a Mesh this store never had loaded.
+    const doomedMeshName = useMeshStore.getState().meshesById.get(id)?.name ?? `Mesh #${id}`;
 
     try {
       await api.deleteMesh(id);
@@ -242,6 +248,14 @@ export const useMeshStore = create<MeshState>((set) => {
     const meshAfter = useMeshStore.getState();
     if (meshAfter.selectedMeshId === id) {
       meshAfter.selectMesh(null);
+      // #2076 — deleting the Mesh the user is looking at is a scope change
+      // nobody asked for: the clear above flips the canvas to All Nodes via
+      // the mesh→mode subscription, silently. Announce it under the name of
+      // what happened. `Mesh “X” was deleted — the canvas moved to All
+      // Nodes.` Fire-and-forget through the shared toast stack, after the
+      // selection write, so it describes a change that already happened and
+      // cannot gate or undo the delete.
+      addToast(SCOPE_NOTICE_PROVIDER, meshDeletedScopeNotice(doomedMeshName), 'info');
     }
     const agentAfter = useAgentNodeStore.getState();
     if (agentAfter.activeNodeId !== null && doomedNodeIds.includes(agentAfter.activeNodeId)) {

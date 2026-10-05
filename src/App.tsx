@@ -302,9 +302,12 @@ function App() {
         // re-pressing while already focused is a harmless re-focus, and
         // the counter pattern (0 → 1 → 2) naturally fires the effect
         // on every distinct press.
-        const ui = useUIStore.getState();
-        if (ui.viewMode !== 'filtered') ui.setViewMode('filtered');
-        ui.requestFocusGridSearch();
+        //
+        // #2076 — the flip, the focus request and the "these results span
+        // Meshes" notice are one store action, shared with the Filtered
+        // segment. The notice is informational and runs after the mode flip
+        // and the focus bump, so it can never suppress either.
+        useUIStore.getState().enterFilteredFromSearch();
         return;
       }
 

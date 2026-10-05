@@ -16,6 +16,8 @@ import { ViewModeSwitcher } from '../../src/components/ViewModeSwitcher/ViewMode
 import { ScopeIndicator } from '../../src/components/TitleBar/ScopeIndicator';
 import { useUIStore } from '../../src/stores/uiStore';
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { useToastStore } from '../../src/stores/toastStore';
+import { SEARCH_ESCAPE_NOTICE } from '../../src/lib/scopeNotices';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
@@ -46,7 +48,13 @@ beforeEach(() => {
     loading: false,
     error: null,
   });
-  useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', focusGridSearchRequest: 0 });
+  useUIStore.setState({
+    viewMode: 'all',
+    lastNonSingleMode: 'all',
+    focusGridSearchRequest: 0,
+    openScopePickerRequest: 0,
+  });
+  useToastStore.setState({ toasts: [] });
 });
 
 describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
@@ -213,6 +221,146 @@ describe('ViewModeSwitcher (wayfinder #982 / #983 / #986)', () => {
         useMeshStore.getState().selectMesh(2);
       });
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-2');
+    });
+  });
+
+  // #2076 — "scope changes announce themselves". The switcher is the
+  // producer for both notices: it asks the title-bar indicator to open its
+  // picker rather than choosing a Mesh for the user, and it announces a
+  // search that leaves a Mesh scope.
+  describe('scope notices (#2076)', () => {
+    /** The switcher and the indicator, as they sit in the title bar. */
+    function renderToolbar() {
+      return render(
+        <>
+          <ViewModeSwitcher />
+          <ScopeIndicator />
+        </>,
+      );
+    }
+
+    const picker = () => screen.queryByTestId('scope-picker');
+
+    describe('Mesh Grid with no Mesh selected', () => {
+      beforeEach(() => {
+        seedAgentNodes([NODE_A, NODE_B]);
+        useMeshStore.setState({
+          meshes: [MESH_1, MESH_2],
+          meshesById: new Map([[1, MESH_1], [2, MESH_2]]),
+          selectedMeshId: null,
+        });
+      });
+
+      it('asks for a Mesh by opening the picker instead of picking one', () => {
+        renderToolbar();
+        expect(picker()).toBeNull();
+
+        fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
+
+        // The picker is open, so the act of choosing is the user's next
+        // explicit step …
+        expect(picker()).toBeTruthy();
+        expect(screen.getByTestId('scope-indicator').getAttribute('aria-expanded')).toBe('true');
+        // … and nothing was chosen for them: no fallback Mesh, and the
+        // canvas still lands in the honest "no Mesh selected" state behind
+        // the panel (the notice never suppresses the path it describes).
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        expect(useUIStore.getState().viewMode).toBe('mesh');
+      });
+
+      it('does not open the picker when a Mesh is already the scope', () => {
+        useMeshStore.getState().selectMesh(1);
+        renderToolbar();
+
+        fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
+
+        expect(picker()).toBeNull();
+        expect(useMeshStore.getState().selectedMeshId).toBe(1);
+      });
+
+      it('re-opens the picker when the Mesh Grid segment is clicked again', () => {
+        // Clicking a segment you're already on means "give me the thing
+        // that segment owns" — the same re-arm discipline the Filtered
+        // segment follows with its focus request.
+        renderToolbar();
+        fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
+        expect(picker()).toBeTruthy();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(picker()).toBeNull();
+
+        fireEvent.click(screen.getByRole('button', { name: /mesh grid/i }));
+
+        expect(picker()).toBeTruthy();
+        expect(useUIStore.getState().openScopePickerRequest).toBe(2);
+      });
+    });
+
+    describe('a search that leaves the Mesh scope', () => {
+      beforeEach(() => {
+        seedAgentNodes([NODE_A, NODE_B]);
+        useMeshStore.setState({
+          meshes: [MESH_1, MESH_2],
+          meshesById: new Map([[1, MESH_1], [2, MESH_2]]),
+          selectedMeshId: 1,
+        });
+        useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+      });
+
+      it('announces the cross-Mesh results exactly once', () => {
+        renderToolbar();
+        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+
+        const toasts = useToastStore.getState().toasts;
+        expect(toasts).toHaveLength(1);
+        expect(toasts[0].message).toBe(SEARCH_ESCAPE_NOTICE);
+        // The live path still runs: mode switched, search focused.
+        expect(useUIStore.getState().viewMode).toBe('filtered');
+        expect(useUIStore.getState().focusGridSearchRequest).toBe(1);
+      });
+
+      it('does not announce again on a Filtered re-click — no escape happened', () => {
+        renderToolbar();
+        // Exact segment name: once Filtered is active the indicator's label
+        // reads "Filtered across meshes · …", which a loose match would also
+        // hit.
+        fireEvent.click(screen.getByRole('button', { name: 'Filtered' }));
+        // Clear the stack first, so a second announcement would be visible
+        // instead of hidden by the toast dedup (same key → same slot).
+        useToastStore.setState({ toasts: [] });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Filtered' }));
+
+        expect(useToastStore.getState().toasts).toEqual([]);
+        // The re-click still does what it advertises.
+        expect(useUIStore.getState().focusGridSearchRequest).toBe(2);
+      });
+
+      it('does not announce when the search started in a cross-Mesh view', () => {
+        useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+        renderToolbar();
+
+        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+
+        expect(useToastStore.getState().toasts).toEqual([]);
+        expect(useUIStore.getState().viewMode).toBe('filtered');
+      });
+
+      it('does not announce on every keystroke — the notice rides the escape, not the query', () => {
+        renderToolbar();
+        fireEvent.click(screen.getByRole('button', { name: /filtered/i }));
+        useToastStore.setState({ toasts: [] });
+
+        // Typing is `setGridSearchQuery` per keystroke, with no route back
+        // through the escape gesture.
+        act(() => {
+          useUIStore.getState().setGridSearchQuery('a');
+          useUIStore.getState().setGridSearchQuery('ag');
+          useUIStore.getState().setGridSearchQuery('agent');
+        });
+
+        expect(useToastStore.getState().toasts).toEqual([]);
+        expect(useUIStore.getState().gridSearchQuery).toBe('agent');
+      });
     });
   });
 });

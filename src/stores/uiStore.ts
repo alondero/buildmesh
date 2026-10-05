@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
+import { addToast } from './toastStore';
+import { SCOPE_NOTICE_PROVIDER, searchEscapeNotice } from '../lib/scopeNotices';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
 import type { ProbeTab } from '../lib/probeContext';
@@ -457,6 +459,34 @@ interface UIState extends GridControls {
   // is set on every press — not just the first one.
   focusGridSearchRequest: number;
   requestFocusGridSearch: () => void;
+
+  // ---- Scope picker open request (issue #2076) ----
+  // The same request-counter channel as `focusGridSearchRequest`, for the
+  // other imperative gesture in the title bar: `ScopeIndicator` owns its
+  // picker's open state locally, so a producer outside that component (the
+  // Mesh Grid segment) cannot set it directly. It bumps this counter and the
+  // indicator opens its picker in a `useLayoutEffect`, the same shape
+  // `GridControls` uses for search focus — no ref forwarding, no
+  // module-level singleton, no test-only reset seam.
+  //
+  // A counter rather than a boolean for the same reason as the search
+  // request: the consumer observes nothing but this number, so a second
+  // Mesh Grid press must bump it again or a user who dismissed the picker
+  // could never reopen it without changing mode.
+  openScopePickerRequest: number;
+  requestOpenScopePicker: () => void;
+
+  // ---- Search entry point + scope notice (issue #2076) ----
+  // The one implementation of the "take me to the grid search" gesture,
+  // shared by the Filtered segment (`ViewModeSwitcher`) and the
+  // ⌘/Ctrl+F global shortcut (App.tsx `focus-grid-search`). Both used to
+  // spell out the same two calls; the notice only makes sense if there is
+  // exactly one of them, because "fires once per escape" is a property of
+  // the gesture rather than of each caller.
+  //
+  // The notice never gates the gesture: the mode flip and the focus request
+  // both run first and unconditionally, and the toast is fire-and-forget.
+  enterFilteredFromSearch: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => {
@@ -692,6 +722,35 @@ export const useUIStore = create<UIState>((set, get) => {
     // counter goes 0 → 1 → 2 = two effect runs = two .focus() calls.
     requestFocusGridSearch: () => {
       set({ focusGridSearchRequest: get().focusGridSearchRequest + 1 });
+    },
+
+    openScopePickerRequest: 0,
+    // No idempotency guard — same discipline as `requestFocusGridSearch`
+    // above, and for the same reason: `ScopeIndicator`'s layout effect
+    // watches only this counter, so a same-value call would drop the
+    // second Mesh Grid press.
+    requestOpenScopePicker: () => {
+      set({ openScopePickerRequest: get().openScopePickerRequest + 1 });
+    },
+
+    enterFilteredFromSearch: () => {
+      const { viewMode, lastNonSingleMode } = get();
+      // Read BEFORE the flip: after it, every scope is cross-Mesh and the
+      // escape would be invisible. `searchEscapeNotice` decides from the
+      // derived scope (#2071), so Single over a Mesh grid counts and a
+      // Filtered re-click does not.
+      const notice = searchEscapeNotice({
+        viewMode,
+        lastNonSingleMode,
+        selectedMeshId: useMeshStore.getState().selectedMeshId,
+      });
+      if (get().viewMode !== 'filtered') get().setViewMode('filtered');
+      // Re-arms on every press, including a re-click from Filtered: the
+      // user's intent is "get me to the search box" (#1609).
+      get().requestFocusGridSearch();
+      if (notice !== null) {
+        addToast(SCOPE_NOTICE_PROVIDER, notice, 'info');
+      }
     },
   };
 });

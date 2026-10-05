@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useToastStore } from '../../src/stores/toastStore';
+import { SCOPE_NOTICE_PROVIDER, SEARCH_ESCAPE_NOTICE } from '../../src/lib/scopeNotices';
 
 // A representative single-file diff context (issue #379). The overlay needs
 // the path + root to fetch, the node/mesh to label and auto-close, and the
@@ -598,6 +600,104 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().probeOpen).toBe(true);
         expect(useUIStore.getState().probeTab).toBe('sessions');
       });
+    });
+  });
+
+  // #2076 — "scope changes announce themselves". Two channels live here:
+  // the open request the Mesh Grid segment sends to the title bar's scope
+  // picker, and `enterFilteredFromSearch`, the one shared implementation of
+  // the "jump to the search box" gesture that both the switcher segment and
+  // the ⌘/Ctrl+F shortcut already had duplicated.
+  describe('scope-change notices (#2076)', () => {
+    beforeEach(() => {
+      localStorage.removeItem('buildmesh.view-mode');
+      // meshStore FIRST: the uiStore mesh→mode subscription fires
+      // synchronously on a selection change and would clobber the viewMode
+      // set below.
+      useMeshStore.setState({ selectedMeshId: null });
+      useUIStore.setState({
+        viewMode: 'all',
+        lastNonSingleMode: 'all',
+        focusGridSearchRequest: 0,
+        openScopePickerRequest: 0,
+      });
+      useToastStore.setState({ toasts: [] });
+    });
+
+    it('requestOpenScopePicker notifies on every press — no idempotency guard', () => {
+      // Same discipline as `requestFocusGridSearch`: the consumer effect
+      // observes only this counter, so a same-value call would swallow the
+      // second Mesh Grid press. Two presses must be two bumps.
+      expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+      useUIStore.getState().requestOpenScopePicker();
+      useUIStore.getState().requestOpenScopePicker();
+      expect(useUIStore.getState().openScopePickerRequest).toBe(2);
+    });
+
+    it('announces once when a search escapes a Mesh-scoped view', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      const toasts = useToastStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0].message).toBe(SEARCH_ESCAPE_NOTICE);
+      expect(toasts[0].provider).toBe(SCOPE_NOTICE_PROVIDER);
+      expect(toasts[0].severity).toBe('info');
+    });
+
+    it('announces the escape from a Mesh-scoped Single view too — the scope, not the label, decides', () => {
+      // Single reports the grid scope it was entered from, so a solo out of
+      // a Mesh is still a Mesh-anchored scope and the search still spans
+      // every Mesh.
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toHaveLength(1);
+    });
+
+    it('announces nothing when the search starts from a cross-Mesh view', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('announces nothing on a second search from the Filtered view itself', () => {
+      // A re-click means "get me to the search box" — no scope change
+      // happened, so there is nothing to announce. The predicate gets this
+      // for free: Filtered is cross-Mesh by construction, so it can never
+      // report an escape.
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('announces nothing from Mesh Grid with no Mesh selected — there was no Mesh to leave', () => {
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('never suppresses the live path: the mode flips and the focus request arms on every press', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useUIStore.getState().viewMode).toBe('filtered');
+      expect(useUIStore.getState().focusGridSearchRequest).toBe(2);
     });
   });
 
