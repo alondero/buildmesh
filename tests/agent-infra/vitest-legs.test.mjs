@@ -81,15 +81,10 @@ test('the legs keep the threads pool CI needs, and the browser belongs to the in
   assert.match(body, /npx playwright install --with-deps chromium/);
 });
 
-test('the required Quality check aggregates both branches and fails closed', () => {
-  // `Quality (Linux)` is a required status check, so renaming it is a
-  // branch-protection change and skipping it counts as passing. The aggregate
-  // must therefore need both branches and must not rely on the implicit skip.
-  const aggregate = jobBlock('quality');
-  assert.match(aggregate, /needs: \[changes, quality-gates, quality-tests\]/);
-  assert.match(aggregate, /if: always\(\) &&/);
-  assert.match(aggregate, /quality-gates=\$GATES_RESULT quality-tests=\$TESTS_RESULT - the frontend gate is not fully green/);
-});
+// The aggregate `Quality (Linux)` — its never-skip rule and the four
+// classification classes it must certify — is owned by
+// `tests/agent-infra/quality-gate.test.mjs`, which tests the guard's behaviour
+// rather than the workflow text.
 
 test('the legs check out full history, because a unit test reads the release tags', () => {
   // `tests/unit/app-version.test.ts` resolves the latest release with

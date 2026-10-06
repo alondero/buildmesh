@@ -133,48 +133,38 @@ jobs:
   quality:
     name: Quality (Linux)
     needs: [changes, quality-gates, quality-tests]
-    # `always()` plus an explicit result check rather than relying on the
-    # implicit skip, for the same reason `rust-bindings` below does it: a
-    # required status check that GitHub reports as *skipped* counts as
-    # satisfied, so a silently skipped aggregate would be a hole in the merge
-    # gate. It fails instead.
+    # `always()`, and never a skip of its own. A required status check that
+    # GitHub reports as *skipped* counts as satisfied, so the aggregate must
+    # run in every class and decide in its guard, where the reason an upstream
+    # branch is absent is visible (scripts/ci/quality-gate.mjs).
     #
-    # The one legitimate skip is a pull request whose diff touched no frontend
-    # on a successful classification: there is nothing for the browser or
-    # vitest branch to prove, and a skipped check reports success the same way
-    # this job would. Every other absence (a failed classification, missing
-    # outputs) keeps the job running so the guard fails with a reason.
-    if: always() && !(needs.changes.outputs.frontend == 'false' && needs.changes.result == 'success')
+    # An earlier revision of this split skipped on
+    # `needs.changes.outputs.frontend == 'false'` to save a few seconds, and
+    # that broke the merge gate in both directions (issue #2046 review):
+    #
+    #   * `Rust tests + TS bindings` requires `Quality (Linux)` == success, so
+    #     on every Rust-only pull request the aggregate skipped, that required
+    #     check went red with "the Rust suite is not fully green", and the
+    #     pull request could not merge — for a suite that had never run.
+    #   * On a docs-only pull request the aggregate skipped while
+    #     `Quality gates (Linux)` still ran and could fail, leaving all three
+    #     required checks skipped (satisfied) over a red non-required one.
+    #
+    # The wall-clock win this job was meant to deliver came from running
+    # `quality-gates` and `quality-tests` in parallel, not from skipping, and
+    # the guard is a few seconds.
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
     steps:
-      # The dependency results arrive as env vars, not through an expression:
-      # GitHub's workflow validator rejects the `needs.*.result` wildcard
-      # inside a function call (`join(needs.*.result, " ")` fails the whole file
-      # with zero jobs), so read the jobs individually. A matrix dependency's
-      # `result` is `success` only when every leg succeeded, which is the
-      # aggregate this gate needs.
-      - name: Refuse to pass unless both frontend branches succeeded
-        shell: bash
+      - name: Refuse to pass unless the frontend branch is fully green
+        run: node scripts/ci/quality-gate.mjs
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
           GATES_RESULT: ${{ needs.quality-gates.result }}
           TESTS_RESULT: ${{ needs.quality-tests.result }}
-          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
-        run: |
-          # A classification that did not succeed leaves empty outputs, which
-          # would otherwise read as "no frontend changed" and skip the vitest
-          # branch. Fail closed, exactly as the Rust gate does.
-          if [ "$CHANGES_RESULT" != success ] || [ -z "$FRONTEND_CHANGED" ]; then
-            echo "::error::change-scope result=$CHANGES_RESULT frontend='$FRONTEND_CHANGED' - refusing to certify the frontend suite without a successful classification."
-            exit 1
-          fi
-          if [ "$GATES_RESULT" != success ] || [ "$TESTS_RESULT" != success ]; then
-            echo "::error::quality-gates=$GATES_RESULT quality-tests=$TESTS_RESULT - the frontend gate is not fully green."
-            exit 1
-          fi
-          echo "frontend=$FRONTEND_CHANGED quality-gates=$GATES_RESULT quality-tests=$TESTS_RESULT"
 
   # The static half of the frontend gate: the cheap checks, the frontend build,
   # and the bundle budget. Split out of `quality` so it runs *beside* the vitest

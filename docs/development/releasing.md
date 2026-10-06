@@ -150,7 +150,7 @@ same ground:
 | Check | Required | What it proves |
 |---|---|---|
 | `Verification / Manifest versions` | no — see the gap below | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. |
-| `Verification / Quality (Linux)` | yes | The aggregate frontend gate. It runs no check of its own: it passes only when the change-scope job succeeded and both branches underneath it did — `Quality gates (Linux)` (agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, process-spawn discipline) and the three `Quality vitest (<leg>)` legs that between them run every unit and integration test file. The one check that legitimately skips: a pull request whose diff touched no frontend on a successful classification. |
+| `Verification / Quality (Linux)` | yes | The aggregate frontend gate. It runs no check of its own, and it never skips: a required check that GitHub reports as *skipped* counts as satisfied, so the decision lives in `scripts/ci/quality-gate.mjs` where the reason an upstream branch is absent is visible. It passes only when the change-scope job succeeded, `Quality gates (Linux)` passed (agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, process-spawn discipline — this is what stops a docs-only pull request), and the three `Quality vitest (<leg>)` legs passed. The one absence it tolerates: the vitest legs skipping themselves when the classification says no frontend changed. |
 | `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
 | `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. Caches its Cargo target directory; macOS deliberately does not. |
@@ -200,7 +200,16 @@ Two required checks — `Quality (Linux)` and `Rust tests + TS bindings` — are
 aggregates that keep `if: always()` and an explicit result check rather than
 relying on the implicit skip, because a required status check GitHub reports as
 *skipped* counts as satisfied. Each fails with a reason instead, including when
-the change-scope job itself failed.
+the change-scope job itself failed. `Quality (Linux)` must not carry a skip
+condition of its own, for a reason worth stating because it is easy to
+reintroduce: `Rust tests + TS bindings` requires `Quality (Linux)` to equal
+`success`, so a skip on one class turns that required check red, and any skip
+also leaves a docs-only pull request mergeable over a red `Quality gates
+(Linux)`. An earlier revision of this split skipped on
+`needs.changes.outputs.frontend == 'false'` and broke both. The rules live in
+`scripts/ci/quality-gate.mjs` and are tested per classification class in
+`tests/agent-infra/quality-gate.test.mjs`; the wall-clock win came from running
+`Quality gates (Linux)` and the vitest legs in parallel, not from skipping.
 
 A caller-supplied `profile` input narrows the graph for pushes to `main`:
 `build.yml` passes `light`, which skips the Rust branch entirely (the merge
