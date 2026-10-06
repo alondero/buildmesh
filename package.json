@@ -39,7 +39,8 @@
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:ci": "vitest run tests/unit tests/integration && playwright test --reporter=line",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "bench:terminal-writer": "node --expose-gc scripts/bench-terminal-writer.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.1.1",

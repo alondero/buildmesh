@@ -193,7 +193,9 @@ describe('Event Listener Integration', () => {
     // Flush the requestAnimationFrame that scheduleFlush uses
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith('Hello\n');
+    // The registry hands xterm its parse-completion callback (issue #2018),
+    // which is the signal the writer budgets on.
+    expect(writeSpy).toHaveBeenCalledWith('Hello\n', expect.any(Function));
   });
 
   it('binary Channel chunks are written to the terminal without Base64', async () => {
@@ -213,7 +215,7 @@ describe('Event Listener Integration', () => {
     onChunk.onmessage(new Uint8Array([0xe2, 0x96, 0x88]));
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]), expect.any(Function));
   });
 
   it('agent-output byte payloads are decoded and written to terminal as bytes', async () => {
@@ -228,7 +230,7 @@ describe('Event Listener Integration', () => {
 
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]), expect.any(Function));
   });
 
   it('events for different sessions are not cross-written', async () => {
@@ -247,7 +249,7 @@ describe('Event Listener Integration', () => {
 
     vi.runAllTimers();
 
-    expect(write1Spy).toHaveBeenCalledWith('From session 1\n');
+    expect(write1Spy).toHaveBeenCalledWith('From session 1\n', expect.any(Function));
     expect(write2Spy).not.toHaveBeenCalled();
   });
 
