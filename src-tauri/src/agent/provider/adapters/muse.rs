@@ -123,6 +123,52 @@
 //! `PermissionRequested` lifecycle signal is impossible by construction and is
 //! deliberately not classified. A `run/terminal` record yields the node back
 //! to the user; `terminal` is `completed | failed | cancelled`.
+//!
+//! **Flags Buildmesh never passes (issue #1710).** `supports_extra_args` is
+//! `true`, so `extra_args` reaches any flag Muse accepts — unvalidated, which
+//! is correct for an escape hatch and wrong for a default. Every flag this
+//! adapter does not bake therefore carries an explicit verdict recorded in
+//! `docs/learning/muse-harness-capabilities.md` ("Launch flags: explicit
+//! verdicts"), verified against the installed 1.3.0 `muse --help` /
+//! `muse exec --help`. The never-pass set, and why:
+//!
+//! - `-w` / `--worktree` (+ `--worktree-base`, `--worktree-existing`) — ADR-0003.
+//!   The worktree provisioner (`git/worktree/provision.rs`) has already created
+//!   the node's checkout before this process starts; a harness-created one would
+//!   leave the node running in a directory Buildmesh never provisioned, which
+//!   also desyncs the `trust.json` key above and the watcher's session-log path.
+//!   Resume is a no-op on the worktree, so nothing re-passes it later either.
+//!   Same verdict as Grok's `-w`.
+//! - `--workspace <PATH>` — the node's world is its spawn cwd, which is exactly
+//!   what `ensure_workspace_trusted` keys on. A second policy-gated tools root
+//!   splits the agent from its node directory, and nothing would know which
+//!   root won.
+//! - `--provider echo` — a deterministic test double (its `--echo-delay-ms`
+//!   companion exists only to keep it deterministic) that answers canned text,
+//!   never touches the repo, and ignores the model override (`--model` is scoped
+//!   to "non-echo providers"). Never baked, never inherited from a default.
+//! - `--base-url` — endpoint routing is a credential decision belonging to the
+//!   proxied-provider story (`preferences::compatibility::resolve_provider_env`,
+//!   the Codex-proxy precedent), not a freeform launch flag.
+//! - `--subagent-worktree-isolation` — a documented compatibility no-op
+//!   ("capability defaults on"), so passing it asserts nothing.
+//! - `--no-session-log` — the passive watcher arms on that very durable log, so
+//!   suppressing it makes the node unobservable rather than quiet.
+//!
+//! The `exec`-only flags (`--max-model-steps`, `--max-tool-output-bytes`,
+//! `--context-compaction-*`, `--session-id`, `--json`, `--prompt-file`,
+//! `--output-schema`, …) are absent from the interactive TUI's grammar: this
+//! adapter spawns the TUI, never `muse exec`, so forwarding one would make the
+//! CLI reject the launch outright. `--max-model-steps` and
+//! `--max-tool-output-bytes` are run-budget knobs for a headless mode Buildmesh
+//! does not drive; the compaction thresholds additionally take a fraction, which
+//! no current `HarnessConfigValue` slot can carry.
+//!
+//! No flag in this pass graduates to modeled — `ResolvedAgentConfig` and the
+//! capability table are unchanged. OpenCode's `--agent <name>` remains the
+//! template if one ever does (`HarnessConfigValue` + `ResolvedAgentConfig` +
+//! capability gate + an adapter `*_args` helper, never a provider-name check at
+//! a call site).
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -1044,6 +1090,148 @@ mod tests {
             !prepared.recipe.base_args.iter().any(|a| a == "--yolo"),
             "resume launch must never bake --yolo (issues #1705 + #1788); got {:?}",
             prepared.recipe.base_args
+        );
+    }
+
+    /// Issue #1710 — the never-emit pin for every flag outside the baked set.
+    ///
+    /// `extra_args` is the documented escape hatch and is deliberately **not**
+    /// filtered here: a mesh may legitimately need a flag this table has not
+    /// seen, and #1358 keeps that path verbatim. What this pins is the argv
+    /// Buildmesh composes *itself* — `spawn_recipe` plus the model, prefill and
+    /// resume layers of `default_prepare` — across every supported platform and
+    /// both launch paths. A future "while we're here" flag addition, or a config
+    /// field that renders one, trips here instead of shipping a harness-owned
+    /// worktree (ADR-0003) or an `exec`-only flag that makes the CLI reject the
+    /// launch before a TUI ever opens.
+    ///
+    /// The list spans every non-modeled verdict in the #1710 table — never-pass,
+    /// passthrough-only and deferred alike, because for argv composition they
+    /// behave identically: Buildmesh does not write them.
+    ///
+    /// Deliberately **absent**: the flags owned by sibling issues
+    /// (`--reasoning-effort` #1704, `--approval-mode` / `--permission-profile` /
+    /// `--approval-judge` #1705, `--trust-workspace` #1706, the
+    /// `--sandbox-network` / `--disable-write` / `--disable-shell` /
+    /// `--enable-shell-tool` group #1707/#1788, and `--no-session-log`'s
+    /// watcher consequences #1709). Those verdicts win on overlap and may
+    /// legitimately start being emitted, so pinning them here would only
+    /// obstruct the sibling work. The lists mirror the tables in
+    /// `docs/learning/muse-harness-capabilities.md`, verified against the
+    /// installed 1.3.0 `muse --help` / `muse exec --help`.
+    #[test]
+    fn composed_argv_never_carries_a_flag_buildmesh_declined_to_model() {
+        use crate::agent::capabilities::ResolvedAgentConfig;
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+
+        /// Flags Buildmesh must never place in a composed Muse argv. Matched on
+        /// the flag name, so both `--flag value` and `--flag=value` are caught.
+        const DECLINED: &[&str] = &[
+            // -- never-pass (the #1710 verdict table) --
+            "-w",
+            "--worktree",
+            "--worktree-base",
+            "--worktree-existing",
+            "--workspace",
+            "--provider",
+            "--base-url",
+            "--subagent-worktree-isolation",
+            "--no-session-log",
+            // -- passthrough-only --
+            "--preset",
+            "--parallel-tool-calls",
+            "--no-parallel-tool-calls",
+            "--agents",
+            // -- deferred --
+            "--image",
+            // -- exec-only: absent from the interactive TUI's grammar --
+            "--json",
+            "--prompt-file",
+            "--api-key-stdin",
+            "--output-schema",
+            "--max-model-steps",
+            "--max-tool-output-bytes",
+            "--context-compaction-strategy",
+            "--context-compaction-soft-threshold",
+            "--context-compaction-hard-threshold",
+            "--session-id",
+            "--allow-workspace-switch",
+            "--user-input-auto-resolve",
+            "--disable-web-tools",
+            "--no-foreign-personal-context",
+        ];
+
+        let declined = |arg: &str| {
+            let name = arg.split_once('=').map_or(arg, |(name, _)| name);
+            DECLINED.contains(&name)
+        };
+
+        let config = ResolvedAgentConfig {
+            model: Some("claude-sonnet-4-5".to_string()),
+            effort: None,
+            // The escape hatch itself is out of scope; the pin covers what
+            // Buildmesh composes around it.
+            extra_args: None,
+        };
+        let session_id = "12345678-1234-4234-8234-123456789abc";
+        let modes = [
+            ("fresh", SessionIdModeRef::None, Some("fix the auth bug")),
+            ("resume", SessionIdModeRef::Resume(session_id), None),
+        ];
+
+        let mut composed = 0usize;
+        for platform in MUSE.available_on() {
+            for (mode, session, prefill) in modes {
+                let prepared = default_prepare(
+                    &MUSE,
+                    HarnessLaunchInput {
+                        platform: *platform,
+                        runtime: env_type_for(*platform),
+                        session,
+                        config: &config,
+                        prefill,
+                        sandbox: false,
+                    },
+                );
+                // Anti-vacuity: this pass must have composed real argv before
+                // the negative assertions below can mean anything. Without it a
+                // regression that emptied the recipe would turn the whole pin
+                // into a silent pass.
+                assert!(
+                    prepared
+                        .recipe
+                        .base_args
+                        .iter()
+                        .any(|arg| arg == "--disable-approval"),
+                    "muse {mode} launch on {platform:?} composed no baked policy \
+                     flag, so the declined-flag scan below would be vacuous; \
+                     got {:?}",
+                    prepared.recipe.base_args
+                );
+                composed += 1;
+                let argv = prepared
+                    .recipe
+                    .base_args
+                    .iter()
+                    .chain(prepared.recipe.trailing_args.iter());
+                for arg in argv {
+                    assert!(
+                        !declined(arg),
+                        "muse {mode} launch on {platform:?} must not carry {:?} — \
+                         issue #1710 declines that flag (see \
+                         docs/learning/muse-harness-capabilities.md, \"Launch \
+                         flags: explicit verdicts\"); composed argv: {:?}",
+                        arg,
+                        prepared.recipe.base_args
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            composed,
+            MUSE.available_on().len() * 2,
+            "the pin must cover every supported platform on both the fresh and \
+             the resume path; composed {composed} launches"
         );
     }
 

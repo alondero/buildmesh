@@ -7,6 +7,7 @@ metadata:
   muse_version: 1.3.0 (1.3.0-R3401.1), native Windows + WSL (macOS unverified)
   date: 2026-09-22
   workspace_trust: implemented 2026-09-22 — pre-provisioned in Muse's config root (issue #1706); verified live with `muse skills list`
+  launch_flags: verdicts recorded 2026-10-06 against 1.3.0 (issue #1710); no flag modeled
 ---
 
 # Meta Muse harness capabilities vs Buildmesh
@@ -49,6 +50,100 @@ passive session-log watcher (issue #1709) — see
 | `available_on` | Linux, macOS, Windows | Native on Windows since Muse 1.3.0 |
 | Base recipe | `--disable-approval --disable-sandbox` | Approval policy #1705 (`--yolo` explicitly rejected); sandbox off so the agent shell reaches the OS credential store (#1788) |
 | Shell | `WindowsShell::Direct` | `muse` / `muse.exe` is a real PE/ELF/Mach-O binary on every platform |
+
+## Launch flags: explicit verdicts (#1710)
+
+`supports_extra_args = true`, so anything Muse accepts can reach a spawn
+through `extra_args` — unvalidated, which is right for an escape hatch but a
+poor place for a *default*. Every Muse launch flag Buildmesh does not bake
+therefore carries an explicit verdict, so a mesh stops cargo-culting argv from
+the internet into `extra_args` and re-creating the failure modes #1148 removed
+(unsupported flags, harness-owned worktrees, swallowed positionals).
+
+The vocabulary: **modeled** (Buildmesh emits it from configuration),
+**passthrough-only** (reachable via `extra_args`, never baked), **never-pass**
+(Buildmesh must not emit it — the escape hatch is documented, not filtered, per
+#1358), **deferred**, or **cross-link** (a sibling issue owns the verdict and
+wins on overlap).
+
+Verified against the installed `Muse Code 1.3.0 (1.3.0-R3401.1)` — `muse --help`
+and `muse exec --help`, re-run 2026-10-06 for this issue. The issue's opening
+table was captured on **1.1.1**; 1.3.0 keeps every flag it lists and adds more
+than it missed (`--agents`, `--no-session-log`, and the
+`--sandbox-network` / `--disable-write` / `--disable-shell` /
+`--enable-shell-tool` safety group), so the re-check was not a formality.
+
+### Never-pass
+
+| Flag | Why Buildmesh must not emit it |
+|---|---|
+| `-w, --worktree [off\|create\|existing]`, `--worktree-base`, `--worktree-existing` | **ADR-0003.** Buildmesh's worktree provisioner (`git/worktree/provision.rs`) has already created the node's checkout before the process starts; a harness-created one would leave the node running somewhere Buildmesh never provisioned, desyncing the node↔path mapping, the trust key (#1706) and the watcher's log path. Resume is deliberately a no-op on the worktree, so there is no resume-time reason to re-pass it either. Same verdict as Grok's `-w`. |
+| `--workspace <PATH>` | A node's world is its spawn cwd, which is also what the trust store keys on (#1706). A second policy-gated tools root splits the agent from its own node directory, and nothing in Buildmesh would know which root won. |
+| `--provider <echo\|meta>` | `echo` is a deterministic test double — its companion `--echo-delay-ms` exists only to make it deterministic. A node launched with it answers canned text, never touches the repo, and silently ignores the model override (the help scopes `--model` to "non-echo providers"). Never baked and never inherited from an app default; only a deliberate `extra_args` entry may select it. |
+| `--base-url <URL>` | Endpoint routing is a credential decision, not a launch flag: it belongs with the proxied-provider story (`preferences/compatibility.rs` `resolve_provider_env`, the Codex-proxy precedent). A freeform base URL routes a node's traffic — and its bearer token — past that story. |
+| `--subagent-worktree-isolation` | Documented as a compatibility no-op: "capability defaults on. Only an affirmative per-child request asks for isolation". Passing it asserts nothing, and reads as a policy Buildmesh holds when it does not. |
+| `--no-session-log` | Buildmesh's attention signal *is* that durable log: `services::muse_watcher` tails the run boundaries in `~/.local/share/muse/sessions/…/session.jsonl` (#1709), and the transcript reader and session recovery read the same tree (#1708). Suppressing it does not make a node quieter — it makes the node unobservable. |
+
+### Passthrough-only
+
+| Flag | Why Buildmesh has no opinion |
+|---|---|
+| `--preset <native-basic\|miniswe>` | The help names the two values and nothing more — no documented tool, approval or sandbox semantics per preset, so there is no vocabulary to model and nothing stable to pin a test against. A preset would also override the launch policy Buildmesh already owns (baked approval/sandbox flags, pre-provisioned trust) rather than add to it. Revisit only if Muse publishes stable per-preset semantics. |
+| `--parallel-tool-calls` / `--no-parallel-tool-calls` | Meta API concurrency, orthogonal to Buildmesh's contract. Also a shape argument: `ResolvedAgentConfig` forwards a *value*, so a negation flag has no slot — the capability-mask design cannot say "off" without inventing a tri-state for every harness. |
+| `--agents <JSON>` | An ephemeral agent-definition overlay carried as a raw JSON blob. Buildmesh's per-node agent configuration already has its own source of truth, and a blob is not the closed string vocabulary `--agent <name>` is for OpenCode — see the slot note below. |
+
+### Deferred
+
+| Flag | Note |
+|---|---|
+| `--image <PATH>` | Multimodal prefill, explicitly out of scope here. One drift detail for whoever picks it up: the interactive TUI accepts a **single** `--image` while `muse exec` accepts it **repeatedly** — a per-surface cardinality difference, the same class of mismatch as `--effort` vs `--reasoning-effort`. |
+
+### Owned by sibling issues
+
+| Flag | Owner |
+|---|---|
+| `--reasoning-effort` (8-level closed vocabulary) | #1704 |
+| `--approval-mode`, `--yolo`, `--permission-profile`, `--approval-judge`, `--disable-approval` | #1705 — `--permission-profile` and `--approval-judge` are recorded here only to note where they went |
+| `--trust-workspace` | #1706 |
+| `--disable-sandbox`, `--sandbox-network`, `--disable-write`, `--disable-shell`, `--enable-shell-tool` | #1707, #1788 |
+| watcher consequences of the session log | #1709 |
+
+### `exec`-only flags never reach the interactive recipe
+
+Buildmesh spawns the **interactive TUI**, never `muse exec`. These flags exist
+only on `muse exec` (verified live on 1.3.0), so forwarding one does not
+degrade behaviour — it makes the CLI reject the whole launch instead of opening
+a TUI:
+
+`--json`, `--prompt-file`, `--api-key-stdin`, `--output-schema`,
+`--max-model-steps`, `--max-tool-output-bytes`,
+`--context-compaction-strategy`, `--context-compaction-soft-threshold`,
+`--context-compaction-hard-threshold`, `--session-id`,
+`--allow-workspace-switch`, `--user-input-auto-resolve`, `--disable-web-tools`,
+`--no-foreign-personal-context`
+
+`--max-model-steps` and `--max-tool-output-bytes` are the run-budget flags this
+issue was opened for; `--context-compaction-*` is the third budget family. Two
+notes worth keeping: `--session-id` being exec-only independently confirms that
+Muse's interactive session ids cannot be assigned by the caller — which is why
+the identity is captured from `session-index.db` instead (#1794) — and the
+compaction thresholds take a fraction, so modeling them would have meant a
+numeric type in `HarnessConfigValue`, not the string shape every current
+harness option uses.
+
+Conversely `--agents` and `--echo-delay-ms` are interactive-only.
+
+### Nothing graduates to modeled in this pass
+
+No Muse flag earned a `HarnessConfigValue` field, so `ResolvedAgentConfig` and
+the capability table are unchanged. The slot is deliberately left open for a
+future promotion: OpenCode's `--agent <name>` is the template — a value added to
+`HarnessConfigValue` + `ResolvedAgentConfig`, behind a capability gate, rendered
+by an adapter `*_args` helper, never a provider-name check at a call site. Of the
+verdicts above, only two could eventually qualify: `--agents` (once Muse
+publishes a stable, name-addressable overlay vocabulary to send instead of a
+blob) and `--parallel-tool-calls` (once the harness-wide tri-state question is
+answered for every adapter at once, not just Muse).
 
 ## Workspace trust (#1706)
 
