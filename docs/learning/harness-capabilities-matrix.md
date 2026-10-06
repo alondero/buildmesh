@@ -291,12 +291,18 @@ chooses its own and Buildmesh recovers it.
 | Cline | Self-assigns | No |
 | Terminal | Buildmesh mints | No |
 
-Two other adapter-level behaviours worth knowing when adding support:
+Three other adapter-level behaviours worth knowing when adding support:
 
 - **Native sandbox flag** — Antigravity is the only harness where Buildmesh
   passes a native sandbox argument (`--sandbox`). Meta Muse ships its own OS
   sandbox that Buildmesh disables at launch so the agent's `git`/`gh`
   credentials reach the keyring.
+- **Harness-owned worktree flags** — none are passed, because Buildmesh
+  provisions the node's checkout itself (ADR-0003). Where a harness exposes
+  them (`grok -w`, `muse -w` / `--worktree`), the verdict is never-pass; Muse
+  also exposes `--workspace`, which would hand a node a second tools root
+  instead of its own directory. Muse's full flag-by-flag verdicts live in
+  [its deep dive](muse-harness-capabilities.md) (#1710).
 - **Backend env reset** — only the Claude Code adapter clears the
   Claude-compatible backend environment variables before spawn, so a
   Claude-compatible profile cannot leak another harness's backend routing into
