@@ -147,6 +147,8 @@
 //!   companion exists only to keep it deterministic) that answers canned text,
 //!   never touches the repo, and ignores the model override (`--model` is scoped
 //!   to "non-echo providers"). Never baked, never inherited from a default.
+//!   `--echo-delay-ms` follows it to never-pass: it is scoped to that provider,
+//!   so there is no configuration in which Buildmesh would want it.
 //! - `--base-url` — endpoint routing is a credential decision belonging to the
 //!   proxied-provider story (`preferences::compatibility::resolve_provider_env`,
 //!   the Codex-proxy precedent), not a freeform launch flag.
@@ -159,7 +161,9 @@
 //! `--context-compaction-*`, `--session-id`, `--json`, `--prompt-file`,
 //! `--output-schema`, …) are absent from the interactive TUI's grammar: this
 //! adapter spawns the TUI, never `muse exec`, so forwarding one would make the
-//! CLI reject the launch outright. `--max-model-steps` and
+//! CLI reject the launch outright. `--session-id` is the sharp one, because
+//! `AgentProvider`'s default `session_assign_args` emits exactly that — hence
+//! the explicit empty override below. `--max-model-steps` and
 //! `--max-tool-output-bytes` are run-budget knobs for a headless mode Buildmesh
 //! does not drive; the compaction thresholds additionally take a fraction, which
 //! no current `HarnessConfigValue` slot can carry.
@@ -710,6 +714,23 @@ impl AgentProvider for MuseAdapter {
     fn resume_args(&self, id: &str) -> Vec<String> {
         vec!["resume".into(), id.into()]
     }
+
+    /// Muse self-assigns its interactive session ids, so `Assign` mode must
+    /// forward nothing. The trait default would emit `--session-id <uuid>`,
+    /// and that flag exists **only on `muse exec`** — the interactive TUI
+    /// would reject the launch outright (verified against the installed 1.3.0
+    /// `muse --help` / `muse exec --help`, issue #1710).
+    ///
+    /// Today `prepare_context` never routes a self-assigning adapter into
+    /// `Assign` (`agent::spawn::prepare.rs` checks `self_assigns_session_id()`
+    /// first), so this is defence in depth rather than a live crash — but
+    /// `default_prepare` is a public seam, and every other self-assigning
+    /// adapter (agy, cline, codex, commandcode, cursor, kimi, mcode,
+    /// opencode) already overrides this to `vec![]`. Being the lone exception
+    /// is exactly how an `exec`-only flag would reach the TUI later.
+    fn session_assign_args(&self, _id: &str) -> Vec<String> {
+        vec![]
+    }
     fn prefill_args(&self, text: &str) -> Vec<String> {
         vec![text.into()]
     }
@@ -1098,16 +1119,22 @@ mod tests {
     /// `extra_args` is the documented escape hatch and is deliberately **not**
     /// filtered here: a mesh may legitimately need a flag this table has not
     /// seen, and #1358 keeps that path verbatim. What this pins is the argv
-    /// Buildmesh composes *itself* — `spawn_recipe` plus the model, prefill and
-    /// resume layers of `default_prepare` — across every supported platform and
-    /// both launch paths. A future "while we're here" flag addition, or a config
-    /// field that renders one, trips here instead of shipping a harness-owned
-    /// worktree (ADR-0003) or an `exec`-only flag that makes the CLI reject the
-    /// launch before a TUI ever opens.
+    /// Buildmesh composes *itself* — `spawn_recipe` plus the model, prefill
+    /// and session layers of `default_prepare` — across every supported
+    /// platform and **all three** session modes. A future "while we're here"
+    /// flag addition, or a config field that renders one, trips here instead
+    /// of shipping a harness-owned worktree (ADR-0003) or an `exec`-only flag
+    /// that makes the CLI reject the launch before a TUI ever opens.
     ///
-    /// The list spans every non-modeled verdict in the #1710 table — never-pass,
-    /// passthrough-only and deferred alike, because for argv composition they
-    /// behave identically: Buildmesh does not write them.
+    /// `Assign` is the mode that earns its place in this list: it is the one
+    /// that reaches [`AgentProvider::session_assign_args`], whose trait
+    /// default emits `--session-id <uuid>`. That flag is `exec`-only, so an
+    /// adapter that inherited the default would break every interactive
+    /// launch routed through `Assign`. Fresh and `Resume` never touch it.
+    ///
+    /// The list spans every non-modeled verdict in the #1710 table —
+    /// never-pass, passthrough-only and deferred alike, because for argv
+    /// composition they behave identically: Buildmesh does not write them.
     ///
     /// Deliberately **absent**: the flags owned by sibling issues
     /// (`--reasoning-effort` #1704, `--approval-mode` / `--permission-profile` /
@@ -1144,6 +1171,9 @@ mod tests {
             "--agents",
             // -- deferred --
             "--image",
+            // Interactive-only, and meaningless without the test-double
+            // provider that is itself never-pass above.
+            "--echo-delay-ms",
             // -- exec-only: absent from the interactive TUI's grammar --
             "--json",
             "--prompt-file",
@@ -1177,6 +1207,7 @@ mod tests {
         let modes = [
             ("fresh", SessionIdModeRef::None, Some("fix the auth bug")),
             ("resume", SessionIdModeRef::Resume(session_id), None),
+            ("assign", SessionIdModeRef::Assign(session_id), None),
         ];
 
         let mut composed = 0usize;
@@ -1200,38 +1231,60 @@ mod tests {
                 assert!(
                     prepared
                         .recipe
-                        .base_args
-                        .iter()
+                        .argv()
                         .any(|arg| arg == "--disable-approval"),
                     "muse {mode} launch on {platform:?} composed no baked policy \
                      flag, so the declined-flag scan below would be vacuous; \
                      got {:?}",
-                    prepared.recipe.base_args
+                    prepared.recipe.argv().collect::<Vec<_>>()
                 );
                 composed += 1;
-                let argv = prepared
-                    .recipe
-                    .base_args
-                    .iter()
-                    .chain(prepared.recipe.trailing_args.iter());
-                for arg in argv {
+                // `SpawnRecipe::argv()` is the same ordering the child sees:
+                // options, then trailing positionals.
+                let argv: Vec<&str> = prepared.recipe.argv().collect();
+                for arg in &argv {
                     assert!(
                         !declined(arg),
-                        "muse {mode} launch on {platform:?} must not carry {:?} — \
+                        "muse {mode} launch on {platform:?} must not carry {arg:?} — \
                          issue #1710 declines that flag (see \
                          docs/learning/muse-harness-capabilities.md, \"Launch \
-                         flags: explicit verdicts\"); composed argv: {:?}",
-                        arg,
-                        prepared.recipe.base_args
+                         flags: explicit verdicts\"); composed argv: {argv:?}"
                     );
                 }
             }
         }
         assert_eq!(
             composed,
-            MUSE.available_on().len() * 2,
-            "the pin must cover every supported platform on both the fresh and \
-             the resume path; composed {composed} launches"
+            MUSE.available_on().len() * modes.len(),
+            "the pin must cover every supported platform on all three session \
+             modes; composed {composed} launches"
+        );
+    }
+
+    /// Issue #1710 — `Assign` mode must forward nothing (the defect this
+    /// override closes).
+    ///
+    /// The `AgentProvider` default for `session_assign_args` emits
+    /// `--session-id <uuid>`, and that flag exists only on `muse exec`: the
+    /// interactive TUI rejects it. Muse is self-assigning, so it is the one
+    /// adapter that must never inherit that default. This mirrors
+    /// `commands::agent_tests::agy_assign_omits_session_flag` and
+    /// `codex_assign_omits_session_flag` at the command layer, and the
+    /// `session_assign_args` overrides in the eight sibling self-assigning
+    /// adapters.
+    #[test]
+    fn assign_mode_forwards_no_session_flag() {
+        assert!(
+            MUSE.session_assign_args("any-id").is_empty(),
+            "muse self-assigns its session ids; Assign mode must not forward \
+             --session-id (exec-only flag, would reject the interactive \
+             launch); got {:?}",
+            MUSE.session_assign_args("any-id")
+        );
+        assert!(
+            MUSE.self_assigns_session_id(),
+            "this override is only correct while muse self-assigns; if that \
+             flips, the trait default (and this test's premise) must change"
         );
     }
 

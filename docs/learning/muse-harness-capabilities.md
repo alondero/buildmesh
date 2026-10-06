@@ -80,6 +80,7 @@ than it missed (`--agents`, `--no-session-log`, and the
 | `-w, --worktree [off\|create\|existing]`, `--worktree-base`, `--worktree-existing` | **ADR-0003.** Buildmesh's worktree provisioner (`git/worktree/provision.rs`) has already created the node's checkout before the process starts; a harness-created one would leave the node running somewhere Buildmesh never provisioned, desyncing the node↔path mapping, the trust key (#1706) and the watcher's log path. Resume is deliberately a no-op on the worktree, so there is no resume-time reason to re-pass it either. Same verdict as Grok's `-w`. |
 | `--workspace <PATH>` | A node's world is its spawn cwd, which is also what the trust store keys on (#1706). A second policy-gated tools root splits the agent from its own node directory, and nothing in Buildmesh would know which root won. |
 | `--provider <echo\|meta>` | `echo` is a deterministic test double — its companion `--echo-delay-ms` exists only to make it deterministic. A node launched with it answers canned text, never touches the repo, and silently ignores the model override (the help scopes `--model` to "non-echo providers"). Never baked and never inherited from an app default; only a deliberate `extra_args` entry may select it. |
+| `--echo-delay-ms <MS>` | Only meaningful with `--provider echo` ("echo provider only"), which is never-pass above, so there is no configuration in which Buildmesh would want this: without the double it tunes a reply path that never runs, and with it the node is the no-op the row above rejects. Never-pass for the same reason, and inheriting the default delay would turn a launch into a *slow* silent no-op. |
 | `--base-url <URL>` | Endpoint routing is a credential decision, not a launch flag: it belongs with the proxied-provider story (`preferences/compatibility.rs` `resolve_provider_env`, the Codex-proxy precedent). A freeform base URL routes a node's traffic — and its bearer token — past that story. |
 | `--subagent-worktree-isolation` | Documented as a compatibility no-op: "capability defaults on. Only an affirmative per-child request asks for isolation". Passing it asserts nothing, and reads as a policy Buildmesh holds when it does not. |
 | `--no-session-log` | Buildmesh's attention signal *is* that durable log: `services::muse_watcher` tails the run boundaries in `~/.local/share/muse/sessions/…/session.jsonl` (#1709), and the transcript reader and session recovery read the same tree (#1708). Suppressing it does not make a node quieter — it makes the node unobservable. |
@@ -131,7 +132,8 @@ compaction thresholds take a fraction, so modeling them would have meant a
 numeric type in `HarnessConfigValue`, not the string shape every current
 harness option uses.
 
-Conversely `--agents` and `--echo-delay-ms` are interactive-only.
+Conversely `--agents` and `--echo-delay-ms` are interactive-only (`--echo-delay-ms`
+carries the never-pass verdict above).
 
 ### Nothing graduates to modeled in this pass
 
