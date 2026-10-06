@@ -158,6 +158,12 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      # The guard is a script in this repository, so this job checks it out
+      # even though it runs nothing else. (`npm ci` is not needed: the guard has
+      # no dependencies, and skipping it is the point of the job being seconds.)
+      - name: Checkout
+        uses: actions/checkout@v7
+
       - name: Refuse to pass unless the frontend branch is fully green
         run: node scripts/ci/quality-gate.mjs
         env:

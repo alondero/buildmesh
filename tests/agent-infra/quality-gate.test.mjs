@@ -121,6 +121,14 @@ test('the workflow wires the guard to the results the rules read', () => {
   assert.match(aggregate, /TESTS_RESULT: \$\{\{ needs\.quality-tests\.result \}\}/);
 });
 
+test('the aggregate job checks out the guard it runs', () => {
+  // The guard lives in this repository, so the job has to check it out. It
+  // did not, once: `node scripts/ci/quality-gate.mjs` failed with
+  // MODULE_NOT_FOUND and took the required check — and `Rust tests + TS
+  // bindings`, which depends on it — red on run 37494657044.
+  assert.match(jobBlock('quality'), /uses: actions\/checkout@v7/);
+});
+
 test('the Rust aggregate still demands a real success from this one', () => {
   // The coupling that made the skip fatal: `rust-bindings` compares the
   // literal string `success`. It is the reason the Rust-only class has to
