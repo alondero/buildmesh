@@ -474,6 +474,15 @@ describe('TitleBar (bespoke window chrome)', () => {
       expect(switcherLabel?.className).toContain('max-[1399px]:hidden');
       const chip = container.querySelector('kbd');
       expect(chip?.className).toContain('max-[1399px]:hidden');
+      // The scope indicator is deliberately NOT on this tier. Its label
+      // collapses LATER (`max-[1699px]:hidden`, pinned in the #2074 block
+      // below): at the 1400px tier the Filtered centre cell cannot afford the
+      // 134.88px a labelled indicator adds, and the measured collision window
+      // is exactly 1400–1599px. Asserted here as the inversion, so a future
+      // "one ladder for the whole bar" refactor cannot silently rejoin it.
+      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
+      expect(scopeLabel?.className).toContain('max-[1699px]:hidden');
+      expect(scopeLabel?.className).not.toContain('max-[1399px]:hidden');
       // Responsive palette width (PR #1623 review): the field is
       // `w-80` (260px at the 13px root) below 1786px viewport, and
       // bumps to its VS Code-parity `w-[640px]` at >=1786px where
@@ -674,11 +683,20 @@ describe('TitleBar (bespoke window chrome)', () => {
       const label = screen.getByTestId('scope-indicator').querySelector('span');
       const className = label?.className ?? '';
       // Truncate BEFORE the collapse: a bounded, ellipsised label at every
-      // width, and the same 1400px hide tier the switcher segments and the
-      // utility pills already use.
+      // width. But the collapse tier sits ABOVE the switcher segments' and the
+      // utility pills' 1400px tier. Measured against the real window in the
+      // Filtered view — the only mode whose header grid is
+      // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
+      // its own 16px padding floor — a labelled indicator costs the left
+      // track 134.88px and overlapped the right cluster at exactly the tier
+      // where the switcher's own labels appear: 1400px (centre 16px, 114px
+      // overflow) and 1500px (centre 70px, 73px overflow). 1600px is the first
+      // width measured clear (centre 170px) and 1700px is the first width
+      // measured comfortable (centre 270px), so the label waits for 1700px.
       expect(className).toContain('truncate');
       expect(className).toContain('max-w-[10rem]');
-      expect(className).toContain('max-[1399px]:hidden');
+      expect(className).toContain('max-[1699px]:hidden');
+      expect(className).not.toContain('max-[1399px]:hidden');
       // The accessible name is the label string, so it survives the collapse.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
     });

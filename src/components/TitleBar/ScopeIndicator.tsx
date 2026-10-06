@@ -67,24 +67,53 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * ## Width ladder
  *
- * The label span is bounded (`max-w-[10rem]`, `truncate`) BEFORE the collapse
- * tier, so a long Mesh name ellipsises and only then does the control fall
- * back to its glyph at the same 1400px tier the switcher segments and the
- * utility pills use (PR #1623). Two properties keep this from becoming a new
- * clipping point in the left cell at the widths that tier already handles:
+ * The label span is bounded (`max-w-[10rem]`, `truncate`) and its collapse tier
+ * sits ABOVE every other control's: it is hidden below 1700px, where the
+ * switcher segments and the utility pills already hide at 1400px (PR #1623).
+ * That asymmetry is measured, not stylistic.
  *
- *   1. `truncate` + `min-w-0` make the span contribute ~0 min-content, so in
- *      the icon-only tier the control costs one glyph plus its padding — the
- *      same cost class as every other pill in the bar (≈38px at the 13px
- *      root), and it is not the left cell's last child, so it can never be
- *      the element that gets clipped (the Filtered search bar is).
- *   2. The `max-w` cap means even the labelled tier adds a bounded amount,
- *      unlike the switcher's five unbounded labels — which is what overflowed
- *      the side tracks at exactly 1300px in the first place.
+ * Filtered is the worst case, and structurally so: it is the only mode whose
+ * header grid is `grid-cols-[auto_minmax(0,1fr)_auto]`, so both flanking
+ * tracks are content-sized `auto` and the centre absorbs whatever is left,
+ * down to its own 16px padding floor. There the labelled indicator adds
+ * 134.88px (32px glyph-only → 166.88px labelled) to a left track the switcher's
+ * own labels have just grown from 518px to 862/893px. Measured against the
+ * real window at the 13px root, that turns the Filtered search bar into an
+ * overlap with the right cluster:
+ *
+ *   viewport   left track   centre track   overflow   collides
+ *   1200px     518px        339px          0          no
+ *   1300px     518px        439px          0          no
+ *   1400px     862px        16px           114px      YES
+ *   1500px     893px        70px           73px       YES
+ *   1600px     893px        170px          0          no
+ *   1700px     893px        270px          0          no
+ *   1920px     893px        490px          0          no
+ *
+ * The collision window is therefore exactly 1400–1599px — the band where the
+ * switcher's labels have just appeared AND this label's would too. Below 1400
+ * neither has paid (518px left track, centre 339–439px); at 1600 and up the
+ * centre is wide enough to absorb the cost. Without the indicator the centre
+ * had ~167px at 1400px and fitted its 130px content, so the indicator — not the
+ * left cell, whose `scrollWidth` equals its `clientWidth` — is what broke it.
+ *
+ * 1700px rather than 1600px because 1600px is the first width measured CLEAR,
+ * not a comfortable one: the centre lands at 170px against a 130–143px
+ * min-content (the "Search or open" field, 143px of it once the
+ * `SEARCH_SHORTCUT_LABEL` kbd chip is visible at ≥1400px), so the whole margin
+ * is ~27px — and part of that min-content is a runtime string this control does
+ * not own. At 1700px the centre is 270px, a measured 127px of slack. Between
+ * 1400px and 1700px the indicator stays glyph-only, which costs the centre
+ * nothing. 1600px would also be defensible if the chip label were fixed-width;
+ * it is not.
+ *
+ * The switcher's own 1400px tier does not move: that ladder was measured
+ * against the same Filtered search bar and still holds. Only this control pays.
  *
  * `aria-label` carries the same string as the visible label, so the
  * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds
- * for free).
+ * for free), and `title` spells the long form — so the glyph-only band costs
+ * no information, only a glance.
  */
 
 const PICKER_ID = dropdownId('titlebar', 'scope-picker');
@@ -374,11 +403,12 @@ export function ScopeIndicator() {
         }`}
       >
         <Icon className="h-4 w-4 shrink-0" />
-        {/* Bounded first, collapsed second (see the width-ladder note above):
-            the name ellipsises, and below the shared 1400px tier only the
-            glyph remains. `max-[1399px]:hidden` must stay a class literal so
-            Tailwind v4's source scanner compiles it. */}
-        <span className="min-w-0 max-w-[10rem] truncate max-[1399px]:hidden">{text}</span>
+        {/* Bounded first, collapsed second — and collapsed at a LATER tier
+            than the switcher's own (see the width-ladder note above): the
+            label costs 134.88px, which the Filtered centre cell cannot absorb
+            between 1400px and 1599px. `max-[1699px]:hidden` must stay a class
+            literal so Tailwind v4's source scanner compiles it. */}
+        <span className="min-w-0 max-w-[10rem] truncate max-[1699px]:hidden">{text}</span>
       </button>
       {open && (
         <div
