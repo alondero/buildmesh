@@ -1,6 +1,5 @@
 import { formatError } from '../lib/errorUtils';
 import { create } from 'zustand';
-import { useShallow } from 'zustand/react/shallow';
 import * as api from '../lib/tauri';
 import { disposeTerminal } from '../components/Terminal/Terminal'; // retained for delete path; archive must NOT dispose — see CLAUDE.md terminal-persistence rule.
 import { hasWorktreeCloseRisk, type WorktreeCloseAction, type WorktreeCloseSafety } from '../lib/worktreeClose';
@@ -492,26 +491,96 @@ interface AgentNodeState {
   cancelSchedule: (nodeId: number) => void;
 }
 
+/// Issue #2021 — the derived full node array, memoized once per store
+/// notification instead of once per subscriber.
+///
+/// Before this, `useAllAgentNodes` ran `nodeIds.map(...).filter(...)` inside
+/// every subscriber's selector, so one store notification allocated and
+/// scanned the full array *once per mounted consumer* — seven times in the
+/// real app (Sidebar, AttentionList, AgentHistoryTab, CommandOmnibar,
+/// ScopeIndicator, GridFilterPopover, AgentNodeView). Profiling at 100/500/
+/// 1000 nodes showed the per-notification allocation growing linearly with
+/// node count for every subscriber, and each consumer's O(N) grouping memo
+/// re-running on every unrelated single-node write.
+///
+/// The memo is keyed on the identity of the two normalized containers.
+/// Every write that can change a node replaces `nodesById` (and a reorder or
+/// delete replaces `nodeIds`), so a changed reference means the derivation must
+/// re-run; an unchanged pair means nothing that feeds it moved, and the cached
+/// array is returned as-is. Writes that do NOT touch nodes — a Circuit
+/// ownership patch, `loading`, `error`, `stalledInputs`, `schedules` — keep both
+/// references identical and now cost one `Object.is` pair instead of N
+/// dereferences per subscriber.
+///
+/// Returning the *previous* array when the freshly derived one is element-wise
+/// identical preserves the guarantee `useShallow` used to provide: a
+/// reconciliation that changed no field (a plain `fetchAgentNodes` poll where
+/// every node compares equal) leaves the consumer's array reference stable and
+/// skips the render. Element identity comes from `shallowEqualAgentNode`, so
+/// this is an element-reference comparison, not a field comparison.
+///
+/// Not thread- or render-safe to share across *different* store instances —
+/// `tests/unit/helpers/seedAgentNodes` and tests that `setState` directly rely
+/// on picking up a new derivation. Keying on both container references handles
+/// that: a reseed replaces both.
+let derivedNodesCache: {
+  nodeIds: readonly number[];
+  nodesById: Record<number, AgentNode>;
+  nodes: AgentNode[];
+} | null = null;
+
+function deriveAgentNodes(
+  nodeIds: readonly number[],
+  nodesById: Record<number, AgentNode>,
+): AgentNode[] {
+  const cached = derivedNodesCache;
+  if (cached && cached.nodeIds === nodeIds && cached.nodesById === nodesById) {
+    return cached.nodes;
+  }
+  const derived: AgentNode[] = [];
+  for (const id of nodeIds) {
+    const node = nodesById[id];
+    if (node !== undefined) derived.push(node);
+  }
+  // Preserve `useShallow`'s referential stability: a derivation whose elements
+  // are all the same references as the previous one keeps the previous array.
+  const previous = cached?.nodes;
+  if (previous && previous.length === derived.length) {
+    let identical = true;
+    for (let i = 0; i < derived.length; i += 1) {
+      if (previous[i] !== derived[i]) {
+        identical = false;
+        break;
+      }
+    }
+    if (identical) {
+      derivedNodesCache = { nodeIds, nodesById, nodes: previous };
+      return previous;
+    }
+  }
+  derivedNodesCache = { nodeIds, nodesById, nodes: derived };
+  return derived;
+}
+
 /// Issue #1384 — derived selector for the full ordered node array. Components
 /// that genuinely need the list (Sidebar, AgentNodeView, CommandOmnibar)
 /// use this hook instead of the duplicated `useMemo(() => nodeIds.map(id =>
-/// nodesById[id]).filter(...), [nodeIds, nodesById])` block. `useShallow`
-/// does the shallow equality on the array's elements so unrelated writes
-/// (Circuit indicator, closing flag, error string) don't churn the consumer.
+/// nodesById[id]).filter(...), [nodeIds, nodesById])` block.
 ///
-/// Returns a fresh array reference on every `nodeIds` change (e.g. a delete
-/// or reorder), so `useMemo`-style downstream derivations in consumers
-/// recompute correctly. Per-id selectors (`state.nodesById[id]`) are
-/// preferred when the consumer only needs one node — they preserve identity
-/// through the shallow reconciliation in `fetchAgentNodes`.
+/// Issue #2021 — the derivation is memoized in [`deriveAgentNodes`] and
+/// already returns a reference-stable array, so this hook no longer needs
+/// `useShallow`'s element walk. Plain `Object.is` against the store slice is
+/// now sufficient, and a subscriber that mounts *after* a notification still
+/// receives the current array rather than a re-derived one.
+///
+/// Returns a fresh array reference whenever any node actually changed (e.g. a
+/// delete, a reorder, a status flip), so `useMemo`-style downstream
+/// derivations in consumers recompute correctly. Per-id selectors
+/// (`state.nodesById[id]`) are preferred when the consumer only needs one node
+/// — they preserve identity through the shallow reconciliation in
+/// `fetchAgentNodes`.
 export function useAllAgentNodes(): AgentNode[] {
-  return useAgentNodeStore(
-    useShallow((s) =>
-      s.nodeIds
-        .map((id) => s.nodesById[id])
-        .filter((n): n is AgentNode => n !== undefined),
-    ),
-  );
+  return useAgentNodeStore((s) => deriveAgentNodes(s.nodeIds, s.nodesById));
 }
 
 /// Freshness window for `refreshIfStale` (issue #1751). A skip only
