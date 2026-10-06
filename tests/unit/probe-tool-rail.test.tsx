@@ -110,7 +110,6 @@ describe('ProbeToolRail (ADR-0032)', () => {
       probeTab: 'files',
       probeWorkingSet: EMPTY_PROBE_WORKING_SET,
       activeDiffFile: null,
-      probeContextPins: {},
     });
     vi.mocked(invoke).mockImplementation(() => Promise.resolve({}));
   });
@@ -292,7 +291,7 @@ describe('ProbeToolRail (ADR-0032)', () => {
     fireEvent.click(screen.getByTestId('probe-rail-all-tools'));
     expect(screen.getByRole('menu', { name: 'All tools' })).toBeTruthy();
 
-    fireEvent.mouseDown(screen.getByTestId('probe-context-pin'));
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Close panel' }));
     expect(screen.queryByRole('menu', { name: 'All tools' })).toBeNull();
   });
 

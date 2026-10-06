@@ -28,6 +28,8 @@ import {
   type CanvasEmptyStateCallbacks,
   type CanvasEmptyStateInput,
 } from '../../src/components/AgentNodeView/CanvasEmptyState';
+import { deriveScope } from '../../src/lib/viewModes';
+import type { NonSingleViewMode, ViewMode } from '../../src/stores/uiStore';
 
 const noopCallbacks: CanvasEmptyStateCallbacks = {
   onCreateMesh: vi.fn(),
@@ -41,16 +43,51 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-function input(overrides: Partial<CanvasEmptyStateInput> = {}): CanvasEmptyStateInput {
+/** Overrides the caller states the way the stores hold them — the View Mode
+ *  and the sidebar selection — plus the two counts the empty state measures.
+ *  `scope` is DERIVED here from the first two (#2070 review), so a test can
+ *  never hand the classifier a View Mode and a Mesh identity that the
+ *  derivation would not produce. */
+interface InputOverrides {
+  meshCount?: number;
+  totalNodeCount?: number;
+  scopedCount?: number;
+  filteredCount?: number;
+  viewMode?: ViewMode;
+  lastNonSingleMode?: NonSingleViewMode;
+  selectedMeshId?: number | null;
+  harnessReady?: boolean;
+}
+
+function input(overrides: InputOverrides = {}): CanvasEmptyStateInput {
+  const {
+    meshCount = 1,
+    totalNodeCount = 0,
+    scopedCount = 0,
+    filteredCount = 0,
+    viewMode = 'all',
+    lastNonSingleMode = viewMode === 'single' ? 'mesh' : viewMode,
+    selectedMeshId = null,
+    harnessReady = true,
+  } = overrides;
   return {
-    meshCount: 1,
-    totalNodeCount: 0,
-    scopedCount: 0,
-    filteredCount: 0,
-    viewMode: 'all',
-    selectedMeshId: null,
-    harnessReady: true,
-    ...overrides,
+    meshCount,
+    totalNodeCount,
+    scopedCount,
+    filteredCount,
+    harnessReady,
+    // The classifier reads the Mesh identity from the derived scope, never
+    // from `viewMode`/`selectedMeshId` re-tested here (#2071's one
+    // derivation). The node list is empty because the counts above are this
+    // component's own measurement — the scope's identity does not depend on
+    // them.
+    scope: deriveScope({
+      viewMode,
+      lastNonSingleMode,
+      agentNodes: [],
+      selectedMeshId,
+      activeNodeId: null,
+    }),
   };
 }
 
@@ -81,7 +118,7 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(branch(input({ meshCount: 0, totalNodeCount: 0 }))).toBe('no-meshes');
     expect(branch(input({ meshCount: 0, totalNodeCount: 2 }))).toBe('no-meshes');
     expect(branch(input({ viewMode: 'mesh', meshCount: 0 }))).toBe('no-meshes');
-    expect(branch(input({ viewMode: 'filtered', meshCount: 0, gridSearchQuery: 'x' }))).toBe('no-meshes');
+    expect(branch(input({ viewMode: 'filtered', meshCount: 0 }))).toBe('no-meshes');
   });
 
   it('returns selected-empty only when viewMode=mesh AND scopedCount=0 AND selectedMeshId is set', () => {
@@ -94,16 +131,18 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(decision.branch === 'selected-empty' && decision.meshId).toBe(42);
   });
 
-  it('mesh view without an explicit selection does NOT route to selected-empty (active-node-mesh fallback is unreachable)', () => {
-    // `scopeNodesForMode` falls back to agentNodes[0].mesh_id when
-    // selectedMeshId is null, so `scopedCount` is non-zero whenever
-    // any agent exists. The mesh-without-selection + scopedCount=0
-    // input is unreachable in production; the classifier correctly
-    // routes through to other branches (filters-exclude-all when
-    // filteredCount=0 and totalNodeCount>0).
+  it('routes Mesh Grid with no selection to the explicit no-mesh-selected branch (#2071)', () => {
+    // #2071 removed the Mesh-scope fallback chain, so Mesh Grid with no
+    // selection is now a reachable production state — and it is exactly
+    // the case the old "clear your filters" CTA lied about. Naming the
+    // missing selection is the honest answer, with or without nodes
+    // loaded elsewhere in the app.
     expect(
       branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 3, selectedMeshId: null })),
-    ).toBe('filters-exclude-all');
+    ).toBe('no-mesh-selected');
+    expect(
+      branch(input({ viewMode: 'mesh', scopedCount: 0, totalNodeCount: 0, selectedMeshId: null })),
+    ).toBe('no-mesh-selected');
   });
 
   it('does NOT return selected-empty when the all view has zero nodes — that is all-empty', () => {
@@ -118,6 +157,27 @@ describe('classifyCanvasEmpty (issue #1536)', () => {
     expect(
       branch(input({ totalNodeCount: 5, scopedCount: 5, filteredCount: 0 })),
     ).toBe('filters-exclude-all');
+  });
+
+  // #2070 review — the classifier now reads the derived scope instead of
+  // re-testing `viewMode === 'mesh'` against `selectedMeshId`. That makes the
+  // two questions the derivation already separates ("what is the grid mode?"
+  // and "is there a Mesh in scope?") visible here: in Single the grid scope
+  // can still BE a Mesh while the canvas shows one soloed node, and claiming
+  // that Mesh is empty would be a lie. So the Mesh branches stay keyed on the
+  // View Mode the user set, and the Mesh identity comes from the scope.
+  it('does not call a Mesh empty when the scope is Mesh-scoped only because Single was entered from a Mesh grid', () => {
+    const single = input({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: 42 });
+    expect(single.scope.isMeshScoped).toBe(true);
+    expect(single.scope.mesh).toEqual({ id: 42, name: null });
+    expect(classifyCanvasEmpty(single).branch).toBe('all-empty');
+  });
+
+  it("does not claim 'no mesh selected' in Single over an empty Mesh grid — that state is Mesh Grid's own", () => {
+    const single = input({ viewMode: 'single', lastNonSingleMode: 'mesh', selectedMeshId: null });
+    expect(single.scope.gridMode).toBe('mesh');
+    expect(single.scope.isMeshScoped).toBe(false);
+    expect(classifyCanvasEmpty(single).branch).toBe('all-empty');
   });
 });
 
@@ -154,27 +214,23 @@ describe('CanvasEmptyState (issue #1536)', () => {
     expect(cbs.onOpenSpawnMenu).toHaveBeenCalledWith(42);
   });
 
-  it('mesh view with selectedMeshId=null surfaces filters-exclude-all when nodes exist', () => {
-    // Senior-review round 4: the previous mesh-without-selection
-    // branch rendered "No agents yet" while 3 agents existed — a
-    // blatant lie. The branch is gone; this case routes through to
-    // `filters-exclude-all` (the documented "Clear filters" CTA),
-    // which is at least truthful even though it assumes a filter
-    // is active when it isn't (the input classifier only knows
-    // `filteredCount` — the caller's grid controls know whether
-    // filters are active, but that's not part of the input shape).
-    const cbs = { ...noopCallbacks, onClearFilters: vi.fn(), onOpenSpawnMenu: vi.fn() };
+  it('no-mesh-selected branch names the missing selection and offers the All Nodes way out (#2071)', () => {
+    // Previously this state rendered "No nodes match" with a Clear-filters
+    // CTA — a lie, since no filter was active. The branch states what is
+    // missing and hands the user a real way out of Mesh Grid.
+    const cbs = { ...noopCallbacks, onViewAll: vi.fn() };
     render(
       <CanvasEmptyState
-        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 3, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
+        input={input({ meshCount: 2, totalNodeCount: 3, scopedCount: 0, filteredCount: 0, viewMode: 'mesh', selectedMeshId: null })}
         callbacks={cbs}
       />,
     );
 
+    expect(screen.getByText('No mesh selected')).toBeTruthy();
+    expect(screen.queryByText('No nodes match')).toBeNull();
     expect(screen.queryByText('No agents in this mesh')).toBeNull();
-    expect(screen.queryByText('No agents yet')).toBeNull();
-    expect(screen.getByText('No nodes match')).toBeTruthy();
-    expect(screen.getByTestId('canvas-empty-clear-filters')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('canvas-empty-view-all'));
+    expect(cbs.onViewAll).toHaveBeenCalledTimes(1);
   });
 
   it('filters-exclude-all branch: Clear search & filters CTA fires onClearFilters', () => {

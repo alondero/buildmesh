@@ -15,7 +15,7 @@
  * models focus tracking.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, within } from '@testing-library/react';
 
 const windowApi = vi.hoisted(() => ({
   minimize: vi.fn(),
@@ -51,7 +51,11 @@ vi.mock('../../src/components/RemoteAccess/RemoteAccessModal', () => ({
 }));
 
 import { TitleBar } from '../../src/components/TitleBar/TitleBar';
-import { useUIStore } from '../../src/stores/uiStore';
+import { useUIStore, type ViewMode } from '../../src/stores/uiStore';
+import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
+import { type AgentNode } from '../../src/stores/agentNodeStore';
+import { useProbeContext } from '../../src/hooks/useProbeContext';
+import { seedAgentNodes } from './helpers/seedAgentNodes';
 import {
   TERMINAL_FONT_SIZE_DEFAULT,
   setTerminalFontSize,
@@ -95,7 +99,6 @@ beforeEach(() => {
     probeOpen: false,
     probeTab: 'files',
     activeDiffFile: null,
-    probeContextPins: {},
     appSettingsOpen: false,
     appSettingsTab: 'general',
     remoteAccessOpen: false,
@@ -451,26 +454,38 @@ describe('TitleBar (bespoke window chrome)', () => {
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
       // Pill and switcher labels drop to icon-only below the SAME tier
-      // (1400px) since #1609 and PR #1623 — one toolbar, one ladder;
-      // the threshold moved from 1300px to 1400px to avoid a 2px clip on
-      // the rightmost ViewModeSwitcher segment ("Filtered") at exactly
-      // 1300px viewport (where labels become visible but the centre's
-      // `w-80` 260px + side clusters' min-content can't coexist). The
-      // kbd chip hides FIRST when narrowing at 1399px — user-facing
-      // affordances outlast the decorative keyboard hint. Class
-      // literals are the contract — they MUST stay as literal strings
-      // (not template literals) so Tailwind v4's source scanner
-      // compiles them. The media queries themselves are
-      // browser-rendered.
+      // (1440px) since #1609 and PR #1623 — one toolbar, one ladder.
+      // The threshold moved 1300 → 1400 (a 2px clip on the rightmost
+      // ViewModeSwitcher segment) and now 1400 → 1440 (#2081 review), where
+      // 1440 is the first width MEASURED clean in BOTH header grids: the
+      // labelled layout needs left 726px + centre min-content 143px +
+      // right 538px = 1407px, so 1400–1439 was over budget by 7px and
+      // clipped (the scope indicator's 32px glyph amplified it into a
+      // visible overlap). At 1440 Filtered the centre is 145px against a
+      // 145px min-content. The kbd chip hides FIRST when narrowing at
+      // 1439px — user-facing affordances outlast the decorative keyboard
+      // hint. Class literals are the contract — they MUST stay as literal
+      // strings (not template literals) so Tailwind v4's source scanner
+      // compiles them. The media queries themselves are browser-rendered.
       const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
-      expect(remotePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
+      expect(remotePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
       const usagePill = screen.getByRole('button', { name: 'Open Usage' });
-      expect(usagePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
+      expect(usagePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       const switcherLabel = switcherGroup.querySelector('span');
-      expect(switcherLabel?.className).toContain('max-[1399px]:hidden');
+      expect(switcherLabel?.className).toContain('max-[1439px]:hidden');
       const chip = container.querySelector('kbd');
-      expect(chip?.className).toContain('max-[1399px]:hidden');
+      expect(chip?.className).toContain('max-[1439px]:hidden');
+      // The scope indicator is deliberately NOT on this tier. Its label
+      // collapses LATER (`max-[1699px]:hidden`, pinned in the #2074 block
+      // below): with the shared ladder at 1440px, the Filtered centre cell
+      // still cannot afford the 134.88px a labelled indicator adds between
+      // 1440 and 1600px (1600px is the first width measured clear, 1700px
+      // the first comfortable one). Asserted here as the inversion, so a
+      // future "one ladder for the whole bar" refactor cannot silently rejoin it.
+      const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
+      expect(scopeLabel?.className).toContain('max-[1699px]:hidden');
+      expect(scopeLabel?.className).not.toContain('max-[1439px]:hidden');
       // Responsive palette width (PR #1623 review): the field is
       // `w-80` (260px at the 13px root) below 1786px viewport, and
       // bumps to its VS Code-parity `w-[640px]` at >=1786px where
@@ -530,6 +545,460 @@ describe('TitleBar (bespoke window chrome)', () => {
       });
       expect(screen.queryByTestId('grid-search-input')).toBeNull();
       expect(useUIStore.getState().gridSearchQuery).toBe('alpha');
+    });
+  });
+
+  // #2074 — the scope indicator is the surface that renders the one derived
+  // scope (#2071), and the caller that passes `meshes` so `deriveScope` can
+  // resolve the Mesh name. These tests seed the Mesh list and the node store
+  // directly; the indicator is a pure reader of both.
+  describe('scope indicator (#2074)', () => {
+    const MESH_A: Mesh = {
+      id: 1, name: 'demo-1', path: '/repo/1', branch: 'main', position: 0,
+      color: null, layout: 'grid', use_worktree: false, created_at: '2026-01-01',
+      github_owner: null, github_repo: null, github_last_synced: null, pre_spawn_pool_size: 0,
+    };
+    const MESH_B: Mesh = { ...MESH_A, id: 2, name: 'demo-2', path: '/repo/2', position: 1 };
+    const NODE: AgentNode = {
+      id: 1, mesh_id: 1, name: 'agent-a', path: '/repo/1', branch: 'main',
+      env: 'wsl', provider: 'claude', status: 'running', cli_session_id: null,
+      use_worktree: false, source_issue: null, worktree_name: null,
+      created_at: '2026-01-01', position: 0, scratchpad: '', sandbox: false,
+      source_pr: null, head_repo_owner: null, head_repo_clone_url: null,
+      source_pr_pinned_sha: null, is_pinned: true, archived: false,
+    };
+    const NODE_OTHER_MESH: AgentNode = { ...NODE, id: 2, mesh_id: 2, name: 'agent-b', is_pinned: false };
+    const NODE_SAME_MESH: AgentNode = { ...NODE, id: 3, mesh_id: 1, name: 'agent-c', position: 1, is_pinned: false };
+
+    beforeEach(() => {
+      // meshStore FIRST: the uiStore mesh→mode subscription fires
+      // synchronously and would clobber the viewMode set after it.
+      useMeshStore.setState({
+        meshes: [MESH_A, MESH_B],
+        meshesById: new Map([[1, MESH_A], [2, MESH_B]]),
+        selectedMeshId: null,
+        loading: false,
+        error: null,
+      });
+      useUIStore.setState({
+        viewMode: 'all',
+        lastNonSingleMode: 'all',
+        gridSearchQuery: '',
+        gridProviderFilter: null,
+        gridStatusFilter: null,
+        openScopePickerRequest: 0,
+      });
+      seedAgentNodes([NODE, NODE_OTHER_MESH, NODE_SAME_MESH]);
+    });
+
+    it('mounts in the left cell between the switcher and the Filtered search bar', async () => {
+      act(() => {
+        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+      });
+      await renderTitleBar();
+      const cell = screen.getByTestId('scope-indicator').closest('[data-tauri-drag-region]')!;
+      // Same toolbar cluster as the switcher, and ahead of the Filtered
+      // view's own search bar — one left cluster, one degradation curve.
+      expect(cell.contains(screen.getByRole('group', { name: /view mode/i }))).toBe(true);
+      const children = Array.from(cell.children);
+      const switcherIndex = children.indexOf(screen.getByRole('group', { name: /view mode/i }));
+      const indicatorIndex = children.indexOf(screen.getByTestId('scope-indicator').parentElement!);
+      const controlsIndex = children.indexOf(screen.getByTestId('grid-controls'));
+      expect(switcherIndex).toBeGreaterThanOrEqual(0);
+      expect(indicatorIndex).toBeGreaterThan(switcherIndex);
+      expect(controlsIndex).toBeGreaterThan(indicatorIndex);
+    });
+
+    it('names the derived Mesh when the scope is Mesh-scoped, with a glyph beside the text', async () => {
+      act(() => {
+        useMeshStore.getState().selectMesh(1);
+      });
+      await renderTitleBar();
+      const trigger = screen.getByTestId('scope-indicator');
+      expect(trigger.getAttribute('aria-label')).toBe('demo-1');
+      expect(trigger.textContent).toBe('demo-1');
+      // Colour is never the only signal: the glyph carries the shape and is
+      // hidden from assistive tech, which reads the text label instead.
+      expect(trigger.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
+      // The Mesh-scoped label is the Mesh name and nothing else — the other
+      // Mesh must not leak into it.
+      expect(trigger.textContent).not.toContain('demo-2');
+    });
+
+    it('names the Mesh id when the scoped Mesh is not in the loaded list', async () => {
+      // `deriveScope` reports a null name for a Mesh it has never seen
+      // (deleted mid-session, or still loading); the indicator shows the id
+      // rather than inventing a label.
+      act(() => {
+        useMeshStore.setState({ meshes: [MESH_B], meshesById: new Map([[2, MESH_B]]) });
+        useMeshStore.getState().selectMesh(1);
+      });
+      await renderTitleBar();
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Mesh #1');
+    });
+
+    it.each([
+      ['all', null, '', 'All meshes · 3 nodes'],
+      ['pinned', 1, '', 'Pinned across meshes · 1 node'],
+      ['filtered', 1, 'agent-c', 'Filtered across meshes · 1 of 3 nodes'],
+    ] as [ViewMode, number | null, string, string][])(
+      'renders the honest cross-Mesh label and count in the %s view (%#)',
+      async (viewMode, selectedMeshId, query, label) => {
+        act(() => {
+          if (selectedMeshId !== null) useMeshStore.setState({ selectedMeshId });
+          useUIStore.setState({ viewMode, lastNonSingleMode: viewMode, gridSearchQuery: query });
+        });
+        await renderTitleBar();
+        const trigger = screen.getByTestId('scope-indicator');
+        // Visible text and accessible name are the same string, so the name
+        // survives the label collapse and satisfies WCAG 2.5.3 (Label in Name).
+        expect(trigger.getAttribute('aria-label')).toBe(label);
+        expect(trigger.textContent).toBe(label);
+        // A cross-Mesh mode must never name a Mesh — pinned and filtered
+        // legitimately keep a sidebar selection, and that Mesh is NOT the
+        // scope the grid is showing.
+        expect(trigger.textContent).not.toContain('demo-1');
+      },
+    );
+
+    it('names the narrowed count against the scope total in Filtered, so an empty result is distinguishable', async () => {
+      act(() => {
+        useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered', gridSearchQuery: 'no-such-node' });
+      });
+      await renderTitleBar();
+      // 0 of 3 — "the filters excluded everything", not "the app is broken".
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('Filtered across meshes · 0 of 3 nodes');
+    });
+
+    it('says so honestly in Mesh Grid with no Mesh selected', async () => {
+      act(() => {
+        useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+      });
+      await renderTitleBar();
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('No mesh selected');
+    });
+
+    it('keeps the accessible name after the visible label collapses, truncating the name first', async () => {
+      act(() => {
+        useMeshStore.getState().selectMesh(1);
+      });
+      await renderTitleBar();
+      const label = screen.getByTestId('scope-indicator').querySelector('span');
+      const className = label?.className ?? '';
+      // Truncate BEFORE the collapse: a bounded, ellipsised label at every
+      // width. But the collapse tier sits ABOVE the switcher segments' and the
+      // utility pills' 1440px tier. Measured against the real window in the
+      // Filtered view — the only mode whose header grid is
+      // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
+      // its own 16px padding floor — a labelled indicator costs the left
+      // track 134.88px. With the shared ladder at 1440px the labelled tier
+      // occupies 1440–1599px, where the centre measured 170px at 1600px
+      // (first clear) and 270px at 1700px (first comfortable) against a
+      // 130–143px min-content. 1600px is the first width measured CLEAR, not
+      // a comfortable one, so the label waits for 1700px.
+      expect(className).toContain('truncate');
+      expect(className).toContain('max-w-[10rem]');
+      expect(className).toContain('max-[1699px]:hidden');
+      expect(className).not.toContain('max-[1439px]:hidden');
+      // The accessible name is the label string, so it survives the collapse.
+      expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
+    });
+
+    it('is borderless and reuses the switcher segment vocabulary', async () => {
+      await renderTitleBar();
+      const crossMesh = screen.getByTestId('scope-indicator');
+      expect(crossMesh.className).not.toContain('border');
+      expect(crossMesh.className).toContain('hover:bg-bg-card');
+      expect(crossMesh.className).toContain('text-text-secondary');
+      expect(crossMesh.className).toContain('rounded-md');
+
+      // A Mesh-scoped indicator takes the active accent — the same class pair
+      // the switcher segment uses for its selected mode.
+      act(() => {
+        useMeshStore.getState().selectMesh(1);
+      });
+      const meshScoped = screen.getByTestId('scope-indicator');
+      expect(meshScoped.className).toContain('bg-bg-card');
+      expect(meshScoped.className).toContain('text-accent-cyan');
+    });
+
+    describe('Mesh picker', () => {
+      /** rAF made synchronous so the focus return is observable, matching
+          the tools-overflow disclosure's convention. */
+      function mockRaf() {
+        return vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb: FrameRequestCallback) => {
+          cb(0);
+          return 1;
+        });
+      }
+
+      it('activation opens the picker and exposes its expanded state and target', async () => {
+        await renderTitleBar();
+        const trigger = screen.getByTestId('scope-indicator');
+        expect(trigger.getAttribute('aria-expanded')).toBe('false');
+        expect(trigger.getAttribute('aria-haspopup')).toBe('dialog');
+        expect(trigger.getAttribute('aria-controls')).toBeNull();
+
+        fireEvent.click(trigger);
+        const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+        expect(trigger.getAttribute('aria-expanded')).toBe('true');
+        expect(trigger.getAttribute('aria-controls')).toBe(picker.id);
+        expect(within(picker).getByRole('button', { name: 'demo-1' })).toBeTruthy();
+        expect(within(picker).getByRole('button', { name: 'demo-2' })).toBeTruthy();
+        // Nothing is selected in the All Nodes view, so no row claims to be
+        // the current scope.
+        expect(within(picker).getByRole('button', { name: 'demo-1' }).getAttribute('aria-current')).toBeNull();
+      });
+
+      // #2076 — the Mesh Grid segment cannot reach into this component, so
+      // it bumps `uiStore.openScopePickerRequest` and the indicator reacts
+      // in a layout effect: the same request-counter channel
+      // `focusGridSearchRequest` already uses for `GridControls`.
+      it('opens on an open request, and opening never chooses a Mesh', async () => {
+        await renderTitleBar();
+        const trigger = screen.getByTestId('scope-indicator');
+        expect(trigger.getAttribute('aria-expanded')).toBe('false');
+
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+
+        // Asking is not choosing: the panel is open with both Meshes listed
+        // and the selection untouched, so the canvas keeps its honest
+        // "no Mesh selected" state behind the panel.
+        expect(screen.getByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+      });
+
+      it('re-opens on the next request after a dismissal', async () => {
+        // No idempotency guard on the counter: a second Mesh Grid press must
+        // bump again, or a user who dismissed the panel could never get it
+        // back without a mode change.
+        await renderTitleBar();
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+
+        act(() => {
+          useUIStore.getState().requestOpenScopePicker();
+        });
+
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+        expect(useUIStore.getState().openScopePickerRequest).toBe(2);
+      });
+
+      it('stays closed on mount — the request counter starts at zero', async () => {
+        await renderTitleBar();
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+      });
+
+      it('marks the selected Mesh as the current scope in the picker', async () => {
+        act(() => {
+          useMeshStore.getState().selectMesh(1);
+        });
+        await renderTitleBar();
+        fireEvent.click(screen.getByTestId('scope-indicator'));
+        const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+        expect(within(picker).getByRole('button', { name: 'demo-1' }).getAttribute('aria-current')).toBe('true');
+        expect(within(picker).getByRole('button', { name: 'demo-2' }).getAttribute('aria-current')).toBeNull();
+      });
+
+      it('Escape closes the picker without changing scope and returns focus to the trigger', async () => {
+        const raf = mockRaf();
+        try {
+          act(() => {
+            useMeshStore.getState().selectMesh(1);
+          });
+          await renderTitleBar();
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+
+          fireEvent.keyDown(document, { key: 'Escape' });
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(trigger.getAttribute('aria-expanded')).toBe('false');
+          expect(document.activeElement).toBe(trigger);
+          // Escape is dismissal, not a decision: scope is untouched.
+          expect(useMeshStore.getState().selectedMeshId).toBe(1);
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('closes on an outside mousedown without changing scope', async () => {
+        await renderTitleBar();
+        fireEvent.click(screen.getByTestId('scope-indicator'));
+        fireEvent.mouseDown(document.body);
+        expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+        expect(useMeshStore.getState().selectedMeshId).toBeNull();
+      });
+
+      it('choosing a Mesh moves the canvas and the Probe destinations together', async () => {
+        // #2073 removed the Probe Context Pins, so the Probe destinations
+        // follow `selectedMeshId` — one write moves both, and they cannot
+        // disagree afterwards.
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          const probe = renderHook(() => useProbeContext());
+          expect(probe.result.current.subjectLabel).toBe('Mesh');
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          fireEvent.click(screen.getByRole('button', { name: 'demo-2' }));
+
+          expect(useMeshStore.getState().selectedMeshId).toBe(2);
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+          expect(probe.result.current.subjectLabel).toBe('Mesh: demo-2');
+          expect(probe.result.current.mode).toBe('following');
+          // The picker closes, focus returns to the trigger, and the control
+          // now names the Mesh it moved to.
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(document.activeElement).toBe(trigger);
+          expect(trigger.getAttribute('aria-label')).toBe('demo-2');
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      // #2070 review — the picker used to call bare `selectMesh`, so choosing
+      // the Mesh already in scope just closed the panel and left the canvas
+      // cross-Mesh, while the sidebar and the omnibar returned it to that
+      // Mesh's grid. All three now run `uiStore.enterMeshScope`, so the same
+      // pick means the same scope everywhere.
+      it('returns the canvas to that Mesh Grid when the picker re-picks the Mesh already in scope', async () => {
+        const raf = mockRaf();
+        try {
+          act(() => {
+            useMeshStore.setState({ selectedMeshId: 1 });
+            useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+          });
+          await renderTitleBar();
+          fireEvent.click(screen.getByTestId('scope-indicator'));
+          fireEvent.click(screen.getByRole('button', { name: 'demo-1' }));
+
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+          expect(useMeshStore.getState().selectedMeshId).toBe(1);
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(document.activeElement).toBe(screen.getByTestId('scope-indicator'));
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('selects a different Mesh and returns the canvas to its grid from a cross-Mesh view', async () => {
+        const raf = mockRaf();
+        try {
+          act(() => {
+            useMeshStore.setState({ selectedMeshId: 1 });
+            useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+          });
+          await renderTitleBar();
+          fireEvent.click(screen.getByTestId('scope-indicator'));
+          fireEvent.click(screen.getByRole('button', { name: 'demo-2' }));
+
+          expect(useMeshStore.getState().selectedMeshId).toBe(2);
+          expect(useUIStore.getState().viewMode).toBe('mesh');
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      // A `role="dialog"` the user never hears about is not reachable by a
+      // screen reader: the panel opens with focus still on the trigger, so the
+      // press that hands over the picker announces nothing. Focus moves INTO
+      // the panel; Escape still hands it back to the trigger.
+      it('moves focus into the panel on open so the dialog is announced', async () => {
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+          expect(picker.contains(document.activeElement)).toBe(true);
+
+          fireEvent.keyDown(document, { key: 'Escape' });
+          expect(document.activeElement).toBe(trigger);
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      // #2081 review — the focus move above reverses previously deliberate
+      // "no focus move" behaviour. It is defensible for a `role="dialog"`
+      // (an unannounced dialog is indistinguishable from a broken control),
+      // but nothing pinned it, so it could regress silently. These two cases
+      // pin it from BOTH routes that can open the panel.
+      it('moves focus into the panel when it opens on a request, not just a click', async () => {
+        // The Mesh Grid segment's route: a producer outside this component
+        // bumps the counter and the panel opens with no click on the trigger
+        // at all, so focus is still wherever the last real interaction left
+        // it. Without the focus move this press announces nothing.
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          // Park focus somewhere unrelated, so "focus is inside the dialog"
+          // cannot pass by accident.
+          const other = document.createElement('button');
+          document.body.appendChild(other);
+          other.focus();
+          expect(document.activeElement).toBe(other);
+
+          act(() => {
+            useUIStore.getState().requestOpenScopePicker();
+          });
+
+          const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+          expect(picker.contains(document.activeElement)).toBe(true);
+          // The panel itself takes focus, never a Mesh row: Enter must not be
+          // able to pick a Mesh the user only looked at.
+          expect(document.activeElement).toBe(picker);
+          other.remove();
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('returns focus to the trigger when dismissed by an outside click', async () => {
+        // Outside-click dismissal used to call `setOpen(false)` directly,
+        // which unmounts the focused panel and drops focus to <body> — a
+        // keyboard user who opened the picker, clicked away and came back
+        // had lost their place entirely. It now returns focus exactly like
+        // Escape: both dismissals are "not a decision", so both hand the
+        // user back where they were.
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+
+          fireEvent.mouseDown(document.body);
+
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(trigger.getAttribute('aria-expanded')).toBe('false');
+          expect(document.activeElement).toBe(trigger);
+          // Dismissal is still not a decision: the scope is untouched.
+          expect(useUIStore.getState().viewMode).toBe('all');
+          expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('reports an empty Mesh list rather than an empty picker', async () => {
+        act(() => {
+          useMeshStore.setState({ meshes: [], meshesById: new Map() });
+        });
+        await renderTitleBar();
+        fireEvent.click(screen.getByTestId('scope-indicator'));
+        const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+        expect(picker.textContent).toContain('No meshes yet');
+        expect(within(picker).queryAllByRole('button')).toHaveLength(0);
+      });
     });
   });
 

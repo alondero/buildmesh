@@ -1,7 +1,5 @@
+import { enterMeshGrid } from '../../lib/gridShortcuts';
 import { useUIStore, type ViewMode } from '../../stores/uiStore';
-import { useMeshStore } from '../../stores/meshStore';
-import { useAgentNodeStore } from '../../stores/agentNodeStore';
-import { resolveMeshScopeId } from '../../lib/viewModes';
 
 /**
  * ViewModeSwitcher — the five-segment View Mode control (wayfinder #982 /
@@ -14,14 +12,21 @@ import { resolveMeshScopeId } from '../../lib/viewModes';
  *
  * Segment semantics:
  *   - Single:    solo the active node (subsumes the old maximize toggle).
- *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection we
- *                select the fallback mesh (active node's, else first) —
- *                the selectMesh subscription in uiStore flips the mode.
+ *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection the
+ *                segment asks for one instead of picking it (#2076) — the
+ *                mode still flips, so the canvas lands in the Mesh Grid's
+ *                "no Mesh selected" empty state, which #2071 made a real
+ *                state after deleting the fallback that used to select the
+ *                active node's mesh (or the first loaded one) for the user —
+ *                and it requests the title bar's Mesh picker so choosing a
+ *                scope is an explicit act. The Ctrl+Alt+G cycle routes
+ *                through the same `enterMeshGrid` helper (#2081 review), so
+ *                "Mesh Grid with nothing selected asks" is defined once.
  *   - Pinned:    cross-mesh filter over is_pinned; never touches
  *                selectedMeshId.
- *   - All Nodes: clear the mesh selection (the same state the sidebar's
- *                re-click-deselect gesture produces) — the sync flips the
- *                mode to 'all'.
+ *   - All Nodes: clear the mesh selection — the only route out of Mesh
+ *                scope since #2072 removed the sidebar's re-click-deselect
+ *                gesture. The sync flips the mode to 'all'.
  *   - Filtered:  cross-mesh view narrowed by the Grid Controls (the Search
  *                Nodes bar renders next to the switcher only in this mode,
  *                #1609). Clicking the segment focuses that search — the
@@ -123,27 +128,19 @@ export function ViewModeSwitcher() {
   const setViewMode = useUIStore(state => state.setViewMode);
 
   const handleSelect = (mode: ViewMode) => {
+    // #2071/#2076 — Mesh Grid picks no Mesh. The mode is set and the Mesh
+    // comes from the sidebar alone; #2071 deleted the fallback chain
+    // (the active node's mesh, else the first loaded) that showed the user
+    // a scope they never chose. With no selection this segment ASKS: it
+    // requests the title bar's Mesh picker, which lists every Mesh and
+    // chooses nothing. The mode still flips first — the notice never
+    // suppresses the path it describes, and the canvas keeps its honest
+    // "no Mesh selected" state behind the panel.
+    //
+    // #2081 review — `enterMeshGrid` owns that rule now, so the Ctrl+Alt+G
+    // cycle asks identically instead of this being a second spelling of it.
     if (mode === 'mesh') {
-      // Mesh Grid needs a mesh scope. The sidebar selection usually
-      // provides it; with no selection, select the fallback mesh (active
-      // node's, else first loaded) and let the uiStore mesh-subscription
-      // flip the mode. No nodes at all → set the mode directly (the view
-      // renders its empty state).
-      const { selectedMeshId, selectMesh } = useMeshStore.getState();
-      if (selectedMeshId === null) {
-        // Issue #1384 — the resolver reads the ordered array, so we
-        // derive it from the normalized split (or use the `getAgentNodes`
-        // helper). `getAgentNodes()` is the lightweight option here:
-        // this branch runs only on click, not in a render loop.
-        const { getAgentNodes, activeNodeId } = useAgentNodeStore.getState();
-        const agentNodes = getAgentNodes();
-        const meshId = resolveMeshScopeId(agentNodes, null, activeNodeId);
-        if (meshId !== null) {
-          selectMesh(meshId);
-          return;
-        }
-      }
-      setViewMode('mesh');
+      enterMeshGrid();
       return;
     }
     if (mode === 'filtered') {
@@ -155,8 +152,13 @@ export function ViewModeSwitcher() {
       // search. Re-clicking while already in Filtered re-arms the request
       // — the user's intent when clicking a segment they're already on is
       // "get me to the search box".
-      if (useUIStore.getState().viewMode !== 'filtered') setViewMode('filtered');
-      useUIStore.getState().requestFocusGridSearch();
+      //
+      // #2076 — both halves of the gesture (the mode flip, the focus
+      // request) and the cross-Mesh-results notice live in one store
+      // action, because "the notice fires once per escape" is a property of
+      // the gesture, not of each caller. Calling it is also why the notice
+      // cannot fire on a re-click from Filtered: no escape happens then.
+      useUIStore.getState().enterFilteredFromSearch();
       return;
     }
     setViewMode(mode);
@@ -182,16 +184,25 @@ export function ViewModeSwitcher() {
             }`}
           >
             <Icon className="w-4 h-4 shrink-0" />
-            {/* Icon-only below 1400px window width — at exactly 1300px
-                the labels become visible but the centre's `w-80` (260px
-                at the 13px root) plus the side clusters' min-content
-                (~565px each when labels are visible) overflows the
-                available side tracks and clips the last segment
-                ("Filtered"). The 1400px floor keeps labels hidden in
-                the 1300–1399px range where the layout can't support
-                them (PR #1623 review). The aria-label keeps the
-                accessible name stable. */}
-            <span className="max-[1399px]:hidden">{label}</span>
+            {/* Icon-only below 1440px window width — the PR #1623 finding was that
+                the floor cannot be 1300px: at exactly 1300px the labels
+                become visible but the centre's `w-80` (260px at the 13px
+                root) plus the side clusters' min-content (~565px each when
+                labels are visible) overflows the available side tracks and
+                clips the last segment ("Filtered"). That moved the floor to
+                1400px, and #2081 review moved it again to 1440px, which is
+                the first width MEASURED clean in both header grids. In
+                Filtered (`grid-cols-[auto_minmax(0,1fr)_auto]` — both side
+                tracks content-sized `auto`, the centre absorbing the rest
+                down to a 16px floor) the labelled layout needs left 726px +
+                centre min-content 143px + right 538px = 1407px, so the
+                1400–1439 range overflowed (38px at exactly 1400 with the
+                scope indicator present, 6px with it hidden); in Mesh Grid
+                (`minmax(0,1fr)_auto_minmax(0,1fr)`) the left cell clipped by
+                6px at exactly 1400 while 1420 and 1440+ were clean. At 1440
+                Filtered the centre is 145px against a 145px min-content.
+                The aria-label keeps the accessible name stable. */}
+            <span className="max-[1439px]:hidden">{label}</span>
           </button>
         );
       })}

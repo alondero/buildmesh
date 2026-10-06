@@ -1,8 +1,10 @@
 import { create } from 'zustand';
 import { useMeshStore } from './meshStore';
+import { addToast } from './toastStore';
+import { SCOPE_NOTICE_PROVIDER, searchEscapeNotice } from '../lib/scopeNotices';
 import { STATUS_CONFIG } from '../lib/status';
 import type { SessionStatus } from '../types/generated/SessionStatus';
-import type { ProbeContextPin, ProbeTab } from '../lib/probeContext';
+import type { ProbeTab } from '../lib/probeContext';
 import { rememberProbeSubview, restoredProbeSubview } from '../lib/probeGroups';
 import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } from '../lib/probeWorkingSet';
 
@@ -305,13 +307,6 @@ interface UIState extends GridControls {
   // records visits transitively) and by `toggleProbe` when it opens the
   // panel; session-only — never persisted.
   probeWorkingSet: ProbeWorkingSet;
-  // Destination-local context captures (issue #1456). Host-lens tabs do
-  // not use these. Mesh/Agent tabs follow selection until the user pins the
-  // current stable id; the resolver keeps a missing pin visible instead of
-  // silently falling back to a newly selected subject. Keeping one slot per
-  // destination means pinning a second tab cannot erase the first tab's
-  // protection when the user returns to it.
-  probeContextPins: Partial<Record<ProbeTab, ProbeContextPin>>;
   // The single file currently shown in the Center Workspace Diff Overlay
   // (issue #379), or null when the overlay is closed. Independent of
   // `probeTab` — the overlay floats over the terminal grid and survives Probe
@@ -321,13 +316,6 @@ interface UIState extends GridControls {
   activeDiffFile: DiffContext | null;
   toggleProbe: () => void;
   setProbeTab: (tab: ProbeTab) => void;
-  pinProbeContext: (pin: ProbeContextPin) => void;
-  // Clears the pin for `tab` (default: the current tab) so the destination
-  // returns to following selection. The palette's mesh-scoped probe entries
-  // ("Open <Destination> in <Mesh>") clear the target tab's stale pin
-  // before selecting the mesh — otherwise a pin to another mesh would keep
-  // winning over the requested scope and the command would appear broken.
-  clearProbeContextPin: (tab?: ProbeTab) => void;
   // Open the probe on a specific tab, opening the panel if it's collapsed.
   // The "click active tab to collapse" UX is left to ProbePanel's own
   // click handler — this is a pure "make the tab visible" action.
@@ -438,6 +426,28 @@ interface UIState extends GridControls {
   // current mode isn't 'single'.
   exitSingleMode: () => void;
 
+  // ---- Entering Mesh scope (#2070) ----
+  // "Enter Mesh scope for Mesh X", as ONE transition. It lives here, next to
+  // the View Mode setter it drives, because the two halves of the scope -
+  // `selectedMeshId` in meshStore and `viewMode` here - cannot both be owned
+  // by meshStore without a circular import (meshStore already imports this
+  // module; see its header).
+  //
+  // Every entrypoint routes here: the sidebar Mesh row and its Mesh-lens
+  // Probe destinations, the title-bar picker's Mesh rows, the omnibar's
+  // Mesh-scoped routes, and the `view-mesh` command. When the Mesh is
+  // already selected there is no selection change, so the
+  // mesh?mode subscription at the bottom of this file cannot fire - the View
+  // Mode setter is what honours the sticky re-click (#2072). Already in that
+  // Mesh's grid, it is a no-op. All Nodes clears the selection inside
+  // `setViewMode`, so it is never a re-click.
+  //
+  // The parameter is a Mesh id and cannot be null: no code path selects a Mesh
+  // the user did not choose (#2071), and "what to do with nothing selected"
+  // stays an entrypoint decision - the `view-mesh` command asks instead of
+  // guessing.
+  enterMeshScope: (meshId: number) => void;
+
   // ---- Grid Controls (wayfinder #988 / ticket #995) ----
   // The five control fields themselves come from `GridControls`. Every setter
   // below is idempotent — a same-value call neither notifies subscribers nor
@@ -471,6 +481,34 @@ interface UIState extends GridControls {
   // is set on every press — not just the first one.
   focusGridSearchRequest: number;
   requestFocusGridSearch: () => void;
+
+  // ---- Scope picker open request (issue #2076) ----
+  // The same request-counter channel as `focusGridSearchRequest`, for the
+  // other imperative gesture in the title bar: `ScopeIndicator` owns its
+  // picker's open state locally, so a producer outside that component (the
+  // Mesh Grid segment) cannot set it directly. It bumps this counter and the
+  // indicator opens its picker in a `useLayoutEffect`, the same shape
+  // `GridControls` uses for search focus — no ref forwarding, no
+  // module-level singleton, no test-only reset seam.
+  //
+  // A counter rather than a boolean for the same reason as the search
+  // request: the consumer observes nothing but this number, so a second
+  // Mesh Grid press must bump it again or a user who dismissed the picker
+  // could never reopen it without changing mode.
+  openScopePickerRequest: number;
+  requestOpenScopePicker: () => void;
+
+  // ---- Search entry point + scope notice (issue #2076) ----
+  // The one implementation of the "take me to the grid search" gesture,
+  // shared by the Filtered segment (`ViewModeSwitcher`) and the
+  // ⌘/Ctrl+F global shortcut (App.tsx `focus-grid-search`). Both used to
+  // spell out the same two calls; the notice only makes sense if there is
+  // exactly one of them, because "fires once per escape" is a property of
+  // the gesture rather than of each caller.
+  //
+  // The notice never gates the gesture: the mode flip and the focus request
+  // both run first and unconditionally, and the toast is fire-and-forget.
+  enterFilteredFromSearch: () => void;
 }
 
 export const useUIStore = create<UIState>((set, get) => {
@@ -483,7 +521,6 @@ export const useUIStore = create<UIState>((set, get) => {
     // Matches the default `probeTab` so the rail is never empty and the
     // body's aria-labelledby always resolves, from boot onward.
     probeWorkingSet: pushProbeWorkingSet(EMPTY_PROBE_WORKING_SET, initialProbeTab),
-    probeContextPins: {},
     activeDiffFile: null,
 
     toggleProbe: () => {
@@ -514,23 +551,6 @@ export const useUIStore = create<UIState>((set, get) => {
         probeTab: tab,
         probeWorkingSet: pushProbeWorkingSet(state.probeWorkingSet, tab),
       }));
-    },
-
-    pinProbeContext: (pin) => {
-      set((state) => ({
-        probeContextPins: {
-          ...state.probeContextPins,
-          [pin.tab]: pin,
-        },
-      }));
-    },
-
-    clearProbeContextPin: (tab) => {
-      const target = tab ?? get().probeTab;
-      if (get().probeContextPins[target] === undefined) return;
-      const probeContextPins = { ...get().probeContextPins };
-      delete probeContextPins[target];
-      set({ probeContextPins });
     },
 
     openDiff: (ctx: DiffContext) => {
@@ -674,6 +694,23 @@ export const useUIStore = create<UIState>((set, get) => {
       get().setViewMode(get().lastNonSingleMode);
     },
 
+    enterMeshScope: (meshId) => {
+      const { selectedMeshId, selectMesh } = useMeshStore.getState();
+      // A different Mesh is a selection change, and the mesh?mode
+      // subscription below turns that into Mesh Grid on its own.
+      if (selectedMeshId !== meshId) {
+        selectMesh(meshId);
+        return;
+      }
+      // The same Mesh again: the subscription short-circuits on an unchanged
+      // selection, so from a cross-Mesh View Mode the canvas would stay
+      // cross-Mesh. Re-picking the Mesh in scope means "take me back to its
+      // grid" (#2072); already there, this is a no-op.
+      if (get().viewMode !== 'mesh') {
+        get().setViewMode('mesh');
+      }
+    },
+
     ...initialGridControls,
 
     setGridSearchQuery: (query) => {
@@ -725,15 +762,44 @@ export const useUIStore = create<UIState>((set, get) => {
     requestFocusGridSearch: () => {
       set({ focusGridSearchRequest: get().focusGridSearchRequest + 1 });
     },
+
+    openScopePickerRequest: 0,
+    // No idempotency guard — same discipline as `requestFocusGridSearch`
+    // above, and for the same reason: `ScopeIndicator`'s layout effect
+    // watches only this counter, so a same-value call would drop the
+    // second Mesh Grid press.
+    requestOpenScopePicker: () => {
+      set({ openScopePickerRequest: get().openScopePickerRequest + 1 });
+    },
+
+    enterFilteredFromSearch: () => {
+      const { viewMode, lastNonSingleMode } = get();
+      // Read BEFORE the flip: after it, every scope is cross-Mesh and the
+      // escape would be invisible. `searchEscapeNotice` decides from the same
+      // scope predicate `deriveScope` answers with (#2071), so Single over a
+      // Mesh grid counts and a Filtered re-click does not.
+      const notice = searchEscapeNotice(
+        viewMode,
+        lastNonSingleMode,
+        useMeshStore.getState().selectedMeshId,
+      );
+      if (get().viewMode !== 'filtered') get().setViewMode('filtered');
+      // Re-arms on every press, including a re-click from Filtered: the
+      // user's intent is "get me to the search box" (#1609).
+      get().requestFocusGridSearch();
+      if (notice !== null) {
+        addToast(SCOPE_NOTICE_PROVIDER, notice, 'info');
+      }
+    },
   };
 });
 
 // Sidebar sync — "one filter, two controls" (wayfinder #982 / ticket #983,
-// re-click-deselect → 'all' per ticket #986). Selecting a mesh in the
-// sidebar switches the canvas to Mesh Grid for that mesh; clearing the
-// selection switches to All Nodes. Pinned mode never writes selectedMeshId,
-// but a sidebar mesh click always means "show me this mesh", so the sync
-// applies in whatever mode the canvas is in.
+// re-click-deselect → 'all' per ticket #986, removed by #2072). Selecting a
+// mesh in the sidebar switches the canvas to Mesh Grid for that mesh;
+// clearing the selection switches to All Nodes. Pinned mode never writes
+// selectedMeshId, but a sidebar mesh click always means "show me this mesh",
+// so the sync applies in whatever mode the canvas is in.
 //
 // The viewMode-equality guard kills the re-entrant cycle: when
 // `setViewMode('all')` itself calls `selectMesh(null)` (issue #1002), the

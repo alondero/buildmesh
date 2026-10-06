@@ -45,17 +45,21 @@ export function HeaderPillButton({ icon, label, onClick, title, ariaLabel, activ
       }`}
     >
       {icon}
-      {/* Icon-only below 1400px window width — unified with the
+      {/* Icon-only below 1440px window width — unified with the
           switcher's ladder (issue #1609; previously the pills dropped at
           1150px, so between the two tiers the bar mixed labelled
           segments with icon pills). The threshold moved from 1300px to
           1400px to avoid a 2px clip on the rightmost ViewModeSwitcher
-          segment ("Filtered") at exactly 1300px — at 1300px the labels
-          become visible but the centre's `w-80` (260px at the 13px root)
-          plus the side clusters' min-content (~565px each) overflows
-          the side tracks (PR #1623 review). The aria-label above keeps
-          the accessible name stable. */}
-      <span className="max-[1399px]:hidden">{label}</span>
+          segment ("Filtered") at exactly 1300px, then from 1400px to
+          1440px in #2081 review: 1400px was measured over budget in both
+          header grids. In Filtered (`grid-cols-[auto_minmax(0,1fr)_auto]`,
+          both side tracks content-sized) the labelled bar needs left
+          726px + centre min-content 143px + right 538px = 1407px, and in
+          Mesh Grid the left cell clipped by 6px at exactly 1400px. 1440 is
+          the first width measured clean in both (Filtered centre 145px
+          against a 145px min-content). The aria-label above keeps the
+          accessible name stable. */}
+      <span className="max-[1439px]:hidden">{label}</span>
     </button>
   );
 }

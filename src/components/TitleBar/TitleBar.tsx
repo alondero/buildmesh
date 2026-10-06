@@ -6,6 +6,7 @@ import { useWindowFocused } from '../../hooks/useWindowFocused';
 import { ViewModeSwitcher } from '../ViewModeSwitcher/ViewModeSwitcher';
 import { GridControls } from './GridControls';
 import { HeaderPillButton } from './HeaderPillButton';
+import { ScopeIndicator } from './ScopeIndicator';
 import { Wordmark } from './Wordmark';
 import { ZoomControl } from './ZoomControl';
 import { TitleBarOverflow } from './TitleBarOverflow';
@@ -141,14 +142,16 @@ function NavigationControls() {
         {/* `SEARCH_SHORTCUT_LABEL` is resolved once at module scope. The
             conditional still keeps an empty <kbd> chip from appearing if
             the catalog row were ever renamed. The chip is the FIRST thing
-            to disappear when narrowing (1400px threshold; labels stay
-            visible down to 1300px — user-facing affordances outlast the
-            decorative keyboard hint, per PR review feedback). The class
-            string MUST stay a literal so Tailwind v4's source scanner
-            picks it up — a template literal would defeat JIT detection
-            and the rule would never compile. */}
+            to disappear when narrowing, on the shared labelled tier
+            (1440px, #2081 review — measured clean in both header grids);
+            user-facing affordances outlast the decorative keyboard hint.
+            The chip contributes ~13px of the centre's 143px min-content
+            in the labelled tier, which is part of why that tier starts at
+            1440. The class string MUST stay a literal so Tailwind v4's
+            source scanner picks it up — a template literal would defeat
+            JIT detection and the rule would never compile. */}
         {SEARCH_SHORTCUT_LABEL !== '' && (
-          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1399px]:hidden">
+          <kbd className="shrink-0 rounded-md border border-border-default bg-bg-card px-1.5 py-0.5 font-mono text-[11px] text-text-muted max-[1439px]:hidden">
             {SEARCH_SHORTCUT_LABEL}
           </kbd>
         )}
@@ -481,6 +484,12 @@ export function TitleBar() {
           )}
           <Wordmark />
           <ViewModeSwitcher />
+          {/* #2074 — the scope indicator names the effective scope (the one
+              `deriveScope` value) and doubles as the Mesh picker. It sits in
+              this cluster, between the switcher that picks the View Mode and
+              the Filtered search bar that narrows it: same toolbar, same
+              width ladder, one degradation curve. */}
+          <ScopeIndicator />
           {/* #1609 — the Search Nodes bar IS the Filtered view's control, so
               it mounts beside the switcher only while that mode is active.
               An honest conditional mount: CSS can't interpolate `width: auto`,

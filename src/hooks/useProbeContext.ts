@@ -3,9 +3,10 @@
  *
  * The stores remain the sources of truth for Meshes, Agent Nodes, and canvas
  * selection. This hook is the read seam that combines them with the
- * destination's explicit ownership definition and an optional destination-
- * local pin. It owns no state of its own, so every consumer sees the same
- * answer and a pin cannot drift from the stores silently.
+ * destination's explicit ownership definition. It owns no state of its own, so
+ * every consumer sees the same answer, and a destination can never disagree
+ * with the sidebar selection — the pins that could do that were removed in
+ * issue #2073.
  */
 
 import { useMemo } from 'react';
@@ -23,7 +24,6 @@ export type {
   ProbeContextMesh,
   ProbeContextMode,
   ProbeContextNode,
-  ProbeContextPin,
   ProbeLens,
   ProbeSubject,
   ProbeTabDefinition,
@@ -45,9 +45,6 @@ export function useProbeContext(): ProbeContext {
   const nodesById = useAgentNodeStore((s) => s.nodesById);
   const viewMode = useUIStore((s) => s.viewMode);
   const probeTab = useUIStore((s) => s.probeTab);
-  // Resolve only the active destination's entry. A pin on another tab should
-  // not cause this destination to re-render or borrow that tab's subject.
-  const probeContextPin = useUIStore((s) => s.probeContextPins[s.probeTab] ?? null);
 
   return useMemo(
     () => resolveProbeContext({
@@ -57,7 +54,6 @@ export function useProbeContext(): ProbeContext {
       activeNodeId,
       nodesById,
       viewMode,
-      pin: probeContextPin,
     }),
     [
       selectedMeshId,
@@ -66,7 +62,6 @@ export function useProbeContext(): ProbeContext {
       nodesById,
       viewMode,
       probeTab,
-      probeContextPin,
     ],
   );
 }

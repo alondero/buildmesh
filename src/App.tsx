@@ -30,7 +30,7 @@ import { createKeyRepeatThrottle } from './lib/keyRepeatThrottle';
 import { isTextInputFocused, isTerminalFocused } from './lib/focusGuard';
 import { traversalTargetId } from './lib/gridTraversal';
 import { toggleGridMaximize, cycleGridMode, buildFocusGridSearchBinding, triggerNewAgentShortcut } from './lib/gridShortcuts';
-import { scopeNodesForMode } from './lib/viewModes';
+import { deriveScope } from './lib/viewModes';
 import { activityRootId, groupActivityNodes, indexAgentNodes } from './lib/nodeActivities';
 import type { NonSingleViewMode } from './stores/uiStore';
 import { jumpToNextAwaitingNode } from './lib/awaitingInputShortcuts';
@@ -302,9 +302,12 @@ function App() {
         // re-pressing while already focused is a harmless re-focus, and
         // the counter pattern (0 → 1 → 2) naturally fires the effect
         // on every distinct press.
-        const ui = useUIStore.getState();
-        if (ui.viewMode !== 'filtered') ui.setViewMode('filtered');
-        ui.requestFocusGridSearch();
+        //
+        // #2076 — the flip, the focus request and the "these results span
+        // Meshes" notice are one store action, shared with the Filtered
+        // segment. The notice is informational and runs after the mode flip
+        // and the focus bump, so it can never suppress either.
+        useUIStore.getState().enterFilteredFromSearch();
         return;
       }
 
@@ -363,13 +366,16 @@ function App() {
       const mode: NonSingleViewMode = ui.viewMode;
 
       // Phase 2: walk the grid the active View Mode actually renders. Ticket
-      // #987 — `scopeNodesForMode` returns exactly the on-screen node set (Mesh
-      // for the resolved mesh, Pinned cross-mesh, All, or Filtered narrowed by
-      // the Grid Controls — #1609) in the store's
-      // canonical (mesh_id, position) order, so traversal matches AgentNodeView
-      // cell-for-cell. This replaces the old `mesh_id === activeNode.mesh_id`
-      // filter, which stranded Ctrl+Alt+Arrow on the active node's mesh in
-      // Pinned/All. `setActiveNode` only writes `activeNodeId` (not
+      // #987 — the derived scope returns exactly the on-screen node set (Mesh
+      // for the selected mesh, Pinned cross-mesh, All, or Filtered narrowed by
+      // the Grid Controls — #1609) in the store's canonical (mesh_id, position)
+      // order, so traversal matches AgentNodeView cell-for-cell. This replaces
+      // the old `mesh_id === activeNode.mesh_id` filter, which stranded
+      // Ctrl+Alt+Arrow on the active node's mesh in Pinned/All. #2071 reads the
+      // one `deriveScope` definition the grid render reads, instead of
+      // re-deriving scope here — and with the Mesh fallback chain gone, a Mesh
+      // Grid with no selection walks an empty set (there is nothing on screen
+      // to walk). `setActiveNode` only writes `activeNodeId` (not
       // `selectedMeshId`), so a cross-mesh hop in Pinned/All won't trip the
       // sidebar-sync subscription back into Mesh mode.
       const activeNode = useAgentNodeStore.getState().getActiveNode();
@@ -386,7 +392,8 @@ function App() {
       const ownerships = useAgentNodeStore.getState().circuitOwnerships;
       const nodeIndex = indexAgentNodes(agentNodes);
       const groups = useNodeActivityStore.getState().groups;
-      const visibleNodes = groupActivityNodes(scopeNodesForMode(mode, agentNodes, selectedMeshId, activeNode.id, filteredControls()), nodeIndex, ownerships, groups);
+      const scope = deriveScope({ viewMode: mode, lastNonSingleMode: ui.lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId: activeNode.id, controls: filteredControls() });
+      const visibleNodes = groupActivityNodes(scope.visibleNodes, nodeIndex, ownerships, groups);
       const targetId = traversalTargetId(visibleNodes, activityRootId(activeNode.id, nodeIndex, ownerships, groups), direction);
       if (targetId !== null) {
         useNodeActivityStore.getState().activateNode(targetId);

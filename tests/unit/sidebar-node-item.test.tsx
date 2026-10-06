@@ -61,45 +61,44 @@ describe('NodeItem', () => {
     expect(onDeleteNode).toHaveBeenCalledTimes(1);
   });
 
-  it('renders the status dot in a fixed-size box so ●/○/⏸/✗ align in the sidebar', () => {
-    // jsdom can't measure layout, so assert className structure. The dot
-    // span must carry the same fixed-width/height classes regardless of
-    // status; otherwise the sans stack renders the outline of ○ visibly
-    // larger than the filled ●, misaligning the dots down the sidebar list.
-    //
-    // Iterate every SessionStatus so the regression guard covers the
-    // `text-violet` (suspended) and `animate-pulse-fast` (awaiting_input)
-    // branches too — not just the two colour-matched cases.
-    const stripVariable = (cn: string) =>
-      cn
-        .replace(/status-\S+/g, '')
-        .replace(/\btext-violet\b/g, '')
-        .replace(/\banimate-pulse-fast\b/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-    const expected =
-      'inline-flex h-3 w-3 shrink-0 items-center justify-center text-xs leading-none';
-
-    for (const [status, label] of [
-      ['running', 'Running'],
-      ['idle', 'Idle'],
-      ['awaiting_input', 'Needs attention'],
-      ['error', 'Error'],
-      ['suspended', 'Suspended'],
+  it('draws each status as one glyph in the same size box so rows align down the sidebar', () => {
+    // jsdom can't measure layout, so assert className structure. Every status
+    // must share one fixed box; the shape (fill style) is what changes.
+    const sizeBoxes = new Set<string>();
+    for (const [status, label, shape] of [
+      ['running', 'Running', 'solid'],
+      ['idle', 'Idle', 'ring'],
+      ['pending', 'Starting…', 'dashed'],
+      ['awaiting_input', 'Needs attention', 'target'],
+      ['error', 'Error', 'cross'],
+      ['lost', 'Lost', 'slash'],
+      ['suspended', 'Suspended', 'half'],
+      ['ready', 'Ready', 'target'],
+      ['completed', 'PR opened', 'target'],
+      ['archived', 'Archived', 'thin'],
     ] as const) {
-      const { unmount } = render(
+      const { container, unmount } = render(
         <NodeItem
           node={makeNode({ status })}
           meshColor={meshColor}
-
           onSelectNode={() => {}}
           onDeleteNode={() => {}}
         />,
       );
-      const wrapper = stripVariable(screen.getByTitle(label).className);
-      expect(wrapper, `status=${status}`).toBe(expected);
+      const glyph = screen.getByRole('img', { name: label });
+      expect(glyph.getAttribute('data-shape'), `status=${status}`).toBe(shape);
+      expect(container.querySelectorAll('[data-testid="node-status-glyph"]'), `status=${status}`).toHaveLength(1);
+      sizeBoxes.add(glyph.className.replace(/\b(status-\S+|text-\S+|animate-\S+)\b/g, '').replace(/\s+/g, ' ').trim());
       unmount();
+    }
+    expect(sizeBoxes.size).toBe(1);
+    expect([...sizeBoxes][0]).toContain('h-5 w-5');
+  });
+
+  it('no longer draws a separate text status dot', () => {
+    const { container } = render(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
+    for (const dot of ['●', '○', '◌', '✓', '✗', '⊘', '⏸']) {
+      expect(container.textContent, dot).not.toContain(dot);
     }
   });
 
@@ -176,26 +175,26 @@ describe('NodeItem', () => {
 
   });
 
-  it('keeps the 14px ownership cell aligned while hiding unpiloted indicators', () => {
+  it('adds the Circuit orbit to the same glyph only while the node is piloted', () => {
     useAgentNodeStore.setState({ circuitOwnerships: {} });
     const { container, rerender } = render(
       <NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />,
     );
-    const cell = container.querySelector('[data-testid="circuit-indicator-cell"]')!;
-    expect(cell.className).toContain('w-3.5');
-    expect(cell.querySelector('[data-testid="circuit-indicator"]')).toBeNull();
+    expect(container.querySelector('[data-orbit]')).toBeNull();
 
     useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Circuit active' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Running. Circuit active' }).querySelector('[data-orbit="comet"]')).toBeTruthy();
+    expect(container.querySelectorAll('[data-testid="node-status-glyph"]')).toHaveLength(1);
   });
 
-  it('uses Circuit ownership for the terminal Done indicator', () => {
+  it('uses Circuit ownership for the terminal Done orbit', () => {
     useAgentNodeStore.setState({ circuitOwnerships: {
       10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'completed', parent_node_id: null },
     } });
-    render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Circuit done' })).toBeTruthy();
+    const { container } = render(<NodeItem node={makeNode({ status: 'completed' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
+    expect(screen.getByRole('img', { name: 'PR opened. Circuit done' })).toBeTruthy();
+    expect(container.querySelector('[data-orbit]')?.getAttribute('data-orbit')).toBe('closed');
   });
 
   it('does not suppress lost-conversation recovery for terminal Circuit history', () => {
@@ -209,11 +208,13 @@ describe('NodeItem', () => {
 
   it('uses the same waiting and failure presentations as the canvas header', () => {
     useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
-    const { rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Circuit waiting' })).toBeTruthy();
+    const { container, rerender } = render(<NodeItem node={makeNode({ status: 'awaiting_input' })} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Needs attention. Circuit waiting' })).toBeTruthy();
+    expect(container.querySelector('[data-orbit]')?.getAttribute('data-orbit')).toBe('half');
 
     useAgentNodeStore.setState({ circuitOwnerships: {10: { node_id: 10, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }} });
     rerender(<NodeItem node={makeNode()} meshColor={meshColor} onSelectNode={() => {}} onDeleteNode={() => {}} />);
-    expect(screen.getByRole('img', { name: 'Circuit needs attention' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Running. Circuit needs attention' })).toBeTruthy();
+    expect(container.querySelector('[data-orbit]')?.getAttribute('data-orbit')).toBe('dashed');
   });
 });
