@@ -547,8 +547,14 @@ fn get_retired_nodes() -> &'static Mutex<VecDeque<i64>> {
     RETIRED_NODES.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-/// Has this node's channel been retired? A fenced id may still *receive*
-/// output through a stale producer handle, but must never gain an entry.
+/// Has this node's channel been retired? A retired id is refused by the two
+/// entry points that could otherwise recreate it ([`ensure_pty_channel`] and
+/// [`subscribe_pty`]); [`send_pty_output`] needs no check because it only ever
+/// writes to an entry that already exists.
+///
+/// The fence is a bounded FIFO, so this is a scan of at most
+/// [`RETIRED_NODE_MEMORY`] ids. That is fine off the output path — it runs at
+/// most once per connect or spawn, and the fanout writes never take this lock.
 fn is_retired(node_id: i64) -> bool {
     get_retired_nodes().lock().contains(&node_id)
 }
