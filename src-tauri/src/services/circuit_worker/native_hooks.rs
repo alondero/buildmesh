@@ -70,20 +70,26 @@ impl NativeHook {
             return None;
         }
         let claude_family = matches!(provider, "claude" | "claude_code" | "anthropic");
-        let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
+        let event = value
+            .get("hook_event_name")
+            .or_else(|| value.get("hookEventName"))
+            .or_else(|| value.get("hookName"))?
+            .as_str()?;
         let human_fact = human_fact(value);
         // Codex's PermissionRequest contract has no stable request id. Keep
         // the event as an uncorrelated permission wait instead of dropping
         // it or inventing a correlation token.
-        if human_fact.is_none() && !matches!(
-            event,
-            "UserPromptSubmit"
-                | "Stop"
-                | "SubagentStart"
-                | "SubagentStop"
-                | "PermissionRequest"
-                | "StopFailure"
-        ) {
+        if human_fact.is_none()
+            && !matches!(
+                event,
+                "UserPromptSubmit"
+                    | "Stop"
+                    | "SubagentStart"
+                    | "SubagentStop"
+                    | "PermissionRequest"
+                    | "StopFailure"
+            )
+        {
             return None;
         }
         let token = |key: &str| {
@@ -115,7 +121,12 @@ impl NativeHook {
             Some(active)
         })();
         Some(Self {
-            session_id: token("session_id").or_else(|| token("sessionId")).or_else(|| token("sessionID")).or_else(|| token("conversationId")).or_else(|| token("conversation_id")).or_else(|| token("taskId")),
+            session_id: token("session_id")
+                .or_else(|| token("sessionId"))
+                .or_else(|| token("sessionID"))
+                .or_else(|| token("conversationId"))
+                .or_else(|| token("conversation_id"))
+                .or_else(|| token("taskId")),
             turn_id: turn_id.clone(),
             event: event.into(),
             child_id: token("agent_id"),
@@ -268,22 +279,71 @@ pub(crate) fn receipt_source_id(
 // attention route. Tool names identify request kind, never request identity.
 fn human_fact(value: &serde_json::Value) -> Option<crate::circuit::observation::ObservedWorkFact> {
     use crate::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
-    let event = value.get("hook_event_name").or_else(|| value.get("hookEventName")).or_else(|| value.get("hookName"))?.as_str()?;
-    let request_id = ["request_id", "tool_use_id", "toolUseId", "requestId", "requestID", "elicitation_id", "toolCallId", "tool_call_id", "callId", "call_id", "permissionID", "permission_id"]
-        .iter().find_map(|key| value.get(key).and_then(|v| v.as_str()).filter(|v| !v.trim().is_empty()))?;
-    let tool = value.get("tool_name").or_else(|| value.get("toolName")).and_then(|v| v.as_str());
+    let event = value
+        .get("hook_event_name")
+        .or_else(|| value.get("hookEventName"))
+        .or_else(|| value.get("hookName"))?
+        .as_str()?;
+    let request_id = [
+        "request_id",
+        "tool_use_id",
+        "toolUseId",
+        "requestId",
+        "requestID",
+        "elicitation_id",
+        "toolCallId",
+        "tool_call_id",
+        "callId",
+        "call_id",
+        "permissionID",
+        "permission_id",
+    ]
+    .iter()
+    .find_map(|key| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.trim().is_empty())
+    })?;
+    let tool = value
+        .get("tool_name")
+        .or_else(|| value.get("toolName"))
+        .and_then(|v| v.as_str());
     let wait_kind = match tool {
         Some("AskUserQuestion" | "request_user_input" | "ask_user_question") => Kind::Question,
         Some("ExitPlanMode") => Kind::ReviewApproval,
         _ => Kind::Permission,
     };
     match event {
-        "PermissionRequest" => Some(Fact::HumanWaitRequested { wait_kind: Kind::Permission, request_id: request_id.into() }),
-        "PreToolUse" if matches!(tool, Some("AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode")) =>
-            Some(Fact::HumanWaitRequested { wait_kind, request_id: request_id.into() }),
-        "PostToolUse" => Some(Fact::ToolResponse { wait_kind, request_id: request_id.into() }),
-        "PostToolUseFailure" => Some(Fact::ToolFailed { wait_kind, request_id: request_id.into() }),
-        "PermissionResult" => Some(Fact::HumanResponse { wait_kind: Kind::Permission, request_id: request_id.into() }),
+        "PermissionRequest" => Some(Fact::HumanWaitRequested {
+            wait_kind: Kind::Permission,
+            request_id: request_id.into(),
+        }),
+        "PreToolUse"
+            if matches!(
+                tool,
+                Some(
+                    "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode"
+                )
+            ) =>
+        {
+            Some(Fact::HumanWaitRequested {
+                wait_kind,
+                request_id: request_id.into(),
+            })
+        }
+        "PostToolUse" => Some(Fact::ToolResponse {
+            wait_kind,
+            request_id: request_id.into(),
+        }),
+        "PostToolUseFailure" => Some(Fact::ToolFailed {
+            wait_kind,
+            request_id: request_id.into(),
+        }),
+        "PermissionResult" => Some(Fact::HumanResponse {
+            wait_kind: Kind::Permission,
+            request_id: request_id.into(),
+        }),
         _ => None,
     }
 }
@@ -337,7 +397,8 @@ pub(crate) fn receive(
         // evidence in `db::circuit::evidence::receive_native_hook`, which is
         // the only place a recorded submission and the harness prompt echo
         // can be compared (issue #1898).
-        submission_correlated: false, submission_seq: None,
+        submission_correlated: false,
+        submission_seq: None,
         hook,
     };
     crate::db::circuit::evidence::receive_native_hook(&receipt)?;
@@ -411,9 +472,7 @@ fn rejected_receipt(
     agent_node_id: i64,
     source: &str,
 ) -> super::CircuitEvent {
-    use crate::circuit::observation::{
-        CircuitObservation, ObservationIdentity, ObservedWorkFact,
-    };
+    use crate::circuit::observation::{CircuitObservation, ObservationIdentity, ObservedWorkFact};
     let expected = ObservationIdentity {
         run_id,
         step_id: entry.node_id.unwrap_or_default(),
@@ -473,7 +532,9 @@ fn normalize(
     expected.session_id = current_session;
     expected.session_incarnation = current_incarnation;
     let human_fact = receipt.hook.human_fact.clone();
-    let authoritative = ((receipt.turn_fenced && (receipt.submission_correlated || human_fact.is_some())) || child_terminal)
+    let authoritative = ((receipt.turn_fenced
+        && (receipt.submission_correlated || human_fact.is_some()))
+        || child_terminal)
         && current_input.is_some()
         && (receipt.input_stamp.is_some() || human_fact.is_some())
         && expected.session_id.is_some()
@@ -484,7 +545,9 @@ fn normalize(
         let revision = format!("{:x}", Sha256::digest(text.as_bytes()));
         facts.push(Fact::AssistantReport { text, revision });
     }
-    if let Some(fact) = human_fact { facts.push(fact); }
+    if let Some(fact) = human_fact {
+        facts.push(fact);
+    }
     match receipt.hook.event.as_str() {
         "UserPromptSubmit" => facts.push(Fact::Working),
         // `background_busy` is only ever set by the AGY parser above; the
@@ -495,7 +558,9 @@ fn normalize(
         } else {
             Fact::ForegroundTerminated
         }),
-        "PermissionRequest" if receipt.hook.human_fact.is_none() => facts.push(Fact::PermissionRequested),
+        "PermissionRequest" if receipt.hook.human_fact.is_none() => {
+            facts.push(Fact::PermissionRequested)
+        }
         "StopFailure" => facts.push(Fact::Unavailable),
         "SubagentStart" => {
             if let Some(id) = receipt.hook.child_id {
@@ -537,7 +602,10 @@ fn normalize(
         .map(|(index, fact)| CircuitObservation {
             identity: identity.clone(),
             source: if receipt.hook.human_fact.is_some() {
-                format!("{}_request_hook", receipt.hook.provider.as_deref().unwrap_or("claude"))
+                format!(
+                    "{}_request_hook",
+                    receipt.hook.provider.as_deref().unwrap_or("claude")
+                )
             } else if receipt.hook.provider.as_deref() == Some("codex") {
                 "codex_native_hook".into()
             } else if receipt.hook.provider.as_deref() == Some("agy") {
@@ -552,22 +620,21 @@ fn normalize(
         })
         .collect();
     super::CircuitEvent::ObservationBatch {
-        input_guard: authoritative.then(|| {
-            crate::circuit::stepper::ObservationInputFence {
-                transcript_guard: None, report_guard: None,
-                agent_node_id: identity.agent_node_id,
-                input_stamp: current_input.expect("authoritative input stamp"),
-                observed_at_ms: if child_terminal {
-                    chrono::Utc::now().timestamp_millis()
-                } else {
-                    receipt.received_at_ms
-                },
-                session_id: expected.session_id.clone().expect("authoritative session"),
-                session_incarnation: expected
-                    .session_incarnation
-                    .clone()
-                    .expect("authoritative incarnation"),
-            }
+        input_guard: authoritative.then(|| crate::circuit::stepper::ObservationInputFence {
+            transcript_guard: None,
+            report_guard: None,
+            agent_node_id: identity.agent_node_id,
+            input_stamp: current_input.expect("authoritative input stamp"),
+            observed_at_ms: if child_terminal {
+                chrono::Utc::now().timestamp_millis()
+            } else {
+                receipt.received_at_ms
+            },
+            session_id: expected.session_id.clone().expect("authoritative session"),
+            session_incarnation: expected
+                .session_incarnation
+                .clone()
+                .expect("authoritative incarnation"),
         }),
         receipt_id: entry.id,
         expected,
@@ -612,7 +679,10 @@ mod tests {
         // A sibling harness reusing the shared parser keeps its own contract:
         // the prompt echo is Claude Code's documented field, not a shared one.
         assert!(
-            NativeHook::parse("codex", submit).unwrap().prompt_digest.is_none(),
+            NativeHook::parse("codex", submit)
+                .unwrap()
+                .prompt_digest
+                .is_none(),
             "Codex has no documented UserPromptSubmit prompt echo"
         );
         // Antigravity's `Stop` shape keeps its own contract too.
@@ -621,17 +691,33 @@ mod tests {
             br#"{"hook_event_name":"Stop","conversationId":"11111111-1111-4111-8111-111111111111","fullyIdle":true,"prompt":"run the tests"}"#,
         )
         .unwrap();
-        assert!(agy.prompt_digest.is_none(), "AGY has no documented UserPromptSubmit prompt echo");
+        assert!(
+            agy.prompt_digest.is_none(),
+            "AGY has no documented UserPromptSubmit prompt echo"
+        );
     }
 
     #[test]
     fn submission_digest_is_a_byte_exact_prompt_fingerprint() {
         // The whole proof rests on this being a real byte-for-byte match, so
         // a one-character difference must not collide.
-        assert_ne!(submission_digest("run the tests"), submission_digest("run the tests "));
-        assert_ne!(submission_digest("run the tests"), submission_digest("Run the tests"));
-        assert_eq!(submission_digest("run the tests"), submission_digest("run the tests"));
-        assert_eq!(submission_digest("run the tests").len(), 64, "digest is a hex sha256");
+        assert_ne!(
+            submission_digest("run the tests"),
+            submission_digest("run the tests ")
+        );
+        assert_ne!(
+            submission_digest("run the tests"),
+            submission_digest("Run the tests")
+        );
+        assert_eq!(
+            submission_digest("run the tests"),
+            submission_digest("run the tests")
+        );
+        assert_eq!(
+            submission_digest("run the tests").len(),
+            64,
+            "digest is a hex sha256"
+        );
     }
 
     #[test]
@@ -710,14 +796,23 @@ mod tests {
                     termination = Some(disposition);
                 }
             }
-            (termination.expect("a Stop always reports foreground termination"), evidence)
+            (
+                termination.expect("a Stop always reports foreground termination"),
+                evidence,
+            )
         }
 
         // The binding is what upgrades the turn's own facts from
         // reduced-confidence presentation to accepted evidence.
         let (disposition, evidence) = replay("turn-bound", true, Some("1:2"));
         assert_eq!(disposition, ObservationDisposition::Accepted);
-        assert_eq!(evidence.identity.as_ref().and_then(|i| i.turn_id.as_deref()), Some("turn-bound"));
+        assert_eq!(
+            evidence
+                .identity
+                .as_ref()
+                .and_then(|i| i.turn_id.as_deref()),
+            Some("turn-bound")
+        );
         // Binding a turn is not completing a step. Claude's `Stop` carries no
         // child/background registry, so the ownership fact that follows the
         // termination is Unavailable and parks the lifecycle unverified.
@@ -747,19 +842,48 @@ mod tests {
         let request = br#"{"hook_event_name":"PermissionRequest","session_id":"session","turn_id":"turn","tool_use_id":"tool-1","tool_name":"Bash"}"#;
         let reply = br#"{"hook_event_name":"PostToolUse","session_id":"session","turn_id":"turn","tool_use_id":"tool-1","tool_name":"Bash"}"#;
         for provider in ["claude", "codex"] {
-            assert_eq!(NativeHook::parse(provider, request).unwrap().human_fact,
-                Some(Fact::HumanWaitRequested { wait_kind: Kind::Permission, request_id: "tool-1".into() }));
-            assert_eq!(NativeHook::parse(provider, reply).unwrap().human_fact,
-                Some(Fact::ToolResponse { wait_kind: Kind::Permission, request_id: "tool-1".into() }));
+            assert_eq!(
+                NativeHook::parse(provider, request).unwrap().human_fact,
+                Some(Fact::HumanWaitRequested {
+                    wait_kind: Kind::Permission,
+                    request_id: "tool-1".into()
+                })
+            );
+            assert_eq!(
+                NativeHook::parse(provider, reply).unwrap().human_fact,
+                Some(Fact::ToolResponse {
+                    wait_kind: Kind::Permission,
+                    request_id: "tool-1".into()
+                })
+            );
             for event in ["Stop", "UserPromptSubmit"] {
                 let payload = serde_json::json!({"hook_event_name":event,"tool_use_id":"tool-1"});
-                assert!(NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap()).is_none_or(|hook| hook.human_fact.is_none()));
+                assert!(
+                    NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap())
+                        .is_none_or(|hook| hook.human_fact.is_none())
+                );
             }
         }
-        assert!(NativeHook::parse("opencode", request).is_none(), "no other harness parser fallback");
-        assert!(NativeHook::parse("codex", br#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#).is_none(), "tool name alone is not a request identity");
+        assert!(
+            NativeHook::parse("opencode", request).is_none(),
+            "no other harness parser fallback"
+        );
+        assert!(
+            NativeHook::parse(
+                "codex",
+                br#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#
+            )
+            .is_none(),
+            "tool name alone is not a request identity"
+        );
         let question = NativeHook::parse("codex", br#"{"hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"q-1"}"#).unwrap();
-        assert!(matches!(question.human_fact, Some(Fact::HumanWaitRequested { wait_kind: Kind::Question, .. })));
+        assert!(matches!(
+            question.human_fact,
+            Some(Fact::HumanWaitRequested {
+                wait_kind: Kind::Question,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -784,7 +908,8 @@ mod tests {
             received_at_ms: 10,
             turn_fenced: true,
             explicit_turn_mismatch: false,
-            submission_correlated: false, submission_seq: None,
+            submission_correlated: false,
+            submission_seq: None,
             hook,
         };
         let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
@@ -797,17 +922,36 @@ mod tests {
             disposition: None,
             observed_at: String::new(),
         };
-        let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(
-            42, entry, receipt, Some("session".into()), Some("1".into()), Some("input-1".into()),
-        ) else { panic!("native batch") };
+        let super::super::CircuitEvent::ObservationBatch {
+            expected,
+            observations,
+            stale,
+            ..
+        } = normalize(
+            42,
+            entry,
+            receipt,
+            Some("session".into()),
+            Some("1".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
         assert!(!stale);
         assert_eq!(observations.len(), 1);
-        assert!(!observations[0].authoritative, "missing submission correlation cannot prove a current turn fact");
+        assert!(
+            !observations[0].authoritative,
+            "missing submission correlation cannot prove a current turn fact"
+        );
         assert_eq!(observations[0].source, "codex_native_hook");
         assert_eq!(observations[0].fact, Fact::PermissionRequested);
 
         let mut evidence = WorkEvidence::default();
-        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert_eq!(
+            evidence.observe(&expected, &observations[0]),
+            ObservationDisposition::ReducedConfidence
+        );
         assert_eq!(evidence.human_waits.len(), 1);
         assert_eq!(evidence.human_waits[0].wait_kind, HumanWaitKind::Permission);
         assert!(evidence.human_waits[0].request_id.is_none());
@@ -828,64 +972,147 @@ mod tests {
             received_at_ms: 11,
             turn_fenced: true,
             explicit_turn_mismatch: false,
-            submission_correlated: false, submission_seq: None,
+            submission_correlated: false,
+            submission_seq: None,
             hook: reply,
         };
         let reply_entry = crate::db::circuit::evidence::CircuitHistoryEntry {
-            id: 2, node_id: Some("work".into()), attempt: Some(1), kind: "native_hook_received".into(),
-            detail: String::new(), source: None, disposition: None, observed_at: String::new(),
+            id: 2,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
         };
-        let super::super::CircuitEvent::ObservationBatch { observations: reply_observations, .. } = normalize(
-            42, reply_entry, reply_receipt, Some("session".into()), Some("1".into()), Some("input-1".into()),
-        ) else { panic!("native batch") };
-        assert_eq!(evidence.observe(&expected, &reply_observations[0]), ObservationDisposition::Rejected);
+        let super::super::CircuitEvent::ObservationBatch {
+            observations: reply_observations,
+            ..
+        } = normalize(
+            42,
+            reply_entry,
+            reply_receipt,
+            Some("session".into()),
+            Some("1".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
+        assert_eq!(
+            evidence.observe(&expected, &reply_observations[0]),
+            ObservationDisposition::Rejected
+        );
 
         let mut stale_identity = expected.clone();
         stale_identity.session_id = Some("different-session".into());
         let stale_response = CircuitObservation {
-            identity: stale_identity, source: "codex_request_hook".into(), source_id: Some("stale-response".into()),
-            observed_at_ms: 12, authoritative: true,
-            fact: Fact::ToolResponse { wait_kind: HumanWaitKind::Permission, request_id: "different-tool".into() },
+            identity: stale_identity,
+            source: "codex_request_hook".into(),
+            source_id: Some("stale-response".into()),
+            observed_at_ms: 12,
+            authoritative: true,
+            fact: Fact::ToolResponse {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "different-tool".into(),
+            },
         };
-        assert_eq!(evidence.observe(&expected, &stale_response), ObservationDisposition::Rejected);
+        assert_eq!(
+            evidence.observe(&expected, &stale_response),
+            ObservationDisposition::Rejected
+        );
         evidence = serde_json::from_str(&serde_json::to_string(&evidence).unwrap()).unwrap();
-        assert_eq!(evidence.human_waits.len(), 1, "restart preserves the typed wait without inventing identity");
+        assert_eq!(
+            evidence.human_waits.len(),
+            1,
+            "restart preserves the typed wait without inventing identity"
+        );
 
         let projection = CircuitObservation {
-            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("awaiting".into()),
-            observed_at_ms: 12, authoritative: false, fact: Fact::NeedsInput,
+            identity: expected.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("awaiting".into()),
+            observed_at_ms: 12,
+            authoritative: false,
+            fact: Fact::NeedsInput,
         };
         evidence.observe(&expected, &projection);
         let ready_projection = CircuitObservation {
-            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("ready".into()),
-            observed_at_ms: 13, authoritative: false, fact: Fact::Yielded,
+            identity: expected.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("ready".into()),
+            observed_at_ms: 13,
+            authoritative: false,
+            fact: Fact::Yielded,
         };
         evidence.observe(&expected, &ready_projection);
         let working_projection = CircuitObservation {
-            identity: expected.clone(), source: "agent_status_projection".into(), source_id: Some("working".into()),
-            observed_at_ms: 14, authoritative: false, fact: Fact::Working,
+            identity: expected.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("working".into()),
+            observed_at_ms: 14,
+            authoritative: false,
+            fact: Fact::Working,
         };
         evidence.observe(&expected, &working_projection);
-        assert_eq!(evidence.human_waits.len(), 1, "status cannot invent another request or replace the permission request");
-        assert!(evidence.human_waits.iter().any(|wait| wait.wait_kind == HumanWaitKind::Permission && wait.request_id.is_none()));
-        assert!(evidence.has_human_wait(), "status projections cannot clear the permission wait");
+        assert_eq!(
+            evidence.human_waits.len(),
+            1,
+            "status cannot invent another request or replace the permission request"
+        );
+        assert!(evidence
+            .human_waits
+            .iter()
+            .any(|wait| wait.wait_kind == HumanWaitKind::Permission && wait.request_id.is_none()));
+        assert!(
+            evidence.has_human_wait(),
+            "status projections cannot clear the permission wait"
+        );
         assert!(!evidence.completion_verified());
     }
 
     #[test]
     fn circuit_request_receipts_preserve_attention_correlation_aliases() {
         use crate::circuit::observation::{HumanWaitKind, ObservedWorkFact};
-        for session in ["session_id", "sessionId", "sessionID", "conversationId", "conversation_id", "taskId"] {
+        for session in [
+            "session_id",
+            "sessionId",
+            "sessionID",
+            "conversationId",
+            "conversation_id",
+            "taskId",
+        ] {
             for turn in ["turn_id", "prompt_id", "promptId"] {
-                for request in ["request_id", "tool_use_id", "toolUseId", "requestId", "requestID", "elicitation_id", "toolCallId", "tool_call_id", "callId", "call_id", "permissionID", "permission_id"] {
+                for request in [
+                    "request_id",
+                    "tool_use_id",
+                    "toolUseId",
+                    "requestId",
+                    "requestID",
+                    "elicitation_id",
+                    "toolCallId",
+                    "tool_call_id",
+                    "callId",
+                    "call_id",
+                    "permissionID",
+                    "permission_id",
+                ] {
                     let mut payload = serde_json::json!({"hookName":"PostToolUseFailure","toolName":"request_user_input"});
                     payload[session] = "session".into();
                     payload[turn] = "turn".into();
                     payload[request] = "request".into();
-                    let hook = NativeHook::parse("codex",&serde_json::to_vec(&payload).unwrap()).unwrap();
-                    assert_eq!(hook.session_id.as_deref(),Some("session"));
-                    assert_eq!(hook.turn_id.as_deref(),Some("turn"));
-                    assert_eq!(hook.human_fact,Some(ObservedWorkFact::ToolFailed {wait_kind:HumanWaitKind::Question,request_id:"request".into()}));
+                    let hook =
+                        NativeHook::parse("codex", &serde_json::to_vec(&payload).unwrap()).unwrap();
+                    assert_eq!(hook.session_id.as_deref(), Some("session"));
+                    assert_eq!(hook.turn_id.as_deref(), Some("turn"));
+                    assert_eq!(
+                        hook.human_fact,
+                        Some(ObservedWorkFact::ToolFailed {
+                            wait_kind: HumanWaitKind::Question,
+                            request_id: "request".into()
+                        })
+                    );
                 }
             }
         }
@@ -893,50 +1120,127 @@ mod tests {
 
     #[test]
     fn circuit_native_request_projection_and_reply_reconcile_in_both_arrival_orders() {
-        use crate::circuit::observation::{CircuitObservation, ObservedWorkFact as Fact, WorkEvidence};
-        for (provider, tool) in [("claude", "AskUserQuestion"), ("codex", "request_user_input"), ("codex", "ask_user_question")] {
+        use crate::circuit::observation::{
+            CircuitObservation, ObservedWorkFact as Fact, WorkEvidence,
+        };
+        for (provider, tool) in [
+            ("claude", "AskUserQuestion"),
+            ("codex", "request_user_input"),
+            ("codex", "ask_user_question"),
+        ] {
             for projection_first in [false, true] {
                 let native = |event: &str, index: i64| {
                     let payload = serde_json::json!({"hook_event_name":event,"session_id":"session","turn_id":"turn","tool_use_id":"request","tool_name":tool});
-                    let hook = NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap()).unwrap();
-                    let receipt = NativeReceipt { agent_node_id:9,input_stamp:None,session_incarnation:Some("1".into()),
-                        source_id:format!("{event}:{index}"),received_at_ms:index,turn_fenced:true,explicit_turn_mismatch:false,submission_correlated:false,submission_seq:None,hook };
-                    let entry = crate::db::circuit::evidence::CircuitHistoryEntry {id:index,node_id:Some("work".into()),attempt:Some(1),kind:"native_hook_received".into(),detail:String::new(),source:None,disposition:None,observed_at:String::new()};
-                    let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, .. } = normalize(42,entry,receipt,Some("session".into()),Some("1".into()),Some("input".into())) else { panic!("native batch") };
+                    let hook = NativeHook::parse(provider, &serde_json::to_vec(&payload).unwrap())
+                        .unwrap();
+                    let receipt = NativeReceipt {
+                        agent_node_id: 9,
+                        input_stamp: None,
+                        session_incarnation: Some("1".into()),
+                        source_id: format!("{event}:{index}"),
+                        received_at_ms: index,
+                        turn_fenced: true,
+                        explicit_turn_mismatch: false,
+                        submission_correlated: false,
+                        submission_seq: None,
+                        hook,
+                    };
+                    let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+                        id: index,
+                        node_id: Some("work".into()),
+                        attempt: Some(1),
+                        kind: "native_hook_received".into(),
+                        detail: String::new(),
+                        source: None,
+                        disposition: None,
+                        observed_at: String::new(),
+                    };
+                    let super::super::CircuitEvent::ObservationBatch {
+                        expected,
+                        observations,
+                        stale,
+                        ..
+                    } = normalize(
+                        42,
+                        entry,
+                        receipt,
+                        Some("session".into()),
+                        Some("1".into()),
+                        Some("input".into()),
+                    )
+                    else {
+                        panic!("native batch")
+                    };
                     assert!(!stale);
                     assert!(observations.iter().all(|item| item.authoritative));
                     (expected, observations)
                 };
-                let (identity, permission) = native("PermissionRequest",2);
-                let (_, question) = native("PreToolUse",3);
+                let (identity, permission) = native("PermissionRequest", 2);
+                let (_, question) = native("PreToolUse", 3);
                 let mut projection_identity = identity.clone();
                 projection_identity.turn_id = None;
-                let projection = CircuitObservation {identity:projection_identity.clone(),source:"agent_status_projection".into(),source_id:Some("awaiting".into()),observed_at_ms:1,authoritative:false,fact:Fact::NeedsInput};
+                let projection = CircuitObservation {
+                    identity: projection_identity.clone(),
+                    source: "agent_status_projection".into(),
+                    source_id: Some("awaiting".into()),
+                    observed_at_ms: 1,
+                    authoritative: false,
+                    fact: Fact::NeedsInput,
+                };
                 let mut state = WorkEvidence::default();
-                if projection_first { state.observe(&projection_identity,&projection); }
-                for fact in permission.iter().chain(&question) { state.observe(&identity,fact); }
-                if !projection_first { state.observe(&projection_identity,&projection); }
-                assert_eq!(state.human_waits.len(),2,"projection must not create another obligation");
+                if projection_first {
+                    state.observe(&projection_identity, &projection);
+                }
+                for fact in permission.iter().chain(&question) {
+                    state.observe(&identity, fact);
+                }
+                if !projection_first {
+                    state.observe(&projection_identity, &projection);
+                }
+                assert_eq!(
+                    state.human_waits.len(),
+                    2,
+                    "projection must not create another obligation"
+                );
                 state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-                let (_, replies) = native("PermissionResult",4);
-                for fact in &replies { state.observe(&identity,fact); }
-                assert!(state.has_human_wait(),"permission answer does not answer the question");
+                let (_, replies) = native("PermissionResult", 4);
+                for fact in &replies {
+                    state.observe(&identity, fact);
+                }
+                assert!(
+                    state.has_human_wait(),
+                    "permission answer does not answer the question"
+                );
                 let waiting = state.clone();
                 for reply_event in ["PostToolUse", "PostToolUseFailure"] {
                     state = waiting.clone();
-                    let (_, replies) = native(reply_event,5);
-                    for fact in &replies { state.observe(&identity,fact); }
-                    assert!(!state.has_human_wait(),"exact tool outcome resolves the question and its permission");
-                    assert!(!state.completion_verified(),"failed or answered requests never establish completion or approval");
+                    let (_, replies) = native(reply_event, 5);
+                    for fact in &replies {
+                        state.observe(&identity, fact);
+                    }
+                    assert!(
+                        !state.has_human_wait(),
+                        "exact tool outcome resolves the question and its permission"
+                    );
+                    assert!(
+                        !state.completion_verified(),
+                        "failed or answered requests never establish completion or approval"
+                    );
                 }
                 let mut late_projection = projection.clone();
                 late_projection.source_id = Some("not-seen-before-reply".into());
-                state.observe(&projection_identity,&late_projection);
-                assert!(!state.has_human_wait(),"late status snapshot cannot recreate a resolved native request");
+                state.observe(&projection_identity, &late_projection);
+                assert!(
+                    !state.has_human_wait(),
+                    "late status snapshot cannot recreate a resolved native request"
+                );
                 late_projection.source_id = Some("new-status-transition".into());
                 late_projection.observed_at_ms = 7;
-                state.observe(&projection_identity,&late_projection);
-                assert!(!state.has_human_wait(),"a newer status projection is still not a native request");
+                state.observe(&projection_identity, &late_projection);
+                assert!(
+                    !state.has_human_wait(),
+                    "a newer status projection is still not a native request"
+                );
                 assert!(!state.completion_verified());
             }
         }
@@ -965,7 +1269,8 @@ mod tests {
             received_at_ms: 5,
             turn_fenced: false,
             explicit_turn_mismatch: false,
-            submission_correlated: false, submission_seq: None,
+            submission_correlated: false,
+            submission_seq: None,
             hook: NativeHook::parse("claude", br#"{"hook_event_name":"Stop"}"#).unwrap(),
         };
         for (id, detail, deleted) in [
@@ -1077,7 +1382,7 @@ mod tests {
         use crate::circuit::{
             context::CircuitContext,
             model::CircuitGraph,
-            stepper::{advance, RunState, RunView, StepView, StepStatus},
+            stepper::{advance, RunState, RunView, StepStatus, StepView},
         };
 
         let receipt = NativeReceipt {
@@ -1088,7 +1393,8 @@ mod tests {
             received_at_ms: 50,
             turn_fenced: false,
             explicit_turn_mismatch: true,
-            submission_correlated: false, submission_seq: None,
+            submission_correlated: false,
+            submission_seq: None,
             hook: NativeHook::parse(
                 "codex",
                 br#"{"hook_event_name":"Stop","session_id":"session","turn_id":"old-turn"}"#,
@@ -1113,10 +1419,18 @@ mod tests {
             Some("1000".into()),
             Some("current-input".into()),
         );
-        let super::super::CircuitEvent::ObservationBatch { stale, observations, .. } = &event else {
+        let super::super::CircuitEvent::ObservationBatch {
+            stale,
+            observations,
+            ..
+        } = &event
+        else {
             panic!("expected a receipt observation batch");
         };
-        assert!(*stale, "an explicit old-turn mismatch stays stale even when its input stamp is current");
+        assert!(
+            *stale,
+            "an explicit old-turn mismatch stays stale even when its input stamp is current"
+        );
 
         let mut run = RunView {
             run_id: 42,
@@ -1197,6 +1511,62 @@ mod tests {
     }
 
     #[test]
+    fn cline_hook_payloads_never_enter_the_native_hook_path() {
+        // Issue #1902: Cline's file-hook layer is the riskiest cross-harness
+        // shape in the tree, because unlike every other provider it keys its
+        // event under `hookName` — the same key the Claude/Codex branch reads
+        // as a fallback — and it ships `taskId` plus `agent_id`, which are
+        // exactly the fields the generic parser folds into `session_id` and
+        // `child_id`. Each body below is a verbatim 3.0.62 payload shape.
+        let bodies = [
+            // afterRun, status === "completed" -> agent_end (the only event
+            // Buildmesh provisions, and the one attention maps to a turn end).
+            br#"{"clineVersion":"3.0.62","timestamp":"2026-09-18T10:00:00.000Z","taskId":"session_1790003303940_9ouga","sessionContext":{"rootSessionId":"session_1790003303940_9ouga"},"workspaceRoots":["C:\\repo"],"userId":"alond","agent_id":"agent-1","parent_agent_id":null,"hookName":"agent_end","iteration":3,"turn":{"outputText":"done","status":"completed"},"taskComplete":{"taskMetadata":{}}}"#.as_slice(),
+            // afterRun abort branch -> agent_abort, while the session is live.
+            br#"{"clineVersion":"3.0.62","timestamp":"2026-09-18T10:00:00.000Z","taskId":"session_1790003303940_9ouga","hookName":"agent_abort","reason":"user-cancel","taskCancel":{"taskMetadata":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_start","taskStart":{"taskMetadata":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_resume","taskResume":{"taskMetadata":{},"previousState":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_error","error":{"name":"Error","message":"boom","stack":"at x"}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"tool_call","iteration":2,"tool_call":{"id":"call-1","name":"bash","input":{"command":"ls"}},"preToolUse":{"toolName":"bash","parameters":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"tool_result","iteration":2,"tool_result":{"name":"bash"},"postToolUse":{"toolName":"bash","parameters":{},"result":"ok","success":true,"executionTimeMs":5}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"prompt_submit","userPromptSubmit":{"prompt":"do the thing","attachments":[]}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"pre_tool_use","preToolUse":{"toolName":"bash","parameters":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"mystery"}"#.as_slice(),
+            // Garbage and near-miss shapes.
+            br#"not json at all"#.as_slice(),
+            br#"{}"#.as_slice(),
+            br#"{"hookName":"agent_end"}"#.as_slice(),
+        ];
+        // `anthropic`/`codex` are included deliberately: they are the two
+        // harnesses whose branch would otherwise accept a Cline body, and
+        // `agy` owns a shape-keyed `Stop` fallback.
+        for body in bodies {
+            for provider in [
+                "cline",
+                "claude",
+                "claude_code",
+                "anthropic",
+                "codex",
+                "agy",
+                "terminal",
+                "",
+            ] {
+                assert!(
+                    NativeHook::parse(provider, body).is_none(),
+                    "cline-shaped payload must not parse as a native hook for {provider:?}"
+                );
+            }
+        }
+        // Cline genuinely supplies no native Circuit receipt at all, so the
+        // gate itself is provider-scoped: a sibling harness's event still
+        // parses under its own id, and Cline never borrows it.
+        assert!(NativeHook::parse("terminal", br#"{"hook_event_name":"Stop"}"#).is_none());
+        assert!(
+            NativeHook::parse("codex", br#"{"hook_event_name":"Stop","session_id":"s"}"#).is_some()
+        );
+    }
+
+    #[test]
     fn native_registry_preserves_all_task_types_and_scheduled_wakeups() {
         let hook = NativeHook::parse("anthropic", br#"{"hook_event_name":"Stop","background_tasks":[{"id":"a","type":"subagent"},{"id":"b","type":"future-task-type"}],"session_crons":[{"id":"a"}]}"#).unwrap();
         assert_eq!(
@@ -1205,7 +1575,7 @@ mod tests {
         );
         let codex_stop = NativeHook::parse(
             "codex",
-            br#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#
+            br#"{"hook_event_name":"Stop","background_tasks":[],"session_crons":[]}"#,
         )
         .expect("retain the Codex lifecycle callback for Circuit history");
         assert_eq!(codex_stop.active_work, Some(BTreeSet::new()));
@@ -1241,7 +1611,8 @@ mod tests {
                 received_at_ms: 2_000,
                 turn_fenced: true,
                 explicit_turn_mismatch: false,
-                submission_correlated: false, submission_seq: None,
+                submission_correlated: false,
+                submission_seq: None,
                 hook,
             };
             let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
@@ -1264,9 +1635,15 @@ mod tests {
             ) else {
                 panic!("expected a foreground callback observation");
             };
-            assert!(observations.iter().any(|observation| observation.fact == expected_fact));
-            assert!(observations.iter().all(|observation| !observation.authoritative),
-                "a Codex lifecycle callback is not correlated to a Buildmesh submission");
+            assert!(observations
+                .iter()
+                .any(|observation| observation.fact == expected_fact));
+            assert!(
+                observations
+                    .iter()
+                    .all(|observation| !observation.authoritative),
+                "a Codex lifecycle callback is not correlated to a Buildmesh submission"
+            );
         }
     }
 
@@ -1277,12 +1654,25 @@ mod tests {
         // `terminationReason`, …).
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"terminationReason":"model_stop","error":"","fullyIdle":true,"workspacePaths":["F:\\src\\repo"],"transcriptPath":"C:\\x\\transcript.jsonl","artifactDirectoryPath":"C:\\x","modelName":"gemini-3.7-flash"}"#).unwrap();
         assert_eq!(hook.event, "Stop");
-        assert_eq!(hook.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
-        assert_eq!(hook.turn_id, None, "executionNum is telemetry, not a turn fence");
+        assert_eq!(
+            hook.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(
+            hook.turn_id, None,
+            "executionNum is telemetry, not a turn fence"
+        );
         assert!(!hook.background_busy);
-        assert_eq!(hook.execution_num, Some(1), "the counter is retained for receipt disambiguation");
+        assert_eq!(
+            hook.execution_num,
+            Some(1),
+            "the counter is retained for receipt disambiguation"
+        );
         assert_eq!(hook.termination_reason.as_deref(), Some("model_stop"));
-        assert_eq!(hook.active_work, None, "no child/background registry exists");
+        assert_eq!(
+            hook.active_work, None,
+            "no child/background registry exists"
+        );
         assert_eq!(hook.final_report, None, "Stop carries no inline report");
         assert_eq!(hook.human_fact, None);
         assert_eq!(hook.provider.as_deref(), Some("agy"));
@@ -1293,20 +1683,41 @@ mod tests {
         assert_eq!(named.execution_num, Some(0));
         assert_eq!(named.termination_reason.as_deref(), Some("NO_TOOL_CALL"));
         // `fullyIdle: false` is the harness's background-busy signal.
-        let busy = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
+        let busy = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#,
+        )
+        .unwrap();
         assert!(busy.background_busy);
-        assert_eq!(busy.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
+        assert_eq!(
+            busy.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         assert_eq!(busy.execution_num, None, "absent counter stays absent");
         // snake_case spellings parse identically.
         let snake = NativeHook::parse("agy", br#"{"hook_event_name":"stop","conversation_id":"550e8400-e29b-41d4-a716-446655440000","fully_idle":false}"#).unwrap();
         assert_eq!(snake, busy);
         // Session comparison downstream is exact, so the conversation id is
         // canonicalized to the lowercase UUID the attention route stores.
-        let upper = NativeHook::parse("agy", br#"{"conversationId":"550E8400-E29B-41D4-A716-446655440000","fullyIdle":true}"#).unwrap();
-        assert_eq!(upper.session_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440000"));
-        assert!(NativeHook::parse("agy", br#"{"conversationId":"not-a-uuid","fullyIdle":true}"#).is_none());
+        let upper = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550E8400-E29B-41D4-A716-446655440000","fullyIdle":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            upper.session_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert!(NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"not-a-uuid","fullyIdle":true}"#
+        )
+        .is_none());
         // Serde round-trip keeps the receipt (durable history rows persist it).
-        assert_eq!(serde_json::from_str::<NativeHook>(&serde_json::to_string(&hook).unwrap()).unwrap(), hook);
+        assert_eq!(
+            serde_json::from_str::<NativeHook>(&serde_json::to_string(&hook).unwrap()).unwrap(),
+            hook
+        );
     }
 
     #[test]
@@ -1322,7 +1733,10 @@ mod tests {
             r#"{"hook_event_name":"Stop","session_id":"session"}"#,
             "not json",
         ] {
-            assert!(NativeHook::parse("agy", body.as_bytes()).is_none(), "{body}");
+            assert!(
+                NativeHook::parse("agy", body.as_bytes()).is_none(),
+                "{body}"
+            );
         }
         // Provider scoping: agy bytes never parse under a harness id that
         // owns no AGY adapter, and Claude request bytes are not AGY evidence.
@@ -1339,30 +1753,88 @@ mod tests {
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
         let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":3,"fullyIdle":true,"terminationReason":"model_stop"}"#).unwrap();
-        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-stop".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
-        let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 1, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
-        let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
-            normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
-        else { panic!("native batch") };
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("7".into()),
+            source_id: "agy-stop".into(),
+            received_at_ms: 10,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook,
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 1,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let super::super::CircuitEvent::ObservationBatch {
+            expected,
+            observations,
+            stale,
+            input_guard,
+            ..
+        } = normalize(
+            42,
+            entry,
+            receipt,
+            Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            Some("7".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
         assert!(!stale);
-        assert!(input_guard.is_none(), "no turn token means no authoritative guard");
+        assert!(
+            input_guard.is_none(),
+            "no turn token means no authoritative guard"
+        );
         assert_eq!(observations.len(), 2);
         assert!(observations.iter().all(|o| !o.authoritative));
         assert!(observations.iter().all(|o| o.source == "agy_native_hook"));
         assert!(matches!(&observations[0].fact, Fact::ForegroundTerminated));
-        assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { reason } if reason.contains("no child/background registry")));
+        assert!(
+            matches!(&observations[1].fact, Fact::OwnershipUnavailable { reason } if reason.contains("no child/background registry"))
+        );
         let mut evidence = WorkEvidence::default();
-        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Unavailable);
+        assert_eq!(
+            evidence.observe(&expected, &observations[1]),
+            ObservationDisposition::Unavailable
+        );
         assert!(evidence.lifecycle_invalidated);
-        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
-        assert!(!evidence.foreground_terminated, "unfenced foreground evidence must not flip lifecycle state");
-        assert!(!evidence.completion_verified(), "unknown owned work never becomes completion");
-        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::Duplicate);
-        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Duplicate);
+        assert_eq!(
+            evidence.observe(&expected, &observations[0]),
+            ObservationDisposition::ReducedConfidence
+        );
+        assert!(
+            !evidence.foreground_terminated,
+            "unfenced foreground evidence must not flip lifecycle state"
+        );
+        assert!(
+            !evidence.completion_verified(),
+            "unknown owned work never becomes completion"
+        );
+        assert_eq!(
+            evidence.observe(&expected, &observations[0]),
+            ObservationDisposition::Duplicate
+        );
+        assert_eq!(
+            evidence.observe(&expected, &observations[1]),
+            ObservationDisposition::Duplicate
+        );
         evidence = serde_json::from_str(&serde_json::to_string(&evidence).unwrap()).unwrap();
-        assert!(evidence.lifecycle_invalidated, "restart preserves the ownership limit");
+        assert!(
+            evidence.lifecycle_invalidated,
+            "restart preserves the ownership limit"
+        );
         assert!(!evidence.completion_verified());
     }
 
@@ -1371,20 +1843,63 @@ mod tests {
         use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#).unwrap();
-        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-busy".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
-        let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 2, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
-        let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
-            normalize(42, entry, receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
-        else { panic!("native batch") };
+        let hook = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":false}"#,
+        )
+        .unwrap();
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("7".into()),
+            source_id: "agy-busy".into(),
+            received_at_ms: 10,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook,
+        };
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 2,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let super::super::CircuitEvent::ObservationBatch {
+            expected,
+            observations,
+            ..
+        } = normalize(
+            42,
+            entry,
+            receipt,
+            Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            Some("7".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
         assert_eq!(observations.len(), 2);
         assert!(matches!(&observations[0].fact, Fact::Yielded));
-        assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { .. }));
+        assert!(matches!(
+            &observations[1].fact,
+            Fact::OwnershipUnavailable { .. }
+        ));
         let mut evidence = WorkEvidence::default();
-        assert_eq!(evidence.observe(&expected, &observations[1]), ObservationDisposition::Unavailable);
-        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert_eq!(
+            evidence.observe(&expected, &observations[1]),
+            ObservationDisposition::Unavailable
+        );
+        assert_eq!(
+            evidence.observe(&expected, &observations[0]),
+            ObservationDisposition::ReducedConfidence
+        );
         assert!(!evidence.foreground_terminated);
         assert!(!evidence.completion_verified());
     }
@@ -1415,9 +1930,9 @@ mod tests {
         // exactly as production stores receipts.
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
-        let graph = serde_json::to_string(
-            &crate::circuit::model::CircuitGraph::walking_skeleton("work"),
-        )
+        let graph = serde_json::to_string(&crate::circuit::model::CircuitGraph::walking_skeleton(
+            "work",
+        ))
         .unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
@@ -1426,8 +1941,11 @@ mod tests {
             .unwrap();
         // Bound parameter: the serialized graph is full of braces that
         // `format!` would misread as placeholders.
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1 WHERE id=1", [&graph])
-            .unwrap();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1 WHERE id=1",
+            [&graph],
+        )
+        .unwrap();
         let receipt = |body: &[u8], at_ms: i64| {
             let hook = NativeHook::parse("agy", body).unwrap();
             let session_incarnation = Some("7".into());
@@ -1435,9 +1953,18 @@ mod tests {
             // persistence strips it again below without a UserPromptSubmit
             // turn-start binding, which is exactly what this test pins.
             let source_id = receipt_source_id(&hook, &session_incarnation).unwrap();
-            NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()),
-                session_incarnation, source_id, received_at_ms: at_ms,
-                turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook }
+            NativeReceipt {
+                agent_node_id: 9,
+                input_stamp: Some("input-1".into()),
+                session_incarnation,
+                source_id,
+                received_at_ms: at_ms,
+                turn_fenced: false,
+                explicit_turn_mismatch: false,
+                submission_correlated: false,
+                submission_seq: None,
+                hook,
+            }
         };
         let turn0 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":0,"fullyIdle":true,"terminationReason":"model_stop"}"#, 10);
         let turn1 = receipt(br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"fullyIdle":true,"terminationReason":"model_stop"}"#, 11);
@@ -1446,7 +1973,10 @@ mod tests {
         crate::db::circuit::evidence::receive_native_hook_locked(&mut db, &turn0).unwrap();
         let rows: Vec<(i64, String)> = {
             let mut stmt = db.prepare("SELECT id, detail FROM circuit_run_history WHERE run_id=1 AND kind='native_hook_received' ORDER BY id").unwrap();
-            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap()
+            stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
         };
         assert_eq!(rows.len(), 2, "both turns are kept; the redelivery dedupes");
         let mut evidence = WorkEvidence::default();
@@ -1454,31 +1984,75 @@ mod tests {
             let stored: serde_json::Value = serde_json::from_str(detail).unwrap();
             assert!(stored.get("input_stamp").is_none_or(|stamp| stamp.is_null()),
                 "persistence strips the input stamp without a turn-start binding: no input fence exists for AGY");
-            let entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: *id, node_id: Some("work".into()),
-                attempt: Some(1), kind: "native_hook_received".into(), detail: detail.clone(), source: None, disposition: None, observed_at: String::new() };
-            let super::super::CircuitEvent::ObservationBatch { expected, observations, stale, input_guard, .. } =
-                resolve_receipt(1, entry, |_| Ok((Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))))
-                    .unwrap()
-            else { panic!("native batch") };
+            let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+                id: *id,
+                node_id: Some("work".into()),
+                attempt: Some(1),
+                kind: "native_hook_received".into(),
+                detail: detail.clone(),
+                source: None,
+                disposition: None,
+                observed_at: String::new(),
+            };
+            let super::super::CircuitEvent::ObservationBatch {
+                expected,
+                observations,
+                stale,
+                input_guard,
+                ..
+            } = resolve_receipt(1, entry, |_| {
+                Ok((
+                    Some("550e8400-e29b-41d4-a716-446655440000".into()),
+                    Some("7".into()),
+                    Some("input-1".into()),
+                ))
+            })
+            .unwrap()
+            else {
+                panic!("native batch")
+            };
             // Honest staleness: with no persisted input stamp the receipt can
             // never be stale-marked; session/incarnation fencing is the only
             // freshness boundary, and these observations stay non-authoritative.
             assert!(!stale);
             assert!(input_guard.is_none());
             assert_eq!(observations.len(), 2);
-            assert!(observations.iter().all(|o| !o.authoritative && o.source == "agy_native_hook"));
-            assert!(matches!(&observations[1].fact, Fact::OwnershipUnavailable { .. }));
+            assert!(observations
+                .iter()
+                .all(|o| !o.authoritative && o.source == "agy_native_hook"));
+            assert!(matches!(
+                &observations[1].fact,
+                Fact::OwnershipUnavailable { .. }
+            ));
             let ownership = evidence.observe(&expected, &observations[1]);
             let foreground = evidence.observe(&expected, &observations[0]);
-            assert!(matches!(ownership, ObservationDisposition::Unavailable | ObservationDisposition::Duplicate));
-            assert!(matches!(foreground, ObservationDisposition::ReducedConfidence | ObservationDisposition::Duplicate));
+            assert!(matches!(
+                ownership,
+                ObservationDisposition::Unavailable | ObservationDisposition::Duplicate
+            ));
+            assert!(matches!(
+                foreground,
+                ObservationDisposition::ReducedConfidence | ObservationDisposition::Duplicate
+            ));
         }
-        let stored_ids: Vec<String> = rows.iter().map(|(_, detail)| {
-            serde_json::from_str::<serde_json::Value>(detail).unwrap()["source_id"].as_str().unwrap().to_owned()
-        }).collect();
-        assert_ne!(stored_ids[0], stored_ids[1], "successive turns persist under distinct source ids");
+        let stored_ids: Vec<String> = rows
+            .iter()
+            .map(|(_, detail)| {
+                serde_json::from_str::<serde_json::Value>(detail).unwrap()["source_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_ne!(
+            stored_ids[0], stored_ids[1],
+            "successive turns persist under distinct source ids"
+        );
         assert!(evidence.lifecycle_invalidated);
-        assert!(!evidence.completion_verified(), "unknown owned work never becomes completion");
+        assert!(
+            !evidence.completion_verified(),
+            "unknown owned work never becomes completion"
+        );
     }
 
     #[test]
@@ -1486,41 +2060,146 @@ mod tests {
         use crate::circuit::observation::{
             ObservationDisposition, ObservedWorkFact as Fact, WorkEvidence,
         };
-        let hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
-        let receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-fenced".into(), received_at_ms: 10, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook };
-        let entry = || crate::db::circuit::evidence::CircuitHistoryEntry { id: 3, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: String::new(), source: None, disposition: None, observed_at: String::new() };
+        let hook = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#,
+        )
+        .unwrap();
+        let receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("7".into()),
+            source_id: "agy-fenced".into(),
+            received_at_ms: 10,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook,
+        };
+        let entry = || crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 3,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: String::new(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
         // A replaced session (restart under a new conversation) is rejected.
-        let super::super::CircuitEvent::ObservationBatch { expected, observations, .. } =
-            normalize(42, entry(), receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
-        else { panic!("native batch") };
+        let super::super::CircuitEvent::ObservationBatch {
+            expected,
+            observations,
+            ..
+        } = normalize(
+            42,
+            entry(),
+            receipt,
+            Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            Some("7".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
         let mut evidence = WorkEvidence::default();
-        assert_eq!(evidence.observe(&expected, &observations[0]), ObservationDisposition::ReducedConfidence);
+        assert_eq!(
+            evidence.observe(&expected, &observations[0]),
+            ObservationDisposition::ReducedConfidence
+        );
         let mut restarted = observations[0].clone();
         restarted.identity.session_id = Some("replacement-session".into());
-        assert_eq!(evidence.observe(&expected, &restarted), ObservationDisposition::Rejected);
+        assert_eq!(
+            evidence.observe(&expected, &restarted),
+            ObservationDisposition::Rejected
+        );
         // A subagent `Stop` carries its own conversation id, so it fences as
         // a different session and can never complete the parent's turn.
-        let subagent = NativeHook::parse("agy", br#"{"conversationId":"660e8400-e29b-41d4-a716-446655440001","fullyIdle":true}"#).unwrap();
-        let subagent_receipt = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-subagent".into(), received_at_ms: 11, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook: subagent };
-        let super::super::CircuitEvent::ObservationBatch { observations: subagent_observations, .. } =
-            normalize(42, entry(), subagent_receipt, Some("550e8400-e29b-41d4-a716-446655440000".into()), Some("7".into()), Some("input-1".into()))
-        else { panic!("native batch") };
-        assert!(matches!(&subagent_observations[0].fact, Fact::ForegroundTerminated));
-        assert_eq!(evidence.observe(&expected, &subagent_observations[0]), ObservationDisposition::Rejected);
+        let subagent = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"660e8400-e29b-41d4-a716-446655440001","fullyIdle":true}"#,
+        )
+        .unwrap();
+        let subagent_receipt = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("7".into()),
+            source_id: "agy-subagent".into(),
+            received_at_ms: 11,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook: subagent,
+        };
+        let super::super::CircuitEvent::ObservationBatch {
+            observations: subagent_observations,
+            ..
+        } = normalize(
+            42,
+            entry(),
+            subagent_receipt,
+            Some("550e8400-e29b-41d4-a716-446655440000".into()),
+            Some("7".into()),
+            Some("input-1".into()),
+        )
+        else {
+            panic!("native batch")
+        };
+        assert!(matches!(
+            &subagent_observations[0].fact,
+            Fact::ForegroundTerminated
+        ));
+        assert_eq!(
+            evidence.observe(&expected, &subagent_observations[0]),
+            ObservationDisposition::Rejected
+        );
         assert!(!evidence.completion_verified());
         // A deleted node consumes its receipt without lifecycle effect.
-        let deleted_hook = NativeHook::parse("agy", br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#).unwrap();
-        let deleted = NativeReceipt { agent_node_id: 9, input_stamp: Some("input-1".into()), session_incarnation: Some("7".into()),
-            source_id: "agy-deleted".into(), received_at_ms: 12, turn_fenced: false, explicit_turn_mismatch: false, submission_correlated: false, submission_seq: None, hook: deleted_hook };
-        let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry { id: 4, node_id: Some("work".into()),
-            attempt: Some(1), kind: "native_hook_received".into(), detail: serde_json::to_string(&deleted).unwrap(), source: None, disposition: None, observed_at: String::new() };
-        let event = resolve_receipt(42, deleted_entry, |_| Err(rusqlite::Error::QueryReturnedNoRows)).unwrap();
-        let super::super::CircuitEvent::ObservationBatch { observations: deleted_observations, .. } = event else { panic!("native batch") };
+        let deleted_hook = NativeHook::parse(
+            "agy",
+            br#"{"conversationId":"550e8400-e29b-41d4-a716-446655440000","fullyIdle":true}"#,
+        )
+        .unwrap();
+        let deleted = NativeReceipt {
+            agent_node_id: 9,
+            input_stamp: Some("input-1".into()),
+            session_incarnation: Some("7".into()),
+            source_id: "agy-deleted".into(),
+            received_at_ms: 12,
+            turn_fenced: false,
+            explicit_turn_mismatch: false,
+            submission_correlated: false,
+            submission_seq: None,
+            hook: deleted_hook,
+        };
+        let deleted_entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 4,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: serde_json::to_string(&deleted).unwrap(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let event = resolve_receipt(42, deleted_entry, |_| {
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        })
+        .unwrap();
+        let super::super::CircuitEvent::ObservationBatch {
+            observations: deleted_observations,
+            ..
+        } = event
+        else {
+            panic!("native batch")
+        };
         assert_eq!(deleted_observations.len(), 1);
-        assert_eq!(deleted_observations[0].source, "native_receipt_agent_deleted");
+        assert_eq!(
+            deleted_observations[0].source,
+            "native_receipt_agent_deleted"
+        );
         assert!(matches!(&deleted_observations[0].fact, Fact::Unavailable));
     }
 }
