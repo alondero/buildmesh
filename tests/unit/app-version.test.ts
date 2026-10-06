@@ -67,12 +67,12 @@ function gt(a: string, b: string) {
   return x.pre > y.pre;
 }
 
-// `latestTagVersion` shells out to `git describe`, which is ~75ms on an idle
-// machine but competes with the rest of the suite for CPU and can take tens of
-// seconds when the whole file runs alongside 287 others. The default 5s
-// per-test budget turned that contention into a spurious failure (the same
-// class as issue #2049), so the tests that shell out get an explicit budget.
-// The assertions themselves are unchanged — only how long they may take.
+// These tests shell out to `git describe` and to `scripts/set-version.mjs`,
+// which are ~75ms on an idle machine but compete with the rest of the suite for
+// CPU and have been observed taking ~50s alongside 287 other test files. They
+// therefore declare a budget above the 30s suite default in `vitest.config.ts`
+// (same class as issue #2049). The assertions themselves are unchanged — only
+// how long they may take.
 const SUBPROCESS_TIMEOUT_MS = 60000;
 
 describe("app version manifests", () => {
