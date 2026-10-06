@@ -91,6 +91,14 @@ test('the required Quality check aggregates both branches and fails closed', () 
   assert.match(aggregate, /quality-gates=\$GATES_RESULT quality-tests=\$TESTS_RESULT - the frontend gate is not fully green/);
 });
 
+test('the legs check out full history, because a unit test reads the release tags', () => {
+  // `tests/unit/app-version.test.ts` resolves the latest release with
+  // `git describe --abbrev=0 --tags`. The suite used to run in the job that
+  // had `fetch-depth: 0`; a leg that checks out shallow has no tags and that
+  // test fails. The first split run of this matrix proved it.
+  assert.match(jobBlock('quality-tests'), /actions\/checkout@v7\n {8}with:\n {10}fetch-depth: 0/);
+});
+
 test('a matrix line the parser does not understand fails loudly instead of dropping a leg', () => {
   const broken = [
     '  quality-tests:',
