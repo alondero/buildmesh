@@ -100,6 +100,7 @@ engineering contract for their scope and limits; none proves behavior on its own
 | Inside a worktree, only edit paths under your worktree root | `.claude/hooks/guard-antipatterns.mjs` | Otherwise you silently edit the main checkout on a different branch |
 | `git commit` with nothing staged | `.claude/hooks/guard-commit-staging.mjs` | Empty/aspirational commit trap (#491→#504). Stage your files first |
 | Behavior-sensitive source committed without a documentation decision | `.claude/hooks/guard-documentation.mjs` | Stage the relevant docs, or record `docs: none — <reason>` when no update is needed |
+| `rustfmt` or `cargo fmt` without `--check` | `.claude/hooks/guard-rustfmt.mjs` | It rewrites child modules or the whole crate (#2022). Use `node scripts/rustfmt-touched.mjs <file.rs>...` |
 | New `#[command]` Tauri commands must be registered in `lib.rs` | (runtime — fails with "command not found") | Easy to forget; the handler list is the source of truth |
 
 If you genuinely need to override a hook, use the per-rule env-var escape

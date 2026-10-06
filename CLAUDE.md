@@ -37,6 +37,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 Claude hooks catch a subset of mistakes; their deny messages say how to proceed. Shell-tool writes bypass the edit hooks, so `git diff` is the evidence.
 - `guard-antipatterns.mjs` (Edit/Write): blocks `.dispose()`, hand-built `\\wsl$\` paths, PowerShell `if`/`while` conditions on a native command (tests output, not exit code), and edits outside the session's worktree. Per-line escapes are named in the deny message.
 - `guard-commit-staging.mjs` / `guard-documentation.mjs` (Bash and PowerShell): deny an empty plain `git commit`, and a behavior-sensitive commit without staged docs or a `docs: none — <reason>` line in the message.
+- `guard-rustfmt.mjs` (Bash and PowerShell): denies `rustfmt`/`cargo fmt` without `--check` (child-module cascade); format with `node scripts/rustfmt-touched.mjs <file.rs>...`.
 - `verify-edit-persisted.mjs` checks modification time after an edit, not content.
 
 ## Code quality

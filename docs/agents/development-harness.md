@@ -105,9 +105,13 @@ Rust formatting follows the same rule: `cargo fmt --all --check` runs over
 the crate, a diff in a touched file fails, and the crate's existing
 formatting backlog (#2022) is reported as `formatDiffCount` instead of
 blocking every Rust change. Format touched files with
-`rustfmt --edition 2021 <file>`; `cargo fmt` rewrites the whole crate, and
-rustfmt on a module root (`lib.rs`, `mod.rs`) also formats its child modules,
-so revert hunks outside your change. A
+`node scripts/rustfmt-touched.mjs <file.rs>...`. Do not run `cargo fmt` (it
+rewrites the whole crate) or bare `rustfmt <file>`: on a module root
+(`lib.rs`, `mod.rs`) rustfmt also formats the child modules. The script
+restores every other Rust file (tracked, or untracked and not ignored) byte
+for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
+`rustfmt` or `cargo fmt` command that is not `--check`, but cannot see a
+command built at run time. A
 rustfmt failure that reports no diff (for example a parse error) stays red.
 Any other existing failure stays red too: reproduce at the recorded base
 before attributing it to baseline debt.
@@ -152,9 +156,13 @@ rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
 suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. For a failed
-implementation that cannot be repaired, record `phase: blocked` and nonempty
-blockers to permit that handoff. None of these paths marks the task complete.
+recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. A FAIL is never
+released by a written report, however many times it is repeated. For a failed
+implementation that cannot be repaired, write
+`{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
+`npm run harness -- update --spec <file>`; the FAIL stop message repeats this
+command. Never edit `.harness/active-task.json` by hand. None of these paths
+marks the task complete.
 
 These hooks apply to Claude; other agents use the portable CLI and existing CI
 gates. Tasks must be started explicitly for this completion guard to apply;

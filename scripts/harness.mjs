@@ -232,7 +232,7 @@ function classify(gate, code, output, paths) {
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
     if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
-    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format only those files with "rustfmt --edition 2021 <file>"; "cargo fmt" would rewrite the whole crate (#2022).`, formatDiffCount: total };
+    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with "node scripts/rustfmt-touched.mjs ${touched.join(' ')}", which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022).`, formatDiffCount: total };
     return { outcome: 'PASS', count: null, formatDiffCount: total };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
@@ -417,7 +417,9 @@ async function hook(root, payload) {
       // A blocked handoff is allowed once the diagnostic has been presented.
       // It never updates phase=complete, and finish still returns nonzero.
       if (payload.stop_hook_active && (['BLOCKED', 'TIMEOUT'].includes(result.outcome) || taskAt(root).phase === 'blocked' && taskAt(root).blockers.length)) return;
-      console.log(JSON.stringify({ decision: 'block', reason: `${result.outcome}: ${result.reason} Complete verification and evidence, or report an incomplete handoff with this diagnostic. Do not claim success.` }));
+      // FAIL is never released by a written report: only recorded blockers permit a handoff, so say how to record them.
+      const escape = result.outcome === 'FAIL' ? ' If the failure cannot be repaired here, write {"phase": "blocked", "blockers": ["<why>"]} to a JSON file and run npm run harness -- update --spec <file>; that permits an incomplete handoff.' : '';
+      console.log(JSON.stringify({ decision: 'block', reason: `${result.outcome}: ${result.reason} Complete verification and evidence, or report an incomplete handoff with this diagnostic.${escape} Do not claim success.` }));
     }
   }
 }

@@ -238,6 +238,9 @@ test('the format gate passes baseline rustfmt debt and fails touched or unexplai
   const touched = await gate('Diff in /r/src-tauri/src/new.rs:3:', ['src-tauri/src/new.rs']);
   assert.equal(touched.outcome, 'FAIL');
   assert.match(touched.reason, /src-tauri\/src\/new\.rs/);
+  // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
+  assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs src-tauri\/src\/new\.rs/);
+  assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
   assert.equal((await gate('error: unexpected token', ['src-tauri/src/new.rs'])).outcome, 'FAIL');
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
@@ -304,6 +307,25 @@ test('hook stdin restores context, guards state writes and rejects stale complet
   assert.equal(JSON.parse(stop.stdout).decision, 'block');
   assert.equal(fixture.hook({ hook_event_name: 'Stop', stop_hook_active: true }).stdout, '');
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'understand');
+});
+test('a failed gate keeps blocking Stop, names the way out, and releases once update records a blocked handoff', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: [], outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' }));
+  // A written report alone must not release a FAIL; only recorded blockers do.
+  for (const payload of [{ hook_event_name: 'Stop' }, { hook_event_name: 'Stop', stop_hook_active: true }]) {
+    const stop = JSON.parse(fixture.hook(payload).stdout);
+    assert.equal(stop.decision, 'block');
+    assert.match(stop.reason, /npm run harness -- update --spec/);
+    assert.match(stop.reason, /"phase":\s*"blocked"/);
+    assert.match(stop.reason, /blockers/);
+  }
+  fixture.put('.task.json', JSON.stringify({ phase: 'blocked', blockers: ['rust-tests fails on a pre-existing host-dependent test'] }));
+  const update = fixture.cli('update', '--spec', '.task.json');
+  assert.equal(update.status, 0, update.stderr);
+  assert.equal(fixture.hook({ hook_event_name: 'Stop', stop_hook_active: true }).stdout, '');
+  assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'blocked');
 });
 test('read-only sessions and unrelated hook events do not require a task', t => {
   const fixture = repo(t);
