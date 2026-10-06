@@ -532,13 +532,13 @@ interface AgentNodeState {
 let derivedNodesCache: {
   nodeIds: readonly number[];
   nodesById: Record<number, AgentNode>;
-  nodes: AgentNode[];
+  nodes: readonly AgentNode[];
 } | null = null;
 
 function deriveAgentNodes(
   nodeIds: readonly number[],
   nodesById: Record<number, AgentNode>,
-): AgentNode[] {
+): readonly AgentNode[] {
   const cached = derivedNodesCache;
   if (cached && cached.nodeIds === nodeIds && cached.nodesById === nodesById) {
     return cached.nodes;
@@ -585,7 +585,14 @@ function deriveAgentNodes(
 /// (`state.nodesById[id]`) are preferred when the consumer only needs one node
 /// — they preserve identity through the shallow reconciliation in
 /// `fetchAgentNodes`.
-export function useAllAgentNodes(): AgentNode[] {
+///
+/// The result is `readonly` because every subscriber shares ONE instance (see
+/// [`deriveAgentNodes`]). That turns the shared-cache invariant into something
+/// the compiler enforces rather than a convention: sorting or reversing this
+/// array in place is a type error, where it would otherwise corrupt every
+/// subscriber and the cache without triggering a React update. Consumers that
+/// need their own order copy first — `[...nodes].sort(...)`.
+export function useAllAgentNodes(): readonly AgentNode[] {
   return useAgentNodeStore((s) => deriveAgentNodes(s.nodeIds, s.nodesById));
 }
 

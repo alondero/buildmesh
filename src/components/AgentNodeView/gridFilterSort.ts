@@ -48,7 +48,7 @@ function compareStableOrder(a: AgentNode, b: AgentNode): number {
  */
 export function deriveVisibleNodes(
   scope: DerivedScope,
-  agentNodes: AgentNode[],
+  agentNodes: readonly AgentNode[],
   controls: GridControlValues,
   ownerships: NodeOwnerships = {},
   groups: NodeGroups = [],

@@ -109,6 +109,11 @@ pub(crate) struct LeaderGuard<'a> {
     provider: &'a str,
     identity: &'a UsageIdentityFingerprint,
     flight: Arc<Flight>,
+    /// Set by [`LeaderGuard::complete`] so `Drop` skips the fallback. A
+    /// successful leader already published the real result; re-publishing
+    /// would be a no-op for correctness but still cost a heap `String`, a
+    /// throwaway `into_usage` projection, and a mutex lock on every success.
+    completed: bool,
 }
 
 impl<'a> LeaderGuard<'a> {
@@ -123,25 +128,34 @@ impl<'a> LeaderGuard<'a> {
             provider,
             identity,
             flight,
+            completed: false,
         }
     }
 
-    pub(crate) fn complete(self, value: (UsageOutcome, ProviderUsage)) {
+    pub(crate) fn complete(mut self, value: (UsageOutcome, ProviderUsage)) {
+        // Publish first, then disarm: if `publish` itself unwinds, the
+        // fallback still reaches the followers rather than leaving them
+        // blocked on a flight nobody will ever complete.
         self.flight.publish(value);
+        self.completed = true;
     }
 }
 
 impl Drop for LeaderGuard<'_> {
     fn drop(&mut self) {
-        // `publish` is idempotent, so this is a no-op after an explicit
-        // `complete` and only fires on the panic path.
-        let reason = "usage fetch did not complete".to_string();
-        self.flight.publish((
-            UsageOutcome::Unavailable {
-                reason: reason.clone(),
-            },
-            UsageOutcome::Unavailable { reason }.into_usage(self.provider),
-        ));
+        // Only on the panic path — a completed leader disarmed itself. The
+        // slot release below runs on EVERY exit path and must not be guarded:
+        // skipping it would strand the key in `in_flight` and make every later
+        // caller wait on a flight nobody owns.
+        if !self.completed {
+            let reason = "usage fetch did not complete".to_string();
+            self.flight.publish((
+                UsageOutcome::Unavailable {
+                    reason: reason.clone(),
+                },
+                UsageOutcome::Unavailable { reason }.into_usage(self.provider),
+            ));
+        }
         self.cache
             .end_flight(self.provider, self.identity, &self.flight);
     }
