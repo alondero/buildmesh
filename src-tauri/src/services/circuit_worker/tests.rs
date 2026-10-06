@@ -2998,7 +2998,6 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         may_admit_run(&pending_row_3, &mesh_row),
         "after terminal — third pending must admit (FIFO promotion)",
     );
-
 }
 
 /// Install this test's private database.
@@ -3189,7 +3188,6 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
         }
         other => panic!("expected a capacity tick, got {other:?}"),
     }
-
 }
 
 /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,
