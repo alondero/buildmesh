@@ -51,3 +51,4 @@ pub use wire::{NamingBackendFailedPayload, NodeRenamedPayload};
 
 #[cfg(test)]
 mod tests;
+// Proof-of-merge-gate marker: a Rust-only diff, used to verify that the required `Rust tests + TS bindings` check still certifies green when the frontend branch has nothing to prove (issue #2046 review, finding F1). Safe to delete.
