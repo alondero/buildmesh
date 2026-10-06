@@ -10,6 +10,7 @@ import {
   DEV_SERVER_STARTUP_MS,
   NAVIGATION_TIMEOUT_MS,
   MOUNT_TIMEOUT_MS,
+  ELEMENT_VISIBLE_TIMEOUT_MS,
   UI_SHOT_STEP_BUDGETS_MS,
 } from '../../scripts/ui-shot-budgets.mjs';
 
@@ -165,7 +166,9 @@ describe('ui-shot mock mode', () => {
       const result = await runUiShot(['--out', output, '--mock', '--mock-url', url], MOUNT_FAILURE_DEADLINE_MS);
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain('#root never populated within 15s');
+      // Built from the constant the script formats its message with, so raising
+// MOUNT_TIMEOUT_MS cannot leave this asserting a stale number.
+expect(result.stderr).toContain(`#root never populated within ${MOUNT_TIMEOUT_MS / 1000}s`);
       expect(result.stderr).toContain('Page errors: mock mount exploded');
       await expect(readFile(output)).rejects.toThrow();
     } finally {
@@ -180,8 +183,11 @@ describe('ui-shot mock mode', () => {
     // `--serve` already started one. Assert the arithmetic against the values
     // the scripts actually use (imported from `ui-shot-budgets.mjs`), so
     // raising a child timeout widens the wrapper automatically.
-    expect(CHILD_WORST_CASE_MS).toBeGreaterThanOrEqual(
-      DEV_SERVER_STARTUP_MS + NAVIGATION_TIMEOUT_MS,
+    // Strict equality against the four-term sum, not `>=`: a `>=` check holds
+    // by construction and would stay green if a term were dropped from
+    // `UI_SHOT_STEP_BUDGETS_MS`, leaving the wrapper under the real worst case.
+    expect(CHILD_WORST_CASE_MS).toBe(
+      DEV_SERVER_STARTUP_MS + NAVIGATION_TIMEOUT_MS + MOUNT_TIMEOUT_MS + ELEMENT_VISIBLE_TIMEOUT_MS,
     );
     expect(WRAPPER_DEADLINE_MS).toBeGreaterThan(CHILD_WORST_CASE_MS);
     expect(TEST_DEADLINE_MS).toBeGreaterThan(WRAPPER_DEADLINE_MS);
