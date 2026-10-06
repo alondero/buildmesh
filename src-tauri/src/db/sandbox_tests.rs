@@ -4,9 +4,9 @@
 //! migration lives in `db::migrations` (issue #249); the test calls
 //! `migrations::evolve_to` against a pre-v18 schema to exercise that path.
 //!
-//! Uses an in-memory SQLite connection rather than the global `DB` OnceCell,
-//! mirroring `scratchpad_tests`, so the whole suite can run as one
-//! `cargo test` invocation without `--test-threads=1`.
+//! Uses an in-memory SQLite connection of its own rather than the seam's
+//! per-test database, mirroring `scratchpad_tests`. Only the `_inner(&Connection)`
+//! helpers are exercised, so it needs no seam helper at all (issue #2048).
 
 #[cfg(test)]
 mod tests {

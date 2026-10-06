@@ -1125,12 +1125,12 @@ mod tests {
     // logic — gate + DB lookup + name/prefill + provider chain + SHA pin —
     // and is what these tests pin.
     //
-    // These tests stand up a real on-disk SQLite DB via `db::init` (the
-    // global `DB` OnceCell is one-shot per process, so we serialise on
-    // `TEST_LOCK` and only initialise on the first test). The `meshes.path`
-    // column is UNIQUE — we point each test at its own temp git repo, and
-    // `resolve_github_owner_repo` only needs `origin` set to a GitHub URL
-    // for the mesh-lookup seam to produce (owner, repo).
+    // Each test gets its own fully-migrated in-memory database from
+    // `ensure_pr_db` (issue #2048), so the per-test fixtures can't observe
+    // each other's rows and this section needs no serialisation lock. The
+    // `meshes.path` column is UNIQUE — we point each test at its own temp git
+    // repo, and `resolve_github_owner_repo` only needs `origin` set to a
+    // GitHub URL for the mesh-lookup seam to produce (owner, repo).
     //
     // The exact-pinning / fork-meta / provider / name assertions all read
     // back the persisted `AgentNode` row via `IssueNodeDraft.node`, so a
@@ -1139,20 +1139,20 @@ mod tests {
     // the corresponding test rather than silently regress to the legacy
     // `base_ref`-fallback path on stage-2.
 
-    /// Serialises tests that touch the global DB. Held for the duration
-    /// of every test in this section so the per-test fixtures (mesh
-    /// rows, worktrees) can't observe each other's mutations. This is
-    /// orthogonal to DB init — the shared helper
-    /// `db::test_support::ensure_db_for_tests` handles the one-shot
-    /// `db::init` so we don't need a local `Once` here.
-    static PR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Initialise the global DB exactly once per test process, then
-    /// acquire `PR_TEST_LOCK` so the test's mutations don't race with
-    /// sibling tests. `db::test_support::ensure_db_for_tests` does the
-    /// init; the lock acquisition serialises the *body*.
-    fn ensure_pr_db() {
-        crate::db::test_support::ensure_db_for_tests();
+    /// Install a private, fully-migrated database for the *calling test
+    /// thread* and hand back the guard that keeps it installed (issue
+    /// #2048). `db::get` resolves a connection to the test thread's own
+    /// database, so the per-test fixtures (mesh rows, worktrees) can't
+    /// observe each other's mutations and this section needs no
+    /// serialisation lock.
+    ///
+    /// The caller MUST hold the returned guard for the whole test body.
+    /// `isolated` is depth-counted, so a nested call from a shared helper
+    /// reuses this database rather than replacing it — but dropping the last
+    /// guard uninstalls it, and the rest of the test would then read the
+    /// process-global database, or panic with "database not initialized".
+    fn ensure_pr_db() -> crate::db::test_support::IsolatedDbGuard {
+        crate::db::test_support::isolated()
     }
 
     /// Create a temp git repo with a known `origin` URL, and insert a
@@ -1186,8 +1186,7 @@ mod tests {
     /// "fork PRs aren't supported" (the legacy wording pre-#443).
     #[test]
     fn create_pr_node_impl_rejects_empty_head_ref() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         let err = create_pr_node_impl(
             1,           // mesh_id — irrelevant; gate short-circuits before DB read
@@ -1222,8 +1221,7 @@ mod tests {
     /// commits because stage-2 can't register a fork remote).
     #[test]
     fn create_pr_node_impl_rejects_incomplete_fork_info() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         let err = create_pr_node_impl(
             1,
@@ -1250,8 +1248,7 @@ mod tests {
     /// here; surfacing the error to the panel is the only sane behaviour.
     #[test]
     fn create_pr_node_impl_rejects_unknown_mesh_id() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         // Use a mesh id that the freshly-init'd DB cannot possibly have
         // (no `create_mesh` was called in this test).
@@ -1290,8 +1287,7 @@ mod tests {
     /// `format_pr_prefill`.)
     #[test]
     fn create_pr_node_impl_wires_name_and_prefill_seam() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         let (_tmp, mesh_id) = create_test_mesh(
             "pr-seam-test",
@@ -1368,8 +1364,7 @@ mod tests {
     /// its own worktree.
     #[test]
     fn create_pr_reviewer_node_impl_names_uniquely_per_spawn() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         let (_tmp, mesh_id) = create_test_mesh(
             "pr-reviewer-naming",
@@ -1445,8 +1440,7 @@ mod tests {
     /// per-mesh value) surfaces as a test failure.
     #[test]
     fn create_pr_node_impl_resolves_provider_chain() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         // Case 1: explicit caller value wins (no mesh, no app default).
         let (_tmp, mesh_id) =
@@ -1516,8 +1510,7 @@ mod tests {
     /// swept at the global tempdir's `Drop`.
     #[test]
     fn create_pr_node_impl_persists_pinned_sha_for_drift_check() {
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
 
         // Case A: non-empty head_sha persists verbatim.
         let (_tmp_a, mesh_id_a) =
@@ -1725,8 +1718,7 @@ mod tests {
         // row, leaving the frontend to ping-pong the badge back to
         // "Starting…" after the next refetch. `on_already_active` writes
         // `Running` directly so the row matches reality.
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
         let (_tmp, node_id) = fresh_pending_node("already-active-pending");
 
         let before = crate::db::get_agent_node_by_id(node_id).expect("read before");
@@ -1749,8 +1741,7 @@ mod tests {
         // The detached-spawn wrapper's `ReportSkipped` arm relies on this:
         // a fresh `Pending` node whose stage-2 short-circuited must surface
         // as `Error` so the user can retry.
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
         let (_tmp, node_id) = fresh_pending_node("err-if-pending");
 
         let sink = crate::agent::session_lifecycle::DbOnlySink;
@@ -1770,8 +1761,7 @@ mod tests {
         // (`orchestrator.rs:117-122`). An unconditional `on_error` would
         // corrupt that recoverable state — `on_error_if_pending` reads
         // the current status and skips the write for non-`Pending` rows.
-        let _guard = PR_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ensure_pr_db();
+        let _db = ensure_pr_db();
         let (_tmp, node_id) = fresh_pending_node("err-preserve-suspended");
         crate::db::update_agent_node_status(
             node_id,

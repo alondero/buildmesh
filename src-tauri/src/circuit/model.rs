@@ -1093,6 +1093,8 @@ impl CircuitGraph {
     pub(crate) fn upgrade_legacy_agent_review_prompts(&mut self) -> bool {
         let old_review = crate::review_contract::LEGACY_LOCAL_REVIEW_PROMPT;
         let old_feedback = crate::review_contract::LEGACY_FEEDBACK_PROMPT;
+        let old_merge =
+            crate::review_contract::legacy_merge_prompt("your pull request for this work", "");
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
@@ -1109,6 +1111,15 @@ impl CircuitGraph {
                         Self::review_feedback_prompt(crate::review_contract::LOCAL_FEEDBACK_SCOPE);
                     changed = true;
                 }
+                CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "merge" && prompt == &old_merge =>
+                {
+                    *prompt = crate::review_contract::merge_approved_pr(
+                        "your pull request for this work",
+                        "",
+                    );
+                    changed = true;
+                }
                 _ => {}
             }
         }
@@ -1123,6 +1134,10 @@ impl CircuitGraph {
         // was split from REVIEW_POLICY. A user-authored extension of either
         // prompt is not stock and must remain intact.
         let old_feedback = "Follow the feedback comments on PR #{{pr.number}} ({{pr.url}}). Reviewer report: {{node.reviewer.output}}. Address every valid comment, run the relevant tests, and update the PR. Do not ignore architectural or clean-code concerns; report what you changed.";
+        let old_merge = crate::review_contract::legacy_merge_prompt(
+            "PR #{{pr.number}} ({{pr.url}})",
+            " {{pr.number}}",
+        );
         let mut changed = false;
         for node in &mut self.nodes {
             match &mut node.kind {
@@ -1139,6 +1154,12 @@ impl CircuitGraph {
                 {
                     *prompt =
                         Self::review_feedback_prompt(crate::review_contract::PR_FEEDBACK_SCOPE);
+                    changed = true;
+                }
+                CircuitNodeKind::InjectPty { prompt, .. }
+                    if node.id == "merge" && prompt == &old_merge =>
+                {
+                    *prompt = Self::pr_merge_prompt();
                     changed = true;
                 }
                 _ => {}
@@ -2694,6 +2715,65 @@ mod tests {
         assert!(matches!(
             graph.node("reviewer").map(|node| &node.kind),
             Some(CircuitNodeKind::SpawnAgentNode { prompt, .. }) if prompt == custom
+        ));
+    }
+
+    #[test]
+    fn legacy_merge_prompts_upgrade_to_branch_sync_text_and_custom_merge_is_preserved() {
+        for (mut graph, upgrade) in [
+            (
+                CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+                "issue",
+            ),
+            (CircuitGraph::agent_review(None, None, 3), "local"),
+        ] {
+            let node = graph
+                .nodes
+                .iter_mut()
+                .find(|node| node.id == "merge")
+                .expect("merge exists");
+            if let CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
+                *prompt = if upgrade == "issue" {
+                    crate::review_contract::legacy_merge_prompt(
+                        "PR #{{pr.number}} ({{pr.url}})",
+                        " {{pr.number}}",
+                    )
+                } else {
+                    crate::review_contract::legacy_merge_prompt(
+                        "your pull request for this work",
+                        "",
+                    )
+                };
+            }
+            let changed = if upgrade == "issue" {
+                graph.upgrade_legacy_issue_review_contract()
+            } else {
+                graph.upgrade_legacy_agent_review_prompts()
+            };
+            assert!(changed, "{upgrade} legacy merge text must upgrade");
+            assert!(
+                matches!(
+                    graph.node("merge").map(|node| &node.kind),
+                    Some(CircuitNodeKind::InjectPty { prompt, .. })
+                        if prompt.contains("gh pr update-branch")
+                            && prompt.contains("gh pr merge")
+                            && !prompt.contains("Do not make further changes")
+                ),
+                "{upgrade} merge node carries the branch-sync text"
+            );
+        }
+
+        let mut custom = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let custom_merge = "Squash and merge when ready. Also update the changelog.";
+        if let Some(node) = custom.nodes.iter_mut().find(|node| node.id == "merge") {
+            if let CircuitNodeKind::InjectPty { prompt, .. } = &mut node.kind {
+                *prompt = custom_merge.into();
+            }
+        }
+        assert!(!custom.upgrade_legacy_issue_review_contract());
+        assert!(matches!(
+            custom.node("merge").map(|node| &node.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt == custom_merge
         ));
     }
 

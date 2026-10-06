@@ -943,6 +943,12 @@ mod tests {
 
     #[test]
     fn curated_env_prepends_git_and_redirects_temp() {
+        // `curated_env` reads the command's *full* env, which inherits the
+        // process environment, and the assertion below is about every var in
+        // it. A parallel test that redirects a var at a temp dir would
+        // otherwise inject a host-temp path and fail this test for a reason
+        // that has nothing to do with `curated_env` (issue #2048).
+        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = CommandBuilder::new("x.exe");
         cmd.env("PATH", r"C:\msys64\usr\bin");
         cmd.env("TEMP", r"C:\Users\me\AppData\Local\Temp");

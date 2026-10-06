@@ -84,8 +84,11 @@ recovery; cleanup stops its live process and is retryable rather than deleting
 the review evidence.
 
 Approval closes the reviewer, then `merge` asks the source to squash-merge the
-pull request (marking a draft ready and waiting for required checks first). The
-run completes once that prompt is delivered: it does not wait for the merge.
+pull request: it marks a draft ready, brings a behind-base branch up to date
+with `gh pr update-branch` (never a rebase, which would rewrite the approved
+commits), waits for the pushed commit's own workflow run, and only then
+squash-merges. The run completes once that prompt is delivered: it does
+not wait for the merge.
 A completed run retires only the agents its graph closed, so the implementation
 agent stays open, and the circuit stops observing every agent it referenced.
 Failed and cancelled runs still retire their owned agents.
@@ -132,7 +135,8 @@ upgrade is reconsidered on a later startup after they finish.
 The publication flow (publish, one reviewer, merge hand-off) reaches stored
 graphs through a one-time startup upgrade of the built-in preset and of
 issue-review circuits whose topology is exactly the previous stock shape.
-Edited prompts and reviewer settings are kept; stock feedback and approval texts
+Edited prompts and reviewer settings are kept; stock feedback, approval, and
+merge texts
 move to their new wording. Each existing run is pinned to the graph it started
 with first, so active runs and failed-run recovery are unaffected. Review-derived
 copies are user-owned and keep their shape; the previous shape still satisfies

@@ -472,7 +472,7 @@ mod tests {
     /// can show different user-facing copy.
     #[tokio::test]
     async fn returns_404_for_unknown_node() {
-        crate::db::test_support::ensure_db_for_tests();
+        let _db = crate::db::test_support::isolated();
         let resp = post_input(&req(br#"{"seq":"y\r"}"#, 0)).await;
         assert_eq!(resp.status_code(), 404, "expected 404 for missing node");
         let text = String::from_utf8_lossy(resp.body());

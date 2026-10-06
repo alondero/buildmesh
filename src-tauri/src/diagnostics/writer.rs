@@ -148,8 +148,11 @@ mod tests {
     use super::*;
 
     /// Unique scratch path per test so cargo's parallel runner can't collide.
+    /// PID-prefixed as well: a bare per-test name is unique inside one test
+    /// process only, and the shard runner executes several binaries against
+    /// the same temp directory at once.
     fn scratch(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("bm-diag-{name}.log"))
+        std::env::temp_dir().join(format!("bm-diag-{}-{name}.log", std::process::id()))
     }
 
     fn cleanup(path: &Path, keep: usize) {
