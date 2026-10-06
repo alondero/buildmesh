@@ -99,7 +99,7 @@ export type OmnibarIndex = IndexedItem[];
 
 /** Merge the five domains into one palette array. */
 export function buildOmnibarIndex(opts: {
-  nodes: AgentNode[];
+  nodes: readonly AgentNode[];
   meshes: Mesh[];
   commands: AppCommand[];
   spawnOptions: SpawnOption[];
@@ -293,7 +293,7 @@ export function viewModeCommandId(mode: ViewMode): string {
 /** Agent Nodes (issue #1410 §1 — name, branch, worktree name, provider /
  *  harness, session status, parent mesh name). The mesh lookup supplies the
  *  parent-mesh name field and subtitle. */
-export function indexAgentNodes(nodes: AgentNode[], meshes: Mesh[]): IndexedItem[] {
+export function indexAgentNodes(nodes: readonly AgentNode[], meshes: Mesh[]): IndexedItem[] {
   const meshNameById = new Map(meshes.map((m) => [m.id, m.name]));
   const items: IndexedItem[] = [];
   for (const node of nodes) {

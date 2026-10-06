@@ -2,12 +2,18 @@ import { spawn } from 'child_process';
 import { createRequire } from 'module';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { DEV_SERVER_STARTUP_MS } from './ui-shot-budgets.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 const vitePackageJson = require.resolve('vite/package.json');
 const viteEntrypoint = resolve(dirname(vitePackageJson), 'bin', 'vite.js');
-const defaultTimeoutMs = 60000;
+// Exported so `tests/integration/ui-shot.test.ts` can budget its wrapper
+// deadline against the real value instead of a hand-copied literal that would
+// silently drift when this number changes (issue #2049 class: a wrapper tighter
+// than its child reports a transport error that reads like "start the dev
+// server" when `--serve` already started one).
+const defaultTimeoutMs = DEV_SERVER_STARTUP_MS;
 
 function isReady(url) {
   return fetch(url).then((response) => response.ok).catch(() => false);

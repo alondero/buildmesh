@@ -11,6 +11,15 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./tests/setup/vitest.setup.ts'],
     include: ['tests/unit/**/*.test.ts', 'tests/unit/**/*.test.tsx', 'tests/integration/**/*.test.ts', 'tests/integration/**/*.test.tsx'],
+    // Vitest's 5s default is too tight for this suite on Windows. With 288
+    // files running concurrently, ordinary filesystem tests (mkdtemp/mkdir/
+    // writeFile under an antivirus-scanned temp dir) and userEvent interaction
+    // tests routinely take 5-6s of wall clock while their assertions pass in
+    // milliseconds, so the budget — not the behaviour — decides the result.
+    // Tests that shell out or drive a browser still declare their own larger
+    // budget where the work genuinely warrants it. 30s stays far below a real
+    // hang, so this does not mask one (same reasoning as issue #2049).
+    testTimeout: 30000,
     // Runtime errors invalidate the run even when assertions pass (#1452).
     dangerouslyIgnoreUnhandledErrors: false,
     coverage: {

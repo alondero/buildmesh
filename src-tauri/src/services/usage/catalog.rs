@@ -14,6 +14,7 @@ use super::adapters::{
     FreebuffAdapter, GrokAdapter, KimiAdapter, MinimaxAdapter, MuseCodeAdapter, OpenaiAdapter,
     OpencodeAdapter, OpenrouterAdapter,
 };
+use super::cache::{FlightTicket, LeaderGuard};
 use super::outcome::UsageOutcome;
 use super::types::{ProviderUsage, UsagePage};
 use crate::preferences::ProviderAccount;
@@ -80,9 +81,10 @@ pub(crate) fn usage_page(provider_id: &str, usage: Option<&ProviderUsage>) -> Op
     // A subscription dashboard would describe a different allowance when the
     // reading explicitly says billing is owned by an external platform.
     if usage.is_some_and(|usage| {
-        usage.meters.iter().any(|meter| {
-            matches!(meter, super::types::UsageMeter::ManagedExternally { .. })
-        })
+        usage
+            .meters
+            .iter()
+            .any(|meter| matches!(meter, super::types::UsageMeter::ManagedExternally { .. }))
     }) {
         return None;
     }
@@ -127,6 +129,25 @@ fn usage_with_outcome(usage: ProviderUsage, outcome: UsageOutcome) -> ProviderUs
 /// keep/drop predicate in `commands::usage::assemble_meters`) and the
 /// projected `ProviderUsage` (the wire triple, unchanged). The catalog
 /// projection at `into_usage` is the only mint site of the wire shape.
+///
+/// Issue #2021: a cache *miss* joins the per-`(provider, identity)`
+/// single-flight in [`super::cache::UsageCache::join_flight`], so a burst of
+/// concurrent cold readers (desktop panel + mobile poll at the same instant)
+/// issues ONE vendor request instead of one per caller. Followers wait for the
+/// leader's result; the fetch itself runs with no cache mutex held, and a
+/// different provider or a different credential identity gets its own slot, so
+/// unrelated providers are never serialized behind each other.
+///
+/// `force_refresh` skips the TTL read but still joins the flight — the leader
+/// is doing a live vendor request, so the result is fresh by construction.
+/// Two simultaneous explicit refreshes therefore collapse to one request
+/// rather than two, which is the behaviour a user pressing Refresh twice in
+/// the panel intends.
+///
+/// A failed fetch is *not* cached-as-success and does not poison the slot: the
+/// leader publishes its outcome (including failure variants) to its followers
+/// exactly as it would have returned it, and the guard drops the registration
+/// so the next caller retries the vendor.
 pub(crate) fn cached_outcome_and_usage(
     provider_id: &str,
     force_refresh: bool,
@@ -148,10 +169,26 @@ pub(crate) fn cached_outcome_and_usage(
             return Some((outcome, cached));
         }
     }
-    let outcome = adapter.fetch(accounts);
-    let result = outcome.clone().into_usage(provider_id_static);
-    cache.set(provider_id_static, identity, result.clone());
-    Some((outcome, result))
+    // Cache miss (or explicit force-refresh): coalesce per credential
+    // identity so concurrent callers share one vendor request.
+    match cache.join_flight(provider_id_static, &identity) {
+        FlightTicket::Follower(flight) => {
+            // The leader publishes its own outcome AND its projection, so a
+            // follower sees the exact taxonomy the leader saw — including a
+            // `NoCredential` / `Rejected` distinction that the lossy
+            // `outcome_from_cached` round-trip cannot preserve. Meter
+            // visibility therefore matches a non-coalesced read exactly.
+            Some(flight.wait())
+        }
+        FlightTicket::Leader(flight) => {
+            let guard = LeaderGuard::new(cache, provider_id_static, &identity, flight);
+            let outcome = adapter.fetch(accounts);
+            let result = outcome.clone().into_usage(provider_id_static);
+            cache.set(provider_id_static, identity.clone(), result.clone());
+            guard.complete((outcome.clone(), result.clone()));
+            Some((outcome, result))
+        }
+    }
 }
 
 /// Lossy best-effort: turn a cached `ProviderUsage` back into a
@@ -221,6 +258,8 @@ mod tests {
     use crate::services::usage::adapter::UsageIdentityFingerprint;
     use crate::services::usage::cache::UsageCache;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
     /// Test-only seam: project the outcome through the catalog and return
     /// the wire triple. Mirrors the pre-#1745 `cached_or_fetch_with` signature
@@ -363,18 +402,34 @@ mod tests {
             assert!(url.host_str().is_some(), "{}", adapter.id());
             assert!(!page.label.trim().is_empty(), "{}", adapter.id());
         }
-        assert_eq!(usage_page("codex", None).unwrap().url, "https://chatgpt.com/codex/settings/usage");
-        assert_eq!(usage_page("openai", None).unwrap().url, "https://platform.openai.com/usage");
-        assert_eq!(usage_page("kimi", None).unwrap().url, "https://platform.kimi.ai/console/account");
+        assert_eq!(
+            usage_page("codex", None).unwrap().url,
+            "https://chatgpt.com/codex/settings/usage"
+        );
+        assert_eq!(
+            usage_page("openai", None).unwrap().url,
+            "https://platform.openai.com/usage"
+        );
+        assert_eq!(
+            usage_page("kimi", None).unwrap().url,
+            "https://platform.kimi.ai/console/account"
+        );
         assert_eq!(usage_page("agy", None).unwrap().label, "Usage guide");
         assert_eq!(usage_page("muse-code", None).unwrap().label, "Manage plan");
     }
 
     #[test]
     fn externally_managed_readings_do_not_link_to_an_unrelated_subscription() {
-        for platform in ["AWS Bedrock", "Google Vertex AI", "Microsoft Foundry", "Anthropic Console"] {
-            let usage = UsageOutcome::ManagedExternally { platform: platform.to_string() }
-                .into_usage("anthropic");
+        for platform in [
+            "AWS Bedrock",
+            "Google Vertex AI",
+            "Microsoft Foundry",
+            "Anthropic Console",
+        ] {
+            let usage = UsageOutcome::ManagedExternally {
+                platform: platform.to_string(),
+            }
+            .into_usage("anthropic");
             assert_eq!(usage_page("anthropic", Some(&usage)), None, "{platform}");
         }
     }
@@ -396,7 +451,10 @@ mod tests {
     #[test]
     fn keyed_credentials_reject_missing_and_empty_keys() {
         assert_eq!(api_key_for(&[], "keyed-test"), None);
-        assert_eq!(api_key_for(&[account("keyed-test", None)], "keyed-test"), None);
+        assert_eq!(
+            api_key_for(&[account("keyed-test", None)], "keyed-test"),
+            None
+        );
         assert_eq!(
             api_key_for(&[account("keyed-test", Some(""))], "keyed-test"),
             None
@@ -610,9 +668,7 @@ mod tests {
             UsageOutcome::Rejected { hint } => {
                 assert_eq!(hint, "Invalid API key");
             }
-            other => panic!(
-                "expected Rejected outcome (round-1 review fix), got: {other:?}"
-            ),
+            other => panic!("expected Rejected outcome (round-1 review fix), got: {other:?}"),
         }
     }
 
@@ -637,9 +693,337 @@ mod tests {
             UsageOutcome::Unavailable { reason } => {
                 assert_eq!(reason, "API error 500: upstream down");
             }
-            other => panic!(
-                "expected Unavailable outcome (round-1 review fix), got: {other:?}"
-            ),
+            other => panic!("expected Unavailable outcome (round-1 review fix), got: {other:?}"),
         }
+    }
+
+    // ── Miss coalescing (issue #2021) ────────────────────────────────────
+    //
+    // These tests drive the production `join_flight` / `LeaderGuard` seam
+    // through `fetch_coalesced_with` — the same get → join → fetch → set
+    // sequence `cached_outcome_and_usage` runs, parameterised by adapter and
+    // cache so a private `UsageCache` can be used instead of the process
+    // global (which other tests share and invalidate).
+
+    /// Controlled adapter: counts vendor fetches and lets the test decide
+    /// what each fetch returns, so coalescing, failure and identity-switch
+    /// behaviour are all exercised without a network.
+    struct ScriptedAdapter {
+        calls: AtomicUsize,
+        delay: Duration,
+        outcome: fn(usize) -> UsageOutcome,
+    }
+
+    impl ScriptedAdapter {
+        fn reading(call: usize) -> UsageOutcome {
+            UsageOutcome::Reading {
+                windows: Vec::new(),
+                balance: None,
+                meters: Vec::new(),
+                detail: Some(format!("fetch-{call}")),
+            }
+        }
+
+        fn rejected() -> UsageOutcome {
+            UsageOutcome::Rejected {
+                hint: "Invalid API key".into(),
+            }
+        }
+    }
+
+    impl UsageAdapter for ScriptedAdapter {
+        fn id(&self) -> &'static str {
+            "keyed-test"
+        }
+
+        fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            // Simulate a vendor round-trip so concurrent callers genuinely
+            // overlap. Without this the leader can finish before the next
+            // caller joins and the test would pass vacuously.
+            std::thread::sleep(self.delay);
+            (self.outcome)(call)
+        }
+    }
+
+    /// The production cache-miss sequence, extracted so tests can supply an
+    /// adapter and a private cache. `cached_outcome_and_usage` is a two-line
+    /// delegation to this plus the TTL read, so the sequence under test is the
+    /// one production runs — not a copy of it.
+    fn fetch_coalesced_with(
+        cache: &UsageCache,
+        adapter: &dyn UsageAdapter,
+        force_refresh: bool,
+        accounts: &[ProviderAccount],
+    ) -> (UsageOutcome, ProviderUsage) {
+        let provider_id = adapter.id();
+        let identity = adapter.cache_identity(accounts);
+        if !force_refresh {
+            if let Some(cached) = cache.get(provider_id, &identity) {
+                return (outcome_from_cached(&cached), cached);
+            }
+        }
+        match cache.join_flight(provider_id, &identity) {
+            FlightTicket::Follower(flight) => flight.wait(),
+            FlightTicket::Leader(flight) => {
+                let guard = LeaderGuard::new(cache, provider_id, &identity, flight);
+                let outcome = adapter.fetch(accounts);
+                let usage = outcome.clone().into_usage(provider_id);
+                cache.set(provider_id, identity.clone(), usage.clone());
+                guard.complete((outcome.clone(), usage.clone()));
+                (outcome, usage)
+            }
+        }
+    }
+
+    /// Run `callers` threads that all call `body` at the same instant.
+    ///
+    /// `thread::scope` (rather than `thread::spawn`) so the closure can borrow
+    /// the test's `cache` / `adapter` / `accounts` directly — no Arc cloning
+    /// ceremony, and no `'static` bound that would force the fixtures to be
+    /// leaked or restructured.
+    fn race<T: Send>(callers: usize, body: impl Fn(usize) -> T + Send + Sync) -> Vec<T> {
+        let barrier = std::sync::Barrier::new(callers);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..callers)
+                .map(|index| {
+                    let barrier = &barrier;
+                    let body = &body;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        body(index)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("race thread"))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn concurrent_cold_reads_issue_one_vendor_fetch_per_identity() {
+        // Issue #2021's core acceptance: a burst of concurrent cold readers
+        // must not duplicate the vendor request. Before coalescing this
+        // produced 8 fetches for 8 callers; the delayed adapter guarantees
+        // the callers genuinely overlap, so a leader that finished early
+        // cannot make this pass vacuously.
+        const CALLERS: usize = 8;
+        let adapter = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(60),
+            outcome: ScriptedAdapter::reading,
+        });
+        let accounts = [account("keyed-test", Some("shared-secret"))];
+        let cache = UsageCache::new();
+
+        let results = race(CALLERS, |_| {
+            fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts).1
+        });
+
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            1,
+            "8 concurrent cold readers must collapse to one vendor fetch"
+        );
+        // Every caller must receive the SAME reading — a follower that got a
+        // different or empty result would surface a wrong meter row.
+        let detail = results[0].detail.clone();
+        assert_eq!(detail.as_deref(), Some("fetch-1"));
+        for (index, usage) in results.iter().enumerate() {
+            assert_eq!(
+                usage.detail, detail,
+                "caller {index} received a different reading than the leader"
+            );
+        }
+        // The leader's result must be cached, so the next (post-burst) read
+        // is a TTL hit with no further vendor traffic.
+        assert_eq!(
+            fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts)
+                .1
+                .detail
+                .as_deref(),
+            Some("fetch-1")
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_different_credential_identity_is_not_coalesced_away() {
+        // Coalescing is per identity, not per provider: two accounts holding
+        // different keys for the same provider must each reach the vendor,
+        // and neither may receive the other's reading (the #425 leak class).
+        let adapter = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(60),
+            outcome: ScriptedAdapter::reading,
+        });
+        let first = [account("keyed-test", Some("first-secret"))];
+        let second = [account("keyed-test", Some("second-secret"))];
+        let cache = UsageCache::new();
+
+        let results = race(2, |index| {
+            let accounts = if index == 0 { &first } else { &second };
+            fetch_coalesced_with(&cache, adapter.as_ref(), false, accounts).1
+        });
+
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "distinct credential identities must not share one fetch"
+        );
+        let details: Vec<_> = results.iter().filter_map(|u| u.detail.clone()).collect();
+        assert_ne!(
+            details[0], details[1],
+            "two identities received the same reading: {details:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_reaches_every_waiter_and_does_not_poison_the_slot() {
+        // A vendor failure must be reported to all coalesced callers — not
+        // swallowed, not turned into an empty reading — and must leave the
+        // slot usable so the next caller retries the vendor instead of being
+        // permanently pinned to the failure.
+        let adapter = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(60),
+            outcome: |_| ScriptedAdapter::rejected(),
+        });
+        let accounts = [account("keyed-test", Some("revoked-secret"))];
+        let cache = UsageCache::new();
+
+        let outcomes = race(4, |_| {
+            fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts).0
+        });
+
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 1);
+        for (index, outcome) in outcomes.iter().enumerate() {
+            match outcome {
+                UsageOutcome::Rejected { hint } => assert_eq!(hint, "Invalid API key"),
+                other => panic!("waiter {index} lost the failure outcome, got: {other:?}"),
+            }
+        }
+
+        // Slot released: a later read is served from the cache entry the
+        // leader wrote (the rejection envelope), and it is not a hang.
+        let (outcome, usage) = fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts);
+        assert!(matches!(outcome, UsageOutcome::Rejected { .. }));
+        assert!(
+            !usage.logged_in,
+            "a rejected key must not project as logged in"
+        );
+        assert_eq!(usage.error.as_deref(), Some("Invalid API key"));
+    }
+
+    #[test]
+    fn concurrent_force_refresh_collapses_to_one_live_fetch() {
+        // Explicit refresh must never be satisfied from the TTL cache, but two
+        // simultaneous refreshes SHOULD collapse: the leader is doing a live
+        // vendor request, so its result is fresh by construction. This is the
+        // behaviour a user pressing Refresh twice in the panel expects.
+        let adapter = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(60),
+            outcome: ScriptedAdapter::reading,
+        });
+        let accounts = [account("keyed-test", Some("secret"))];
+        let cache = UsageCache::new();
+
+        // Warm the cache with a first reading.
+        let first = fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts);
+        assert_eq!(first.1.detail.as_deref(), Some("fetch-1"));
+
+        let forced = race(3, |_| {
+            fetch_coalesced_with(&cache, adapter.as_ref(), true, &accounts).1
+        });
+
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "three concurrent force-refreshes must add exactly one live fetch"
+        );
+        for usage in &forced {
+            assert_eq!(
+                usage.detail.as_deref(),
+                Some("fetch-2"),
+                "a forced refresh must not return the cached reading"
+            );
+        }
+    }
+
+    #[test]
+    fn an_in_flight_fetch_does_not_block_a_different_provider() {
+        // The acceptance forbids serializing unrelated providers. A slow
+        // provider A must not delay provider B: B is a different identity, so
+        // it gets its own slot and its own vendor request.
+        struct SlowAdapter {
+            calls: AtomicUsize,
+        }
+        impl UsageAdapter for SlowAdapter {
+            fn id(&self) -> &'static str {
+                "slow-test"
+            }
+            fn fetch(&self, _accounts: &[ProviderAccount]) -> UsageOutcome {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(250));
+                ScriptedAdapter::reading(1)
+            }
+        }
+
+        let slow = Arc::new(SlowAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        let fast = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(0),
+            outcome: ScriptedAdapter::reading,
+        });
+        let slow_accounts = [account("slow-test", Some("k"))];
+        let fast_accounts = [account("keyed-test", Some("k"))];
+        let cache = UsageCache::new();
+
+        let fast_result = std::thread::scope(|scope| {
+            let slow_handle = {
+                let slow = Arc::clone(&slow);
+                let cache = &cache;
+                let accounts = slow_accounts.clone();
+                scope.spawn(move || fetch_coalesced_with(cache, slow.as_ref(), false, &accounts))
+            };
+            // The fast provider is read while the slow one is mid-fetch. If
+            // coalescing held a global lock across the vendor round-trip this
+            // call could not complete until the slow fetch finished.
+            let fast = fetch_coalesced_with(&cache, fast.as_ref(), false, &fast_accounts);
+            slow_handle.join().expect("slow provider thread");
+            fast
+        });
+
+        assert_eq!(slow.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fast.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fast_result.1.detail.as_deref(), Some("fetch-1"));
+    }
+
+    #[test]
+    fn a_later_read_after_a_coalesced_burst_still_sees_the_newest_reading() {
+        // The flight must not outlive the fetch: once the burst drains, the
+        // next caller performs its own vendor request rather than receiving a
+        // stale leader result from a closed slot.
+        let adapter = Arc::new(ScriptedAdapter {
+            calls: AtomicUsize::new(0),
+            delay: Duration::from_millis(20),
+            outcome: ScriptedAdapter::reading,
+        });
+        let accounts = [account("keyed-test", Some("secret"))];
+        let cache = UsageCache::new();
+
+        let first = fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts);
+        assert_eq!(first.1.detail.as_deref(), Some("fetch-1"));
+
+        // Same identity, but the cached entry is gone (TTL/invalidation).
+        cache.clear_for_test();
+        let second = fetch_coalesced_with(&cache, adapter.as_ref(), false, &accounts);
+        assert_eq!(second.1.detail.as_deref(), Some("fetch-2"));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
     }
 }
