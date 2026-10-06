@@ -154,6 +154,10 @@ function coalesceChunks(
     const chunk = chunks[i];
     if (typeof chunk !== 'string') allStrings = false;
     if (!isByteChunk(chunk)) allBytes = false;
+    // Both false means the window is mixed, which fully determines the
+    // outcome; scanning the remaining chunks would only burn iterations over
+    // an already-decided answer.
+    if (!allStrings && !allBytes) break;
   }
   if (allStrings) {
     let joined = '';
@@ -221,9 +225,15 @@ function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined, options: F
       continue;
     }
     entry.inFlight++;
+    // Per-write latch, not a clamp. Clamping to zero only hides underflow: a
+    // duplicate `done()` from one write would still release a *different*
+    // write's slot, letting more payloads reach xterm than the cap allows
+    // while that write is still parsing. Each write releases its own slot
+    // exactly once.
+    let completed = false;
     const done = () => {
-      // Clamped: a sink that reports completion twice must not drive the
-      // count negative and hand out budget it never spent.
+      if (completed) return;
+      completed = true;
       entry.inFlight = Math.max(0, entry.inFlight - 1);
       options.onComplete?.();
     };
@@ -231,10 +241,10 @@ function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined, options: F
       writeFn(chunk, done);
     } catch (err) {
       // A synchronous throw (torn-down terminal, failing addon) would
-      // otherwise leak this slot; MAX_INFLIGHT_WRITES leaks and the writer is
-      // bricked for the rest of the session, so undo the count before
-      // propagating.
-      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      // otherwise leak this slot, and MAX_INFLIGHT_WRITES leaks brick the
+      // writer for the rest of the session. `done` is idempotent, so this is
+      // also the correct path when the sink called `done` and *then* threw.
+      done();
       throw err;
     }
   }

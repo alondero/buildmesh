@@ -333,22 +333,67 @@ describe('TerminalWriter budgets (issue #2018)', () => {
       expect(writer.inFlightWrites(1)).toBe(0);
     });
 
-    it('ignores a duplicate parse completion instead of underflowing', () => {
-      let done: (() => void) | undefined;
+    it('does not let one write release another write\'s budget slot', () => {
+      // Two writes in flight, then Write A reports completion twice. A clamp
+      // alone would drive the count 2 -> 1 -> 0 and hand Write B's slot to new
+      // payloads while B is still parsing inside xterm, breaching the cap.
+      const dones: (() => void)[] = [];
       writer.register(
         1,
-        (_data, d) => {
-          done = d;
+        (_data, done) => {
+          if (done) dones.push(done);
         },
         { completionAware: true },
       );
-      writer.append(1, rafChunk());
+      const block = 'b'.repeat(4096);
+      writer.append(1, block);
       flush();
+      writer.append(1, block);
+      flush();
+      expect(writer.inFlightWrites(1)).toBe(2);
+
+      const [writeA, writeB] = dones;
+      writeA();
       expect(writer.inFlightWrites(1)).toBe(1);
 
-      done?.();
-      done?.();
-      done?.();
+      // Duplicate completion from A must not consume B's slot.
+      writeA();
+      writeA();
+      expect(writer.inFlightWrites(1)).toBe(1);
+
+      // Only B's own completion frees the last slot.
+      writeB();
+      expect(writer.inFlightWrites(1)).toBe(0);
+    });
+
+    it('does not release the slot twice when the sink completes then throws', () => {
+      // Two writes in flight; the second completes and *then* throws. Its
+      // throw path must not decrement on top of its own completion and take
+      // the still-parsing first write's slot.
+      const pending: (() => void)[] = [];
+      let call = 0;
+      writer.register(
+        1,
+        (_data, done) => {
+          if (call++ === 0) {
+            pending.push(done!); // first write completes only when told
+            return;
+          }
+          done?.(); // second write completes, then fails
+          throw new Error('failed after completing');
+        },
+        { completionAware: true },
+      );
+
+      const block = 'b'.repeat(4096);
+      writer.append(1, block);
+      flush();
+      writer.append(1, block);
+      expect(() => flush()).toThrow('failed after completing');
+
+      // Only the throwing write's own slot was released.
+      expect(writer.inFlightWrites(1)).toBe(1);
+      pending[0]();
       expect(writer.inFlightWrites(1)).toBe(0);
     });
 
