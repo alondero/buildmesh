@@ -29,6 +29,9 @@ $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
 
+# Shared launcher helpers (Read-LogFile). Dot-sourced before first use.
+. (Join-Path $PSScriptRoot "launcher-common.ps1")
+
 # The dev profile must NOT share src-tauri\target\release\ with the stable
 # hub: cargo's binary output filename is fixed by the crate's [[bin]] name
 # ("buildmesh"), so both profiles would write to buildmesh.exe. With the
@@ -83,31 +86,20 @@ if (-not (Test-Path $Binary)) {
 # Issue #2043 - the exit code must report the LAUNCH VERDICT and nothing else.
 # $ErrorActionPreference = "Stop" is script-wide, so a read that failed for an
 # incidental reason (the app still holds buildmesh.log open for writing, a panic
-# log momentarily locked, a transient sharing violation) aborted the script and
-# left powershell.exe reporting 1 for a launch that was already up and healthy.
-# A failed read means "no evidence from this source", so it falls through to the
-# next one instead of deciding the verdict. Write-Host keeps the warning off the
-# success stream, which would otherwise corrupt this function's return value.
-function Get-LogLines {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return @() }
-    try {
-        return @(Get-Content -LiteralPath $Path)
-    } catch {
-        Write-Host "WARN: could not read $Path ($($_.Exception.Message))"
-        return @()
-    }
-}
-
-$BeforeLines = (Get-LogLines $LogPath).Count
-# Same delta-capture for the panic-hook outputs (issue #158). Echo the
-# counts to stdout so /verify can parse them and slice the post-launch
-# file without re-deriving from disk state.
-$BeforePanicLines = (Get-LogLines $PanicLogPath).Count
-$BeforePanicEarlyLines = (Get-LogLines $PanicEarlyLogPath).Count
-Write-Output "Buildmesh Dev pre-launch line count (buildmesh.log): $BeforeLines"
-Write-Output "Buildmesh Dev pre-launch line count (panic.log): $BeforePanicLines"
-Write-Output "Buildmesh Dev pre-launch line count (panic_early.log): $BeforePanicEarlyLines"
+# log momentarily locked) aborted the script and left powershell.exe reporting 1
+# for a launch that was already up and healthy. Read-LogFile treats a failed
+# read as "no evidence" and the verification below falls through to the next
+# source instead of deciding the verdict.
+$BeforeLog = Read-LogFile $LogPath
+# Same delta-capture for the panic-hook outputs (issue #158). Echo the counts
+# to stdout so /verify can parse them and slice the post-launch file without
+# re-deriving from disk state. An unreadable baseline prints "unreadable"
+# rather than a misleading 0, which would make every post-launch line look new.
+$BeforePanic = Read-LogFile $PanicLogPath
+$BeforePanicEarly = Read-LogFile $PanicEarlyLogPath
+Write-Output "Buildmesh Dev pre-launch line count (buildmesh.log): $(Format-Count $BeforeLog)"
+Write-Output "Buildmesh Dev pre-launch line count (panic.log): $(Format-Count $BeforePanic)"
+Write-Output "Buildmesh Dev pre-launch line count (panic_early.log): $(Format-Count $BeforePanicEarly)"
 
 # 5. Launch raw binary. The WebView2 loader reads the env var at app start;
 #    it must be set only for the launch (not the build) and cleared after so
@@ -141,21 +133,28 @@ Start-Sleep -Seconds 3
 # new lines verbatim so a human running the script directly sees the panic
 # message + backtrace, matching the failure-summary shape /verify step 8
 # produces (skill.md `### panic.log + panic_early.log slices`).
-foreach ($p in @(@{Path=$PanicLogPath; BeforeCount=$BeforePanicLines},
-                 @{Path=$PanicEarlyLogPath; BeforeCount=$BeforePanicEarlyLines})) {
-    $c = (Get-LogLines $p.Path).Count
-    if ($c -gt $p.BeforeCount) {
-        Write-Output "ERROR: panic detected in $($p.Path) (was $($p.BeforeCount) lines, now $c). Launch aborted."
+foreach ($p in @(@{Path=$PanicLogPath; Before=$BeforePanic},
+                 @{Path=$PanicEarlyLogPath; Before=$BeforePanicEarly})) {
+    $growth = Compare-LogGrowth -Path $p.Path -Before $p.Before
+    # Unchecked means a read failed (already warned). Skipping is deliberate:
+    # it is neither a panic nor a clean bill of health, and the launch falls
+    # through to the startup and process checks below.
+    if (-not $growth.Checked) { continue }
+    if ($growth.Grew) {
+        Write-Output "ERROR: panic detected in $($p.Path) (was $($p.Before.Lines.Count) lines, now $($growth.Lines.Count)). Launch aborted."
         Write-Output "----- panic entry -----"
-        Get-LogLines $p.Path | Select-Object -Skip $p.BeforeCount | ForEach-Object { Write-Output $_ }
+        $growth.Lines | Select-Object -Skip $p.Before.Lines.Count | ForEach-Object { Write-Output $_ }
         Write-Output "-----------------------"
         exit 1
     }
 }
 
-$AllLines = Get-LogLines $LogPath
-if ($AllLines.Count -gt $BeforeLines) {
-    $NewLines = $AllLines[$BeforeLines..($AllLines.Count - 1)]
+# Startup confirmation rides the same guard: an unreadable baseline or a failed
+# current read cannot prove startup, so the launch falls through to the process
+# check instead of guessing.
+$startup = Compare-LogGrowth -Path $LogPath -Before $BeforeLog
+if ($startup.Checked -and $startup.Grew) {
+    $NewLines = $startup.Lines[$BeforeLog.Lines.Count..($startup.Lines.Count - 1)]
     $started = $NewLines | Where-Object { $_ -match "started|ready" }
     if ($started) {
         Write-Output "OK - Buildmesh Dev running"
@@ -163,14 +162,14 @@ if ($AllLines.Count -gt $BeforeLines) {
     }
 }
 
-# Fallback: check process is alive. Querying a process that exited and was
-# already reaped throws under $ErrorActionPreference="Stop", which used to
-# abort instead of reporting the verdict (issue #2043).
+# Fallback: check process is alive. A query failure is reported as "not alive"
+# so this ends in the explicit failed-to-start verdict below rather than an
+# unhandled error whose exit code and message would be misleading.
 $Alive = $false
 try {
     $Alive = -not $proc.HasExited
 } catch {
-    Write-Host "WARN: could not query the launched process ($($_.Exception.Message))"
+    Write-Warning "could not query the launched process: $($_.Exception.Message)"
 }
 if ($Alive) {
     Write-Output "OK - Process alive (no log confirmation)"

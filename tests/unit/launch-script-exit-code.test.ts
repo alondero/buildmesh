@@ -9,206 +9,294 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "../..");
 
 // Issue #2043 - run-dev.ps1 printed its `OK - ...` line and still left
-// powershell.exe reporting a non-zero exit, so harnesses read a healthy dev
-// launch as a failure. Two distinct causes, pinned here:
+// powershell.exe reporting a non-zero exit, so a harness read a healthy dev
+// launch as a failure.
 //
-//   1. In-script. `$ErrorActionPreference = "Stop"` is script-wide, so ANY
-//      error record aborts the script and powershell.exe returns 1 - including
-//      errors from reads the launch verdict does not depend on (a log file the
-//      app is still writing, a panic log momentarily locked) and from the
-//      Stop-Process/Get-Process race on a re-run. The launch must degrade to
-//      the next evidence source instead of aborting.
-//   2. Host-level. A consumer that stops reading stdout early
-//      (`... 2>&1 | Select-Object -First N`, `| head`) closes the pipe under
-//      powershell.exe, which then returns non-zero even after `exit 0`. Not
-//      preventable from inside the script, so the contract is documented and
-//      the `OK - ` line is the authoritative success signal.
+// The launchers run under $ErrorActionPreference = "Stop", so any error record
+// aborts the script and powershell.exe returns 1 - including errors from work
+// the launch verdict does not depend on. The app holds buildmesh.log open while
+// writing, so a bare Get-Content on it can fail with a sharing violation.
 //
-// The static half pins the structure that prevents (1); the behavioural half
-// actually executes the shipped Get-LogLines helper to prove a locked log file
-// degrades to "no evidence" instead of aborting the launcher.
+// Two failure directions have to stay fixed together, which is why the delta
+// decision lives in one tested function (Compare-LogGrowth) rather than inline:
+//   - unreadable baseline + readable current -> every line looks new, so a
+//     naive count comparison false-panics a healthy launch (#2043);
+//   - readable baseline + unreadable current -> 0 is never greater than N, so a
+//     naive comparison reports "no panic" after the panic hook has already
+//     written its entry, masking a real panic-only crash (#158).
+//
+// A separate, host-level failure is not preventable from inside a script: a
+// consumer that stops reading stdout early (`... 2>&1 | Select-Object -First N`)
+// closes the pipe under powershell.exe, which returns non-zero even after the
+// script reached `exit 0`. The launchers and /use document the contract: the
+// `OK - ` line is the authoritative success signal.
 
-interface LauncherSpec {
-  path: string;
-  okLine: RegExp;
-  /** Marker proving the script states the exit-code contract for its readers. */
-  contractMarkers: string[];
-}
-
-const LAUNCHERS: LauncherSpec[] = [
-  {
-    path: "scripts/run-dev.ps1",
-    okLine: /^\s*Write-Output "OK - /m,
-    contractMarkers: ["EXIT CODE (issue #2043)", "Select-Object -First"],
-  },
-  {
-    path: "scripts/run.ps1",
-    okLine: /^\s*Write-Output "OK - /m,
-    contractMarkers: ["issue #2043", "scripts/run-dev.ps1"],
-  },
-];
+const COMMON = "scripts/launcher-common.ps1";
+const WINDOWS_LAUNCHERS = ["scripts/run-dev.ps1", "scripts/run.ps1"];
+const ALL_LAUNCHERS = [...WINDOWS_LAUNCHERS, "scripts/run-dev.sh", "scripts/run.sh"];
 
 const read = (path: string) => readFileSync(resolve(REPO_ROOT, path), "utf8");
 
-describe("launcher scripts report the launch verdict through their exit code (issue #2043)", () => {
-  for (const { path } of LAUNCHERS) {
-    describe(path, () => {
-      it("reads log files only through the fault-tolerant Get-LogLines helper", () => {
+/** Drops `#` line comments and `<# #>` help blocks so assertions see only code. */
+const stripComments = (src: string) =>
+  src.replace(/<#[\s\S]*?#>/g, "").replace(/^\s*#.*$/gm, "");
+
+// The behavioural suites shell out to PowerShell, which takes longer than
+// vitest's 5s default once a loaded CI runner is involved.
+const POWERSHELL_TIMEOUT_MS = 60_000;
+
+/**
+ * `pwsh` (PowerShell 7, preinstalled on GitHub's Linux runners) or Windows
+ * PowerShell. Returns null when neither is on PATH, which is the only reason
+ * the behavioural suites are ever skipped.
+ */
+function resolvePowerShell(): string | null {
+  for (const exe of ["pwsh", "powershell.exe"]) {
+    try {
+      execFileSync(exe, ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], {
+        stdio: "pipe",
+        timeout: POWERSHELL_TIMEOUT_MS,
+      });
+      return exe;
+    } catch {
+      // Not installed; try the next one.
+    }
+  }
+  return null;
+}
+
+const PS = resolvePowerShell();
+
+describe("launcher exit-code contract (issue #2043)", () => {
+  describe("structure", () => {
+    for (const path of WINDOWS_LAUNCHERS) {
+      it(`${path} dot-sources the shared helper instead of inlining log reads`, () => {
         const content = read(path);
-        // A bare `Get-Content` under `$ErrorActionPreference = "Stop"` throws
-        // on a sharing violation and aborts the script. Every read the verdict
-        // depends on must go through the helper, which catches and degrades.
-        const helperStart = content.indexOf("function Get-LogLines {");
         expect(
-          helperStart,
-          `${path} should define Get-LogLines so a failed log read degrades to "no evidence" ` +
-            "instead of aborting a launch that is already up (issue #2043).",
-        ).toBeGreaterThan(-1);
+          content,
+          `${path} should dot-source ${COMMON} so the log-read semantics cannot drift ` +
+            "between the two launchers.",
+        ).toMatch(/\.\s*\(Join-Path\s+\$PSScriptRoot\s+["']launcher-common\.ps1["']\)/);
 
-        const helperEnd = content.indexOf("\n}\n", helperStart);
-        expect(helperEnd, `${path}: could not find the end of Get-LogLines`).toBeGreaterThan(helperStart);
-
-        const outside = content
-          .slice(0, helperStart)
-          .concat(content.slice(helperEnd + 3))
-          .split("\n")
+        // A bare Get-Content under $ErrorActionPreference = "Stop" throws on a
+        // sharing violation and aborts the script.
+        const bare = stripComments(content)
+          .split(/\r?\n/)
           .filter((line) => /\bGet-Content\b/.test(line));
-
         expect(
-          outside,
-          `${path} reads a log with a bare Get-Content outside Get-LogLines. Under ` +
-            '$ErrorActionPreference = "Stop" that aborts the script and turns a healthy ' +
-            "launch into exit 1.",
+          bare,
+          `${path} still reads a log with a bare Get-Content. Every read the verdict depends on ` +
+            "must go through Read-LogFile, which degrades instead of aborting.",
         ).toEqual([]);
       });
 
-      it("guards the launched-process query so a reaped process cannot abort the verdict", () => {
-        const content = read(path);
-        expect(content).toMatch(/try\s*\{[^}]*\$proc\.HasExited[^}]*\}\s*catch\s*\{/);
-      });
-
-      it("tolerates the Stop-Process race when replacing an existing instance", () => {
-        const content = read(path);
-        const stop = content.split("\n").filter((line) => /\|\s*Stop-Process\b/.test(line));
-        expect(stop.length, `${path} should stop the existing instance`).toBeGreaterThan(0);
-        for (const line of stop) {
-          expect(
-            line,
-            `${path}: Stop-Process needs -ErrorAction SilentlyContinue. A previous instance can ` +
-              'exit between Get-Process and Stop-Process, and under $ErrorActionPreference = "Stop" ' +
-              "that race aborts the script before it ever launches (issue #2043).",
-          ).toMatch(/-ErrorAction\s+SilentlyContinue/);
-        }
-      });
-
-      it("prints an ERROR line before every exit 1, and an OK line on every success path", () => {
-        const lines = read(path).split("\n");
+      it(`${path} reports a failure only with a diagnostic, and success only with an OK line`, () => {
+        const lines = read(path).split(/\r?\n/);
         const exits = lines
           .map((line, i) => ({ line: line.trim(), i }))
-          .filter(({ line }) => /^exit\s+1\b/.test(line));
-
+          .filter(({ line }) => /^exit\s+1$/.test(line));
         expect(exits.length, `${path} should have failure exits to check`).toBeGreaterThan(0);
 
         for (const { i } of exits) {
-          // Walk back to the start of the enclosing block: the diagnostic is
-          // what makes a real failure distinguishable from a transport glitch,
-          // so a bare `exit 1` with nothing said is a regression.
-          const window = lines.slice(Math.max(0, i - 8), i).join("\n");
+          // Walk back to the start of the enclosing block (a column-0 `}` or the
+          // top of the file) rather than a fixed line count: the diagnostic can
+          // legitimately sit several lines above the exit.
+          const block: string[] = [];
+          for (let j = i - 1; j >= 0; j--) {
+            if (lines[j] === "}") break;
+            block.unshift(lines[j]);
+          }
           expect(
-            window,
-            `${path}:${i + 1} exits 1 without an ERROR diagnostic above it. Callers cannot tell a ` +
-              "real launch failure from an incidental abort (issue #2043).",
-          ).toMatch(/Write-Output "ERROR:/);
+            block.join("\n"),
+            `${path}:${i + 1} exits 1 without an ERROR diagnostic in its enclosing block. ` +
+              "Callers cannot tell a real launch failure from an incidental abort (#2043).",
+          ).toMatch(/Write-(Output|Host)\s+"ERROR:/);
         }
 
-        expect(read(path)).toMatch(LAUNCHERS.find((l) => l.path === path)!.okLine);
+        expect(read(path), `${path} should print an OK line callers can key on`).toMatch(
+          /Write-Output "OK - /,
+        );
       });
-
-      it("documents the exit-code contract and the early-closing-consumer caveat", () => {
-        const content = read(path);
-        const spec = LAUNCHERS.find((l) => l.path === path)!;
-        for (const marker of spec.contractMarkers) {
-          expect(
-            content,
-            `${path} should document the exit-code contract (missing "${marker}"). Callers that ` +
-              "only read the exit code abort a healthy launch (issue #2043).",
-          ).toContain(marker);
-        }
-      });
-    });
-  }
-});
-
-// Behavioural: run the helper that actually ships in the launchers. Windows-only
-// because it locks a file with an exclusive share mode and executes
-// powershell.exe - both are platform-specific capabilities of the launcher, not
-// something this test would be asserting on another OS.
-//
-// These spawn powershell.exe, so they carry an explicit timeout well above
-// vitest's 5s default; on a loaded machine the default flaked here.
-const POWERSHELL_TIMEOUT_MS = 60_000;
-
-describe.skipIf(process.platform !== "win32")("Get-LogLines degrades instead of aborting (issue #2043)", () => {
-  const extractHelper = (path: string) => {
-    const content = read(path);
-    const start = content.indexOf("function Get-LogLines {");
-    const end = content.indexOf("\n}\n", start);
-    return content.slice(start, end + 3);
-  };
-
-  // `$body` receives the scratch directory so each run owns its fixture files -
-  // a shared name in %TEMP% would let concurrent runs fight over the lock.
-  const runProbe = (helperSource: string, body: (dir: string) => string[]) => {
-    const dir = mkdtempSync(resolve(tmpdir(), "bm-exitcode-"));
-    try {
-      writeFileSync(resolve(dir, "helper.ps1"), helperSource, "utf8");
-      writeFileSync(resolve(dir, "probe.ps1"), `${body(dir).join("\n")}\n`, "utf8");
-      return execFileSync(
-        "powershell.exe",
-        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", resolve(dir, "probe.ps1")],
-        { encoding: "utf8", timeout: POWERSHELL_TIMEOUT_MS },
-      ).trim();
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
-  };
 
-  for (const { path } of LAUNCHERS) {
-    it(
-      `${path}: returns the file's lines when it can be read`,
+    it("keeps the read warning on the warning stream, not the success stream", () => {
+      // Write-Host bypasses 3>&1 and lands on the console; the launchers' stdout
+      // is a contract (/verify parses the pre-launch counts out of it).
+      expect(stripComments(read(COMMON)), `${COMMON} should warn with Write-Warning`).not.toMatch(
+        /\bWrite-Host\b/,
+      );
+    });
+
+    it("gives all four launchers the same OK prefix so callers match one protocol", () => {
+      for (const path of ALL_LAUNCHERS) {
+        const ok = read(path).match(/(?:Write-Output|echo)\s+"(OK[^"]*)"/g) ?? [];
+        expect(ok.length, `${path} should print an OK line`).toBeGreaterThan(0);
+        for (const line of ok) {
+          expect(
+            line,
+            `${path} prints "${line}" - every launcher must use the same "OK - " prefix ` +
+              "so a caller does not need a per-platform matcher.",
+          ).toMatch(/"OK - /);
+        }
+      }
+    });
+  });
+
+  describe("PowerShell availability", () => {
+    // Without this, a runner missing pwsh would silently skip every behavioural
+    // proof below and still report green - the gap that left the original
+    // fix unverified on PR CI.
+    it.runIf(process.env.CI === "true")(
+      "is present, or the launcher helper proofs would silently skip",
       () => {
-        const out = runProbe(extractHelper(path), (dir) => [
-          ". $PSScriptRoot\\helper.ps1",
-          `$p = Join-Path '${dir}' 'readable.log'`,
-          "Set-Content -LiteralPath $p -Value @('alpha','beta')",
-          "$lines = @(Get-LogLines $p)",
-          `"COUNT=" + $lines.Count`,
-          `"FIRST=" + $lines[0]`,
-        ]);
-        expect(out).toContain("COUNT=2");
-        expect(out).toContain("FIRST=alpha");
+        expect(
+          PS,
+          "No PowerShell on PATH (tried pwsh, powershell.exe). GitHub's ubuntu runners ship " +
+            "pwsh; without it the Read-LogFile / Compare-LogGrowth proofs do not run.",
+        ).not.toBeNull();
       },
-      POWERSHELL_TIMEOUT_MS,
     );
+  });
 
-    it(
-      `${path}: returns no evidence instead of throwing when the log is exclusively locked`,
+  describe.skipIf(PS === null)("Read-LogFile / Compare-LogGrowth behaviour", () => {
+    /**
+     * Dot-sources the REAL helper from the repo - no text extraction, so the
+     * proofs cannot drift from the shipped file - and reports each property as a
+     * `KEY=value` line for the assertions below.
+     */
+    const runProbe = (body: (dir: string) => string[]) => {
+      const dir = mkdtempSync(resolve(tmpdir(), "bm-launcher-"));
+      try {
+        const probe = resolve(dir, "probe.ps1");
+        const commonPath = resolve(REPO_ROOT, COMMON).replace(/'/g, "''");
+        writeFileSync(
+          probe,
+          [
+            "$ErrorActionPreference = 'Stop'",
+            `. '${commonPath}'`,
+            "function Say([string]$k, $v) { Write-Output ($k + '=' + $v) }",
+            ...body(dir),
+          ].join("\n") + "\n",
+          "utf8",
+        );
+        return execFileSync(PS!, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", probe], {
+          encoding: "utf8",
+          timeout: POWERSHELL_TIMEOUT_MS,
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    const field = (out: string, key: string) =>
+      new RegExp(`^${key}=(.*)$`, "m").exec(out)?.[1]?.trim();
+
+    it("reads a readable file", () => {
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'readable.log'`,
+        `Set-Content -LiteralPath $p -Value @('alpha','beta')`,
+        `$r = Read-LogFile $p`,
+        `Say 'Readable' $r.Readable`,
+        `Say 'Count' $r.Lines.Count`,
+        `Say 'First' $r.Lines[0]`,
+      ]);
+      expect(field(out, "Readable")).toBe("True");
+      expect(field(out, "Count")).toBe("2");
+      expect(field(out, "First")).toBe("alpha");
+    });
+
+    it("treats a missing file as zero lines, not as unreadable", () => {
+      // The app may not have created the log yet. Reporting this as unreadable
+      // would skip the check on a perfectly normal first launch.
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'never-created.log'`,
+        `$r = Read-LogFile $p`,
+        `Say 'Readable' $r.Readable`,
+        `Say 'Count' $r.Lines.Count`,
+      ]);
+      expect(field(out, "Readable")).toBe("True");
+      expect(field(out, "Count")).toBe("0");
+    });
+
+    it("reports growth when the file gained lines", () => {
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'growing.log'`,
+        `Set-Content -LiteralPath $p -Value @('one')`,
+        `$before = Read-LogFile $p`,
+        `Add-Content -LiteralPath $p -Value @('two')`,
+        `$g = Compare-LogGrowth -Path $p -Before $before`,
+        `Say 'Checked' $g.Checked`,
+        `Say 'Grew' $g.Grew`,
+        `Say 'Count' $g.Lines.Count`,
+      ]);
+      expect(field(out, "Checked")).toBe("True");
+      expect(field(out, "Grew")).toBe("True");
+      expect(field(out, "Count")).toBe("2");
+    });
+
+    it("reports no growth when the file is unchanged", () => {
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'steady.log'`,
+        `Set-Content -LiteralPath $p -Value @('one')`,
+        `$before = Read-LogFile $p`,
+        `$g = Compare-LogGrowth -Path $p -Before $before`,
+        `Say 'Checked' $g.Checked`,
+        `Say 'Grew' $g.Grew`,
+      ]);
+      expect(field(out, "Checked")).toBe("True");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it("does not false-panic when the baseline read failed", () => {
+      // Regression for #2043: an unreadable baseline must never make every
+      // existing line look new.
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'baseline.log'`,
+        `Set-Content -LiteralPath $p -Value @('one','two','three')`,
+        `$g = Compare-LogGrowth -Path $p -Before ([pscustomobject]@{ Readable = $false; Lines = @() })`,
+        `Say 'Checked' $g.Checked`,
+        `Say 'Grew' $g.Grew`,
+      ]);
+      expect(field(out, "Checked")).toBe("False");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it("does not silently pass when the post-launch read failed", () => {
+      // Regression for #158: collapsing an unreadable read to 0 lines makes
+      // `0 -gt N` false and reports a clean launch after a real panic. The
+      // result must be unchecked, which is the state the launchers skip.
+      // A directory stands in for an unreadable target on every platform.
+      const out = runProbe((dir) => [
+        `$p = Join-Path '${dir}' 'unreadable.log'`,
+        `Set-Content -LiteralPath $p -Value @('one','two')`,
+        `$before = Read-LogFile $p`,
+        `Remove-Item -LiteralPath $p -Force`,
+        `New-Item -ItemType Directory -Path $p -Force | Out-Null`,
+        `$g = Compare-LogGrowth -Path $p -Before $before`,
+        `Say 'Checked' $g.Checked`,
+        `Say 'Grew' $g.Grew`,
+      ]);
+      expect(field(out, "Checked")).toBe("False");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it.runIf(process.platform === "win32")(
+      "reports unreadable (and never throws) for an exclusively-locked file",
       () => {
-        const out = runProbe(extractHelper(path), (dir) => [
-          ". $PSScriptRoot\\helper.ps1",
+        // The real reproduction: the app holds buildmesh.log open for writing.
+        const out = runProbe((dir) => [
           `$p = Join-Path '${dir}' 'locked.log'`,
-          "Set-Content -LiteralPath $p -Value @('alpha')",
-          // FileShare.None reproduces the app still holding buildmesh.log open
-          // for writing, which is what made the launcher abort with exit 1.
-          "$lock = [System.IO.File]::Open($p, 'Open', 'ReadWrite', 'None')",
-          "try { $lines = @(Get-LogLines $p) } finally { $lock.Dispose() }",
-          `"COUNT=" + $lines.Count`,
+          `Set-Content -LiteralPath $p -Value @('alpha')`,
+          `$lock = [System.IO.File]::Open($p, 'Open', 'ReadWrite', 'None')`,
+          `try {`,
+          `  $r = Read-LogFile $p -Attempts 1`,
+          `  Say 'Readable' $r.Readable`,
+          `  Say 'Count' $r.Lines.Count`,
+          `} finally { $lock.Dispose() }`,
         ]);
-        // The regression: a terminating throw here would escape Get-LogLines
-        // and abort the launcher, turning a healthy launch into exit 1.
-        expect(out).toContain("COUNT=0");
+        expect(field(out, "Readable")).toBe("False");
+        expect(field(out, "Count")).toBe("0");
       },
-      POWERSHELL_TIMEOUT_MS,
     );
-  }
+  });
 });

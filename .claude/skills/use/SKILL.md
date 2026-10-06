@@ -22,11 +22,11 @@ Run the deterministic dev-profile launch script for the host platform:
 
 Each script handles: kill existing **buildmesh-dev** (never the stable hub) → build dev profile → launch raw `buildmesh-dev` binary → verify startup. Check that an existing dev instance belongs to this task before replacing it; another session may be using it.
 
-**Read the exit code together with stdout — do not treat non-zero as failure on its own.** A launcher that printed its `OK` line has launched and verified the app (issue #2043). Match on the leading `OK` word, not the dash: the PowerShell launchers print `OK - Buildmesh Dev running` while `run-dev.sh` prints `OK — Buildmesh Dev running` with an em dash.
+**Read the exit code together with stdout — do not treat non-zero as failure on its own.** A launcher that printed its `OK - ...` line has launched and verified the app (issue #2043). All four launchers use the same `OK - ` prefix.
 
-- `OK…` line present → success, proceed, even if the exit code is non-zero. That happens when this command's own output is consumed by something that stops reading early (`... 2>&1 | Select-Object -First N`, `| head`, a truncated capture buffer): the pipe closes under `powershell.exe` and it returns non-zero after the script already exited 0. Capture the full output instead of truncating it.
-- No `OK…` line and non-zero → real failure. Report the `ERROR:` line the script printed and stop.
-- No `OK…` line and zero → treat as suspicious; verify the app before continuing.
+- `OK - ` present → success, proceed, even if the exit code is non-zero. That happens when this command's own output is consumed by something that stops reading early (`... 2>&1 | Select-Object -First N`, `| head`, a truncated capture buffer): the pipe closes under `powershell.exe` and it returns non-zero after the script already exited 0. Capture the full output instead of truncating it.
+- No `OK - ` line and non-zero → real failure. Report the `ERROR:` line the script printed and stop.
+- No `OK - ` line and zero → treat as suspicious; verify the app before continuing.
 
 ### Step 2: Start log monitor
 
