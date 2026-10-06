@@ -83,7 +83,10 @@ vi.mock('@tauri-apps/plugin-opener', () => ({
 
 vi.mock('@xterm/xterm', () => {
   class MockTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     onTitleChange = vi.fn();
     onResize = vi.fn();
@@ -329,7 +332,9 @@ describe('AgentTerminal auto-spawn (issue #302)', () => {
 
     const instance = terminalManager.getInstance(IDLE_NODE.id);
     expect(instance).toBeDefined();
-    expect(instance!.term.write).toHaveBeenCalledWith(startupFrame);
+    // The agent registry registers a completion-aware sink, so xterm also gets
+    // the parse-completion callback the in-flight budget is built on (#2018).
+    expect(instance!.term.write).toHaveBeenCalledWith(startupFrame, expect.any(Function));
     expect(
       vi.mocked(invoke).mock.calls.some(([command]) => command === 'unsubscribe_agent_output'),
       'auto-spawn must keep the node-scoped Channel; unsubscribe is dispose-only',

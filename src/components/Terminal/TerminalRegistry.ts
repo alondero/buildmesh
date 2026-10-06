@@ -407,7 +407,15 @@ export class TerminalRegistry {
         useNativeClipboardPaste: false,
       };
 
-      this.writer.register(nodeId, (data) => term.write(data));
+      // `term.write`'s callback fires when xterm has parsed the payload, so
+      // the writer can cap how much unparsed work xterm holds at once
+      // (issue #2018). Both arguments are required here: the writer only
+      // counts in-flight payloads for a sink declared completion-aware.
+      this.writer.register(
+        nodeId,
+        (data, done) => term.write(data, done),
+        { completionAware: true },
+      );
       this.fontSizeManager.register(nodeId, term, () => measureAndFit(instance));
       // Issue #734: register the new term with the ThemeManager so a later
       // theme flip (handled by ThemeManager's onTerminalThemeChange listener)

@@ -486,7 +486,10 @@ export class BuildRunTerminalRegistry {
       // Per-instance writer (NOT the shared registry writer — see class
       // header comment about key namespace collision).
       const writer = new TerminalWriter();
-      writer.register(sessionId, (data) => term.write(data));
+      // Completion-aware like the agent registry: `term.write`'s callback is
+      // xterm's parse-completion signal, which is what lets the writer cap
+      // in-flight unparsed payloads (issue #2018).
+      writer.register(sessionId, (data, done) => term.write(data, done), { completionAware: true });
 
       // Bump the per-sessionId generation. Each doCreate for the same
       // sessionId increments — the exit listener installed below captures
