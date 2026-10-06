@@ -108,7 +108,7 @@ export function hasActiveCircuitOwnership(
 // ---------------------------------------------------------------------------
 //
 // `getCircuitNodePresentation` above answers the per-node question "is
-// automation driving, waiting, or finished?" for the Pilot-light indicator.
+// automation driving, waiting, or finished?" for the glyph's Circuit ring.
 // A node card can hold several members, so the header needs a card-level
 // answer to "who on this card needs a human, and what do they need?".
 //
@@ -126,12 +126,12 @@ export function hasActiveCircuitOwnership(
 // copy to whichever member happened to be listed first.
 //
 // The only failure suppressed is a solo card's own: with a single member the
-// title bar's Pilot light already shows that member's failure in red, so the
+// title bar glyph's dashed red ring already shows that member's failure, so the
 // chip would repeat it and its `revealAttention` click would land on the same
 // session. See `isSoloFocusedFailure`.
 //
-// An active run is carried by the Pilot light. A finished run is already told
-// by the green lifecycle dot, the Pilot-light check, and the PR pill, so a
+// An active run is carried by the glyph's comet. A finished run is already told
+// by the green status circle, the closed green ring, and the PR pill, so a
 // third green chip with a no-op click would be redundant. An unpiloted,
 // healthy card renders none.
 
@@ -194,7 +194,7 @@ function outcomeCandidateFor(node: AgentNode, sources: CircuitOutcomeSources): O
 
 /**
  * A solo card whose focused member failed under Circuit: the title bar's one
- * Pilot light is already visibly red for that member, and `revealAttention`
+ * glyph already shows a dashed red ring for that member, and `revealAttention`
  * could only cycle back to it. The chip adds no reachability here, so it is the
  * single case this resolver suppresses. A multi-member card keeps the chip even
  * when the focused member failed, because its siblings are otherwise hidden.

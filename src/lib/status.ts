@@ -3,28 +3,39 @@ import type { AgentNode } from '../types/generated/AgentNode';
 import type { LifecycleChangedPayload } from '../types/generated/LifecycleChangedPayload';
 import type { SignalHealth } from '../types/generated/SignalHealth';
 
+/**
+ * The circle drawn for a node status by `NodeStatusGlyph`. `dot` is the
+ * legacy text glyph (● ○ ✓ etc.) still consumed by the mobile SPA
+ * and a couple of the desktop rows that need a coloured character rather
+ * than a coloured SVG circle.
+ */
+export type StatusGlyphShape = 'solid' | 'ring' | 'dashed' | 'slash' | 'half' | 'target' | 'thin' | 'cross';
+
 // `hex` mirrors the resolved value of each entry's Tailwind `color` token
 // (see the `--color-*` custom properties in `src/App.css`) as a literal
-// hex string. Desktop consumes `color`/`bgColor`/`dot` directly as Tailwind
-// classes; the mobile SPA (`src/mobile/`) doesn't run Tailwind and renders
-// status dots/bars via inline `style`, so it reads `hex`/`label` off this
-// same record instead of keeping its own hand-picked palette + label copy
-// (issue #815) — one status vocabulary for every spawn/status surface.
+// hex string. `color`/`bgColor` are the Tailwind classes consumed by desktop
+// surfaces that still draw a coloured fill (e.g. the mesh summary row's dot
+// in `Sidebar/MeshItem.tsx`). `dot` is the text glyph rendered by the mobile
+// SPA (`src/mobile/`) via inline styles; the mobile SPA doesn't run Tailwind.
+// One status vocabulary for every spawn/status surface (issue #815).
 export const STATUS_CONFIG = {
   // Stage-2 in progress; visually pulses so the user sees liveness.
   pending: {
     color: 'text-text-muted animate-pulse-fast',
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',
+    glyph: 'dashed',
     label: 'Starting…',
     hex: '#7a8492',
   },
+
   // Issue #654 — agent launched but the 3s early-exit window hasn't elapsed.
   // Visually mirrors `pending`; conditional promotion to Running fires next.
   spawning: {
     color: 'text-text-muted animate-pulse-fast',
     bgColor: 'bg-text-muted animate-pulse-fast',
     dot: '◌',
+    glyph: 'dashed',
     label: 'Starting…',
     hex: '#7a8492',
   },
@@ -32,13 +43,16 @@ export const STATUS_CONFIG = {
     color: 'status-running',
     bgColor: 'bg-status-running',
     dot: '●',
+    glyph: 'solid',
     label: 'Running',
     hex: '#00d4ff',
   },
+
   idle: {
     color: 'status-idle',
     bgColor: 'bg-status-idle',
     dot: '○',
+    glyph: 'ring',
     label: 'Idle',
     // Same cyan as `running` — desktop distinguishes idle/running by the
     // dot glyph (○ vs ●) and label, not color. Intentional; `.status-idle`
@@ -53,16 +67,20 @@ export const STATUS_CONFIG = {
     color: 'status-waiting animate-pulse-fast',
     bgColor: 'bg-status-warning animate-pulse-fast',
     dot: '●',
+    glyph: 'target',
     label: 'Needs attention',
     hex: '#f59e0b',
   },
+
   error: {
     color: 'status-error',
     bgColor: 'bg-status-error',
     dot: '✗',
+    glyph: 'cross',
     label: 'Error',
     hex: '#ef4444',
   },
+
   // Issue #1793 — the reaper's terminal state for a circuit-piloted node that
   // stayed running with no session identity and no readable report. Not the
   // same as `error` (nothing was ever observed), so it gets distinct copy on
@@ -71,6 +89,7 @@ export const STATUS_CONFIG = {
     color: 'status-error',
     bgColor: 'bg-status-error',
     dot: '⊘',
+    glyph: 'slash',
     label: 'Lost',
     hex: '#ef4444',
   },
@@ -78,6 +97,7 @@ export const STATUS_CONFIG = {
     color: 'text-violet',
     bgColor: 'bg-accent-violet',
     dot: '⏸',
+    glyph: 'half',
     label: 'Suspended',
     hex: '#8b5cf6',
   },
@@ -88,6 +108,7 @@ export const STATUS_CONFIG = {
     color: 'text-accent-green',
     bgColor: 'bg-accent-green',
     dot: '✓',
+    glyph: 'target',
     label: 'PR opened',
     hex: '#22c55e',
   },
@@ -99,6 +120,7 @@ export const STATUS_CONFIG = {
     color: 'text-accent-green',
     bgColor: 'bg-accent-green',
     dot: '✓',
+    glyph: 'target',
     label: 'Ready',
     // Same green as `completed` — both render `text-accent-green` on
     // desktop, so the mobile hex mirrors that token (#22c55e), not a
@@ -112,6 +134,7 @@ export const STATUS_CONFIG = {
     color: 'text-text-muted',
     bgColor: 'bg-text-muted',
     dot: '◌',
+    glyph: 'thin',
     label: 'Archived',
     hex: '#7a8492',
   },

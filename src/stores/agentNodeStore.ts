@@ -666,7 +666,7 @@ export const useAgentNodeStore = create<AgentNodeState>((set, get) => {
   // `circuit-run-updated` event — which carries only `{ run_id, state }` —
   // cannot introduce an ownership row the UI has not seen: a node's first run,
   // or a fresh run on a node whose prior ownership is terminal. Without this
-  // read the Pilot light and the title bar's "already under review" control
+  // read the node glyph's Circuit ring and the title bar's "already under review" control
   // stay blank until an unrelated full `fetchAgentNodes` (the next node spawn).
   const refreshCircuitOwnerships = createCoalescedRefresh(async () => {
     const revision = circuitOwnershipsRevision;
