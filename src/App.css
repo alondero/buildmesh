@@ -408,6 +408,36 @@ html, body {
   50% { opacity: 0.3; }
 }
 
+/* Unified node glyph (NodeStatusGlyph). The Circuit comet's duration and delay
+   are set inline from `nodeStatusGlyph.ts` so every comet shares one clock.
+   With reduced motion it parks at 12 o'clock over a stronger track: a static
+   "piloting" that no waiting/blocked/done ring shape can be mistaken for. */
+.node-glyph-comet {
+  transform-origin: 12px 12px;
+  animation-name: node-glyph-orbit;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.node-glyph-track {
+  opacity: 0.22;
+}
+
+@keyframes node-glyph-orbit {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .node-glyph-comet {
+    animation: none;
+    transform: rotate(-90deg);
+  }
+
+  .node-glyph-track {
+    opacity: 0.4;
+  }
+}
+
 /* Border pulse for terminal cards needing attention */
 .animate-border-pulse {
   animation: border-pulse 1.5s ease-in-out infinite;

@@ -16,7 +16,8 @@ import { useWorktreeClosePromptStore } from '../../src/stores/worktreeClosePromp
 import type { WorktreeCloseSafety } from '../../src/lib/worktreeClose';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { getCircuitNodePresentation } from '../../src/lib/circuitNodePresentation';
-import { CircuitNodeIndicatorCell } from '../../src/components/shared/CircuitNodeIndicator';
+import { NodeStatusGlyph } from '../../src/components/shared/NodeStatusGlyph';
+import { getNodeStatusConfig } from '../../src/lib/status';
 
 // Issue #647: `agentNodeStore.deleteAgentNode` disposes the xterm terminal
 // BEFORE the `delete_agent_node` IPC commits. On failure the restored row
@@ -71,11 +72,15 @@ function makeNode(overrides: Partial<AgentNode> = {}): AgentNode {
 function StoreBackedCircuitIndicator({ nodeId }: { nodeId: number }) {
   const node = useAgentNodeStore(s => s.nodesById[nodeId]);
   const ownership = useAgentNodeStore(s => s.circuitOwnerships[nodeId]);
-  return node
-    ? createElement(CircuitNodeIndicatorCell, {
-      presentation: getCircuitNodePresentation(node, ownership),
-    })
-    : null;
+  if (!node) return null;
+  const config = getNodeStatusConfig(node);
+  return createElement(NodeStatusGlyph, {
+    shape: config.glyph,
+    colorClass: config.color,
+    statusLabel: config.label,
+    statusTitle: config.title,
+    circuit: getCircuitNodePresentation(node, ownership),
+  });
 }
 
 // Issue #1384 — seed the normalized store state via the shared
@@ -560,7 +565,7 @@ describe('useAgentNodeStore', () => {
       const circuitStates = ['running', 'paused', 'running'] as const;
       const phases = [];
       render(createElement(StoreBackedCircuitIndicator, { nodeId: 11 }));
-      const visibleLabels = ['Circuit active', 'Circuit waiting', 'Circuit active'];
+      const visibleLabels = ['Running. Circuit active', 'Running. Circuit waiting', 'Running. Circuit active'];
       for (const [index, state] of circuitStates.entries()) {
         ledgerState = state;
         await mockEmit('circuit-run-updated', { run_id: 1, state });
@@ -582,7 +587,7 @@ describe('useAgentNodeStore', () => {
         return Promise.resolve(undefined);
       });
       await mockEmit('circuit-run-updated', { run_id: 1, state: 'completed' });
-      await waitFor(() => expect(screen.getByRole('img', { name: 'Circuit done' })).toBeTruthy());
+      await waitFor(() => expect(screen.getByRole('img', { name: 'Running. Circuit done' })).toBeTruthy());
       expect(useAgentNodeStore.getState().circuitOwnerships[11]?.state).toBe('completed');
       expect(mockInvoke).toHaveBeenCalledWith('list_agent_nodes');
     });
