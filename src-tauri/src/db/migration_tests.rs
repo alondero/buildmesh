@@ -379,7 +379,11 @@ mod tests {
         // text gains the branch-update hand-off too (its prompt is a literal
         // match, so the upgrade is safe), but its topology is preserved.
         let upgraded_copy = CircuitGraph::from_json(&read(3)).unwrap();
-        assert_ne!(read(3), copy, "a non-preset copy with stock merge text is rewritten");
+        assert_ne!(
+            read(3),
+            copy,
+            "a non-preset copy with stock merge text is rewritten"
+        );
         assert!(upgraded_copy.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
         assert!(matches!(
             upgraded_copy.node("merge").map(|n| &n.kind),
