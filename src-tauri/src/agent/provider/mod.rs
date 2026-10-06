@@ -372,6 +372,28 @@ pub struct ProviderInfo {
     pub unavailable_reason: Option<String>,
 }
 
+/// Paste-gate policy for a staged multiline prompt (issue #2061).
+///
+/// Declared by each harness adapter so `circuit::delivery` does not branch
+/// on harness name strings: the adapter that owns the spawn behavior also
+/// owns the knowledge of how that harness renders a pasted prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteGatePolicy {
+    /// No rendered-paste gate: the generic echo/quiet path submits.
+    Generic,
+    /// Multiline pastes wait for a rendered echo before Enter: a complete
+    /// `[Pasted Content N chars]` marker, or the full visible text for short
+    /// drafts. Long drafts that the harness collapses to a marker can only
+    /// ever be confirmed by that marker.
+    RenderedMarkerOnly,
+    /// As `RenderedMarkerOnly`, but a draft past the full-text limit is also
+    /// confirmed by its trailing anchor characters: the harness draws
+    /// mid-size pastes inline instead of collapsing them (Muse, and Codex
+    /// per the partial 0.160.0 frame in #2061), so demanding a marker would
+    /// stall exactly like Muse run 343.
+    RenderedWithTailAnchor,
+}
+
 /// Behaviour an agent provider must declare.
 ///
 /// Implementations live as zero-sized structs under `adapters/`, exposed as
@@ -527,6 +549,16 @@ pub trait AgentProvider: Send + Sync {
         true
     }
 
+    /// How the paste gate confirms a staged multiline prompt for this
+    /// harness (issue #2061). Only harnesses whose composer redraws a
+    /// pasted prompt opt into the rendered gate; of those, only harnesses
+    /// that draw mid-size pastes inline take the tail-anchor variant.
+    /// `circuit::delivery` consults this instead of comparing harness
+    /// name strings.
+    fn paste_gate_policy(&self) -> PasteGatePolicy {
+        PasteGatePolicy::Generic
+    }
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 
@@ -604,7 +636,11 @@ pub trait AgentProvider: Send + Sync {
     /// effort / extra / sandbox onto `base_args` and never inspects or
     /// relocates trailing positionals — so a future adapter that adds a
     /// trailing flag cannot have that flag amputated by a blind `.pop()`.
-    fn spawn_recipe_for_resume(&self, _platform: Platform, _session_id: &str) -> Option<SpawnRecipe> {
+    fn spawn_recipe_for_resume(
+        &self,
+        _platform: Platform,
+        _session_id: &str,
+    ) -> Option<SpawnRecipe> {
         None
     }
 
@@ -626,7 +662,10 @@ pub trait AgentProvider: Send + Sync {
     /// A pure, adapter-owned recipe for one-shot background inference.
     /// Defaults to unavailable; a headless CLI flag alone does not establish
     /// prompt delivery, final-answer extraction, or non-interactive completion.
-    fn background_recipe(&self, _platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
+    fn background_recipe(
+        &self,
+        _platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
         None
     }
 
@@ -752,7 +791,9 @@ pub trait AgentProvider: Send + Sync {
         let effort_control = self.effort_control();
         HarnessCapabilities {
             harness_id: self.id().to_string(),
-            background_inference: self.background_recipe(Platform::current()).map(|recipe| recipe.capability),
+            background_inference: self
+                .background_recipe(Platform::current())
+                .map(|recipe| recipe.capability),
             supports_resume: self.supports_resume(),
             auto_resume_on_startup: self.auto_resume_on_startup(),
             requires_attention_hook: self.requires_attention_hook(),

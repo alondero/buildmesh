@@ -18,8 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use super::evidence::{append_history, run_graph, DISPOSITION_APPLIED, SOURCE_OPERATOR};
 use crate::circuit::model::{
-    CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_FAILED,
-    CIRCUIT_SWEEP_NOTE_PREFIX,
+    CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_PREFIX,
 };
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep, SessionStatus};
 
@@ -465,7 +464,7 @@ pub(crate) fn recover_failed_run_locked(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::circuit::model::CircuitGraph;
+    use crate::circuit::model::{CircuitGraph, CIRCUIT_SWEEP_NOTE_FAILED};
 
     fn fixture() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

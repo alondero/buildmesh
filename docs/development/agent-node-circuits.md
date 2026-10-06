@@ -136,9 +136,13 @@ review/diff text, avoiding CLI argument parsing of diff lines such as `+ ...`.
 For a multiline Codex prompt, including one using a proxied Codex provider,
 Buildmesh waits until Codex renders the pasted content in its input box and the
 redraw settles before sending Enter. The wait captures an output position before
-the PTY write, accepts Codex's normalized line-ending count, and uses the completed
-paste marker for long prompts. Muse also accepts the end of a long prompt drawn
-in full, because it collapses only the largest pastes into a marker. A startup
+the PTY write, accepts Codex's normalized line-ending count, and confirms a
+long prompt by its completed paste marker or — like Muse — by the end of the
+prompt drawn in full, because both harnesses draw mid-size pastes inline and
+collapse only the largest into a marker (issue #2061; Codex per a partial
+0.160.0 frame, a clean live capture still outstanding). Which confirmation a
+harness uses is declared by its adapter (`paste_gate_policy`), not by name
+checks in delivery. A startup
 redraw alone cannot acknowledge the
 paste; if Codex never renders it, the node is marked for attention instead of
 leaving an apparently submitted review idle. A dead process ends the wait early.
