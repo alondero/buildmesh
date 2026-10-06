@@ -9,7 +9,7 @@ import { useUIStore } from '../../stores/uiStore';
 import { terminalManager } from '../Terminal/Terminal';
 import { watchAgentNode, unwatchAgentNode } from '../../lib/tauri';
 import { GridSplitter } from './GridSplitter';
-import { resolveSingleNode } from '../../lib/viewModes';
+import { deriveScope, resolveSingleNode } from '../../lib/viewModes';
 import { deriveVisibleNodes } from './gridFilterSort';
 import { CenterDiffOverlay } from './CenterDiffOverlay';
 import { CircuitEditorOverlay } from '../Circuits/CircuitEditorOverlay';
@@ -186,23 +186,35 @@ export function AgentNodeView() {
   const gridSortBy = useUIStore(state => state.gridSortBy);
   const gridSortDirection = useUIStore(state => state.gridSortDirection);
 
+  // #2071 — one derived scope per render, shared by the grid render below
+  // and the canvas empty state's counts. Neither re-derives "which Mesh is
+  // this, and what does it hold" from the sidebar selection and the focused
+  // node, so the two can't disagree about the scope they render.
+  const scope = useMemo(
+    () => deriveScope({
+      viewMode,
+      lastNonSingleMode,
+      agentNodes,
+      selectedMeshId,
+      activeNodeId,
+      controls: { gridSearchQuery, gridProviderFilter, gridStatusFilter },
+    }),
+    [viewMode, lastNonSingleMode, agentNodes, selectedMeshId, activeNodeId, gridSearchQuery, gridProviderFilter, gridStatusFilter],
+  );
+
   // The ordered nodes the active grid mode renders. 'single' is not a grid
   // mode — it renders `singleNode` below instead, so its list stays empty.
   const visibleNodes = useMemo(
     () => deriveVisibleNodes(
-      viewMode,
+      scope,
       agentNodes,
-      selectedMeshId,
-      activeNodeId,
       { gridSearchQuery, gridProviderFilter, gridStatusFilter, gridSortBy, gridSortDirection },
       ownerships,
       groups,
     ),
     [
-      viewMode,
+      scope,
       agentNodes,
-      selectedMeshId,
-      activeNodeId,
       gridSearchQuery,
       gridProviderFilter,
       gridStatusFilter,
@@ -437,12 +449,9 @@ export function AgentNodeView() {
             // Terminal re-renders while the user is typing. Senior-
             // review finding: reactivity pollution.
             <CanvasEmptyStateContainer
-              viewMode={viewMode}
-              lastNonSingleMode={lastNonSingleMode}
               selectedMeshId={selectedMeshId}
-              activeNodeId={activeNodeId}
               agentNodes={agentNodes}
-              visibleNodesLength={visibleNodes.length}
+              scope={scope}
             />
           ) : viewMode === 'single' ? (
             singleNode ? (

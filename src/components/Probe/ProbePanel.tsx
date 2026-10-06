@@ -15,8 +15,8 @@
  * and returns `null` when the inspector is hidden. The full body, the
  * `useProbeResize` hook (which reads `localStorage` and arms the drag
  * handles), and `useProbeContext` (which subscribes to `nodesById`,
- * `meshesById`, `selectedMeshId`, `activeNodeId`, `viewMode`, `probeTab`,
- * and `probeContextPins`) all live behind that gate in `ProbePanelContent`,
+ * `meshesById`, `selectedMeshId`, `activeNodeId`, `viewMode`, and
+ * `probeTab`) all live behind that gate in `ProbePanelContent`,
  * so a hidden panel performs zero work — no store subscriptions fire, no
  * resize state mutates, no context resolves. Every re-render of the closed
  * panel would otherwise walk into `useProbeContext` and `bodyWidthRef`
@@ -32,9 +32,14 @@
  * dense file lists while the center workspace stays useful on common laptop
  * resolutions.
  *
- * The header pins the active destination's icon in a tinted chip next to its
- * label, with the explicit lens/subject and following-or-pinned mode visible
- * so each destination body stays free of redundant context chrome. Body
+ * The header shows the active destination's icon in a tinted chip next to its
+ * label, with the explicit lens/subject and the fixed-or-following mode
+ * visible so each destination body stays free of redundant context chrome.
+ * Issue #2075 promoted that lens/subject line to a legible weight: since
+ * #2073 removed Probe Context Pins, disclosure is the only thing making a
+ * selection-following destination's subject drift visible, so the subject is
+ * no longer the quietest run in the header.
+ * Body
  * content fades in on destination switch (keyed remount), and the whole body
  * slides in from the right when the inspector opens — both animations run
  * through the design-token keyframes in `App.css` and respect
@@ -88,25 +93,6 @@ export const PROBE_TABS: readonly ProbeTabDef[] = PROBE_TAB_ORDER.map((tab) => (
   ...PROBE_TAB_DEFINITIONS[tab],
 }));
 
-function ContextPinIcon({ className = 'w-3.5 h-3.5' }: { className?: string }) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m12 17 5-5" />
-      <path d="M9 3h6l1 5-4 4v5l-2 2v-7L6 8l1-5Z" />
-      <path d="M5 21h14" />
-    </svg>
-  );
-}
-
 /**
  * Issue #1568 — `Suspense` fallback shown while a lazy Probe tab chunk is
  * in flight. The body takes the full flex region (`flex-1`) so the
@@ -146,8 +132,6 @@ export function ProbePanel() {
 function ProbePanelContent() {
   const probeTab = useUIStore((s) => s.probeTab);
   const toggleProbe = useUIStore((s) => s.toggleProbe);
-  const pinProbeContext = useUIStore((s) => s.pinProbeContext);
-  const clearProbeContextPin = useUIStore((s) => s.clearProbeContextPin);
   // Issue #724 — the panel is now horizontally resizable (default 360px,
   // clamped 240–720). The shared `useResizable` hook's valueRef pattern
   // (issue #301) prevents the second-drag stale-closure jump; the wrapper
@@ -166,8 +150,8 @@ function ProbePanelContent() {
   bodyWidthRef.current = bodyWidth;
   // The inspector header surfaces the destination's explicit lens and subject.
   // Unlike the old mesh-only subheading, this keeps Host usage from inheriting
-  // a misleading mesh name and makes selection-following/pinned behavior
-  // visible before a stateful action is taken.
+  // a misleading mesh name and makes selection-following behavior visible
+  // before a stateful action is taken.
   const context = useProbeContext();
 
   // Issue #1375 — the inspector is fully on-demand: closed means GONE. There
@@ -175,20 +159,11 @@ function ProbePanelContent() {
   // title-bar Usage action, and contextual entries own reopening.
   const activeDef = PROBE_TABS.find((t) => t.tab === probeTab) ?? PROBE_TABS[0];
   const ActiveIcon = activeDef.icon;
-  const contextModeLabel = context.mode === 'pinned'
-    ? 'Pinned context'
-    : context.lens === 'host'
-      ? 'Host-wide'
-      : context.followsSelection
-        ? 'Following selection'
-        : 'Fixed context';
-  const handlePinToggle = () => {
-    if (context.mode === 'pinned') {
-      clearProbeContextPin();
-    } else if (context.pinCandidate !== null) {
-      pinProbeContext(context.pinCandidate);
-    }
-  };
+  // Issue #2073 — the mode vocabulary is exactly two values: a Host-owned
+  // destination is fixed, every Mesh/Agent destination follows the selection.
+  const contextModeLabel = context.mode === 'fixed'
+    ? 'Host-wide'
+    : 'Following selection';
 
   return (
     // Outer wrapper is `relative` but does NOT carry `overflow-hidden` —
@@ -259,10 +234,14 @@ function ProbePanelContent() {
         className="flex flex-col h-full w-full overflow-hidden border-l border-border-subtle"
       >
         {/* Header — active destination icon chip + label (title) + explicit
-            lens/subject + following/pinned mode + close button. The subject
+            lens/subject + fixed-or-following mode + close button. The subject
             line replaces the directory-path strip the Issues / PRs tabs
             used to render individually, so every destination makes its
-            ownership visible in the same place. */}
+            ownership visible in the same place — and since #2075 that
+            disclosure renders at a weight that is actually readable at a
+            glance (see the comment on the subject row below). Only live-scope
+            information is here: #2073 removed the pin, so the header carries
+            no captured subject to disagree with the selection. */}
         <div
           className="flex items-center justify-between gap-2 pl-3 pr-2 py-2 border-b border-border-subtle min-h-[56px]"
         >
@@ -274,17 +253,52 @@ function ProbePanelContent() {
               <ActiveIcon className="w-4 h-4" />
             </span>
             <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-sm text-text-primary font-medium truncate">
+              {/* Destination name — the heading the subject line sits under.
+                  Issue #2075 promoted the subject to a `text-sm font-medium`
+                  line, so the title takes `font-semibold`: without the extra
+                  step the two header lines would render identically and the
+                  header would stop saying which is the destination. */}
+              <span
+                data-testid="probe-context-title"
+                className="text-sm text-text-primary font-semibold truncate"
+              >
                 {activeDef.label}
               </span>
+              {/* Issue #2075 — the disclosure. Since #2073 deleted Probe
+                  Context Pins, this line IS the guarantee that the
+                  destination's subject is visible while the user reads a diff
+                  or a file tree: with two Agent Nodes in one Mesh, Agent
+                  Changes swaps subject and Project Files swaps working tree
+                  as focus moves. It therefore renders at the same size as the
+                  destination name, in `text-text-primary` (the highest-contrast
+                  text token) — previously a 12px `text-text-secondary` run,
+                  the quietest thing in the header. Glyph + text still carry the
+                  meaning, so colour is never the only signal. Size and colour
+                  live on the spans rather than the row, so the row cannot
+                  re-introduce the muted run by inheritance. */}
               <div
                 data-testid="probe-context-subject"
-                className="flex items-center gap-1 min-w-0 text-xs text-text-secondary"
-                title={context.subjectLabel}
+                className="flex items-center gap-1 min-w-0"
+                title={context.detailLabel
+                  ? `${context.subjectLabel} · ${context.detailLabel}`
+                  : context.subjectLabel}
               >
-                <span className="truncate min-w-0">{context.subjectLabel}</span>
+                <span
+                  data-testid="probe-context-subject-name"
+                  className="truncate min-w-0 text-sm font-medium text-text-primary"
+                >
+                  {context.subjectLabel}
+                </span>
+                {/* Mixed-ownership qualifier: Project Files' working tree vs the
+                    repository root, an Agent lens' parent Mesh. One step below
+                    the subject it qualifies, and off `text-text-muted` — it is
+                    the load-bearing half of the disclosure for the two
+                    destinations whose subject moves under the user (#732). */}
                 {context.detailLabel && (
-                  <span className="truncate min-w-0 text-text-muted">
+                  <span
+                    data-testid="probe-context-subject-detail"
+                    className="truncate min-w-0 text-xs text-text-secondary"
+                  >
                     · {context.detailLabel}
                   </span>
                 )}
@@ -297,23 +311,6 @@ function ProbePanelContent() {
               </span>
             </div>
           </div>
-          {context.canPin && (
-            <button
-              type="button"
-              onClick={handlePinToggle}
-              data-testid="probe-context-pin"
-              aria-pressed={context.mode === 'pinned'}
-              className={`p-1.5 rounded-md transition-colors shrink-0 ${
-                context.mode === 'pinned'
-                  ? 'text-accent-cyan bg-accent-cyan/10'
-                  : 'text-text-muted hover:text-text-primary hover:bg-bg-card'
-              }`}
-              title={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
-              aria-label={context.mode === 'pinned' ? 'Unpin context' : 'Pin context'}
-            >
-              <ContextPinIcon />
-            </button>
-          )}
           <button
             type="button"
             onClick={toggleProbe}
@@ -402,7 +399,7 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
   // "Agent Changes" lists a specific node's edits — with no focused node
   // there's nothing to inspect, even though a mesh is selected.
   // The Agent lens reports a missing node through the same contract as a
-  // missing Mesh; its empty state names the lens and whether a pin is stale.
+  // missing Mesh; its empty state names the lens and the recovery action.
 
   // Real content for the tabs whose issues have landed. Routed after the
   // explicit context guard so each destination gets the same missing-subject
@@ -422,14 +419,15 @@ function ProbeTabBody({ tab }: { tab: ProbeTab }) {
 }
 
 function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
+  // Issue #2073 — losing the subject through ordinary selection loss lands
+  // here with the destination's recovery instruction. There is no pin to
+  // unpin: the destination simply has no subject yet.
   if (context.lens === 'agent') {
     return (
       <EmptyState
         icon={<SearchIcon className="w-5 h-5" />}
-        label={context.mode === 'pinned' ? 'Pinned agent unavailable' : 'No active agent node'}
-        hint={context.mode === 'pinned'
-          ? 'Agent lens is pinned to a node that is no longer available. Unpin the context to follow the current selection.'
-          : 'Agent lens: focus an agent terminal to review the changes it has made.'}
+        label="No active agent node"
+        hint="Agent lens: focus an agent terminal to review the changes it has made."
         fill
         testId="probe-context-empty"
       />
@@ -439,14 +437,8 @@ function ProbeContextEmptyState({ context }: { context: ProbeContext }) {
   return (
     <EmptyState
       icon={<CompassIcon className="w-5 h-5" />}
-      label={context.mode === 'pinned'
-        ? context.subject.available ? 'Pinned file context unavailable' : 'Pinned mesh unavailable'
-        : 'No project selected'}
-      hint={context.mode === 'pinned'
-        ? context.subject.available
-          ? 'The pinned working tree is no longer available. Unpin the context to follow the current selection.'
-          : 'Mesh lens is pinned to a mesh that is no longer available. Unpin the context to follow the current selection.'
-        : 'Mesh lens: select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here.'}
+      label="No project selected"
+      hint="Mesh lens: select a mesh in the sidebar, or focus an agent node, to inspect its files, changes, and settings here."
       fill
       testId="probe-context-empty"
     />

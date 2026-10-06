@@ -1,8 +1,9 @@
-﻿import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import {
   PROBE_TAB_DEFINITIONS,
   useProbeContext,
+  type ProbeTab,
 } from '../../src/hooks/useProbeContext';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
@@ -66,7 +67,6 @@ describe('useProbeContext (issue #1456)', () => {
       viewMode: 'mesh',
       lastNonSingleMode: 'mesh',
       probeTab: 'files',
-      probeContextPins: {},
     });
   });
 
@@ -78,10 +78,7 @@ describe('useProbeContext (issue #1456)', () => {
       subjectLabel: 'Mesh',
       mode: 'following',
       followsSelection: true,
-      pinnable: true,
       hasRequiredContext: false,
-      canPin: false,
-      pinCandidate: null,
       activeMeshId: null,
       activeNodeId: null,
       activePath: null,
@@ -105,10 +102,7 @@ describe('useProbeContext (issue #1456)', () => {
       subjectLabel: 'Mesh: mesh-1',
       mode: 'following',
       followsSelection: true,
-      pinnable: true,
       hasRequiredContext: true,
-      canPin: true,
-      pinCandidate: { tab: 'files', lens: 'mesh', meshId: 1, nodeId: null },
       activeMeshId: 1,
       activeNodeId: null,
       activePath: '/a',
@@ -133,10 +127,7 @@ describe('useProbeContext (issue #1456)', () => {
       subjectLabel: 'Mesh: mesh-1',
       mode: 'following',
       followsSelection: true,
-      pinnable: true,
       hasRequiredContext: true,
-      canPin: true,
-      pinCandidate: { tab: 'files', lens: 'mesh', meshId: 1, nodeId: 7 },
       activeMeshId: 1,
       activeNodeId: 7,
       // activePath follows the focused node (worktree subdir), but
@@ -291,7 +282,6 @@ describe('useProbeContext (issue #1456)', () => {
     expect(result.current.lens).toBe('mesh');
     expect(result.current.subjectLabel).toBe('Mesh: unavailable');
     expect(result.current.hasRequiredContext).toBe(false);
-    expect(result.current.canPin).toBe(false);
     expect(result.current.activeMeshId).toBe(99);
     expect(result.current.activePath).toBeNull();
     expect(result.current.activeMeshPath).toBeNull();
@@ -339,7 +329,6 @@ describe('useProbeContext (issue #1456)', () => {
       lens: 'host',
       baseline: 'host',
       followsSelection: false,
-      pinnable: false,
     });
     expect(PROBE_TAB_DEFINITIONS.review).toMatchObject({
       lens: 'agent',
@@ -351,7 +340,7 @@ describe('useProbeContext (issue #1456)', () => {
     });
   });
 
-  it('follows a changed Mesh selection until the destination is pinned', () => {
+  it('follows a changed Mesh selection', () => {
     const mesh1 = makeMesh(1, '/a');
     const mesh2 = makeMesh(2, '/b');
     useMeshStore.setState({
@@ -390,10 +379,7 @@ describe('useProbeContext (issue #1456)', () => {
       subjectLabel: 'Host',
       mode: 'fixed',
       followsSelection: false,
-      pinnable: false,
       hasRequiredContext: true,
-      canPin: false,
-      pinCandidate: null,
       activeMeshId: null,
       activeNodeId: null,
       activePath: null,
@@ -402,7 +388,11 @@ describe('useProbeContext (issue #1456)', () => {
     });
   });
 
-  it('pins an Agent lens to its node and does not follow a later focus change', () => {
+// Issue #2073 — the anti-drift contract for the removal of Probe Context
+  // Pins: there is no capture, so a Mesh/Agent destination always reads the
+  // live selection, a Host destination is fixed, and losing the subject
+  // yields the explicit unavailable state instead of another subject.
+  it('follows the focused Agent Node: Agent Changes re-targets on every focus change', () => {
     const mesh = makeMesh(1, '/a');
     useMeshStore.setState({
       meshes: [mesh],
@@ -410,99 +400,137 @@ describe('useProbeContext (issue #1456)', () => {
       selectedMeshId: 1,
     });
     seedAgentNodes([
-      makeNode({ id: 7, mesh_id: 1, name: 'agent-7' }),
-      makeNode({ id: 8, mesh_id: 1, name: 'agent-8', worktree_name: 'agent-8' }),
+      makeNode({ id: 7, mesh_id: 1, name: 'agent-7', worktree_name: 'wt-7' }),
+      makeNode({ id: 8, mesh_id: 1, name: 'agent-8', worktree_name: 'wt-8' }),
     ], 7);
     useUIStore.setState({ probeTab: 'review' });
 
     const { result } = renderHook(() => useProbeContext());
     expect(result.current).toMatchObject({
       lens: 'agent',
+      subject: { lens: 'agent', id: 7, name: 'agent-7', available: true },
       subjectLabel: 'Agent: agent-7',
       detailLabel: 'Mesh: mesh-1',
+      activeMeshId: 1,
       activeNodeId: 7,
+      activePath: '/a/.claude/worktrees/wt-7',
       mode: 'following',
+      followsSelection: true,
+      hasRequiredContext: true,
     });
 
     act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
       useAgentNodeStore.getState().setActiveNode(8);
     });
 
     expect(result.current).toMatchObject({
       lens: 'agent',
-      subjectLabel: 'Agent: agent-7',
+      subject: { lens: 'agent', id: 8, name: 'agent-8', available: true },
+      subjectLabel: 'Agent: agent-8',
+      activeNodeId: 8,
+      activePath: '/a/.claude/worktrees/wt-8',
+      mode: 'following',
+      followsSelection: true,
+      hasRequiredContext: true,
+    });
+  });
+
+  it('follows the focused Agent Node: Project Files re-targets its working directory', () => {
+    const mesh = makeMesh(1, '/a');
+    useMeshStore.setState({
+      meshes: [mesh],
+      meshesById: new Map([[1, mesh]]),
+      selectedMeshId: 1,
+    });
+    seedAgentNodes([
+      makeNode({ id: 7, mesh_id: 1, name: 'agent-7', worktree_name: 'wt-7' }),
+      makeNode({ id: 8, mesh_id: 1, name: 'agent-8', worktree_name: 'wt-8' }),
+    ], 7);
+
+    const { result } = renderHook(() => useProbeContext());
+    expect(result.current).toMatchObject({
+      lens: 'mesh',
+      subjectLabel: 'Mesh: mesh-1',
+      detailLabel: 'Working tree: agent-7',
       activeNodeId: 7,
-      activePath: '/a/.claude/worktrees/bold-keen-brook',
-      mode: 'pinned',
-      followsSelection: false,
-    });
-  });
-
-  it('keeps a pinned Mesh destination on its subject after selection changes', () => {
-    const mesh1 = makeMesh(1, '/a');
-    const mesh2 = makeMesh(2, '/b');
-    useMeshStore.setState({
-      meshes: [mesh1, mesh2],
-      meshesById: new Map([[1, mesh1], [2, mesh2]]),
-      selectedMeshId: 1,
-    });
-    useUIStore.setState({ probeTab: 'properties' });
-
-    const { result } = renderHook(() => useProbeContext());
-    act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
-      useMeshStore.getState().selectMesh(2);
-    });
-
-    expect(result.current).toMatchObject({
-      subjectLabel: 'Mesh: mesh-1',
-      activeMeshId: 1,
+      activePath: '/a/.claude/worktrees/wt-7',
       activeMeshPath: '/a',
-      mode: 'pinned',
-      followsSelection: false,
+      mode: 'following',
+    });
+
+    act(() => {
+      useAgentNodeStore.getState().setActiveNode(8);
+    });
+
+    // The Mesh lens still owns the Mesh (its root stays available for repo
+    // walking); only the mixed working-tree presentation re-targets.
+    expect(result.current).toMatchObject({
+      lens: 'mesh',
+      subject: { lens: 'mesh', id: 1, name: 'mesh-1', available: true },
+      detailLabel: 'Working tree: agent-8',
+      activeMeshId: 1,
+      activeNodeId: 8,
+      activePath: '/a/.claude/worktrees/wt-8',
+      activeMeshPath: '/a',
+      mode: 'following',
     });
   });
 
-  it('keeps pins isolated when multiple Probe destinations are captured', () => {
-    const mesh1 = makeMesh(1, '/a');
-    const mesh2 = makeMesh(2, '/b');
+  it('resolves Project Files mixed ownership from the selection alone', () => {
+    const mesh = makeMesh(1, '/a');
     useMeshStore.setState({
-      meshes: [mesh1, mesh2],
-      meshesById: new Map([[1, mesh1], [2, mesh2]]),
+      meshes: [mesh],
+      meshesById: new Map([[1, mesh]]),
       selectedMeshId: 1,
     });
-    useUIStore.setState({ probeTab: 'properties' });
+    seedAgentNodes([
+      makeNode({ id: 7, mesh_id: 1, name: 'agent-7', worktree_name: 'wt-7' }),
+    ], null);
 
     const { result } = renderHook(() => useProbeContext());
-    act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
-      useUIStore.getState().setProbeTab('issues');
+
+    // Mesh selected, no Agent Node focused → the Mesh-owned repository root.
+    expect(result.current).toMatchObject({
+      lens: 'mesh',
+      subject: { lens: 'mesh', id: 1, name: 'mesh-1', available: true },
+      activeNodeId: null,
+      activeNodeName: null,
+      activePath: '/a',
+      activeMeshPath: '/a',
+      detailLabel: 'Repository root',
+      mode: 'following',
+      hasRequiredContext: true,
     });
+
     act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
-      useMeshStore.getState().selectMesh(2);
+      useAgentNodeStore.getState().setActiveNode(7);
     });
 
     expect(result.current).toMatchObject({
-      subjectLabel: 'Mesh: mesh-1',
-      mode: 'pinned',
+      activeNodeId: 7,
+      activeNodeName: 'agent-7',
+      activePath: '/a/.claude/worktrees/wt-7',
+      activeMeshPath: '/a',
+      detailLabel: 'Working tree: agent-7',
+      mode: 'following',
+      hasRequiredContext: true,
     });
 
+    // Losing the focused Agent Node is not losing the destination's subject:
+    // the Mesh lens keeps the repository root rather than going unavailable.
     act(() => {
-      useUIStore.getState().setProbeTab('properties');
+      useAgentNodeStore.getState().setActiveNode(null);
     });
+
     expect(result.current).toMatchObject({
-      subjectLabel: 'Mesh: mesh-1',
-      mode: 'pinned',
-    });
-    expect(useUIStore.getState().probeContextPins).toEqual({
-      properties: { tab: 'properties', lens: 'mesh', meshId: 1, nodeId: null },
-      issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null },
+      activeNodeId: null,
+      activePath: '/a',
+      detailLabel: 'Repository root',
+      hasRequiredContext: true,
     });
   });
 
-  it('does not fall back to the Mesh root when a pinned working tree disappears', () => {
+  it('keeps every Host destination fixed and never resolves a Mesh', () => {
     const mesh = makeMesh(1, '/a');
     useMeshStore.setState({
       meshes: [mesh],
@@ -511,50 +539,103 @@ describe('useProbeContext (issue #1456)', () => {
     });
     seedAgentNodes([makeNode({ id: 7, mesh_id: 1 })], 7);
 
+    const hostTabs = (Object.keys(PROBE_TAB_DEFINITIONS) as ProbeTab[])
+      .filter((tab) => PROBE_TAB_DEFINITIONS[tab].lens === 'host');
+    expect(hostTabs).toEqual(['usage', 'sessions']);
+
+    for (const tab of hostTabs) {
+      useUIStore.setState({ probeTab: tab });
+      const { result, unmount } = renderHook(() => useProbeContext());
+      expect(result.current).toMatchObject({
+        lens: 'host',
+        subject: { lens: 'host', id: null, name: null, available: true },
+        subjectLabel: 'Host',
+        mode: 'fixed',
+        followsSelection: false,
+        hasRequiredContext: true,
+        activeMeshId: null,
+        activeNodeId: null,
+        activePath: null,
+        activeMeshPath: null,
+        activeMeshName: null,
+        activeNodeName: null,
+        detailLabel: null,
+      });
+      unmount();
+    }
+  });
+
+  it('reports a lost Agent Node as unavailable instead of resolving another subject', () => {
+    const mesh = makeMesh(1, '/a');
+    useMeshStore.setState({
+      meshes: [mesh],
+      meshesById: new Map([[1, mesh]]),
+      selectedMeshId: 1,
+    });
+    // Two nodes stay loaded throughout: a resolver that "helpedfully" fell
+    // back would surface agent-8 here, and the assertion below would catch it.
+    seedAgentNodes([
+      makeNode({ id: 7, mesh_id: 1, name: 'agent-7', worktree_name: 'wt-7' }),
+      makeNode({ id: 8, mesh_id: 1, name: 'agent-8', worktree_name: 'wt-8' }),
+    ], 7);
+    useUIStore.setState({ probeTab: 'review' });
+
     const { result } = renderHook(() => useProbeContext());
+    expect(result.current.subjectLabel).toBe('Agent: agent-7');
+
     act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
-      seedAgentNodes([]);
+      useAgentNodeStore.getState().setActiveNode(null);
     });
 
     expect(result.current).toMatchObject({
-      lens: 'mesh',
-      subjectLabel: 'Mesh: mesh-1',
-      mode: 'pinned',
-      hasRequiredContext: false,
+      lens: 'agent',
+      subject: { lens: 'agent', id: null, name: null, available: false },
+      subjectLabel: 'Agent',
       activeNodeId: null,
+      activeNodeName: null,
       activePath: null,
-      detailLabel: 'Pinned working tree unavailable',
+      mode: 'following',
+      hasRequiredContext: false,
+    });
+
+    // The recovery action is selection: focusing a node makes it the subject.
+    act(() => {
+      useAgentNodeStore.getState().setActiveNode(8);
+    });
+
+    expect(result.current).toMatchObject({
+      subjectLabel: 'Agent: agent-8',
+      activeNodeId: 8,
+      hasRequiredContext: true,
     });
   });
 
-  it('shows a pinned context as unavailable instead of falling back', () => {
-    const mesh1 = makeMesh(1, '/a');
-    const mesh2 = makeMesh(2, '/b');
+  it('reports a dangling focused Agent Node as unavailable rather than guessing', () => {
+    // `activeNodeId` still points at a node that is gone (closed without the
+    // store clearing the id). The Mesh lens degrades to the repository root;
+    // the Agent lens has no such fallback and must report unavailable.
+    const mesh = makeMesh(1, '/a');
     useMeshStore.setState({
-      meshes: [mesh1, mesh2],
-      meshesById: new Map([[1, mesh1], [2, mesh2]]),
+      meshes: [mesh],
+      meshesById: new Map([[1, mesh]]),
       selectedMeshId: 1,
     });
+    seedAgentNodes([makeNode({ id: 7, mesh_id: 1, name: 'agent-7' })], 7);
+    useUIStore.setState({ probeTab: 'review' });
 
-    const { result } = renderHook(() => useProbeContext());
+    const { result, rerender } = renderHook(() => useProbeContext());
     act(() => {
-      useUIStore.getState().pinProbeContext(result.current.pinCandidate!);
-      useMeshStore.setState({
-        meshes: [mesh2],
-        meshesById: new Map([[2, mesh2]]),
-        selectedMeshId: 2,
-      });
+      useAgentNodeStore.setState({ nodesById: {}, nodeIds: [], activeNodeId: 7 });
+      rerender();
     });
 
     expect(result.current).toMatchObject({
-      subject: { lens: 'mesh', id: 1, name: null, available: false },
-      subjectLabel: 'Mesh: unavailable',
-      mode: 'pinned',
-      hasRequiredContext: false,
-      activeMeshId: 1,
+      lens: 'agent',
+      subject: { lens: 'agent', id: 7, name: null, available: false },
+      subjectLabel: 'Agent: unavailable',
+      activeNodeId: 7,
       activePath: null,
-      activeMeshPath: null,
+      hasRequiredContext: false,
     });
   });
 });

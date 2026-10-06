@@ -32,7 +32,7 @@ beforeEach(() => {
   beta = { ...alpha, id: nextMeshId++, name: 'Beta', path: '/repos/beta' };
   seedAgentNodes([]);
   useMeshStore.setState({ meshes: [alpha, beta], meshesById: new Map([[alpha.id, alpha], [beta.id, beta]]), selectedMeshId: alpha.id });
-  useUIStore.setState({ viewMode: 'mesh', probeContextPins: {} });
+  useUIStore.setState({ viewMode: 'mesh' });
   vi.mocked(invoke).mockReset().mockImplementation(async (cmd, args) => {
     if (cmd === 'get_mesh_scratchpad') return `Notes for ${(args as { meshId: number }).meshId}`;
     if (cmd === 'get_mesh_properties') return config((args as { meshId: number }).meshId === alpha.id ? 'Alpha' : 'Beta');

@@ -106,7 +106,7 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
   beforeEach(() => {
     // The cycle is a pure store rotation — it never reads the node arrays, so
     // agentNodes stays empty. Only the UI store's mode state matters.
-    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+    useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh', openScopePickerRequest: 0 });
     // Reset the mesh store too — cycleGridMode's All step must clear
     // selectedMeshId (issue #1002), so the tests need a known starting
     // selection rather than whatever the previous test left behind.
@@ -123,6 +123,41 @@ describe('cycleGridMode (#987 Ctrl+Alt+G / Cmd+Alt+G view-mode cycle)', () => {
     expect(useUIStore.getState().viewMode).toBe('filtered');
     cycleGridMode();
     expect(useUIStore.getState().viewMode).toBe('mesh');
+  });
+
+  // #2081 review — the cycle used to call `setViewMode` directly, so landing
+  // on 'mesh' with nothing selected sat silently on the "no Mesh selected"
+  // empty state while the Mesh Grid segment and the `view-mesh` command both
+  // asked for a Mesh. This inverts the pre-fix behaviour rather than dropping
+  // the case: the cycle now routes through the same `enterMeshGrid` helper,
+  // so the request fires here too.
+  it('asks for a Mesh when the cycle lands on Mesh Grid with nothing selected', () => {
+    // Cycle the full rotation back round onto 'mesh'; `beforeEach` left
+    // selectedMeshId null and the 'all' step keeps it null.
+    cycleGridMode(); // mesh → pinned
+    cycleGridMode(); // pinned → all
+    cycleGridMode(); // all → filtered
+    expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+
+    cycleGridMode(); // filtered → mesh, with no Mesh selected
+
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    // The mode still flips — the ask never suppresses the path it describes.
+    expect(useUIStore.getState().openScopePickerRequest).toBe(1);
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+  });
+
+  it('does not ask when the cycle lands on a Mesh Grid that already has a Mesh', () => {
+    // The common case: a selection exists, so Mesh Grid is not a dead end
+    // and there is nothing to ask about. Same as the segment.
+    useMeshStore.setState({ selectedMeshId: 3 });
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+
+    cycleGridMode(); // filtered → mesh
+
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+    expect(useMeshStore.getState().selectedMeshId).toBe(3);
   });
 
   it('clears selectedMeshId when cycling into All Nodes (issue #1002)', () => {

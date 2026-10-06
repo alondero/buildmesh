@@ -11,7 +11,8 @@
  * Domain contract (issue #1410 §1):
  *   - Agent Nodes:  name, branch, worktree name, provider/harness, session
  *                   status, and parent mesh name.
- *   - Meshes:       mesh name, repo path, and active branch.
+ *   - Meshes:       mesh name, repo path, and active branch. The row is the
+ *                   "go to Mesh" entry (issue #2077).
  *   - App Commands: theme toggling, view mode switches (Single, Mesh,
  *                   Pinned, All), open Settings, open Remote Access, show
  *                   Cheatsheet, Git sync, and the inspector destinations
@@ -324,7 +325,16 @@ export function indexAgentNodes(nodes: AgentNode[], meshes: Mesh[]): IndexedItem
 
 /** Meshes (issue #1410 §1 — mesh name, repo path, active branch). The active
  *  branch is `base_ref` (the mesh's canonical base branch — see the generated
- *  `AgentNode.branch` doc for the overload note). */
+ *  `AgentNode.branch` doc for the overload note).
+ *
+ *  The row IS the omnibar's "go to Mesh" entry (issue #2077): executing it is
+ *  a scope change, so the label names the action — the palette's verb-phrase
+ *  convention ("Open GitHub Issues in ProjectY", "Spawn Claude Code on
+ *  ProjectY"), which a bare Mesh name does not. The bare name stays the
+ *  primary FIELD, so a Mesh-name query keeps its exact-prefix bonus at index 0
+ *  and the row is still found by typing the Mesh's name; only the visible
+ *  label differs from the matched text (the same shape as the GitHub rows,
+ *  whose label is `#N <title>` over a title-only primary field). */
 export function indexMeshes(meshes: Mesh[]): IndexedItem[] {
   const items: IndexedItem[] = [];
   for (const mesh of meshes) {
@@ -337,7 +347,7 @@ export function indexMeshes(meshes: Mesh[]): IndexedItem[] {
     items.push({
       id: `mesh:${mesh.id}`,
       category: CATEGORY.mesh,
-      label: mesh.name,
+      label: `Go to Mesh: ${mesh.name}`,
       subtitle,
       icon: 'mesh',
       fields,

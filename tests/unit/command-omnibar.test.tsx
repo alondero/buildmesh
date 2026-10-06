@@ -14,12 +14,14 @@
  *     target — the same invariant TerminalManager relies on).
  */
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll } from 'vitest';
-import { render, cleanup, fireEvent, screen, act, waitFor, createEvent } from '@testing-library/react';
+import { render, renderHook, cleanup, fireEvent, screen, act, waitFor, createEvent } from '@testing-library/react';
 import { CommandOmnibar } from '../../src/components/CommandOmnibar/CommandOmnibar';
 import { executeOmnibarItem, runOmnibarCommand } from '../../src/components/CommandOmnibar/omnibarActions';
 import { useUIStore, type OmnibarMode } from '../../src/stores/uiStore';
-import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { useAgentNodeStore, useAllAgentNodes } from '../../src/stores/agentNodeStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useProbeContext } from '../../src/hooks/useProbeContext';
+import { deriveScope } from '../../src/lib/viewModes';
 import type { AgentNode } from '../../src/types/generated/AgentNode';
 import type { Mesh } from '../../src/types/generated/Mesh';
 import type { SpawnOption } from '../../src/lib/groups';
@@ -647,16 +649,13 @@ describe('CommandOmnibar — command execution routing', () => {
     });
   });
 
-  it('routes a mesh-scoped probe item to its mesh, clears the stale pin, and opens the tab', () => {
+  it('routes a mesh-scoped probe item to its mesh and opens the tab', () => {
     // "Open GitHub Issues in ProjectY": the Probe's GitHub tabs read the
     // selected mesh, so the router must select the item's mesh (2, not the
-    // currently selected 1). A stale per-tab pin to mesh 1 would keep
-    // winning over the fresh selection, so it is cleared first.
+    // currently selected 1) — that selection is the whole retargeting now
+    // that issue #2073 removed the per-tab pin.
     const projectY = { ...mesh, id: 2, name: 'ProjectY' };
     useMeshStore.setState({ selectedMeshId: 1 });
-    useUIStore.setState({
-      probeContextPins: { issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null } },
-    });
     const openProbeTab = vi.fn();
     executeOmnibarItem('probe-in-mesh:issues:2', {
       meshes: [mesh, projectY],
@@ -665,7 +664,6 @@ describe('CommandOmnibar — command execution routing', () => {
       openProbeTab,
     });
     expect(useMeshStore.getState().selectedMeshId).toBe(2);
-    expect(useUIStore.getState().probeContextPins.issues).toBeUndefined();
     expect(openProbeTab).toHaveBeenCalledWith('issues');
   });
 
@@ -673,7 +671,7 @@ describe('CommandOmnibar — command execution routing', () => {
     // No selection change, so the sidebar sync cannot fire — the router
     // exits non-mesh modes itself (mirrors the `issue:`/`pull:` branch).
     useMeshStore.setState({ selectedMeshId: 1 });
-    useUIStore.setState({ viewMode: 'pinned', probeContextPins: {} });
+    useUIStore.setState({ viewMode: 'pinned' });
     const openProbeTab = vi.fn();
     executeOmnibarItem('probe-in-mesh:issues:1', {
       meshes: [mesh],
@@ -712,6 +710,210 @@ describe('CommandOmnibar — command execution routing', () => {
     type('buildmesh');
     fireEvent.keyDown(screen.getByRole('combobox'), { key: 'Enter' });
     expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The go-to-Mesh entry (issue #2077). Scope is reachable from the keyboard:
+// the entry names the action it performs, and executing it is ONE write — the
+// Mesh selection — from which both the canvas scope (#2071 `deriveScope`) and
+// the Probe destination's subject follow. Neither half is asserted through a
+// mock of our own routing: the canvas half is read from the derived scope and
+// the Probe half from the resolver the Probe header itself renders.
+// ---------------------------------------------------------------------------
+describe('CommandOmnibar — go to Mesh entry (issue #2077)', () => {
+  const projectY: Mesh = {
+    ...mesh,
+    id: 2,
+    name: 'ProjectY',
+    path: 'F:/src/ProjectY',
+    position: 1,
+  };
+  const projectYNode: AgentNode = {
+    ...node,
+    id: 12,
+    mesh_id: 2,
+    name: 'yankee-node',
+    branch: 'feat/yankee',
+    path: 'F:/src/ProjectY/.worktrees/yankee',
+    worktree_name: 'yankee',
+    position: 0,
+  };
+
+  /** Start cross-Mesh with no selection: the state a scope change starts from. */
+  beforeEach(() => {
+    seedAgentNodes([node, projectYNode], null);
+    useMeshStore.setState({
+      meshes: [mesh, projectY],
+      meshesById: new Map([[mesh.id, mesh], [projectY.id, projectY]]),
+      selectedMeshId: null,
+    });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', probeTab: 'issues', openScopePickerRequest: 0 });
+  });
+
+  /** The derived canvas scope, read through the same hook order the grid uses. */
+  function currentScope() {
+    return renderHook(() =>
+      deriveScope({
+        viewMode: useUIStore((s) => s.viewMode),
+        lastNonSingleMode: useUIStore((s) => s.lastNonSingleMode),
+        agentNodes: useAllAgentNodes(),
+        selectedMeshId: useMeshStore((s) => s.selectedMeshId),
+        activeNodeId: useAgentNodeStore((s) => s.activeNodeId),
+        meshes: useMeshStore((s) => s.meshes),
+      }),
+    ).result.current;
+  }
+
+  it('offers a "Go to Mesh" entry that the keyboard can activate by Mesh name', () => {
+    render(<CommandOmnibar />);
+    openOmnibar();
+    type('ProjectY');
+    // Results are ranked, and the Mesh-scoped destination rows for the same
+    // Mesh can rank above the Mesh itself — so walk the highlight onto the
+    // entry rather than assuming where the engine put it.
+    expect(options().map((row) => row.textContent ?? '')).toContainEqual(
+      expect.stringContaining('Go to Mesh: ProjectY'),
+    );
+    const input = screen.getByRole('combobox');
+    const isEntryActive = () =>
+      options()
+        .find((row) => row.getAttribute('aria-selected') === 'true')
+        ?.textContent?.includes('Go to Mesh: ProjectY') === true;
+    for (let step = 0; step < options().length && !isEntryActive(); step += 1) {
+      fireEvent.keyDown(input, { key: 'ArrowDown' });
+    }
+    expect(isEntryActive()).toBe(true);
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    // A scope write, not a destination open: the Probe tab is untouched.
+    expect(useUIStore.getState().probeTab).toBe('issues');
+  });
+
+  it('moves BOTH the canvas scope and the Probe subject to the named Mesh', () => {
+    render(<CommandOmnibar />);
+    openOmnibar();
+    type('ProjectY');
+    // Click the entry row itself: Enter would execute whichever row the
+    // engine ranked first, which is not necessarily this one.
+    const entry = options().find((row) => row.textContent?.includes('Go to Mesh: ProjectY'));
+    expect(entry).toBeDefined();
+    fireEvent.click(entry!);
+
+    expect(useMeshStore.getState().selectedMeshId).toBe(2);
+    // Canvas half — the Mesh Grid now holds exactly ProjectY's nodes.
+    const scope = currentScope();
+    expect(scope.gridMode).toBe('mesh');
+    expect(scope.isMeshScoped).toBe(true);
+    expect(scope.mesh).toEqual({ id: 2, name: 'ProjectY' });
+    expect(scope.visibleNodes.map((n) => n.name)).toEqual(['yankee-node']);
+
+    // Probe half — the destination the palette was already showing names the
+    // same Mesh. One write, one scope: the two cannot disagree.
+    const probe = renderHook(() => useProbeContext()).result.current;
+    expect(probe.lens).toBe('mesh');
+    expect(probe.subjectLabel).toBe('Mesh: ProjectY');
+    expect(probe.activeMeshId).toBe(2);
+  });
+
+  it('selects the destination Mesh BEFORE opening a Mesh-scoped destination', () => {
+    // Ordering, not coincidence: a Mesh-lens destination resolves its subject
+    // from `selectedMeshId`, so the selection must already be in place when
+    // the destination opens.
+    const selectedWhenOpened: Array<number | null> = [];
+    const openProbeTab = vi.fn(() => {
+      selectedWhenOpened.push(useMeshStore.getState().selectedMeshId);
+    });
+
+    executeOmnibarItem('probe-in-mesh:issues:2', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab,
+    });
+    expect(selectedWhenOpened).toEqual([2]);
+
+    const scope = currentScope();
+    expect(scope.mesh).toEqual({ id: 2, name: 'ProjectY' });
+    expect(renderHook(() => useProbeContext()).result.current.subjectLabel).toBe('Mesh: ProjectY');
+  });
+
+  it('leaves scope untouched for a Mesh that is not in the loaded list', () => {
+    executeOmnibarItem('mesh:99', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    expect(currentScope().isMeshScoped).toBe(false);
+  });
+
+  // #2070 review — "enter Mesh scope for Mesh X" is ONE store operation
+  // (`uiStore.enterMeshScope`). These two cases are the omnibar half of that
+  // contract: the entry that names a Mesh and the `view-mesh` command must
+  // agree with the sidebar and the title-bar picker about what the same
+  // selection means.
+  it('returns the canvas to that Mesh Grid when the entry names the Mesh already in scope', () => {
+    // No selection change, so the mesh→mode subscription cannot fire — the
+    // re-click ruling (#2072) is what makes this reach Mesh Grid.
+    useMeshStore.setState({ selectedMeshId: mesh.id });
+    useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+
+    executeOmnibarItem('mesh:1', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    const scope = currentScope();
+    expect(scope.gridMode).toBe('mesh');
+    expect(scope.mesh).toEqual({ id: mesh.id, name: 'buildmesh' });
+  });
+
+  it('view-mesh returns the canvas to the selected Mesh Grid without asking again', () => {
+    useMeshStore.setState({ selectedMeshId: mesh.id });
+    useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+
+    runOmnibarCommand('view-mesh', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useMeshStore.getState().selectedMeshId).toBe(mesh.id);
+    // A Mesh is already chosen, so there is nothing to ask about.
+    expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+  });
+
+  it('view-mesh asks instead of guessing when no Mesh is selected', () => {
+    // #2071 deleted the "focused node's Mesh, else the first loaded Mesh"
+    // fallback, and User Story 9 says this case must ask. A focused node and
+    // two loaded Meshes are both present here — exactly the state in which the
+    // old chain would have silently chosen `buildmesh`.
+    seedAgentNodes([node, projectYNode], node.id);
+    useMeshStore.setState({ selectedMeshId: null });
+    useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+
+    runOmnibarCommand('view-mesh', {
+      meshes: [mesh, projectY],
+      spawnOptions: [],
+      setViewMode: useUIStore.getState().setViewMode,
+      openProbeTab: vi.fn(),
+    });
+
+    // Asking, not choosing: the selection is still the user's to make, the
+    // View Mode shows the honest "no Mesh selected" state, and the title-bar
+    // picker is asked to open.
+    expect(useMeshStore.getState().selectedMeshId).toBeNull();
+    expect(useUIStore.getState().viewMode).toBe('mesh');
+    expect(useUIStore.getState().openScopePickerRequest).toBe(1);
+    expect(currentScope().isMeshScoped).toBe(false);
   });
 });
 

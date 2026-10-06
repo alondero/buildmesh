@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useUIStore, type DiffContext } from '../../src/stores/uiStore';
 import { useMeshStore } from '../../src/stores/meshStore';
+import { useToastStore } from '../../src/stores/toastStore';
+import { SCOPE_NOTICE_PROVIDER } from '../../src/lib/scopeNotices';
 
 // A representative single-file diff context (issue #379). The overlay needs
 // the path + root to fetch, the node/mesh to label and auto-close, and the
@@ -142,6 +144,23 @@ describe('useUIStore', () => {
         useUIStore.setState({ viewMode: 'all' });
         useUIStore.getState().setViewMode('pinned');
         expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      });
+
+      it('is enforced by the setter for every cross-Mesh mode it is entered from (#2072)', () => {
+        // #2072 made All Nodes the only route out of Mesh scope, so the
+        // invariant has to hold no matter which mode the user was in when
+        // they switched — otherwise a caller that skips `setViewMode` would
+        // leave All Nodes paired with a highlighted Mesh. Driven through the
+        // setter, not through the sidebar, because the invariant lives here.
+        for (const mode of ['mesh', 'pinned', 'filtered', 'single'] as const) {
+          useMeshStore.setState({ selectedMeshId: 7 });
+          useUIStore.getState().setViewMode(mode);
+          expect(useMeshStore.getState().selectedMeshId).toBe(7);
+
+          useUIStore.getState().setViewMode('all');
+          expect(useUIStore.getState().viewMode).toBe('all');
+          expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        }
       });
 
     });
@@ -582,88 +601,181 @@ describe('useUIStore', () => {
         expect(useUIStore.getState().probeTab).toBe('sessions');
       });
     });
+  });
 
-    describe('clearProbeContextPin', () => {
-      // The setter accepts an optional target tab so the omnibar's
-      // mesh-scoped probe entries can clear a stale pin without disturbing
-      // the user's current tab. Without these contracts the only call sites
-      // (omnibarActions.ts, ProbePanel) could drift — especially the
-      // issue:/pull: routes that clear a non-current tab from the omnibar.
-      beforeEach(() => {
-        useUIStore.setState({ probeContextPins: {} });
+  // #2076 — "scope changes announce themselves". Two channels live here:
+  // the open request the Mesh Grid segment sends to the title bar's scope
+  // picker, and `enterFilteredFromSearch`, the one shared implementation of
+  // the "jump to the search box" gesture that both the switcher segment and
+  // the ⌘/Ctrl+F shortcut already had duplicated.
+  describe('scope-change notices (#2076)', () => {
+    beforeEach(() => {
+      localStorage.removeItem('buildmesh.view-mode');
+      // meshStore FIRST: the uiStore mesh→mode subscription fires
+      // synchronously on a selection change and would clobber the viewMode
+      // set below.
+      useMeshStore.setState({ selectedMeshId: null });
+      useUIStore.setState({
+        viewMode: 'all',
+        lastNonSingleMode: 'all',
+        focusGridSearchRequest: 0,
+        openScopePickerRequest: 0,
       });
+      useToastStore.setState({ toasts: [] });
+    });
 
-      it('removes only the named tab when multiple pins exist (other pins survive)', () => {
-        // Regression pin: `clearProbeContextPin('issues')` must delete just
-        // the issues slot — `pulls` and `files` keep their pinned context.
-        useUIStore.setState({
-          probeContextPins: {
-            issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null },
-            pulls: { tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null },
-            files: { tab: 'files', lens: 'mesh', meshId: 2, nodeId: null },
-          },
-        });
-        useUIStore.getState().clearProbeContextPin('issues');
-        const pins = useUIStore.getState().probeContextPins;
-        expect(pins.issues).toBeUndefined();
-        expect(pins.pulls).toEqual({
-          tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null,
-        });
-        expect(pins.files).toEqual({
-          tab: 'files', lens: 'mesh', meshId: 2, nodeId: null,
-        });
-      });
+    it('requestOpenScopePicker notifies on every press — no idempotency guard', () => {
+      // Same discipline as `requestFocusGridSearch`: the consumer effect
+      // observes only this counter, so a same-value call would swallow the
+      // second Mesh Grid press. Two presses must be two bumps.
+      expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+      useUIStore.getState().requestOpenScopePicker();
+      useUIStore.getState().requestOpenScopePicker();
+      expect(useUIStore.getState().openScopePickerRequest).toBe(2);
+    });
 
-      it('defaults to the current probeTab when called without an argument', () => {
-        // The user clicks the inspector pin button while on the `files`
-        // tab — the unsetter must target `files`, not whatever the omnibar
-        // most recently selected.
-        useUIStore.setState({
-          probeTab: 'files',
-          probeContextPins: {
-            files: { tab: 'files', lens: 'mesh', meshId: 1, nodeId: null },
-            pulls: { tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null },
-          },
-        });
-        useUIStore.getState().clearProbeContextPin();
-        const pins = useUIStore.getState().probeContextPins;
-        expect(pins.files).toBeUndefined();
-        expect(pins.pulls).toEqual({
-          tab: 'pulls', lens: 'mesh', meshId: 1, nodeId: null,
-        });
-      });
+    it('announces once when a search escapes a Mesh-scoped view', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
 
-      it('targets the named tab even when probeTab is on a different destination', () => {
-        // Regression pin for the omnibar's `probe-in-mesh:` route: the
-        // current tab is `files` but the mesh-scoped Issues entry must
-        // clear the `issues` pin, not the `files` pin.
-        useUIStore.setState({
-          probeTab: 'files',
-          probeContextPins: {
-            issues: { tab: 'issues', lens: 'mesh', meshId: 1, nodeId: null },
-            files: { tab: 'files', lens: 'mesh', meshId: 2, nodeId: null },
-          },
-        });
-        useUIStore.getState().clearProbeContextPin('issues');
-        const pins = useUIStore.getState().probeContextPins;
-        expect(pins.issues).toBeUndefined();
-        expect(pins.files).toEqual({
-          tab: 'files', lens: 'mesh', meshId: 2, nodeId: null,
-        });
-      });
+      useUIStore.getState().enterFilteredFromSearch();
 
-      it('is a clean no-op when no pin exists for the target tab (no state update, no subscriber notification)', () => {
-        // Same shape as `setViewMode` is-idempotent: a no-op must not
-        // trigger a render. The store impl returns before `set()` so the
-        // subscriber counter is the proof.
-        useUIStore.setState({ probeContextPins: {} });
-        let notifyCount = 0;
-        const unsub = useUIStore.subscribe(() => { notifyCount += 1; });
-        useUIStore.getState().clearProbeContextPin('issues');
-        unsub();
-        expect(notifyCount).toBe(0);
-        expect(useUIStore.getState().probeContextPins).toEqual({});
-      });
+      const toasts = useToastStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0].message).toBe(
+        'Search results span every Mesh — the search matches Agent Node names, not one Mesh.',
+      );
+      expect(toasts[0].provider).toBe(SCOPE_NOTICE_PROVIDER);
+      expect(toasts[0].severity).toBe('info');
+    });
+
+    it('announces the escape from a Mesh-scoped Single view too — the scope, not the label, decides', () => {
+      // Single reports the grid scope it was entered from, so a solo out of
+      // a Mesh is still a Mesh-anchored scope and the search still spans
+      // every Mesh.
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'single', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toHaveLength(1);
+    });
+
+    it('announces nothing when the search starts from a cross-Mesh view', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('announces nothing on a second search from the Filtered view itself', () => {
+      // A re-click means "get me to the search box" — no scope change
+      // happened, so there is nothing to announce. The predicate gets this
+      // for free: Filtered is cross-Mesh by construction, so it can never
+      // report an escape.
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'filtered', lastNonSingleMode: 'filtered' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('announces nothing from Mesh Grid with no Mesh selected — there was no Mesh to leave', () => {
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useToastStore.getState().toasts).toEqual([]);
+    });
+
+    it('never suppresses the live path: the mode flips and the focus request arms on every press', () => {
+      useMeshStore.setState({ selectedMeshId: 4 });
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterFilteredFromSearch();
+      useUIStore.getState().enterFilteredFromSearch();
+
+      expect(useUIStore.getState().viewMode).toBe('filtered');
+      expect(useUIStore.getState().focusGridSearchRequest).toBe(2);
+    });
+  });
+
+  // "Enter Mesh scope for Mesh X" is ONE store operation. The sidebar, the
+  // title-bar picker, the omnibar's Mesh-scoped routes and the `view-mesh`
+  // command all route through it, so the same selection means the same scope
+  // change everywhere (#2070 review — the entrypoints had drifted into three
+  // behaviours, one of which still guessed a Mesh).
+  describe('enterMeshScope', () => {
+    beforeEach(() => {
+      localStorage.removeItem('buildmesh.view-mode');
+      // meshStore FIRST: the mesh→mode subscription fires synchronously on a
+      // selection change and would clobber the viewMode set below it.
+      useMeshStore.setState({ selectedMeshId: null });
+      useUIStore.setState({ viewMode: 'all', lastNonSingleMode: 'all', openScopePickerRequest: 0 });
+    });
+
+    it('selects a different Mesh and returns the canvas to its Mesh Grid', () => {
+      useMeshStore.setState({ selectedMeshId: 1 });
+      useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+
+      useUIStore.getState().enterMeshScope(7);
+
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    // The mesh→mode subscription short-circuits on an unchanged
+    // `selectedMeshId`, so the View Mode setter is the only thing that can
+    // honour the re-click (#2072). Each cross-Mesh mode that legitimately
+    // keeps a Mesh selected is covered.
+    it.each(['pinned', 'filtered', 'single'] as const)(
+      'returns the canvas to that Mesh Grid when the already-selected Mesh is chosen from %s',
+      (mode) => {
+        useMeshStore.setState({ selectedMeshId: 7 });
+        useUIStore.setState({ viewMode: mode, lastNonSingleMode: mode === 'single' ? 'mesh' : mode });
+
+        useUIStore.getState().enterMeshScope(7);
+
+        expect(useUIStore.getState().viewMode).toBe('mesh');
+        expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      },
+    );
+
+    it('is a no-op when the already-selected Mesh is chosen while its grid is showing', () => {
+      useMeshStore.setState({ selectedMeshId: 7 });
+      useUIStore.setState({ viewMode: 'mesh', lastNonSingleMode: 'mesh' });
+
+      useUIStore.getState().enterMeshScope(7);
+
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
+    });
+
+    // All Nodes is the only way OUT of Mesh scope, and it nulls the selection
+    // inside `setViewMode` (issue #1002). Entering Mesh scope from there is a
+    // real selection change, so there is nothing sticky to restore.
+    it('enters Mesh Grid from All Nodes by selecting the Mesh the caller named', () => {
+      useUIStore.getState().enterMeshScope(7);
+
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+    });
+
+    // The operation takes a Mesh id, never a mesh-or-fallback, and it never
+    // asks for one: choosing what to do with "no Mesh selected" belongs to
+    // the entrypoint (the omnibar's `view-mesh` asks), not to the shared
+    // transition — otherwise one entrypoint's guess becomes everyone's (#2071).
+    it('never requests the scope picker and never nulls a selection it was given', () => {
+      useMeshStore.setState({ selectedMeshId: 7 });
+      useUIStore.setState({ viewMode: 'pinned', lastNonSingleMode: 'pinned' });
+
+      useUIStore.getState().enterMeshScope(7);
+
+      expect(useUIStore.getState().openScopePickerRequest).toBe(0);
+      expect(useMeshStore.getState().selectedMeshId).toBe(7);
     });
   });
 

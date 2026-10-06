@@ -8,6 +8,15 @@
  * the routing out of the component makes it unit-testable without
  * rendering React and keeps the palette a pure "search + select" surface.
  *
+ * Every Mesh-scoped route — the "Go to Mesh: <name>" entry (#2077) and the
+ * destination routes — enters Mesh scope through the one store operation
+ * `uiStore.enterMeshScope`, so a palette action that names a Mesh always
+ * resolves the same scope the sidebar and the title-bar picker do. Ordering
+ * still matters for the destination routes: the scope is entered BEFORE the
+ * destination opens, because a Mesh-lens destination resolves its subject
+ * from `selectedMeshId`. Opening first would leave it reading the Mesh the
+ * user did not ask for.
+ *
  * Modal opens go through `uiStore` (`cheatsheetOpen` / `appSettingsOpen` /
  * `remoteAccessOpen`), the same source of truth App's `?` key and TitleBar's
  * header buttons already use — no window-event side channel.
@@ -25,6 +34,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../lib/probeContext';
 import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
+import { enterMeshGrid } from '../../lib/gridShortcuts';
 
 /** Everything `executeOmnibarItem` needs beyond the stores themselves. */
 export interface OmnibarActionContext {
@@ -61,16 +71,17 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       ctx.setViewMode(id.slice('view-'.length) as ViewMode);
       return true;
     case 'view-mesh': {
-      const meshStore = useMeshStore.getState();
-      if (meshStore.selectedMeshId === null) {
-        const active = useAgentNodeStore.getState().getActiveNode();
-        const meshId = active?.mesh_id ?? ctx.meshes[0]?.id;
-        if (meshId !== undefined) {
-          meshStore.selectMesh(meshId);
-          return true;
-        }
-      }
-      if (useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+      // #2070 review — this case used to re-inline the Mesh fallback chain
+      // #2071 deleted (focused node's Mesh, else the first loaded Mesh), so
+      // the palette could put the canvas in a scope nobody chose.
+      //
+      // #2081 review — it then re-inlined the "enter Mesh Grid, and ask when
+      // nothing is selected" rule as well. `enterMeshGrid` is now the single
+      // definition of that gesture, shared with the Mesh Grid segment and the
+      // Ctrl+Alt+G cycle: a chosen Mesh enters its scope (never a guess), and
+      // nothing chosen means nothing selected — the mode flips to the honest
+      // "no Mesh selected" state and the picker is asked to open.
+      enterMeshGrid();
       return true;
     }
     case 'open-settings':
@@ -138,12 +149,15 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     return;
   }
   if (id.startsWith('mesh:')) {
+    // The "Go to Mesh: <name>" entry (#2077). Entering that Mesh's scope is
+    // the whole action: it moves the canvas into that Mesh's grid and
+    // retargets the Mesh-lens Probe destinations, so scope changes without a
+    // destination being opened.
     const meshId = Number(id.slice('mesh:'.length));
     if (!Number.isFinite(meshId)) return;
-    if (!ctx.meshes.some((mesh) => mesh.id === meshId)) return;
-    const changed = useMeshStore.getState().selectedMeshId !== meshId;
-    useMeshStore.getState().selectMesh(meshId);
-    if (!changed) ctx.setViewMode('mesh');
+    const mesh = ctx.meshes.find((item) => item.id === meshId);
+    if (!mesh) return;
+    useUIStore.getState().enterMeshScope(mesh.id);
     return;
   }
   if (id.startsWith('command:')) {
@@ -186,10 +200,9 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // Id shape is `probe-in-mesh:<tab>:<meshId>` — "Open <Destination> in
     // <Mesh>". Mesh-lens destinations read their mesh from `meshStore`, so
     // the item's mesh must be selected first (the same retargeting the
-    // `issue:`/`pull:` branch below performs). A stale per-tab pin would
-    // keep winning over the fresh selection, so it is cleared: the command
-    // is a navigation ("show me Y"), not a pin request, and the probe
-    // returns to following selection afterwards.
+    // `issue:`/`pull:` branch below performs). Issue #2073 removed the
+    // per-tab pin, so selecting the mesh is all this route needs: the
+    // destination then follows that selection.
     const body = id.slice('probe-in-mesh:'.length);
     const sep = body.lastIndexOf(':');
     if (sep === -1) return;
@@ -199,10 +212,7 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     if (PROBE_TAB_DEFINITIONS[tab].lens !== 'mesh') return;
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(meshId)) return;
-    useUIStore.getState().clearProbeContextPin(tab);
-    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
-    useMeshStore.getState().selectMesh(mesh.id);
-    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    useUIStore.getState().enterMeshScope(mesh.id);
     ctx.openProbeTab(tab);
     return;
   }
@@ -211,23 +221,15 @@ export function executeOmnibarItem(id: string, ctx: OmnibarActionContext): void 
     // The Probe's GitHub tabs read their mesh from `meshStore`, so an item
     // belonging to a mesh other than the currently selected one must
     // select its mesh first — otherwise the user lands on the tab showing
-    // a DIFFERENT mesh's issues (issue #1411 review). A stale per-tab pin
-    // would keep winning over the fresh selection, so the target tab's
-    // pin is cleared first — same rationale the `probe-in-mesh:` branch
-    // above uses.
+    // a DIFFERENT mesh's issues (issue #1411 review). Selecting the mesh is
+    // the whole retargeting now — issue #2073 removed the pin that could
+    // otherwise keep winning over the fresh selection.
     const [, meshPart, numberPart] = id.split(':');
     const meshId = Number(meshPart);
     const number = Number(numberPart);
     const mesh = ctx.meshes.find((item) => item.id === meshId);
     if (!mesh || !Number.isFinite(number)) return;
-    if (id.startsWith('issue:')) {
-      useUIStore.getState().clearProbeContextPin('issues');
-    } else {
-      useUIStore.getState().clearProbeContextPin('pulls');
-    }
-    const changed = useMeshStore.getState().selectedMeshId !== mesh.id;
-    useMeshStore.getState().selectMesh(mesh.id);
-    if (!changed && useUIStore.getState().viewMode !== 'mesh') ctx.setViewMode('mesh');
+    useUIStore.getState().enterMeshScope(mesh.id);
     if (id.startsWith('issue:')) {
       requestIssueNavigation({ meshId: mesh.id, issueNumber: number });
       ctx.openProbeTab('issues');

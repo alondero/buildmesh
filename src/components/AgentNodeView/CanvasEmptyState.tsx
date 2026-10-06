@@ -11,9 +11,12 @@
  *
  * Each case has a different correct call to action — a single splash that
  * conflates them tells the user the wrong story ("Add a mesh" when they
- * already have one). This component picks one of five branches from a
+ * already have one). This component picks one of six branches from a
  * discriminated input and renders a CTA that drives the right store
- * action through the caller-supplied callbacks.
+ * action through the caller-supplied callbacks. (#2071 added the sixth:
+ * Mesh Grid with no Mesh selected, which used to hide behind the
+ * "no nodes match" branch and tell the user to clear filters that were
+ * never set.)
  *
  * The component is intentionally a pure renderer: it reads no store state
  * directly and invokes no global action. Callers (`AgentNodeView`,
@@ -23,7 +26,7 @@
  * over the legacy `meshStore.addMesh()` direct call).
  */
 import { ReadinessSteps } from './ReadinessSteps';
-import type { ViewMode } from '../../stores/uiStore';
+import type { DerivedScope } from '../../lib/viewModes';
 
 /** The shape the empty state needs to pick a branch. Each field is
  *  computed by the owning UI from the live stores — `CanvasEmptyState`
@@ -47,12 +50,14 @@ export interface CanvasEmptyStateInput {
   /** Nodes the active scope actually shows. 0 while `scopedCount` > 0
    *  drives `filters-exclude-all`. */
   filteredCount: number;
-  /** The active view mode. */
-  viewMode: ViewMode;
-  /** The sidebar's selected mesh id, or `null` when none is selected.
-   *  Required (not assumed!) for the `selected-empty` branch. The
-   *  classifier reads this field explicitly. */
-  selectedMeshId: number | null;
+  /** The scope `AgentNodeView` already derived for this render (#2071).
+   *  The Mesh identity the Mesh branches key off comes from HERE, not from
+   *  a re-test of `viewMode === 'mesh'` against `selectedMeshId` — that
+   *  re-test was the fourth place deriving scope for itself (#2070 review).
+   *  `viewMode` is deliberately read off it rather than `gridMode`: in
+   *  Single the grid scope can still be a Mesh while the canvas shows one
+   *  soloed node, and calling that Mesh empty would be a lie. */
+  scope: DerivedScope;
   /** Whether ANY non-terminal harness is reachable (issue #822).
    *  Drives the "Setup" routing when the user has no usable agent. */
   harnessReady: boolean;
@@ -65,6 +70,7 @@ export interface CanvasEmptyStateInput {
  *  from a comment that lies. */
 export type CanvasEmptyDecision =
   | { branch: 'no-meshes' }
+  | { branch: 'no-mesh-selected' }
   | { branch: 'selected-empty'; meshId: number }
   | { branch: 'all-empty' }
   | { branch: 'filters-exclude-all' }
@@ -79,7 +85,9 @@ export type CanvasEmptyDecision =
  *    - onOpenSetup: open App Settings → Providers when no harness works
  *    - onViewAll: swap the canvas view mode to 'all' (used by the
  *      Pinned empty state's "View All Nodes" CTA so a new user lands
- *      in the right place instead of bouncing back to Pinned) */
+ *      in the right place instead of bouncing back to Pinned, and by
+ *      the Mesh Grid's no-selection CTA (#2071) — both need a view
+ *      that doesn't require a Mesh) */
 export interface CanvasEmptyStateCallbacks {
   onCreateMesh: () => void;
   onOpenSpawnMenu: (meshId: number | null) => void;
@@ -111,29 +119,32 @@ interface CanvasEmptyStateProps {
  *   2. Pinned wins next — its dedicated CTA swaps view mode, which
  *      is the right escape when the user has meshes but nothing
  *      pinned.
- *   3. "Selected mesh is empty" — view mode is mesh AND that mesh
+ *   3. "No Mesh selected" (#2071) — Mesh Grid needs a Mesh and the
+ *      sidebar has none. Since the Mesh-scope fallback chain was
+ *      deleted this is a reachable production state rather than a
+ *      theoretical one, so it gets its own honest copy: the missing
+ *      thing is the selection, not the agents and not the filters.
+ *   4. "Selected mesh is empty" — view mode is mesh AND that mesh
  *      has zero nodes AND the user explicitly picked it
  *      (selectedMeshId is set). Distinct from "all meshes empty"
  *      because the user has a place to spawn into.
- *      `scopeNodesForMode` (viewModes.ts) falls back to the active
- *      node's mesh, then to the first mesh — so the mesh-with-no-
- *      selection case is unreachable in production. The classifier
- *      routes only the explicit-selection case to `selected-empty`;
- *      a mesh-view-with-fallback-scope renders through to the
- *      `filters-exclude-all` branch via the existing checks below.
- *   4. "All meshes empty" — meshes exist but zero nodes globally.
+ *   5. "All meshes empty" — meshes exist but zero nodes globally.
  *      The CTA still offers a spawn action because at least one
  *      mesh is wired up; it just has no agents yet.
- *   5. "Filters exclude all" — there ARE nodes, just none that
+ *   6. "Filters exclude all" — there ARE nodes, just none that
  *      match the active controls. The way out is `onClearFilters`,
  *      NOT adding meshes or spawning (issue #1609 mirrors this for
  *      the dedicated Filtered view; #1536 generalises it).
  */
 export function classifyCanvasEmpty(input: CanvasEmptyStateInput): CanvasEmptyDecision {
   if (input.meshCount === 0) return { branch: 'no-meshes' };
-  if (input.viewMode === 'pinned') return { branch: 'pinned-empty' };
-  if (input.viewMode === 'mesh' && input.scopedCount === 0 && input.selectedMeshId !== null) {
-    return { branch: 'selected-empty', meshId: input.selectedMeshId };
+  if (input.scope.viewMode === 'pinned') return { branch: 'pinned-empty' };
+  // `isMeshScoped` is the scope's own answer to "is there a Mesh in scope?",
+  // so Mesh Grid with nothing chosen and Mesh Grid with a chosen-but-empty
+  // Mesh cannot be told apart by re-deriving anything (#2070 review).
+  if (input.scope.viewMode === 'mesh' && !input.scope.isMeshScoped) return { branch: 'no-mesh-selected' };
+  if (input.scope.viewMode === 'mesh' && input.scopedCount === 0 && input.scope.mesh !== null) {
+    return { branch: 'selected-empty', meshId: input.scope.mesh.id };
   }
   if (input.totalNodeCount === 0) return { branch: 'all-empty' };
   if (input.filteredCount === 0) return { branch: 'filters-exclude-all' };
@@ -403,6 +414,37 @@ function PinnedEmptyBranch({ onViewAll }: { onViewAll: () => void }) {
   );
 }
 
+/** "Mesh Grid has no Mesh to scope to" (#2071) — the sidebar selection is
+ * empty, so the Mesh Grid renders nothing. The copy names the missing
+ * selection rather than the agents or the filters (neither is why the grid
+ * is empty). The CTA is the same escape hatch Pinned uses: All Nodes, the
+ * cross-Mesh view that needs no selection. */
+function NoMeshSelectedBranch({ onViewAll }: { onViewAll: () => void }) {
+  return (
+    <EmptyShell
+      icon={folderIcon}
+      heading="No mesh selected"
+      body="The Mesh Grid shows one mesh's agents. Pick a mesh from the sidebar, or view all nodes across every mesh."
+      cta={
+        <button
+          type="button"
+          data-testid="canvas-empty-view-all"
+          onClick={onViewAll}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-accent-cyan text-text-inverse font-sans font-medium text-sm hover:bg-accent-blue transition-colors border border-transparent"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect width="7" height="9" x="3" y="3" rx="1" />
+            <rect width="7" height="5" x="14" y="3" rx="1" />
+            <rect width="7" height="9" x="14" y="12" rx="1" />
+            <rect width="7" height="5" x="3" y="16" rx="1" />
+          </svg>
+          View All Nodes
+        </button>
+      }
+    />
+  );
+}
+
 export function CanvasEmptyState({
   input,
   callbacks,
@@ -411,6 +453,8 @@ export function CanvasEmptyState({
   switch (decision.branch) {
     case 'no-meshes':
       return <NoMeshesBranch callbacks={callbacks} harnessReady={input.harnessReady} />;
+    case 'no-mesh-selected':
+      return <NoMeshSelectedBranch onViewAll={callbacks.onViewAll} />;
     case 'selected-empty':
       // The classifier's discriminated union returns `meshId: number`
       // (non-nullable) on this branch — TypeScript narrows the type

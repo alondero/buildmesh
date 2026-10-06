@@ -6,6 +6,8 @@ import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeSto
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
 import { activityMemberIds, activityRootId, groupActivityNodes, handoverTargets, indexAgentNodes } from '../../src/lib/nodeActivities';
 import { deriveVisibleNodes } from '../../src/components/AgentNodeView/gridFilterSort';
+import { deriveScope, type DerivedScope, type FilterControls } from '../../src/lib/viewModes';
+import type { ViewMode } from '../../src/stores/uiStore';
 import { NodeCard } from '../../src/components/AgentNodeView/NodeCard';
 import { jumpToNextAwaitingNode } from '../../src/lib/awaitingInputShortcuts';
 
@@ -52,6 +54,24 @@ const ownerships = { 1: ownership(1), 2: ownership(2, 1) };
 const controls = { gridSearchQuery: '', gridProviderFilter: null, gridStatusFilter: null,
   gridSortBy: 'custom' as const, gridSortDirection: 'asc' as const };
 
+// #2071 — the grid ordering layer takes the ONE derived scope rather than
+// re-deriving scope from the selection and the focused node, so these tests
+// hand it the same `deriveScope` the production render path builds.
+const scope = (
+  viewMode: ViewMode,
+  agentNodes: AgentNode[],
+  selectedMeshId: number | null,
+  activeNodeId: number | null,
+  filterControls: FilterControls,
+): DerivedScope => deriveScope({
+  viewMode,
+  lastNonSingleMode: viewMode === 'single' ? 'all' : viewMode,
+  agentNodes,
+  selectedMeshId,
+  activeNodeId,
+  controls: filterControls,
+});
+
 function card() {
   return <NodeCard nodeId={1} memberIds={[1, 2, 4]} isActive
     onActivate={(id, utility, utilityMode) => useNodeActivityStore.getState().activateNode(id, utility, utilityMode)} />;
@@ -73,12 +93,13 @@ describe('node activities', () => {
     expect(state.groups).toEqual([[3, 1]]);
     expect(JSON.parse(localStorage.getItem('buildmesh.node-groups')!)).toEqual([[3, 1]]);
     expect(activityMemberIds(nodes, ownerships, state.groups)).toEqual({ 3: [3, 1, 2] });
-    expect(deriveVisibleNodes('all', nodes, 1, 2, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    expect(deriveVisibleNodes(scope('all', nodes, 1, 2, controls), nodes, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
     state.activateNode(2, true, 'build');
     expect(useNodeActivityStore.getState().selections[3]).toEqual({ nodeId: 2, utility: true });
     expect(useAgentNodeStore.getState().activeNodeId).toBe(2);
-    expect(deriveVisibleNodes('filtered', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships, state.groups).map(n => n.id)).toEqual([3]);
-    expect(deriveVisibleNodes('pinned', nodes.map(n => ({ ...n, is_pinned: n.id === 2 })), 1, 2, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    expect(deriveVisibleNodes(scope('filtered', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }), nodes, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships, state.groups).map(n => n.id)).toEqual([3]);
+    const pinnedNodes = nodes.map(n => ({ ...n, is_pinned: n.id === 2 }));
+    expect(deriveVisibleNodes(scope('pinned', pinnedNodes, 1, 2, controls), pinnedNodes, controls, ownerships, state.groups).map(n => n.id)).toEqual([3]);
   });
 
   it('merges groups in insertion order and refuses self, missing, archived and cross-mesh targets', () => {
@@ -146,8 +167,10 @@ describe('node activities', () => {
     const independent = [node(1), node(2), node(3)];
     useAgentNodeStore.setState({ nodesById: indexAgentNodes(independent), circuitOwnerships: {} });
     useNodeActivityStore.getState().groupNodes(1, 3);
-    const visible = () => deriveVisibleNodes('all', useAgentNodeStore.getState().getAgentNodes(), 1, 1,
-      controls, {}, useNodeActivityStore.getState().groups).map(n => n.id);
+    const visible = () => deriveVisibleNodes(
+      scope('all', useAgentNodeStore.getState().getAgentNodes(), 1, 1, controls),
+      useAgentNodeStore.getState().getAgentNodes(), controls, {}, useNodeActivityStore.getState().groups,
+    ).map(n => n.id);
     expect(visible()).toEqual([2, 3]);
     await useAgentNodeStore.getState().swapAgentNodes(2, 3);
     expect(visible()).toEqual([3, 2]);
@@ -206,10 +229,12 @@ describe('node activities', () => {
   });
 
   it('groups reviewers in all/mesh grids and keeps child-only filter and pin matches accessible', () => {
-    expect(deriveVisibleNodes('all', nodes, 1, 2, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
-    expect(deriveVisibleNodes('mesh', nodes, 1, 2, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
-    expect(deriveVisibleNodes('filtered', nodes, 1, 2, { ...controls, gridSearchQuery: 'Reviewer' }, ownerships).map(n => n.id)).toEqual([1]);
-    expect(deriveVisibleNodes('pinned', nodes.map(n => ({ ...n, is_pinned: n.id === 2 })), 1, 2, controls, ownerships).map(n => n.id)).toEqual([1]);
+    const pinnedNodes = nodes.map(n => ({ ...n, is_pinned: n.id === 2 }));
+    const searching = { ...controls, gridSearchQuery: 'Reviewer' };
+    expect(deriveVisibleNodes(scope('all', nodes, 1, 2, controls), nodes, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
+    expect(deriveVisibleNodes(scope('mesh', nodes, 1, 2, controls), nodes, controls, ownerships).map(n => n.id)).toEqual([1, 3]);
+    expect(deriveVisibleNodes(scope('filtered', nodes, 1, 2, searching), nodes, searching, ownerships).map(n => n.id)).toEqual([1]);
+    expect(deriveVisibleNodes(scope('pinned', pinnedNodes, 1, 2, controls), pinnedNodes, controls, ownerships).map(n => n.id)).toEqual([1]);
   });
 
   it('leaves orphaned, cross-mesh and cyclic relationships accessible', () => {

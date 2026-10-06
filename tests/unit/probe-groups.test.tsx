@@ -13,7 +13,7 @@ beforeEach(() => {
   useMeshStore.setState({ selectedMeshId: 1, meshes: [mesh] as never, meshesById: new Map([[1, mesh]]) as never });
   seedAgentNodes([{ id: 5, mesh_id: 1, name: 'Fix API', path: '/api-work', branch: 'feature', status: 'idle', env: 'windows' } as AgentNode]);
   useAgentNodeStore.setState({ activeNodeId: 5 });
-  useUIStore.setState({ probeTab: 'files', probeContextPins: {}, probeWorkingSet: { tabs: ['files'], mru: ['files'] }, viewMode: 'mesh' });
+  useUIStore.setState({ probeTab: 'files', probeWorkingSet: { tabs: ['files'], mru: ['files'] }, viewMode: 'mesh' });
 });
 afterEach(cleanup);
 
@@ -37,8 +37,7 @@ describe('Probe group navigation', () => {
       .toEqual(['review', 'usage', 'issues']);
   });
 
-  it('Files buttons expose selection, baselines and keyboard navigation without transferring pins', () => {
-    useUIStore.setState({ probeContextPins: { review: { tab: 'review', lens: 'agent', meshId: 1, nodeId: 5 } } });
+  it('Files buttons expose selection, baselines and keyboard navigation', () => {
     render(<RelatedTools />);
     const group = screen.getByRole('group', { name: 'Files & changes views' });
     const explorer = within(group).getByRole('button', { name: 'Explorer' });
@@ -49,14 +48,12 @@ describe('Probe group navigation', () => {
     expect(document.activeElement).toBe(changes);
     expect(changes.getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('files-baseline').textContent).toBe('Agent changes vs merge base (origin/trunk) · Agent scope');
-    expect(useUIStore.getState().probeContextPins.files).toBeUndefined();
     fireEvent.keyDown(changes, { key: 'Home' }); expect(document.activeElement).toBe(explorer);
     fireEvent.keyDown(explorer, { key: 'End' }); expect(document.activeElement).toBe(changes);
     fireEvent.keyDown(changes, { key: 'ArrowRight' }); expect(document.activeElement).toBe(explorer);
     fireEvent.keyDown(explorer, { key: 'ArrowLeft' }); expect(document.activeElement).toBe(changes);
     act(() => useUIStore.getState().openProbeTab('files'));
     expect(explorer.getAttribute('aria-pressed')).toBe('true');
-    expect(useUIStore.getState().probeContextPins.review).toEqual({ tab: 'review', lens: 'agent', meshId: 1, nodeId: 5 });
   });
 
   it('GitHub subviews preserve exact destinations and omit Files comparison prose', () => {
