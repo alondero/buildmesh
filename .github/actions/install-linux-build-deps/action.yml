@@ -19,21 +19,25 @@ runs:
     # The download half of `apt-get install` is the expensive half, and it is
     # the same set of packages in all nine jobs. Point apt's own archive cache
     # at a workspace directory so the .debs it downloads survive the job as an
-    # actions/cache entry, keyed on the runner image (Ubuntu releases package
-    # different versions) and on this file (which owns the package list, so
-    # editing it invalidates the entry by itself — no hand-maintained version
-    # salt to forget).
+    # actions/cache entry, keyed on the runner OS and on this file (which owns
+    # the package list, so editing it invalidates the entry by itself — no
+    # hand-maintained version salt to forget).
+    #
+    # There is deliberately no runner-image component in the key:
+    # `runner.image` evaluates to an empty string inside a composite action, so
+    # including it only produces a misleading empty segment. A runner-image
+    # change does not need it — see the self-healing note below.
     #
     # The cache is apt's own supported mechanism, not an extracted-file
     # reconstruction: apt matches a cached .deb against the version its index
-    # wants and downloads only what is missing, so a stale or partial entry
-    # costs a download and nothing else. That is what makes the fail-loudly
-    # behaviour below worth keeping.
+    # wants and downloads only what is missing, so a stale entry — including
+    # one left by an older runner image — costs a download and nothing else.
+    # That is what makes the fail-loudly behaviour below worth keeping.
     - name: Cache the downloaded .deb set
       uses: actions/cache@v4
       with:
         path: .ci-apt-archives
-        key: apt-debs-${{ runner.os }}-${{ runner.image }}-${{ hashFiles('.github/actions/install-linux-build-deps/action.yml') }}
+        key: apt-debs-${{ runner.os }}-${{ hashFiles('.github/actions/install-linux-build-deps/action.yml') }}
 
     - name: Install Linux system dependencies
       shell: bash
@@ -86,4 +90,17 @@ runs:
         if [ "$rc" -eq 124 ]; then
           echo "::error::apt-get install hit its 20-minute deadline - downloads were still progressing too slowly; re-run this job."
         fi
-        exit "$rc"
+        if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+
+        # actions/cache tars this directory as the unprivileged `runner` user,
+        # but apt ran as root (see APT::Sandbox::User above) and left a root-only
+        # `lock` file and a root-only `partial/` behind. tar then aborts with
+        # "Cannot open: Permission denied", the save is skipped as a *warning*,
+        # and the cache silently stays empty forever — measured on runs
+        # 37478897554 and 37480484066. Drop both and open the .debs up for
+        # reading so the job that runs first actually leaves an entry behind.
+        rm -rf "$GITHUB_WORKSPACE/.ci-apt-archives/lock" "$GITHUB_WORKSPACE/.ci-apt-archives/partial"
+        sudo chmod -R a+rX "$GITHUB_WORKSPACE/.ci-apt-archives"
+        # Log the size: an empty line here means the cache saved nothing, which
+        # is the symptom of a permissions problem rather than a slow mirror.
+        echo "apt archive cache: $(du -sh "$GITHUB_WORKSPACE/.ci-apt-archives" | cut -f1)"
