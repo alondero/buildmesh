@@ -16,6 +16,17 @@ const slash = path => path.replaceAll('\\', '/');
 // Git reports repo-relative paths with their on-disk case; Windows accepts any spelling.
 const caseKey = process.platform === 'win32' ? path => path.toLowerCase() : path => path;
 
+// rustfmt has no way to discover the edition, and a wrong one misparses the
+// file. Read it from the crate that owns the code instead of pinning a literal
+// that silently drifts from Cargo.toml.
+export function rustfmtEdition(root) {
+  const manifest = resolve(root, 'src-tauri', 'Cargo.toml');
+  const contents = existsSync(manifest) ? readFileSync(manifest, 'utf8') : '';
+  const edition = /^edition\s*=\s*"([^"]+)"/m.exec(/^\[package\][^[]*/m.exec(contents)?.[0] ?? '')?.[1];
+  if (!edition) throw new Error(`Cannot read edition = from the [package] section of ${manifest}.`);
+  return edition;
+}
+
 export function formatTouched(root, files, run) {
   const wanted = new Map(files.map(path => {
     const relativePath = slash(relative(root, resolve(root, path)));
@@ -49,7 +60,7 @@ function main(args) {
     process.exit(2);
   }
   const run = absolute => {
-    const result = spawnSync('rustfmt', ['--edition', '2021', ...absolute], { cwd: root, stdio: 'inherit' });
+    const result = spawnSync('rustfmt', ['--edition', rustfmtEdition(root), ...absolute], { cwd: root, stdio: 'inherit' });
     if (result.error || result.status !== 0) throw new Error(`rustfmt failed (${result.error?.message ?? `exit ${result.status}`}); other files were restored.`);
   };
   try {
