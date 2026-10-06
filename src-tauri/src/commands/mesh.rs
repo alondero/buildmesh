@@ -81,9 +81,7 @@ pub async fn pick_mesh_folder(app: tauri::AppHandle) -> Result<Option<PickedFold
 pub async fn add_mesh(app: tauri::AppHandle) -> Result<Mesh, String> {
     crate::commands::run_blocking("add_mesh", move || {
         tracing::debug!("add_mesh called");
-        let folder_path = app.dialog()
-            .file()
-            .blocking_pick_folder();
+        let folder_path = app.dialog().file().blocking_pick_folder();
         tracing::debug!("folder picker returned: {:?}", folder_path);
         let folder_path = folder_path.ok_or("No folder selected")?;
 
@@ -231,16 +229,16 @@ pub(crate) fn clone_target_into_mesh(
 
     let mut cmd = crate::process_util::git_command();
     cmd.arg("clone").arg(&target.url).arg(&dest);
-    let output = match crate::process_util::run_command_with_timeout(cmd, "git clone", CLONE_TIMEOUT)
-    {
-        Ok(output) => output,
-        Err(e) => {
-            // A timed-out clone is killed and reaped by the runner, but may
-            // have left a partial tree.
-            remove_partial_clone(&dest, dest_existed);
-            return Err(e);
-        }
-    };
+    let output =
+        match crate::process_util::run_command_with_timeout(cmd, "git clone", CLONE_TIMEOUT) {
+            Ok(output) => output,
+            Err(e) => {
+                // A timed-out clone is killed and reaped by the runner, but may
+                // have left a partial tree.
+                remove_partial_clone(&dest, dest_existed);
+                return Err(e);
+            }
+        };
 
     if !output.status.success() {
         remove_partial_clone(&dest, dest_existed);
@@ -356,8 +354,7 @@ pub async fn list_meshes() -> Result<Vec<Mesh>, String> {
 /// restructuring the FILL_LOCK to block user-initiated deletes, which is
 /// out of scope.
 pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
-    let pool_paths =
-        db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
+    let pool_paths = db::list_warm_paths_for_mesh_droppable(mesh_id).map_err(|e| e.to_string())?;
     // Mesh deletion cascades its agent rows directly in SQLite, so the
     // per-node service delete hook is not called. Snapshot the ids before the
     // cascade and release their process-lifetime attention state after the
@@ -370,7 +367,10 @@ pub fn delete_mesh_inner(mesh_id: i64) -> Result<(), String> {
         .collect::<Vec<_>>();
     db::delete_mesh(mesh_id).map_err(|e| e.to_string())?;
     for node_id in node_ids {
-        crate::agent::node_teardown::release(node_id);
+        // Mesh deletion is permanent, so it retires each cascaded node's PTY
+        // broadcast channel too — otherwise a mesh churn leaves one
+        // 128 KiB-history fanout per node behind forever (#2019).
+        crate::agent::node_teardown::release_for_deleted_node(node_id);
     }
     for path in pool_paths {
         if let Err(e) = crate::git::worktree::remove_one_worktree(&path) {
@@ -458,11 +458,9 @@ pub async fn get_local_ip() -> Result<String, String> {
                 return Err(format!("interface enumeration task panicked: {}", e));
             }
             Err(_elapsed) => {
-                return Err(
-                    "timeout enumerating interfaces (5s exceeded); \
+                return Err("timeout enumerating interfaces (5s exceeded); \
                      a stuck adapter driver may be blocking GetAdaptersAddresses"
-                        .to_string(),
-                );
+                    .to_string());
             }
         }
     };
