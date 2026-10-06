@@ -121,24 +121,79 @@ jobs:
 
   # The fast, frontend-only gate — the first result a PR hears back from. It
   # deliberately no longer compiles Rust: that moved to `rust-build`, so the
-  # Rust shards and both platform-smoke jobs no longer wait behind it. The
-  # required status-check name is owned by branch protection
+  # Rust shards and both platform-smoke jobs no longer wait behind it.
+  #
+  # It is an *aggregate* (issue #2046): the static gates and the vitest suites
+  # run as parallel jobs, because one vitest invocation over both suites was
+  # 220s of a ~310s job — the whole critical path for a frontend-only pull
+  # request. The required status-check name is owned by branch protection
   # (docs/development/releasing.md), so this job keeps the `Quality (Linux)`
-  # name and its aggregate meaning.
+  # name and its aggregate meaning, and it does no work of its own: it
+  # certifies that both branches underneath it succeeded.
   quality:
     name: Quality (Linux)
+    needs: [changes, quality-gates, quality-tests]
+    # `always()` plus an explicit result check rather than relying on the
+    # implicit skip, for the same reason `rust-bindings` below does it: a
+    # required status check that GitHub reports as *skipped* counts as
+    # satisfied, so a silently skipped aggregate would be a hole in the merge
+    # gate. It fails instead.
+    #
+    # The one legitimate skip is a pull request whose diff touched no frontend
+    # on a successful classification: there is nothing for the browser or
+    # vitest branch to prove, and a skipped check reports success the same way
+    # this job would. Every other absence (a failed classification, missing
+    # outputs) keeps the job running so the guard fails with a reason.
+    if: always() && !(needs.changes.outputs.frontend == 'false' && needs.changes.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # The dependency results arrive as env vars, not through an expression:
+      # GitHub's workflow validator rejects the `needs.*.result` wildcard
+      # inside a function call (`join(needs.*.result, " ")` fails the whole file
+      # with zero jobs), so read the jobs individually. A matrix dependency's
+      # `result` is `success` only when every leg succeeded, which is the
+      # aggregate this gate needs.
+      - name: Refuse to pass unless both frontend branches succeeded
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          GATES_RESULT: ${{ needs.quality-gates.result }}
+          TESTS_RESULT: ${{ needs.quality-tests.result }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
+        run: |
+          # A classification that did not succeed leaves empty outputs, which
+          # would otherwise read as "no frontend changed" and skip the vitest
+          # branch. Fail closed, exactly as the Rust gate does.
+          if [ "$CHANGES_RESULT" != success ] || [ -z "$FRONTEND_CHANGED" ]; then
+            echo "::error::change-scope result=$CHANGES_RESULT frontend='$FRONTEND_CHANGED' - refusing to certify the frontend suite without a successful classification."
+            exit 1
+          fi
+          if [ "$GATES_RESULT" != success ] || [ "$TESTS_RESULT" != success ]; then
+            echo "::error::quality-gates=$GATES_RESULT quality-tests=$TESTS_RESULT - the frontend gate is not fully green."
+            exit 1
+          fi
+          echo "frontend=$FRONTEND_CHANGED quality-gates=$GATES_RESULT quality-tests=$TESTS_RESULT"
+
+  # The static half of the frontend gate: the cheap checks, the frontend build,
+  # and the bundle budget. Split out of `quality` so it runs *beside* the vitest
+  # suites instead of in front of them — issue #2046. Nothing here needs a
+  # browser or a test run, so it never waits on either.
+  quality-gates:
+    name: Quality gates (Linux)
     needs: changes
     # Runs even when the change-scope job failed: a required check that skips
-    # reports green, and this one must not certify a tree whose classification
-    # never succeeded. `!cancelled()` rather than `always()` so a superseded
-    # run still stops. The steps gated on the classification below treat an
-    # empty output as "unknown, run it" for the same reason.
+    # reports green, and the aggregate above must not certify a tree whose
+    # classification never succeeded. `!cancelled()` rather than `always()` so
+    # a superseded run still stops. The steps gated on the classification
+    # below treat an empty output as "unknown, run it" for the same reason.
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    # A backstop above the real work (npm ci, the static gates, the frontend
-    # build, Chromium, and the vitest suites). It no longer contains the Rust
-    # compile, so the old 150-minute floor — sized around a lost-runner hang in
-    # `cargo test` — is unnecessary: a hung step here is caught far sooner.
+    # A backstop above the real work (npm ci, the static gates, and the
+    # frontend build). It no longer contains the Rust compile, so the old
+    # 150-minute floor — sized around a lost-runner hang in `cargo test` — is
+    # unnecessary: a hung step here is caught far sooner.
     timeout-minutes: 45
 
     steps:
@@ -178,7 +233,7 @@ jobs:
           if [[ "$base" =~ ^0+$ ]]; then base=HEAD; fi
           node scripts/check-agent-diff.mjs --base "$base"
 
-      # Issue #1545 ??? gate the README against drift in the Provider enum
+      # Issue #1545 — gate the README against drift in the Provider enum
       # count, supported-platforms claim, SmartScreen warning, and the
       # CLAUDE.md "no internal issue numbers in user-facing docs" rule.
       # Cheap (no build), runs in ~50ms; safe to add at the top of the
@@ -199,7 +254,7 @@ jobs:
             node scripts/check-docs.mjs
           fi
 
-      # Issue #1542 ??? enforced ESLint + React Hooks gate. Two steps:
+      # Issue #1542 — enforced ESLint + React Hooks gate. Two steps:
       #  (a) `npm run lint` runs ESLint across the codebase; the flat
       #      config excludes `src/types/generated/**`, `dist/**`, the
       #      agent working dir, docs, and the lint-fixtures dir so a
@@ -207,7 +262,7 @@ jobs:
       #      (closed #1242 was a real one) before they ship.
       #  (b) `npm run lint:fixtures` runs ESLint against the two
       #      intentional-violation fixtures and asserts each one trips
-      #      its target rule. This is the inverse of (a) ??? it must
+      #      its target rule. This is the inverse of (a) — it must
       #      succeed (the gate is live), proving a future rule tweak
       #      that accidentally silences React Hooks would fail CI.
       # Run before the build so a syntax-level regression trips in
@@ -235,39 +290,122 @@ jobs:
         run: npm run check:bundle
 
       # `tests/integration/ui-shot.test.ts` drives the fixture UI in headless
-      # Chromium (scripts/ui-shot.mjs) ??? it launches a real browser rather
-      # than mocking one, so the suite cannot pass on a runner without the
-      # pinned browser build. A GitHub runner has none, and `launchChromium`
-      # throws instead of skipping, so the job installs it here (issue #1520).
-      # Skipped when the change-scope job reports frontend=false: a
-      # Rust-only pull request has nothing for a browser suite to run
-      # against, and the skip keeps the required Quality check green. An
-      # empty output (the classification failed) is unknown, and unknown
-      # runs the browser rather than skipping it.
-      - name: Install Chromium for the UI screenshot tests
-        if: needs.changes.outputs.frontend != 'false'
-        run: npx playwright install --with-deps chromium
-
-      # Single invocation runs both unit and integration suites in the
-      # same vitest worker-pool boot (cheaper than two separate calls
-      # which each start node + transform every module twice). Issue #1257
-      # ??? --pool=threads is required; the default forks pool silently
-      # times out inside CI's container and reports PASS(0) FAIL(0) exit
-      # 0, the same false-green we hit in worktrees. Tests scope is
-      # explicit (no `vitest run` default) so a new suite dir can't sneak
-      # in. Skipped for Rust-only pull requests (change-scope job), for
-      # the same reason as the Chromium install above; the static gates,
-      # lint, docs checks, and frontend build in this job still run. An
-      # empty output (failed classification) runs the suites.
-      - name: Run vitest test suite (unit + integration)
-        if: needs.changes.outputs.frontend != 'false'
-        run: npx vitest run --pool=threads tests/unit tests/integration
-
+      # Chromium (scripts/ui-shot.mjs) and is the one suite that needs a
+      # browser build. It now runs in the `quality-tests` leg that owns the
+      # integration suite, which installs Chromium there — not here, so a
+      # frontend-only pull request no longer pays for a browser the vitest
+      # branch installs on its own critical path.
+      #
       # Fail CI if any code path spawns `git` via bare `Command::new("git")`
       # or sets `creation_flags` inline. Only process_util may own those details.
       # Node-only, so it lives in the fast frontend gate rather than the compile.
       - name: Verify no inline process-spawn patterns outside process_util (gh665/gh690)
         run: node scripts/check-process-spawn-discipline.mjs
+
+  # The vitest half of the frontend gate, as parallel legs (issue #2046).
+  #
+  # One `vitest run tests/unit tests/integration` measured 220s — 126s on one
+  # run, 212s on another — and Quality was the entire critical path for a
+  # frontend-only pull request. Profiling the suite (287 files) showed the
+  # serial test time splits almost evenly: the unit suites are 312s across 277
+  # files and the ten integration files are 88s, but one of those,
+  # `ui-shot.test.ts`, is 80s of it because it drives a real browser.
+  #
+  # So the unit suite is split by vitest's own `--shard` (which balances by file
+  # duration and gives every file to exactly one shard) and the integration
+  # suite — one slow browser-bound file — stays whole in a third leg. Measured
+  # locally, that is 139 and 138 files with zero overlap.
+  #
+  # Only the integration leg installs Chromium, and that is not a guess: the
+  # unit suites name no browser test. The three unit files that mention
+  # Playwright read `ui-shot-node-status.steps.mjs` as *text* or quote Chromium
+  # in a comment, and no file under tests/unit calls `launchChromium`, so the
+  # split does not scatter the browser across legs whose shard assignment
+  # cannot be predicted from here. `browser` is still declared per leg so a leg
+  # that does need one says so, and a missing browser fails loudly anyway:
+  # `launchChromium` throws rather than skipping.
+  #
+  # `tests/agent-infra/vitest-legs.test.mjs` gates this matrix: the shard
+  # indices must be exactly 1..N over one N, the suite directories must
+  # partition the two directories the single combined invocation used to name,
+  # and a leg naming `tests/integration` must be the leg that installs the
+  # browser. A runtime `vitest list` gate like the Rust one has was measured
+  # and rejected — one boot costs ~57s, four boots would cost more wall-clock
+  # than this split saves.
+  quality-tests:
+    name: Quality vitest (${{ matrix.leg.label }})
+    needs: changes
+    # Same reasoning as the Chromium and vitest steps this replaced: a
+    # Rust-only pull request has nothing for a browser or a test suite to run
+    # against, and the skip keeps the required check green. An empty output
+    # after a failed classification is unknown, and unknown runs the suites.
+    if: ${{ !cancelled() && needs.changes.outputs.frontend != 'false' }}
+    runs-on: ubuntu-latest
+    # The old 150-minute floor belonged to the job that also compiled Rust.
+    # A hung vitest leg is caught by this cap in minutes.
+    timeout-minutes: 45
+    strategy:
+      # A failed leg must not cancel its siblings' evidence.
+      fail-fast: false
+      matrix:
+        leg:
+          - label: unit 1/2
+            args: "--pool=threads --shard=1/2 tests/unit"
+            browser: "false"
+          - label: unit 2/2
+            args: "--pool=threads --shard=2/2 tests/unit"
+            browser: "false"
+          - label: integration
+            args: "--pool=threads tests/integration"
+            browser: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # `npm ci` is a dependency of `npx vitest`, and of the browser install.
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # The browser build is ~170 MB and the pinned Playwright version is what
+      # selects it, so cache on the lockfile that pins that version: this leg
+      # and `verify-smoke` restore the same Chromium instead of each
+      # downloading it (issue #2046). Only the legs that declare `browser:
+      # "true"` pay even the cache restore.
+      - name: Cache the Playwright browser build
+        if: ${{ matrix.leg.browser == 'true' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # `tests/integration/ui-shot.test.ts` drives the fixture UI in headless
+      # Chromium (scripts/ui-shot.mjs) — it launches a real browser rather than
+      # mocking one, so the suite cannot pass on a runner without the pinned
+      # browser build. A GitHub runner has none, and `launchChromium` throws
+      # instead of skipping, so the leg installs it (issue #1520).
+      # `npx playwright install` re-validates the cached revision and
+      # re-downloads if it does not match, so a stale entry costs a download,
+      # not a broken test run. `--with-deps` stays: the system libraries are
+      # not files this cache can hold, and it is close to a no-op on a runner
+      # that already has them.
+      - name: Install Chromium for the UI screenshot tests
+        if: ${{ matrix.leg.browser == 'true' }}
+        run: npx playwright install --with-deps chromium
+
+      # One vitest boot per leg over the files that leg owns. `--pool=threads`
+      # is required; the default forks pool silently times out inside CI's
+      # container and reports PASS(0) FAIL(0) exit 0, the same false-green we
+      # hit in worktrees (issue #1257). The suite directory is explicit (no
+      # `vitest run` default) so a new suite dir can't sneak in.
+      - name: Run the ${{ matrix.leg.label }} vitest leg
+        run: npx vitest run ${{ matrix.leg.args }}
 
   # The single Rust compile, shared by every downstream Rust job so a cold
   # target directory is paid for once instead of seven times. It starts as
@@ -333,10 +471,20 @@ jobs:
       # Cache the expensive Linux test build once. The shards and the bindings
       # job restore this instead of rebuilding; the platform smoke jobs
       # deliberately do not persist OS-specific target directories.
+      #
+      # `shared-key` is what keeps that to *one* cache entry. By default
+      # rust-cache keys on the job id, so the compile, the shards, and the
+      # non-shard pass each saved their own ~590 MB copy of the same dependency
+      # artifacts — nine jobs, and on a Cargo.lock bump every one of them a
+      # fresh entry. The repository sits at 9.98 GB of GitHub's 10 GB cache
+      # budget, so that duplication is what evicts the very entries that make
+      # this job's compile 54s instead of minutes (issue #2046). One key means
+      # one entry: the first job to finish saves it and the rest no-op.
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
+          shared-key: linux-rust-target
 
       # Record the runner's disk and memory budget, drop the image's unused
       # toolchains, and add swap. Uploaded as an artifact rather than only
@@ -369,11 +517,19 @@ jobs:
           path: runner-budget.txt
           retention-days: 7
 
-      # tauri-build validates `frontendDist` (../dist) and the Rust suite embeds
-      # dist/mobile, so both bundles must exist before the compile. `npm run
-      # build` runs tsc + vite + vite --mode mobile.
-      - name: Build desktop + mobile bundles
-        run: npm run build
+      # Only `dist/mobile` has to exist before the compile:
+      # rust-embed folds it into the test binary
+      # (`http::assets::tests::mobile_assets_include_built_index_html` reads
+      # dist/mobile/index.html), and `npm run build:mobile` builds exactly it.
+      # The desktop bundle is not needed here — `Quality gates (Linux)` runs
+      # the full `npm run build` (tsc + both vite builds) and the required
+      # `Quality (Linux)` gate needs it to succeed — and skipping it took a
+      # measured 18s off this job's critical path (issue #2046). tauri-build
+      # only registers `frontendDist` as a rebuild trigger when the directory
+      # exists, and a debug-profile `generate_context!` does not embed assets
+      # at compile time, so the missing desktop bundle cannot fail this build.
+      - name: Build the mobile bundle
+        run: npm run build:mobile
 
       - name: Compile the Rust test binaries
         run: cargo test --locked --no-run
@@ -393,7 +549,7 @@ jobs:
       # Manual runs additionally exercise the real CLI contract at a known
       # version. Regular PRs stay hermetic and use deterministic help-parser
       # coverage in the Rust suite. A release tag runs this workflow through
-      # the `push` path and therefore skips both steps below ??? the release gate
+      # the `push` path and therefore skips both steps below — the release gate
       # is verification, not a live-CLI contract re-run.
       - name: Install pinned Codex CLI for proxy contract smoke
         if: github.event_name == 'workflow_dispatch'
@@ -404,7 +560,7 @@ jobs:
         run: cargo test --locked pinned_codex_cli_loads_profile_for_fresh_and_resume -- --ignored
         working-directory: src-tauri
 
-  # Issue #1520 ??? the Rust suite, sharded by module group.
+  # Issue #1520 — the Rust suite, sharded by module group.
   #
   # Seven runs of the first CI execution lost the hosted runner inside
   # `cargo test --lib`, every one of them with no step conclusion and no
@@ -412,7 +568,7 @@ jobs:
   # split into sequential steps only narrows it one step per hour-long cycle.
   # One job per module group instead means a lost runner costs exactly one
   # group, and every other shard keeps its log and its conclusion. `fail-fast:
-  # false` for the same reason ??? a sibling's failure must not cancel the
+  # false` for the same reason — a sibling's failure must not cancel the
   # evidence.
   #
   # Default thread count throughout: every DB-backed test installs a private
@@ -485,11 +641,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Warm cache from `rust-build`, which compiled the same targets.
+      # Warm cache from `rust-build`, which compiled the same targets. The
+      # shared key is `rust-build`'s: one entry for the whole Rust branch, so
+      # seven shards do not each keep a private copy of the same artifacts
+      # (issue #2046).
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          shared-key: linux-rust-target
 
       - name: Restore the built mobile assets
         uses: actions/download-artifact@v4
@@ -574,6 +734,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          shared-key: linux-rust-target
 
       - name: Restore the built mobile assets
         uses: actions/download-artifact@v4
@@ -630,7 +791,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      - name: Check Rust???TS type bindings are up to date
+      - name: Check Rust↔TS type bindings are up to date
         shell: bash
         run: |
           git add --intent-to-add src/types/generated
@@ -690,11 +851,11 @@ jobs:
           fi
           echo "rust=$RUST_CHANGED quality=$QUALITY_RESULT rust-build=$RUST_BUILD_RESULT rust-tests=$RUST_TESTS_RESULT rust-nonshard=$RUST_NONSHARD_RESULT"
 
-  # Issue #1257 ??? the Playwright verify-smoke spec (issue #157) was
-  # designed to run WITHOUT a Rust compile ??? it boots just Vite and
+  # Issue #1257 — the Playwright verify-smoke spec (issue #157) was
+  # designed to run WITHOUT a Rust compile — it boots just Vite and
   # installs a JS-side Tauri mock before any app module evaluates.
   # Previously this CI never ran it, so the receiver-binding regression
-  # class (#149 ??? bytes emitted but never reach xterm.js) had no
+  # class (#149 — bytes emitted but never reach xterm.js) had no
   # pre-merge gate. The job installs Chromium, runs only the
   # `verify-smoke` Playwright project, and stays well under 5 minutes.
   # Its only `needs` is the change-scope job, which costs a few seconds
@@ -729,7 +890,19 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Issue #157 ??? verify-smoke installs Chromium with its system
+      # The browser build is ~170 MB and the pinned Playwright version is what
+      # selects it, so cache on the lockfile that pins that version: this job
+      # and the vitest integration leg restore the same Chromium instead of
+      # each downloading it (issue #2046). `npx playwright install`
+      # re-validates the revision and re-downloads if it does not match, so a
+      # stale entry costs a download, not a broken test run.
+      - name: Cache the Playwright browser build
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Issue #157 — verify-smoke installs Chromium with its system
       # dependencies (libnss3, libatk-bridge2.0-0, etc.) so the headless
       # browser can render xterm.js + the React app. --with-deps is a
       # no-op on hosts that already have the libs.
@@ -797,13 +970,25 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Keep the Cargo download cache but do not retain an OS-specific target
-      # directory for these smoke builds.
-      - name: Cache Rust dependencies
+      # Keep the Cargo download cache; persist target directories on Windows only
+      # (issue #2046). This was the slowest job in the repository — 573s on a
+      # push to main, 326s of it a cold Tauri compile — and it delays the
+      # post-merge signal. Two reasons this is safe rather than a multi-GB
+      # target directory dumped into a 10 GB repository budget: rust-cache
+      # stores *dependency* artifacts only and never the workspace crate, so
+      # the entry is about the size of the Linux one (~590 MB); and its key
+      # already contains the runner OS, so this cannot collide with, or evict,
+      # the Linux entry the merge gate depends on.
+      #
+      # macOS stays deliberately cold: the cache action documents macOS target
+      # directories as its corruption workaround, its smoke is 245s, and the
+      # budget is better spent on the leg that was 535s. The `false` is
+      # deliberate rather than an oversight.
+      - name: Cache Cargo registry (and the Windows target)
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
-          cache-targets: false
+          cache-targets: ${{ matrix.os == 'windows-latest' }}
 
       - name: Install frontend dependencies
         run: npm ci

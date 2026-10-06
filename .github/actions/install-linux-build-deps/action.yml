@@ -9,12 +9,50 @@ description: >-
   `RUSTFLAGS=-C link-arg=-fuse-ld=lld`, which links a Tauri-sized binary with
   far less memory and time than GNU ld.
 
+  Nine jobs per Rust pull request pay this step (the compile, seven shards, and
+  the non-shard pass), so the .deb set is cached and apt unpacks it instead of
+  re-downloading 85+ packages every time (issue #2046).
+
 runs:
   using: composite
   steps:
+    # The download half of `apt-get install` is the expensive half, and it is
+    # the same set of packages in all nine jobs. Point apt's own archive cache
+    # at a workspace directory so the .debs it downloads survive the job as an
+    # actions/cache entry, keyed on the runner image (Ubuntu releases package
+    # different versions) and on this file (which owns the package list, so
+    # editing it invalidates the entry by itself — no hand-maintained version
+    # salt to forget).
+    #
+    # The cache is apt's own supported mechanism, not an extracted-file
+    # reconstruction: apt matches a cached .deb against the version its index
+    # wants and downloads only what is missing, so a stale or partial entry
+    # costs a download and nothing else. That is what makes the fail-loudly
+    # behaviour below worth keeping.
+    - name: Cache the downloaded .deb set
+      uses: actions/cache@v4
+      with:
+        path: .ci-apt-archives
+        key: apt-debs-${{ runner.os }}-${{ runner.image }}-${{ hashFiles('.github/actions/install-linux-build-deps/action.yml') }}
+
     - name: Install Linux system dependencies
       shell: bash
       run: |
+        # `Dir::Cache::archives` is where apt keeps downloaded .debs by default
+        # (/var/cache/apt/archives, which no runner persists between jobs).
+        # Redirecting it is the whole cache: on a hit apt still resolves and
+        # verifies every package and runs its maintainer scripts — it only
+        # skips the transfer. `APT::Sandbox::User=root` keeps the unprivileged
+        # _apt downloader from needing write access to the workspace directory
+        # this cache restores into.
+        APT_OPTS=(
+          -o Acquire::Retries=5
+          -o Acquire::http::Timeout=30
+          -o Acquire::https::Timeout=30
+          -o Dir::Cache::archives="$GITHUB_WORKSPACE/.ci-apt-archives"
+          -o APT::Sandbox::User=root
+        )
+        mkdir -p "$GITHUB_WORKSPACE/.ci-apt-archives/partial"
         # A flaky mirror must fail the step, not burn the job cap in silence:
         # attempt 1 of run 36885525121 crawled through `apt-get update` for
         # seven minutes and then sat on a stalled download until the job was
@@ -26,11 +64,6 @@ runs:
         # packages (WebKitGTK and friends) blew through a 10-minute cap on run
         # 36926316381 while still downloading. When a deadline does fire, say
         # so in the step log instead of leaving a bare 124.
-        APT_OPTS=(
-          -o Acquire::Retries=5
-          -o Acquire::http::Timeout=30
-          -o Acquire::https::Timeout=30
-        )
         rc=0
         sudo timeout --kill-after=30s 10m apt-get "${APT_OPTS[@]}" update || rc=$?
         if [ "$rc" -eq 124 ]; then
