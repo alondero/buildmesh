@@ -41,8 +41,11 @@ const read = (path: string) => readFileSync(resolve(REPO_ROOT, path), "utf8");
 const stripComments = (src: string) =>
   src.replace(/<#[\s\S]*?#>/g, "").replace(/^\s*#.*$/gm, "");
 
-// The behavioural suites shell out to PowerShell, which takes longer than
-// vitest's 5s default once a loaded CI runner is involved.
+// Every test below spawns a PowerShell process, so each one must carry this
+// timeout. It is not optional: the FIRST probe on a cold Linux runner pays
+// pwsh's startup cost and exceeded vitest's 5s default, failing CI in
+// "reads a readable file" while every later (warm) probe passed. Pass it as the
+// last argument of each behavioural `it` - do not rely on the default.
 const POWERSHELL_TIMEOUT_MS = 60_000;
 
 /**
@@ -203,7 +206,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       expect(field(out, "Readable")).toBe("True");
       expect(field(out, "Count")).toBe("2");
       expect(field(out, "First")).toBe("alpha");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it("treats a missing file as zero lines, not as unreadable", () => {
       // The app may not have created the log yet. Reporting this as unreadable
@@ -216,7 +219,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       ]);
       expect(field(out, "Readable")).toBe("True");
       expect(field(out, "Count")).toBe("0");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it("reports growth when the file gained lines", () => {
       const out = runProbe((dir) => [
@@ -232,7 +235,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       expect(field(out, "Checked")).toBe("True");
       expect(field(out, "Grew")).toBe("True");
       expect(field(out, "Count")).toBe("2");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it("reports no growth when the file is unchanged", () => {
       const out = runProbe((dir) => [
@@ -245,7 +248,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       ]);
       expect(field(out, "Checked")).toBe("True");
       expect(field(out, "Grew")).toBe("False");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it("does not false-panic when the baseline read failed", () => {
       // Regression for #2043: an unreadable baseline must never make every
@@ -259,7 +262,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       ]);
       expect(field(out, "Checked")).toBe("False");
       expect(field(out, "Grew")).toBe("False");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it("does not silently pass when the post-launch read failed", () => {
       // Regression for #158: collapsing an unreadable read to 0 lines makes
@@ -278,7 +281,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
       ]);
       expect(field(out, "Checked")).toBe("False");
       expect(field(out, "Grew")).toBe("False");
-    });
+    }, POWERSHELL_TIMEOUT_MS);
 
     it.runIf(process.platform === "win32")(
       "reports unreadable (and never throws) for an exclusively-locked file",
@@ -297,6 +300,7 @@ describe("launcher exit-code contract (issue #2043)", () => {
         expect(field(out, "Readable")).toBe("False");
         expect(field(out, "Count")).toBe("0");
       },
+      POWERSHELL_TIMEOUT_MS,
     );
   });
 });
