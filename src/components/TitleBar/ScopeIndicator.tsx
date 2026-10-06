@@ -69,46 +69,50 @@ import { dropdownId } from '../../lib/dropdownId';
  *
  * The label span is bounded (`max-w-[10rem]`, `truncate`) and its collapse tier
  * sits ABOVE every other control's: it is hidden below 1700px, where the
- * switcher segments and the utility pills already hide at 1400px (PR #1623).
- * That asymmetry is measured, not stylistic.
+ * switcher segments and the utility pills hide at the shared labelled tier
+ * (1440px since #2081 review, 1400px before it, PR #1623). That asymmetry is
+ * measured, not stylistic.
  *
  * Filtered is the worst case, and structurally so: it is the only mode whose
  * header grid is `grid-cols-[auto_minmax(0,1fr)_auto]`, so both flanking
  * tracks are content-sized `auto` and the centre absorbs whatever is left,
  * down to its own 16px padding floor. There the labelled indicator adds
  * 134.88px (32px glyph-only → 166.88px labelled) to a left track the switcher's
- * own labels have just grown from 518px to 862/893px. Measured against the
- * real window at the 13px root, that turns the Filtered search bar into an
- * overlap with the right cluster:
+ * own labels have just grown from 518px to 726px. Measured against the real
+ * window at the 13px root, that turns the Filtered search bar into an overlap
+ * with the right cluster. With the switcher labels AND this label both
+ * rendered:
  *
  *   viewport   left track   centre track   overflow   collides
- *   1200px     518px        339px          0          no
- *   1300px     518px        439px          0          no
- *   1400px     862px        16px           114px      YES
+ *   1400px     862px        16px           114px      YES   (old shared tier)
  *   1500px     893px        70px           73px       YES
  *   1600px     893px        170px          0          no
  *   1700px     893px        270px          0          no
  *   1920px     893px        490px          0          no
  *
- * The collision window is therefore exactly 1400–1599px — the band where the
- * switcher's labels have just appeared AND this label's would too. Below 1400
- * neither has paid (518px left track, centre 339–439px); at 1600 and up the
- * centre is wide enough to absorb the cost. Without the indicator the centre
- * had ~167px at 1400px and fitted its 130px content, so the indicator — not the
- * left cell, whose `scrollWidth` equals its `clientWidth` — is what broke it.
+ * The 1400px row is the measurement that motivated the old tier and is no
+ * longer reachable: the switcher's labels do not appear below 1440px. The
+ * labelled collision window is therefore exactly 1440–1599px — the band where
+ * the switcher's labels have just appeared AND this label's would too. At the
+ * 1440px boundary, derived from that width's measured glyph-only state (left
+ * 758px, centre 145px, min-content 145px), paying this label's 134.88px drops
+ * the centre to ~10px against a 143px min-content — still a collision. Below
+ * 1440 neither label has paid (518px left track); at 1600 and up the centre is
+ * wide enough to absorb the cost. Without the indicator the centre at 1440
+ * fits its 145px content exactly, so the indicator — not the left cell, whose
+ * `scrollWidth` equals its `clientWidth` — is what breaks the tier.
  *
  * 1700px rather than 1600px because 1600px is the first width measured CLEAR,
  * not a comfortable one: the centre lands at 170px against a 130–143px
  * min-content (the "Search or open" field, 143px of it once the
- * `SEARCH_SHORTCUT_LABEL` kbd chip is visible at ≥1400px), so the whole margin
- * is ~27px — and part of that min-content is a runtime string this control does
- * not own. At 1700px the centre is 270px, a measured 127px of slack. Between
- * 1400px and 1700px the indicator stays glyph-only, which costs the centre
- * nothing. 1600px would also be defensible if the chip label were fixed-width;
- * it is not.
- *
- * The switcher's own 1400px tier does not move: that ladder was measured
- * against the same Filtered search bar and still holds. Only this control pays.
+ * `SEARCH_SHORTCUT_LABEL` kbd chip is visible at the labelled tier), so the
+ * whole margin is ~27px — and part of that min-content is a runtime string this
+ * control does not own. At 1700px the centre is 270px, a measured 127px of
+ * slack. Between 1440px and 1700px the indicator stays glyph-only, which costs
+ * the centre nothing. 1600px would also be defensible if the chip label were
+ * fixed-width; it is not. Raising the shared ladder to 1440px only WIDENED the
+ * band this control hides through, so its own tier needs no move — it is the
+ * right number today and stays it.
  *
  * `aria-label` carries the same string as the visible label, so the
  * accessible name survives the collapse (and WCAG 2.5.3 Label in Name holds
@@ -406,8 +410,9 @@ export function ScopeIndicator() {
         {/* Bounded first, collapsed second — and collapsed at a LATER tier
             than the switcher's own (see the width-ladder note above): the
             label costs 134.88px, which the Filtered centre cell cannot absorb
-            between 1400px and 1599px. `max-[1699px]:hidden` must stay a class
-            literal so Tailwind v4's source scanner compiles it. */}
+            anywhere in the 1440–1599px labelled band. `max-[1699px]:hidden`
+            must stay a class literal so Tailwind v4's source scanner compiles
+            it. */}
         <span className="min-w-0 max-w-[10rem] truncate max-[1699px]:hidden">{text}</span>
       </button>
       {open && (

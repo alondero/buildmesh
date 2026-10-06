@@ -184,16 +184,25 @@ export function ViewModeSwitcher() {
             }`}
           >
             <Icon className="w-4 h-4 shrink-0" />
-            {/* Icon-only below 1400px window width — at exactly 1300px
-                the labels become visible but the centre's `w-80` (260px
-                at the 13px root) plus the side clusters' min-content
-                (~565px each when labels are visible) overflows the
-                available side tracks and clips the last segment
-                ("Filtered"). The 1400px floor keeps labels hidden in
-                the 1300–1399px range where the layout can't support
-                them (PR #1623 review). The aria-label keeps the
-                accessible name stable. */}
-            <span className="max-[1399px]:hidden">{label}</span>
+            {/* Icon-only below 1440px window width — the PR #1623 finding was that
+                the floor cannot be 1300px: at exactly 1300px the labels
+                become visible but the centre's `w-80` (260px at the 13px
+                root) plus the side clusters' min-content (~565px each when
+                labels are visible) overflows the available side tracks and
+                clips the last segment ("Filtered"). That moved the floor to
+                1400px, and #2081 review moved it again to 1440px, which is
+                the first width MEASURED clean in both header grids. In
+                Filtered (`grid-cols-[auto_minmax(0,1fr)_auto]` — both side
+                tracks content-sized `auto`, the centre absorbing the rest
+                down to a 16px floor) the labelled layout needs left 726px +
+                centre min-content 143px + right 538px = 1407px, so the
+                1400–1439 range overflowed (38px at exactly 1400 with the
+                scope indicator present, 6px with it hidden); in Mesh Grid
+                (`minmax(0,1fr)_auto_minmax(0,1fr)`) the left cell clipped by
+                6px at exactly 1400 while 1420 and 1440+ were clean. At 1440
+                Filtered the centre is 145px against a 145px min-content.
+                The aria-label keeps the accessible name stable. */}
+            <span className="max-[1439px]:hidden">{label}</span>
           </button>
         );
       })}

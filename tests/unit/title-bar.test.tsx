@@ -454,35 +454,38 @@ describe('TitleBar (bespoke window chrome)', () => {
     it('carries the responsive degradation classes (labels, chip, flex floors)', async () => {
       const { container } = await renderTitleBar();
       // Pill and switcher labels drop to icon-only below the SAME tier
-      // (1400px) since #1609 and PR #1623 — one toolbar, one ladder;
-      // the threshold moved from 1300px to 1400px to avoid a 2px clip on
-      // the rightmost ViewModeSwitcher segment ("Filtered") at exactly
-      // 1300px viewport (where labels become visible but the centre's
-      // `w-80` 260px + side clusters' min-content can't coexist). The
-      // kbd chip hides FIRST when narrowing at 1399px — user-facing
-      // affordances outlast the decorative keyboard hint. Class
-      // literals are the contract — they MUST stay as literal strings
-      // (not template literals) so Tailwind v4's source scanner
-      // compiles them. The media queries themselves are
-      // browser-rendered.
+      // (1440px) since #1609 and PR #1623 — one toolbar, one ladder.
+      // The threshold moved 1300 → 1400 (a 2px clip on the rightmost
+      // ViewModeSwitcher segment) and now 1400 → 1440 (#2081 review), where
+      // 1440 is the first width MEASURED clean in BOTH header grids: the
+      // labelled layout needs left 726px + centre min-content 143px +
+      // right 538px = 1407px, so 1400–1439 was over budget by 7px and
+      // clipped (the scope indicator's 32px glyph amplified it into a
+      // visible overlap). At 1440 Filtered the centre is 145px against a
+      // 145px min-content. The kbd chip hides FIRST when narrowing at
+      // 1439px — user-facing affordances outlast the decorative keyboard
+      // hint. Class literals are the contract — they MUST stay as literal
+      // strings (not template literals) so Tailwind v4's source scanner
+      // compiles them. The media queries themselves are browser-rendered.
       const remotePill = screen.getByRole('button', { name: 'Open mobile remote access' });
-      expect(remotePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
+      expect(remotePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
       const usagePill = screen.getByRole('button', { name: 'Open Usage' });
-      expect(usagePill.querySelector('span')?.className).toContain('max-[1399px]:hidden');
+      expect(usagePill.querySelector('span')?.className).toContain('max-[1439px]:hidden');
       const switcherGroup = screen.getByRole('group', { name: /view mode/i });
       const switcherLabel = switcherGroup.querySelector('span');
-      expect(switcherLabel?.className).toContain('max-[1399px]:hidden');
+      expect(switcherLabel?.className).toContain('max-[1439px]:hidden');
       const chip = container.querySelector('kbd');
-      expect(chip?.className).toContain('max-[1399px]:hidden');
+      expect(chip?.className).toContain('max-[1439px]:hidden');
       // The scope indicator is deliberately NOT on this tier. Its label
       // collapses LATER (`max-[1699px]:hidden`, pinned in the #2074 block
-      // below): at the 1400px tier the Filtered centre cell cannot afford the
-      // 134.88px a labelled indicator adds, and the measured collision window
-      // is exactly 1400–1599px. Asserted here as the inversion, so a future
-      // "one ladder for the whole bar" refactor cannot silently rejoin it.
+      // below): with the shared ladder at 1440px, the Filtered centre cell
+      // still cannot afford the 134.88px a labelled indicator adds between
+      // 1440 and 1600px (1600px is the first width measured clear, 1700px
+      // the first comfortable one). Asserted here as the inversion, so a
+      // future "one ladder for the whole bar" refactor cannot silently rejoin it.
       const scopeLabel = screen.getByTestId('scope-indicator').querySelector('span');
       expect(scopeLabel?.className).toContain('max-[1699px]:hidden');
-      expect(scopeLabel?.className).not.toContain('max-[1399px]:hidden');
+      expect(scopeLabel?.className).not.toContain('max-[1439px]:hidden');
       // Responsive palette width (PR #1623 review): the field is
       // `w-80` (260px at the 13px root) below 1786px viewport, and
       // bumps to its VS Code-parity `w-[640px]` at >=1786px where
@@ -684,19 +687,19 @@ describe('TitleBar (bespoke window chrome)', () => {
       const className = label?.className ?? '';
       // Truncate BEFORE the collapse: a bounded, ellipsised label at every
       // width. But the collapse tier sits ABOVE the switcher segments' and the
-      // utility pills' 1400px tier. Measured against the real window in the
+      // utility pills' 1440px tier. Measured against the real window in the
       // Filtered view — the only mode whose header grid is
       // `auto_minmax(0,1fr)_auto`, so the centre absorbs the overflow down to
       // its own 16px padding floor — a labelled indicator costs the left
-      // track 134.88px and overlapped the right cluster at exactly the tier
-      // where the switcher's own labels appear: 1400px (centre 16px, 114px
-      // overflow) and 1500px (centre 70px, 73px overflow). 1600px is the first
-      // width measured clear (centre 170px) and 1700px is the first width
-      // measured comfortable (centre 270px), so the label waits for 1700px.
+      // track 134.88px. With the shared ladder at 1440px the labelled tier
+      // occupies 1440–1599px, where the centre measured 170px at 1600px
+      // (first clear) and 270px at 1700px (first comfortable) against a
+      // 130–143px min-content. 1600px is the first width measured CLEAR, not
+      // a comfortable one, so the label waits for 1700px.
       expect(className).toContain('truncate');
       expect(className).toContain('max-w-[10rem]');
       expect(className).toContain('max-[1699px]:hidden');
-      expect(className).not.toContain('max-[1399px]:hidden');
+      expect(className).not.toContain('max-[1439px]:hidden');
       // The accessible name is the label string, so it survives the collapse.
       expect(screen.getByTestId('scope-indicator').getAttribute('aria-label')).toBe('demo-1');
     });
