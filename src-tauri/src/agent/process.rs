@@ -171,7 +171,14 @@ impl InputStamp {
 fn input_buffer_state_after(len: usize, bracketed_paste: bool, data: &[u8]) -> (usize, bool) {
     let mut input = TerminalInput::with_state(len, bracketed_paste);
     input.accept(data);
-    (if input.has_pending_sequence() { UNKNOWN_INPUT_BUFFER_LEN } else { input.len }, input.bracketed_paste)
+    (
+        if input.has_pending_sequence() {
+            UNKNOWN_INPUT_BUFFER_LEN
+        } else {
+            input.len
+        },
+        input.bracketed_paste,
+    )
 }
 
 #[cfg(test)]
@@ -218,19 +225,31 @@ impl AgentProcess {
     }
 
     /// Non-blocking enqueue onto the dedicated writer thread.
-    fn enqueue_input(&self, data: Vec<u8>, framing: InputFraming) -> Result<InputActivity, InputWriteError> {
-        self.enqueue_input_if_current(data, None, framing).map(|(_, activity)| activity)
+    fn enqueue_input(
+        &self,
+        data: Vec<u8>,
+        framing: InputFraming,
+    ) -> Result<InputActivity, InputWriteError> {
+        self.enqueue_input_if_current(data, None, framing)
+            .map(|(_, activity)| activity)
     }
 
     fn input_stamp_result(&self) -> Result<InputStamp, InputUnavailable> {
         let _guard = self.writer_tx.lock().unwrap();
         let input = self.input_decoder.lock().unwrap();
-        if input.bracketed_paste { return Err(InputUnavailable::Paste); }
+        if input.bracketed_paste {
+            return Err(InputUnavailable::Paste);
+        }
         if input.has_pending_sequence() || input.len == UNKNOWN_INPUT_BUFFER_LEN {
             return Err(InputUnavailable::UnknownInput);
         }
-        if input.len != 0 { return Err(InputUnavailable::Draft); }
-        Ok(InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
+        if input.len != 0 {
+            return Err(InputUnavailable::Draft);
+        }
+        Ok(InputStamp {
+            generation: self.generation,
+            version: self.input_version.load(Ordering::Relaxed),
+        })
     }
 
     /// Shared fence for observing or submitting an already staged draft.
@@ -240,17 +259,31 @@ impl AgentProcess {
     /// the comparison atomic with writes and process retirement.
     fn owns_staged_draft(&self, expected: &InputStamp) -> bool {
         !self.retired.load(Ordering::SeqCst)
-            && *expected == (InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) })
+            && *expected
+                == (InputStamp {
+                    generation: self.generation,
+                    version: self.input_version.load(Ordering::Relaxed),
+                })
             && !self.input_decoder.lock().unwrap().has_pending_sequence()
     }
 
-    fn enqueue_input_if_current(&self, data: Vec<u8>, expected: Option<InputStamp>, framing: InputFraming) -> Result<(Option<InputStamp>, InputActivity), InputWriteError> {
+    fn enqueue_input_if_current(
+        &self,
+        data: Vec<u8>,
+        expected: Option<InputStamp>,
+        framing: InputFraming,
+    ) -> Result<(Option<InputStamp>, InputActivity), InputWriteError> {
         let guard = self.writer_tx.lock().unwrap();
-        if self.retired.load(Ordering::SeqCst) { return Err(InputWriteError::Closed); }
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(InputWriteError::Closed);
+        }
         if expected.is_some_and(|expected| !self.owns_staged_draft(&expected)) {
             return Ok((None, InputActivity::default()));
         }
-        let stamp = InputStamp { generation: self.generation, version: self.input_version.load(Ordering::Relaxed) };
+        let stamp = InputStamp {
+            generation: self.generation,
+            version: self.input_version.load(Ordering::Relaxed),
+        };
         let mut input = self.input_decoder.lock().unwrap();
         // Failed sends must not advance the decoder, including half a reply.
         let mut next = input.clone();
@@ -266,8 +299,12 @@ impl AgentProcess {
         // gauge again — reserving first and returning `Closed` here would strand
         // `len` bytes and one message as a permanent phantom backlog on the
         // `DIAG` line until the entry is dropped (issue #1530 review).
-        let Some(tx) = guard.as_ref() else { return Err(InputWriteError::Closed); };
-        if !self.queue.admits(len) { return Err(InputWriteError::Backpressured); }
+        let Some(tx) = guard.as_ref() else {
+            return Err(InputWriteError::Closed);
+        };
+        if !self.queue.admits(len) {
+            return Err(InputWriteError::Backpressured);
+        }
         // The reservation is made under `writer_tx` (held above), so a
         // concurrent enqueue cannot slip between the headroom check and the
         // reservation, and the `try_send` result rolls it back exactly.
@@ -285,10 +322,21 @@ impl AgentProcess {
         }
         let version = if activity.user_input {
             self.input_version.fetch_add(1, Ordering::Relaxed) + 1
-        } else { stamp.version };
-        if activity.submitted { self.last_submit_ms.store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed); }
+        } else {
+            stamp.version
+        };
+        if activity.submitted {
+            self.last_submit_ms
+                .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
+        }
         *input = next;
-        Ok((Some(InputStamp { generation: self.generation, version }), activity))
+        Ok((
+            Some(InputStamp {
+                generation: self.generation,
+                version,
+            }),
+            activity,
+        ))
     }
 
     /// Live accounting for this agent's PTY input queue, for diagnostics.
@@ -398,13 +446,20 @@ impl AgentProcessRegistry {
     /// actual usage is observable, and it must fall back to zero once the
     /// writers drain (issue #1530).
     pub fn input_queue_totals(&self) -> (usize, u64) {
-        self.inner.iter().fold((0, 0), |(messages, bytes), (_, agent)| {
-            let (agent_messages, agent_bytes) = agent.input_queue();
-            (messages + agent_messages, bytes + agent_bytes)
-        })
+        self.inner
+            .iter()
+            .fold((0, 0), |(messages, bytes), (_, agent)| {
+                let (agent_messages, agent_bytes) = agent.input_queue();
+                (messages + agent_messages, bytes + agent_bytes)
+            })
     }
 
-    fn write_input_with_framing(&self, session_id: i64, data: &[u8], framing: InputFraming) -> Result<InputOutcome, String> {
+    fn write_input_with_framing(
+        &self,
+        session_id: i64,
+        data: &[u8],
+        framing: InputFraming,
+    ) -> Result<InputOutcome, String> {
         let agent = self
             .get(&session_id)
             .ok_or_else(|| "Agent not running".to_string())?;
@@ -454,7 +509,9 @@ impl AgentProcessRegistry {
             }
         };
         let activity = outcome.activity;
-        if !activity.user_input { return Ok(outcome); }
+        if !activity.user_input {
+            return Ok(outcome);
+        }
         // Mark THIS MESH as active so the background warm-pool worker holds
         // off its idle refills for this mesh's pool while the user is typing
         // into the terminal (issue #613 AC2; issue #634 scopes the activity
@@ -482,15 +539,21 @@ impl AgentProcessRegistry {
 
     /// Unlike report admission, a delivery watcher owns a nonempty staged draft.
     pub(crate) fn input_is_current(&self, session_id: i64, expected: &str) -> bool {
-        let Some(agent) = self.get(&session_id) else { return false; };
-        let Some(expected) = InputStamp::decode(expected) else { return false; };
+        let Some(agent) = self.get(&session_id) else {
+            return false;
+        };
+        let Some(expected) = InputStamp::decode(expected) else {
+            return false;
+        };
         let _guard = agent.writer_tx.lock().unwrap();
         agent.owns_staged_draft(&expected)
     }
 
     pub(crate) fn input_stamp_result(&self, session_id: i64) -> Result<String, InputUnavailable> {
-        self.get(&session_id).ok_or(InputUnavailable::MissingProcess)?
-            .input_stamp_result().map(InputStamp::encode)
+        self.get(&session_id)
+            .ok_or(InputUnavailable::MissingProcess)?
+            .input_stamp_result()
+            .map(InputStamp::encode)
     }
 
     /// Commit a recovered lifecycle fact while input cannot change. The
@@ -498,17 +561,26 @@ impl AgentProcessRegistry {
     /// database contention holds no PTY locks. The callback only performs the
     /// conditional mutation; global registry locks never span SQLite work.
     pub(crate) fn commit_recovered_turn(
-        &self, session_id: i64, expected: &str, completed_at_ms: i64,
+        &self,
+        session_id: i64,
+        expected: &str,
+        completed_at_ms: i64,
         commit: impl FnOnce() -> Result<bool, String>,
     ) -> Result<bool, String> {
-        let Some(expected) = InputStamp::decode(expected) else { return Ok(false); };
-        let Some(agent) = self.get(&session_id) else { return Ok(false); };
+        let Some(expected) = InputStamp::decode(expected) else {
+            return Ok(false);
+        };
+        let Some(agent) = self.get(&session_id) else {
+            return Ok(false);
+        };
         let _guard = agent.writer_tx.lock().unwrap();
         if !agent.owns_staged_draft(&expected)
             || !agent.input_decoder.lock().unwrap().empty_prompt()
             || agent.last_submit_ms.load(Ordering::Relaxed) >= completed_at_ms
             || !agent.reader_alive.load(Ordering::SeqCst)
-        { return Ok(false); }
+        {
+            return Ok(false);
+        }
         commit()
     }
 
@@ -521,10 +593,16 @@ impl AgentProcessRegistry {
     /// because the circuit treats `None` as "someone else owns this draft,
     /// never submit it automatically" and a mere full queue must not be
     /// mistaken for that (issue #1530).
-    pub(crate) fn write_bytes_if_current(&self, session_id: i64, data: &[u8], expected: &str) -> Result<Option<String>, InputWriteError> {
+    pub(crate) fn write_bytes_if_current(
+        &self,
+        session_id: i64,
+        data: &[u8],
+        expected: &str,
+    ) -> Result<Option<String>, InputWriteError> {
         let agent = self.get(&session_id).ok_or(InputWriteError::Closed)?;
         let expected = InputStamp::decode(expected).ok_or(InputWriteError::InvalidStamp)?;
-        agent.enqueue_input_if_current(data.to_vec(), Some(expected), InputFraming::ByteStream)
+        agent
+            .enqueue_input_if_current(data.to_vec(), Some(expected), InputFraming::ByteStream)
             .map(|(stamp, _)| stamp.map(InputStamp::encode))
     }
 
@@ -565,10 +643,16 @@ impl AgentProcessRegistry {
             // The compare-and-replace retries concurrent inserts, without
             // keeping the global map locked while waiting for an agent.
             let guard = previous.as_ref().map(|old| old.writer_tx.lock().unwrap());
-            if let Some(old) = previous.as_ref() { old.retired.store(true, Ordering::SeqCst); }
-            let replaced = self.inner.replace_if_current(session_id, previous.as_ref(), agent.clone());
+            if let Some(old) = previous.as_ref() {
+                old.retired.store(true, Ordering::SeqCst);
+            }
+            let replaced =
+                self.inner
+                    .replace_if_current(session_id, previous.as_ref(), agent.clone());
             drop(guard);
-            if replaced { break previous; }
+            if replaced {
+                break previous;
+            }
         };
         if let Some(prev) = previous {
             prev.deliberate_kill.store(true, Ordering::SeqCst);
@@ -582,7 +666,9 @@ impl AgentProcessRegistry {
     /// (issue #1531).
     fn remove_if_current(&self, session_id: i64, generation: u64) -> Option<Arc<AgentProcess>> {
         let agent = self.get(&session_id)?;
-        if agent.generation != generation { return None; }
+        if agent.generation != generation {
+            return None;
+        }
         let _guard = agent.writer_tx.lock().unwrap();
         agent.retired.store(true, Ordering::SeqCst);
         self.inner
@@ -660,7 +746,9 @@ impl AgentProcessRegistry {
     /// Cleanup callers must name the incarnation they observed, so a delayed
     /// retirement cannot tear down a replacement process for the same node.
     pub(crate) fn kill_session_if_generation(&self, session_id: i64, generation: u64) -> bool {
-        let Some(agent) = self.remove_if_current(session_id, generation) else { return false; };
+        let Some(agent) = self.remove_if_current(session_id, generation) else {
+            return false;
+        };
         agent.deliberate_kill.store(true, Ordering::SeqCst);
         teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
         true
@@ -668,7 +756,9 @@ impl AgentProcessRegistry {
 
     pub fn kill_session(&self, session_id: i64) {
         while let Some(current) = self.get(&session_id) {
-            let Some(agent) = self.remove_if_current(session_id, current.generation) else { continue; };
+            let Some(agent) = self.remove_if_current(session_id, current.generation) else {
+                continue;
+            };
             // Flag the teardown as deliberate BEFORE closing anything,
             // so the reader thread — EOFed by the master drop below —
             // is guaranteed to observe the flag when its epilogue runs.
@@ -746,10 +836,7 @@ fn teardown_incarnation(
     match join {
         JoinPolicy::Both => {
             if let Some(handle) = agent.reader_handle.lock().unwrap().take() {
-                crate::pty::lifecycle::join_with_timeout(
-                    handle,
-                    std::time::Duration::from_secs(2),
-                );
+                crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
         }
         JoinPolicy::WriterOnly => {
@@ -830,7 +917,9 @@ impl ProcessRegistryApi for AgentProcessRegistry {
         AgentProcessRegistry::write_input(self, session_id, data)
     }
     fn input_queue(&self, session_id: i64) -> (usize, u64) {
-        self.get(&session_id).map(|agent| agent.input_queue()).unwrap_or_default()
+        self.get(&session_id)
+            .map(|agent| agent.input_queue())
+            .unwrap_or_default()
     }
     fn resize_pty(&self, session_id: i64, cols: u16, rows: u16) -> Result<(), String> {
         AgentProcessRegistry::resize_pty(self, session_id, cols, rows)
@@ -950,7 +1039,10 @@ pub(crate) mod testing {
     /// (`write_bytes_if_current` is not on `ProcessRegistryApi`).
     pub(crate) fn capturing_registry(
         session_id: i64,
-    ) -> (Arc<AgentProcessRegistry>, std::sync::mpsc::Receiver<Vec<u8>>) {
+    ) -> (
+        Arc<AgentProcessRegistry>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
         let registry = Arc::new(AgentProcessRegistry::new());
         super::tests::insert_trivial_agent(&registry, session_id);
         // Swap the draining writer for a channel the caller owns, so every byte
@@ -1045,7 +1137,11 @@ pub(crate) mod testing {
         });
         (
             registry,
-            Arc::new(BlockedWriter { taken, written, open }),
+            Arc::new(BlockedWriter {
+                taken,
+                written,
+                open,
+            }),
         )
     }
 }
@@ -1085,27 +1181,52 @@ mod tests {
         let agent = registry.get(&id).unwrap();
         *agent.writer_tx.lock().unwrap() = Some(tx);
         let stamp = registry.input_stamp(id).unwrap();
-        for packet in [b"\x1b[I".as_slice(), b"\x1b[O", b"\x1b[12;34R", b"\x1b[?1;2c", b"\x1b[<0;24;12M"] {
+        for packet in [
+            b"\x1b[I".as_slice(),
+            b"\x1b[O",
+            b"\x1b[12;34R",
+            b"\x1b[?1;2c",
+            b"\x1b[<0;24;12M",
+        ] {
             for byte in packet {
-                assert_eq!(accepted_activity(&registry, id, &[*byte]), InputActivity::default());
+                assert_eq!(
+                    accepted_activity(&registry, id, &[*byte]),
+                    InputActivity::default()
+                );
                 assert_eq!(rx.recv().unwrap(), vec![*byte]);
             }
             assert_eq!(registry.input_stamp(id).as_ref(), Some(&stamp));
-            assert!(registry.commit_recovered_turn(id, &stamp, 1, || Ok(true)).unwrap());
+            assert!(registry
+                .commit_recovered_turn(id, &stamp, 1, || Ok(true))
+                .unwrap());
         }
         assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), 0);
         assert!(!agent.first_user_input_logged.load(Ordering::Relaxed));
         registry.write_input(id, b"\x1b[").unwrap();
         rx.recv().unwrap();
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput)
+        );
         assert!(!registry.input_is_current(id, &stamp));
-        assert!(!registry.commit_recovered_turn(id, &stamp, 1, || panic!("incomplete input is ambiguous")).unwrap());
-        assert!(registry.write_bytes_if_current(id, b"continue", &stamp).unwrap().is_none());
+        assert!(!registry
+            .commit_recovered_turn(id, &stamp, 1, || panic!("incomplete input is ambiguous"))
+            .unwrap());
+        assert!(registry
+            .write_bytes_if_current(id, b"continue", &stamp)
+            .unwrap()
+            .is_none());
         assert!(rx.try_recv().is_err());
         registry.write_input(id, b"A").unwrap();
         rx.recv().unwrap();
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
-        assert_ne!(agent.input_version.load(Ordering::Relaxed), InputStamp::decode(&stamp).unwrap().version);
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput)
+        );
+        assert_ne!(
+            agent.input_version.load(Ordering::Relaxed),
+            InputStamp::decode(&stamp).unwrap().version
+        );
         registry.kill_session(id);
     }
 
@@ -1118,22 +1239,42 @@ mod tests {
             let previous = registry.input_stamp(id).unwrap();
             registry.write_input(id, b"\x1b").unwrap();
             assert_eq!(rx.recv().unwrap(), b"\x1b");
-            assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
-            assert!(!registry.commit_recovered_turn(id, &previous, i64::MAX,
-                || panic!("pending Escape must block recovery")).unwrap());
-            assert!(registry.write_bytes_if_current(id, b"continue", &previous).unwrap().is_none());
+            assert_eq!(
+                registry.input_stamp_result(id),
+                Err(InputUnavailable::UnknownInput)
+            );
+            assert!(!registry
+                .commit_recovered_turn(id, &previous, i64::MAX, || panic!(
+                    "pending Escape must block recovery"
+                ))
+                .unwrap());
+            assert!(registry
+                .write_bytes_if_current(id, b"continue", &previous)
+                .unwrap()
+                .is_none());
             assert!(rx.try_recv().is_err());
 
             let last_submit = agent.last_submit_ms.load(Ordering::Relaxed);
-            assert_eq!(accepted_activity(&registry, id, &[boundary]), InputActivity {
-                user_input: true, submitted: boundary == b'\r',
-            });
+            assert_eq!(
+                accepted_activity(&registry, id, &[boundary]),
+                InputActivity {
+                    user_input: true,
+                    submitted: boundary == b'\r',
+                }
+            );
             assert_eq!(rx.recv().unwrap(), vec![boundary]);
-            let current = registry.input_stamp(id).expect("boundary makes reports bindable again");
+            let current = registry
+                .input_stamp(id)
+                .expect("boundary makes reports bindable again");
             assert_ne!(current, previous);
-            assert!(!registry.commit_recovered_turn(id, &previous, i64::MAX,
-                || panic!("old report cannot cross new input")).unwrap());
-            assert!(registry.commit_recovered_turn(id, &current, i64::MAX, || Ok(true)).unwrap());
+            assert!(!registry
+                .commit_recovered_turn(id, &previous, i64::MAX, || panic!(
+                    "old report cannot cross new input"
+                ))
+                .unwrap());
+            assert!(registry
+                .commit_recovered_turn(id, &current, i64::MAX, || Ok(true))
+                .unwrap());
             if boundary == b'\r' {
                 assert!(agent.last_submit_ms.load(Ordering::Relaxed) > 0);
             } else {
@@ -1142,7 +1283,10 @@ mod tests {
         }
         assert!(!accepted_activity(&registry, id, b"\x1b\r").submitted);
         assert_eq!(rx.recv().unwrap(), b"\x1b\r");
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput)
+        );
         registry.write_input(id, b"\x03").unwrap();
         rx.recv().unwrap();
 
@@ -1150,8 +1294,11 @@ mod tests {
         rx.recv().unwrap();
         registry.write_bytes(id, b"\r").unwrap();
         rx.recv().unwrap();
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput),
-            "raw byte fragments must not acquire terminal event semantics");
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput),
+            "raw byte fragments must not acquire terminal event semantics"
+        );
         registry.kill_session(id);
     }
 
@@ -1176,12 +1323,27 @@ mod tests {
             InputDisposition::Backpressured,
             "a full input queue must be reported, not dropped behind a success"
         );
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::UnknownInput));
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::UnknownInput)
+        );
         assert_eq!(rx.recv().unwrap(), b"\x1b");
-        assert!(rx.try_recv().is_err(), "the refused clear must never have been queued");
-        assert!(!registry.commit_recovered_turn(id, &original, i64::MAX,
-            || panic!("dropped clear cannot authorize recovery")).unwrap());
-        assert_eq!(accepted_activity(&registry, id, b"\x03"), InputActivity { user_input: true, submitted: false });
+        assert!(
+            rx.try_recv().is_err(),
+            "the refused clear must never have been queued"
+        );
+        assert!(!registry
+            .commit_recovered_turn(id, &original, i64::MAX, || panic!(
+                "dropped clear cannot authorize recovery"
+            ))
+            .unwrap());
+        assert_eq!(
+            accepted_activity(&registry, id, b"\x03"),
+            InputActivity {
+                user_input: true,
+                submitted: false
+            }
+        );
         assert_eq!(rx.recv().unwrap(), b"\x03");
         assert!(registry.input_stamp(id).is_some());
         registry.kill_session(id);
@@ -1196,9 +1358,18 @@ mod tests {
         let agent = registry.get(&id).unwrap();
         *agent.writer_tx.lock().unwrap() = Some(tx);
         let original = registry.input_stamp(id).unwrap();
-        assert_eq!(accepted_activity(&registry, id, b"draft"), InputActivity { user_input: true, submitted: false });
+        assert_eq!(
+            accepted_activity(&registry, id, b"draft"),
+            InputActivity {
+                user_input: true,
+                submitted: false
+            }
+        );
         rx.recv().unwrap();
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::Draft)
+        );
         registry.write_input(id, b"\x03").unwrap();
         rx.recv().unwrap();
         for packet in [b"\x1b[20".as_slice(), b"0~", b"line\n", b"\x1b[201", b"~"] {
@@ -1206,9 +1377,22 @@ mod tests {
             rx.recv().unwrap();
         }
         assert_eq!(agent.last_submit_ms.load(Ordering::Relaxed), 0);
-        assert_eq!(registry.input_stamp_result(id), Err(InputUnavailable::Draft));
-        assert!(!registry.commit_recovered_turn(id, &original, i64::MAX, || panic!("new draft invalidates old report")).unwrap());
-        assert_eq!(accepted_activity(&registry, id, b"\r"), InputActivity { user_input: true, submitted: true });
+        assert_eq!(
+            registry.input_stamp_result(id),
+            Err(InputUnavailable::Draft)
+        );
+        assert!(!registry
+            .commit_recovered_turn(id, &original, i64::MAX, || panic!(
+                "new draft invalidates old report"
+            ))
+            .unwrap());
+        assert_eq!(
+            accepted_activity(&registry, id, b"\r"),
+            InputActivity {
+                user_input: true,
+                submitted: true
+            }
+        );
         rx.recv().unwrap();
         assert!(agent.last_submit_ms.load(Ordering::Relaxed) > 0);
         assert_ne!(registry.input_stamp(id).unwrap(), original);
@@ -1245,8 +1429,10 @@ mod tests {
             Err(InputUnavailable::UnknownInput),
             "an unterminated escape sequence must leave the prompt uncertain, not stamped"
         );
-        assert!(registry.input_stamp(id).is_none(),
-            "no usable stamp exists while the sequence is open");
+        assert!(
+            registry.input_stamp(id).is_none(),
+            "no usable stamp exists while the sequence is open"
+        );
         registry.kill_session(id);
     }
 
@@ -1281,16 +1467,22 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let (lookup_tx, lookup_rx) = std::sync::mpsc::channel();
         let recovery_registry = registry.clone();
-        let recovery = std::thread::spawn(move || recovery_registry.commit_recovered_turn(id, &input, i64::MAX, || {
-            entered_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            Ok(true)
-        }).unwrap());
+        let recovery = std::thread::spawn(move || {
+            recovery_registry
+                .commit_recovered_turn(id, &input, i64::MAX, || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(true)
+                })
+                .unwrap()
+        });
         entered_rx.recv().unwrap();
         let lookup_registry = registry.clone();
         let lookup = std::thread::spawn(move || {
             let found = lookup_registry.get(&other).is_some();
-            let written = lookup_registry.write_bytes(other, b"still responsive\r").is_ok();
+            let written = lookup_registry
+                .write_bytes(other, b"still responsive\r")
+                .is_ok();
             lookup_tx.send(found && written).unwrap();
         });
         let responsive = lookup_rx.recv_timeout(std::time::Duration::from_secs(1));
@@ -1301,7 +1493,10 @@ mod tests {
         lookup.join().unwrap();
         registry.kill_session(id);
         registry.kill_session(other);
-        assert!(responsive.unwrap(), "another session must remain accessible while SQLite is busy");
+        assert!(
+            responsive.unwrap(),
+            "another session must remain accessible while SQLite is busy"
+        );
         assert_eq!(other_rx.recv().unwrap(), b"still responsive\r");
     }
 
@@ -1313,43 +1508,85 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         *registry.get(&id).unwrap().writer_tx.lock().unwrap() = Some(tx);
         let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE agent_nodes (id INTEGER PRIMARY KEY, status TEXT,
+        conn.execute_batch(
+            "CREATE TABLE agent_nodes (id INTEGER PRIMARY KEY, status TEXT,
             session_started_at INTEGER, status_changed_at TEXT);
-            INSERT INTO agent_nodes VALUES (-930003, 'running', 1, '2026-09-13T18:25:20Z');").unwrap();
+            INSERT INTO agent_nodes VALUES (-930003, 'running', 1, '2026-09-13T18:25:20Z');",
+        )
+        .unwrap();
         let lifecycle = "1:2026-09-13T18:25:20Z";
         let input = registry.input_stamp(id).unwrap();
         let agent = registry.get(&id).unwrap();
         let completed_at = chrono::Utc::now().timestamp_millis() - 1000;
-        let commit = || crate::db::complete_agent_turn_if_current_inner(&conn, id, lifecycle).map_err(|e| e.to_string());
-        assert!(registry.commit_recovered_turn(id, &input, completed_at, || {
-            assert!(agent.writer_tx.try_lock().is_err(), "input stays fenced through the DB commit");
-            commit()
-        }).unwrap());
-        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "ready");
+        let commit = || {
+            crate::db::complete_agent_turn_if_current_inner(&conn, id, lifecycle)
+                .map_err(|e| e.to_string())
+        };
+        assert!(registry
+            .commit_recovered_turn(id, &input, completed_at, || {
+                assert!(
+                    agent.writer_tx.try_lock().is_err(),
+                    "input stays fenced through the DB commit"
+                );
+                commit()
+            })
+            .unwrap());
+        assert_eq!(
+            conn.query_row("SELECT status FROM agent_nodes", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "ready"
+        );
 
         // A lifecycle change after observation must win even when the new
         // state is also Running. Comparing only status would accept it.
-        conn.execute_batch("UPDATE agent_nodes SET status='running', status_changed_at='2026-09-13T18:30:00Z'").unwrap();
-        assert!(!registry.commit_recovered_turn(id, &input, completed_at, commit).unwrap());
-        assert_eq!(conn.query_row("SELECT status FROM agent_nodes", [], |r| r.get::<_, String>(0)).unwrap(), "running");
+        conn.execute_batch(
+            "UPDATE agent_nodes SET status='running', status_changed_at='2026-09-13T18:30:00Z'",
+        )
+        .unwrap();
+        assert!(!registry
+            .commit_recovered_turn(id, &input, completed_at, commit)
+            .unwrap());
+        assert_eq!(
+            conn.query_row("SELECT status FROM agent_nodes", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "running"
+        );
 
         registry.write_bytes(id, b"draft").unwrap();
         assert_eq!(rx.recv().unwrap(), b"draft");
         assert!(registry.input_stamp(id).is_none());
-        assert!(!registry.commit_recovered_turn(id, &input, completed_at, || panic!("draft must prevent mutation")).unwrap());
+        assert!(!registry
+            .commit_recovered_turn(id, &input, completed_at, || panic!(
+                "draft must prevent mutation"
+            ))
+            .unwrap());
         registry.write_bytes(id, b"\r").unwrap();
         assert_eq!(rx.recv().unwrap(), b"\r");
         let after_submit = registry.input_stamp(id).unwrap();
-        assert!(!registry.commit_recovered_turn(id, &after_submit, completed_at,
-            || panic!("even a prompt submitted before observation supersedes old native completion")).unwrap());
-        assert!(!registry.commit_recovered_turn(id, &input, i64::MAX,
-            || panic!("a changed input version must prevent mutation")).unwrap());
+        assert!(!registry
+            .commit_recovered_turn(id, &after_submit, completed_at, || panic!(
+                "even a prompt submitted before observation supersedes old native completion"
+            ))
+            .unwrap());
+        assert!(!registry
+            .commit_recovered_turn(id, &input, i64::MAX, || panic!(
+                "a changed input version must prevent mutation"
+            ))
+            .unwrap());
         insert_trivial_agent(&registry, id);
-        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
-            || panic!("a replacement process cannot consume its predecessor's completion")).unwrap());
+        assert!(!registry
+            .commit_recovered_turn(id, &after_submit, i64::MAX, || panic!(
+                "a replacement process cannot consume its predecessor's completion"
+            ))
+            .unwrap());
         registry.kill_session(id);
-        assert!(!registry.commit_recovered_turn(id, &after_submit, i64::MAX,
-            || panic!("a dead process cannot publish completion")).unwrap());
+        assert!(!registry
+            .commit_recovered_turn(id, &after_submit, i64::MAX, || panic!(
+                "a dead process cannot publish completion"
+            ))
+            .unwrap());
     }
 
     #[test]
@@ -1362,37 +1599,70 @@ mod tests {
         let observed = registry.input_stamp(id).unwrap();
         registry.write_bytes(id, b"unfinished draft").unwrap();
         assert_eq!(rx.recv().unwrap(), b"unfinished draft");
-        assert!(registry.input_stamp(id).is_none(), "a draft already present before classification is ineligible");
-        assert!(registry.write_bytes_if_current(id, b"continue", &observed).unwrap().is_none());
+        assert!(
+            registry.input_stamp(id).is_none(),
+            "a draft already present before classification is ineligible"
+        );
+        assert!(registry
+            .write_bytes_if_current(id, b"continue", &observed)
+            .unwrap()
+            .is_none());
         assert!(rx.try_recv().is_err());
         registry.write_bytes(id, b"\r").unwrap();
         assert_eq!(rx.recv().unwrap(), b"\r");
         let observed = registry.input_stamp(id).unwrap();
-        let staged = registry.write_bytes_if_current(id, b"staged prompt", &observed).unwrap().unwrap();
+        let staged = registry
+            .write_bytes_if_current(id, b"staged prompt", &observed)
+            .unwrap()
+            .unwrap();
         assert_eq!(rx.recv().unwrap(), b"staged prompt");
         registry.write_bytes(id, b"more user input").unwrap();
         assert_eq!(rx.recv().unwrap(), b"more user input");
-        assert!(registry.write_bytes_if_current(id, b"\r", &staged).unwrap().is_none(), "Enter must not submit newer input");
+        assert!(
+            registry
+                .write_bytes_if_current(id, b"\r", &staged)
+                .unwrap()
+                .is_none(),
+            "Enter must not submit newer input"
+        );
         assert!(rx.try_recv().is_err());
         registry.kill_session(id);
     }
 
     #[test]
     fn input_stamp_ignores_navigation_and_tracks_backspace_to_empty() {
-        assert_eq!(input_buffer_len_after(0, b"\x1b[A\x1b[I"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(0, b"\x1b[A\x1b[I"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(0, b"draft"), 5);
-        assert_eq!(input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(5, b"\x1b[D\x7f\x7f\x7f\x7f\x7f"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(5, b"\x7f\x7f\x7f\x7f\x7f"), 0);
         assert_eq!(input_buffer_len_after(5, b"\x03"), 0);
-        assert_eq!(input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"), 8);
-        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x1b[D\x7f"), UNKNOWN_INPUT_BUFFER_LEN);
-        assert_eq!(input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x15"), UNKNOWN_INPUT_BUFFER_LEN);
+        assert_eq!(
+            input_buffer_len_after(0, b"\x1b[200~line\n two\x1b[201~"),
+            8
+        );
+        assert_eq!(
+            input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x1b[D\x7f"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
+        assert_eq!(
+            input_buffer_len_after(UNKNOWN_INPUT_BUFFER_LEN, b"\x15"),
+            UNKNOWN_INPUT_BUFFER_LEN
+        );
         assert_eq!(input_buffer_len_after(0, b"\x10"), UNKNOWN_INPUT_BUFFER_LEN);
     }
 
     #[test]
     fn input_buffer_state_preserves_bracketed_paste_across_packets() {
-        assert_eq!(input_buffer_state_after(0, false, b"\x1b[200~draft"), (5, true));
+        assert_eq!(
+            input_buffer_state_after(0, false, b"\x1b[200~draft"),
+            (5, true)
+        );
         assert_eq!(input_buffer_state_after(5, true, b"\n"), (5, true));
         assert_eq!(input_buffer_state_after(5, true, b"\x1b[201~"), (5, false));
     }
@@ -1434,7 +1704,9 @@ mod tests {
         // the flakiness by reporting a full queue as a successful write. These
         // tests are about input decoding, not about queue saturation — the
         // saturation path has its own fixtures.
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+            crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY,
+        );
         let queue = Arc::new(InputQueueGauge::default());
         let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
@@ -1479,7 +1751,11 @@ mod tests {
         // fills the single slot and the third is refused.
         let (registry, writer) = blocked_writer_registry(id, 1);
         let agent = registry.get(&id).unwrap();
-        assert_eq!(registry.input_queue_totals(), (0, 0), "baseline is an empty queue");
+        assert_eq!(
+            registry.input_queue_totals(),
+            (0, 0),
+            "baseline is an empty queue"
+        );
 
         // Fill the queue with *empty* buffers. They occupy a message slot each
         // without producing any input activity, which keeps the first-user-input
@@ -1489,7 +1765,11 @@ mod tests {
         assert!(registry.write_bytes(id, b"").unwrap().is_accepted());
         wait_for(|| writer.taken() == 1, "writer to park on the first buffer");
         assert!(registry.write_bytes(id, b"").unwrap().is_accepted());
-        assert_eq!(agent.input_queue(), (1, 0), "one slot still buffered, zero bytes");
+        assert_eq!(
+            agent.input_queue(),
+            (1, 0),
+            "one slot still buffered, zero bytes"
+        );
         assert!(
             !agent.first_user_input_logged.load(Ordering::SeqCst),
             "an empty buffer is not user input, so the checkpoint is still unset"
@@ -1509,8 +1789,10 @@ mod tests {
 
         // The refusal must leave every downstream signal untouched: no decoder
         // advance, no first-user-input checkpoint, no activity.
-        assert!(!agent.first_user_input_logged.load(Ordering::SeqCst),
-            "a refused write must not claim the user typed");
+        assert!(
+            !agent.first_user_input_logged.load(Ordering::SeqCst),
+            "a refused write must not claim the user typed"
+        );
         assert_eq!(
             registry.input_stamp_result(id),
             Ok(stamp_before),
@@ -1519,9 +1801,18 @@ mod tests {
         );
 
         // And it must not have quietly joined the queue either.
-        assert_eq!(agent.input_queue(), (1, 0), "a refusal must not be accounted as queued");
-        assert!(!writer.release_and_collect(2).iter().any(|chunk| chunk == b"lost prompt"),
-            "the refused buffer must never reach the PTY");
+        assert_eq!(
+            agent.input_queue(),
+            (1, 0),
+            "a refusal must not be accounted as queued"
+        );
+        assert!(
+            !writer
+                .release_and_collect(2)
+                .iter()
+                .any(|chunk| chunk == b"lost prompt"),
+            "the refused buffer must never reach the PTY"
+        );
         registry.kill_session(id);
     }
 
@@ -1573,14 +1864,24 @@ mod tests {
         // Drain, then retry the identical bytes. A refusal never queued them,
         // so re-sending cannot duplicate.
         writer.release_and_collect(2);
-        wait_for(|| agent.input_queue() == (0, 0), "queue to return to baseline");
+        wait_for(
+            || agent.input_queue() == (0, 0),
+            "queue to return to baseline",
+        );
         let retry = registry.write_input(id, b"gamma").unwrap();
         assert!(retry.is_accepted(), "a drained queue must accept the retry");
 
         let delivered = writer.release_and_collect(3);
-        assert_eq!(delivered, vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
-            "exact bytes, original order, no duplicate");
-        assert_eq!(agent.input_queue(), (0, 0), "byte usage returns to baseline after draining");
+        assert_eq!(
+            delivered,
+            vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
+            "exact bytes, original order, no duplicate"
+        );
+        assert_eq!(
+            agent.input_queue(),
+            (0, 0),
+            "byte usage returns to baseline after draining"
+        );
         registry.kill_session(id);
     }
 
@@ -1606,9 +1907,15 @@ mod tests {
                 bytes <= PTY_INPUT_QUEUE_BYTE_CAPACITY as u64,
                 "the byte ceiling must hold, saw {bytes}"
             );
-            assert!(accepted <= 64, "the fixture should never need the message bound");
+            assert!(
+                accepted <= 64,
+                "the fixture should never need the message bound"
+            );
         }
-        assert!(accepted > 1, "the fixture must build a real backlog, got {accepted}");
+        assert!(
+            accepted > 1,
+            "the fixture must build a real backlog, got {accepted}"
+        );
         assert!(
             accepted < 64,
             "the byte ceiling should bite before the 64-message bound; it stopped after {accepted}"
@@ -1619,20 +1926,34 @@ mod tests {
         // message bound still has room.
         let oversize = vec![b'x'; PTY_INPUT_QUEUE_BYTE_CAPACITY / 2 + 1];
         let refusal = registry.write_input(id, &oversize).unwrap();
-        assert_eq!(refusal.disposition, InputDisposition::Backpressured,
-            "a backlog under the message bound but over the byte bound must still be refused");
+        assert_eq!(
+            refusal.disposition,
+            InputDisposition::Backpressured,
+            "a backlog under the message bound but over the byte bound must still be refused"
+        );
         let (_messages, bytes) = agent.input_queue();
-        assert!(bytes <= PTY_INPUT_QUEUE_BYTE_CAPACITY as u64,
-            "the byte ceiling must hold: {bytes} > {PTY_INPUT_QUEUE_BYTE_CAPACITY}");
+        assert!(
+            bytes <= PTY_INPUT_QUEUE_BYTE_CAPACITY as u64,
+            "the byte ceiling must hold: {bytes} > {PTY_INPUT_QUEUE_BYTE_CAPACITY}"
+        );
 
         // With the queue drained, a buffer larger than the whole cap is still
         // admitted whole. Rejecting it would mean no paste of any size could be
         // sent, and splitting it would break issue #1498.
         writer.release_and_collect(accepted);
         wait_for(|| agent.input_queue() == (0, 0), "queue to drain");
-        assert!(registry.write_input(id, &oversize).unwrap().is_accepted(),
-            "an oversized paste must be admitted whole once the queue is empty");
-        assert_eq!(writer.release_and_collect(accepted + 1).last().unwrap().len(), oversize.len());
+        assert!(
+            registry.write_input(id, &oversize).unwrap().is_accepted(),
+            "an oversized paste must be admitted whole once the queue is empty"
+        );
+        assert_eq!(
+            writer
+                .release_and_collect(accepted + 1)
+                .last()
+                .unwrap()
+                .len(),
+            oversize.len()
+        );
         registry.kill_session(id);
     }
 
@@ -1649,7 +1970,11 @@ mod tests {
 
         assert!(registry.write_input(id, &paste).unwrap().is_accepted());
         let delivered = writer.release_and_collect(1);
-        assert_eq!(delivered.len(), 1, "a paste must never be split into several writes");
+        assert_eq!(
+            delivered.len(),
+            1,
+            "a paste must never be split into several writes"
+        );
         assert_eq!(delivered[0], paste, "the paste must arrive byte-for-byte");
         registry.kill_session(id);
     }
@@ -1659,7 +1984,10 @@ mod tests {
     fn wait_for(mut condition: impl FnMut() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !condition() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
@@ -1677,14 +2005,16 @@ mod tests {
     #[test]
     fn handover_rejects_text_with_nothing_in_it() {
         for text in ["", " ", "\n", "\t \r\n"] {
-            let err = validate_handover_text(text)
-                .expect_err("whitespace-only is not a handover");
+            let err = validate_handover_text(text).expect_err("whitespace-only is not a handover");
             assert!(err.contains("Nothing to hand over"), "{err}");
         }
         // The selection is handed over as-is: surrounding whitespace is part of
         // what the user selected, so it is not trimmed off the payload.
         for text in ["fix the race\r", "\n  fix the race\n"] {
-            assert!(validate_handover_text(text).is_ok(), "{text:?} carries text");
+            assert!(
+                validate_handover_text(text).is_ok(),
+                "{text:?} carries text"
+            );
         }
     }
 
@@ -1846,7 +2176,9 @@ mod tests {
         // the flakiness by reporting a full queue as a successful write. These
         // tests are about input decoding, not about queue saturation — the
         // saturation path has its own fixtures.
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+            crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY,
+        );
         let queue = Arc::new(InputQueueGauge::default());
         let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
@@ -1924,7 +2256,9 @@ mod tests {
         // the flakiness by reporting a full queue as a successful write. These
         // tests are about input decoding, not about queue saturation — the
         // saturation path has its own fixtures.
-        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY);
+        let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(
+            crate::agent::spawn::PTY_WRITER_CHANNEL_CAPACITY,
+        );
         let queue = Arc::new(InputQueueGauge::default());
         let writer_queue = Arc::clone(&queue);
         let writer_thread = std::thread::spawn(move || {
@@ -1956,13 +2290,32 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
+        // Hold our own handle so the AgentProcess outlives its removal from the
+        // registry. Without it, dropping the registry entry drops `writer_tx`
+        // and closes the channel anyway, so the test cannot tell whether
+        // `kill_session` dropped the sender itself — which is the #1531
+        // property under test.
+        let held = registry.get(&session_id).expect("inserted above");
         registry.kill_session(session_id);
         let elapsed = started.elapsed();
 
+        // The #1531 regression — joining before dropping the sender, so the
+        // join pays `join_with_timeout`'s 2s fallback — is detected
+        // deterministically: if `close_input()` did not run, `writer_tx` still
+        // holds its sender and this fails regardless of timing.
         assert!(
-            elapsed < std::time::Duration::from_millis(1500),
-            "kill_session must close the writer channel before joining; \
-             paid the fallback budget instead ({elapsed:?})"
+            held.writer_tx.lock().unwrap().is_none(),
+            "kill_session must drop the writer sender before joining (#1531); \
+             it is still held {elapsed:?} after the call"
+        );
+        // Wall clock is only a hang guard here, not the discriminator. The
+        // previous 1500ms bound sat inside the range the scheduler actually
+        // needs under CPU contention — this test has taken 2.24s on a loaded
+        // machine while the join completed without the fallback — so it fired
+        // on healthy runs (issue #2049 class).
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "kill_session must not hang: took {elapsed:?}"
         );
         assert!(
             writer_exited.load(Ordering::SeqCst),
@@ -2147,7 +2500,10 @@ mod tests {
         // not from spawn (this test deliberately has no terminal responder).
         let exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while child_arc.lock().unwrap().try_wait().unwrap().is_none() {
-            assert!(std::time::Instant::now() < exit_deadline, "probe child did not exit");
+            assert!(
+                std::time::Instant::now() < exit_deadline,
+                "probe child did not exit"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         // The watcher polls every 500ms, so retain the original 2s bound.
@@ -2208,10 +2564,17 @@ mod tests {
         let desktop = crate::agent::session_lifecycle::testing::RecordingSink::new();
         super::publish_submitted_input(&desktop, payload);
         let events = desktop.lifecycle_changed();
-        assert_eq!(events.len(), 1, "submitting input must publish agent-lifecycle, not only the legacy clear");
+        assert_eq!(
+            events.len(),
+            1,
+            "submitting input must publish agent-lifecycle, not only the legacy clear"
+        );
         assert_eq!(events[0].session_id, 7);
         assert_eq!(events[0].status, crate::models::SessionStatus::Running);
-        assert_eq!(events[0].kind, crate::agent::session_lifecycle::LifecycleKind::WorkResumed);
+        assert_eq!(
+            events[0].kind,
+            crate::agent::session_lifecycle::LifecycleKind::WorkResumed
+        );
         assert_eq!(*desktop.attention_cleared(), vec![7]);
     }
 
@@ -2270,7 +2633,11 @@ pub async fn resize_agent(session_id: i64, rows: u16, cols: u16) -> Result<(), S
 }
 
 #[command]
-pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Result<InputOutcome, String> {
+pub async fn write_to_agent(
+    app: AppHandle,
+    session_id: i64,
+    data: String,
+) -> Result<InputOutcome, String> {
     // Issue #1122 (progressive text entry latency).
     //
     // The previous implementation offloaded the entire body — PTY write
@@ -2310,7 +2677,9 @@ pub async fn write_to_agent(app: AppHandle, session_id: i64, data: String) -> Re
     // the stale-mark hypothesis behind auto-clear (issue #878) no longer
     // holds, and the keystroke's own echo must not count toward the
     // resume burst. A refused write engaged nobody, so it must not disarm.
-    if outcome.activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    if outcome.activity.user_input {
+        crate::attention_autoclear::disarm(session_id);
+    }
     if !outcome.is_accepted() || !outcome.activity.submitted {
         return Ok(outcome);
     }
@@ -2380,7 +2749,9 @@ pub(crate) fn write_to_agent_signal_blocking(
 #[cfg(test)]
 pub(crate) fn write_to_agent_blocking(session_id: i64, data: String) -> Result<bool, String> {
     let outcome = PROCESS_REGISTRY.write_input(session_id, data.as_bytes())?;
-    if outcome.activity.user_input { crate::attention_autoclear::disarm(session_id); }
+    if outcome.activity.user_input {
+        crate::attention_autoclear::disarm(session_id);
+    }
     let should_signal = outcome.is_accepted()
         && outcome.activity.submitted
         && !should_skip_attention_signals(session_id);
@@ -2412,7 +2783,11 @@ pub(super) fn provider_is_plain_terminal(provider: &str) -> bool {
 }
 
 #[command]
-pub async fn send_to_agent(app: AppHandle, session_id: i64, input: String) -> Result<InputOutcome, String> {
+pub async fn send_to_agent(
+    app: AppHandle,
+    session_id: i64,
+    input: String,
+) -> Result<InputOutcome, String> {
     write_to_agent(app, session_id, format!("{}\n", input)).await
 }
 
