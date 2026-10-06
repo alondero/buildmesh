@@ -104,6 +104,12 @@ test('the edition comes from the crate manifest, not from a literal in the scrip
   assert.deepEqual(fixture.read('src/child.rs').toString(), 'fn  child() {}\r\nfn  mixed() {}\n');
 });
 
+test('the edition is found after array values earlier in the [package] section', t => {
+  const fixture = crate(t);
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nauthors = ["A Person <a@example.com>"]\nkeywords = [\n  "one",\n  "two",\n]\nedition = "2021"\n\n[lib]\nname = "fixture_lib"\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+});
+
 test('formatTouched restores siblings even when the formatter fails after rewriting them', t => {
   const fixture = crate(t);
   const before = fixture.read('src/child.rs');
