@@ -14,14 +14,21 @@ pub struct CircuitObserverCapabilities {
 }
 
 pub(crate) fn for_agent(agent: &crate::models::AgentNode) -> CircuitObserverCapabilities {
-    let harness = agent.launch_configuration.as_ref().and_then(|configuration| configuration.resolved.as_ref())
-        .map(|plan| plan.harness.harness.as_str()).unwrap_or(agent.provider.as_str());
+    let harness = agent
+        .launch_configuration
+        .as_ref()
+        .and_then(|configuration| configuration.resolved.as_ref())
+        .map(|plan| plan.harness.harness.as_str())
+        .unwrap_or(agent.provider.as_str());
     for_provider(harness)
 }
 
 pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
-    let id = crate::agent::harness_catalog::HARNESS_PROFILE_ALIASES.iter()
-        .find(|(alias, _)| *alias == provider).map(|(_, id)| *id).unwrap_or(provider);
+    let id = crate::agent::harness_catalog::HARNESS_PROFILE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == provider)
+        .map(|(_, id)| *id)
+        .unwrap_or(provider);
     let (foreground, owned_work, final_report, reconciliation, yielded_budget_ms) = match id {
         // Issue #1902: Cline 3.0.62 (Windows npm `.cmd` resolved through
         // `cmd.exe /c`; macOS/Linux direct) was inspected, not assumed.
@@ -132,11 +139,26 @@ mod tests {
                 // Unverified), but records the inspected version, platform,
                 // hook/pull sources, and the missing ownership registry
                 // instead of the generic fallback.
-                assert!(policy.foreground.starts_with("Unavailable:"), "opencode foreground must stay unavailable");
-                assert!(policy.foreground.contains("OpenCode"), "must record the inspected harness version");
-                assert!(policy.foreground.contains("session.idle"), "must name the hook source that was inspected");
-                assert!(policy.owned_work.starts_with("Unavailable:"), "opencode ownership must stay unavailable");
-                assert!(policy.owned_work.contains("child/background"), "must state the ownership coverage gap");
+                assert!(
+                    policy.foreground.starts_with("Unavailable:"),
+                    "opencode foreground must stay unavailable"
+                );
+                assert!(
+                    policy.foreground.contains("OpenCode"),
+                    "must record the inspected harness version"
+                );
+                assert!(
+                    policy.foreground.contains("session.idle"),
+                    "must name the hook source that was inspected"
+                );
+                assert!(
+                    policy.owned_work.starts_with("Unavailable:"),
+                    "opencode ownership must stay unavailable"
+                );
+                assert!(
+                    policy.owned_work.contains("child/background"),
+                    "must state the ownership coverage gap"
+                );
                 assert_eq!(policy.yielded_budget_ms, 30_000);
             } else if id == "cline" {
                 // Issue #1902: same explicit-unsupported shape for Cline.
@@ -165,8 +187,14 @@ mod tests {
                 );
                 assert_eq!(policy.yielded_budget_ms, 30_000);
             } else if !matches!(id, "anthropic" | "codex" | "agy") {
-                assert_eq!(policy.foreground, "Unavailable: no authoritative Circuit lifecycle adapter is wired");
-                assert_eq!(policy.owned_work, "Unavailable: no authoritative Circuit ownership adapter is wired");
+                assert_eq!(
+                    policy.foreground,
+                    "Unavailable: no authoritative Circuit lifecycle adapter is wired"
+                );
+                assert_eq!(
+                    policy.owned_work,
+                    "Unavailable: no authoritative Circuit ownership adapter is wired"
+                );
             }
         }
         assert!(for_provider("codex").owned_work.starts_with("Unavailable:"));
@@ -180,12 +208,27 @@ mod tests {
         // read as assigned-work completion.
         let policy = for_provider("agy");
         assert_eq!(policy.harness, "agy");
-        assert!(policy.foreground.contains("Stop-hook"), "foreground names the validated hook source");
-        assert!(policy.foreground.contains("never authoritative"), "foreground disclaims completion authority");
-        assert!(policy.owned_work.starts_with("Unavailable:"), "ownership stays unavailable");
+        assert!(
+            policy.foreground.contains("Stop-hook"),
+            "foreground names the validated hook source"
+        );
+        assert!(
+            policy.foreground.contains("never authoritative"),
+            "foreground disclaims completion authority"
+        );
+        assert!(
+            policy.owned_work.starts_with("Unavailable:"),
+            "ownership stays unavailable"
+        );
         assert!(policy.owned_work.contains("no child/background registry"));
-        assert_eq!(policy.yielded_budget_ms, 30_000, "no validated basis to change the default budget");
-        assert_eq!(policy.active_budget_ms, super::super::observation::ACTIVE_WAIT_MS as u32);
+        assert_eq!(
+            policy.yielded_budget_ms, 30_000,
+            "no validated basis to change the default budget"
+        );
+        assert_eq!(
+            policy.active_budget_ms,
+            super::super::observation::ACTIVE_WAIT_MS as u32
+        );
     }
 
     #[test]
@@ -196,8 +239,14 @@ mod tests {
         // promise nobody verified.
         let policy = for_provider("anthropic");
         assert_eq!(policy.harness, "anthropic");
-        assert!(policy.foreground.contains("UserPromptSubmit"), "names the event that carries the prompt echo");
-        assert!(policy.foreground.contains("prompt_id"), "names the native turn token");
+        assert!(
+            policy.foreground.contains("UserPromptSubmit"),
+            "names the event that carries the prompt echo"
+        );
+        assert!(
+            policy.foreground.contains("prompt_id"),
+            "names the native turn token"
+        );
         assert!(
             policy.foreground.contains("reduced confidence"),
             "states what an unprovable receipt is worth"
@@ -210,7 +259,10 @@ mod tests {
             policy.reconciliation.contains("recorded submission"),
             "the binding is through a submission Buildmesh recorded"
         );
-        assert_eq!(policy.yielded_budget_ms, 90_000, "no validated basis to change the budget");
+        assert_eq!(
+            policy.yielded_budget_ms, 90_000,
+            "no validated basis to change the budget"
+        );
     }
 
     #[test]
@@ -224,16 +276,23 @@ mod tests {
         // even an accepted foreground termination without owned-work coverage
         // never verifies completion.
         let identity = ObservationIdentity {
-            run_id: 7, step_id: "work".into(), attempt: 1, agent_node_id: 11,
+            run_id: 7,
+            step_id: "work".into(),
+            attempt: 1,
+            agent_node_id: 11,
             session_incarnation: Some("1".into()),
             session_id: Some("ses_fc52ccfb9ffek1jl23ZwpRuSP7".into()),
-            turn_id: None, report_revision: None,
+            turn_id: None,
+            report_revision: None,
         };
         let mut evidence = WorkEvidence::default();
         let foreground = CircuitObservation {
-            identity: identity.clone(), source: "agent_status_projection".into(),
-            source_id: Some("opencode-status-1".into()), observed_at_ms: 100,
-            authoritative: false, fact: ObservedWorkFact::ForegroundTerminated,
+            identity: identity.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("opencode-status-1".into()),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: ObservedWorkFact::ForegroundTerminated,
         };
         assert_eq!(
             evidence.observe(&identity, &foreground),
@@ -246,9 +305,12 @@ mod tests {
         let mut wrong_session = identity.clone();
         wrong_session.session_id = Some("ses_00000000000000000000000000".into());
         let stale = CircuitObservation {
-            identity: wrong_session, source: "agent_status_projection".into(),
-            source_id: Some("opencode-status-2".into()), observed_at_ms: 101,
-            authoritative: false, fact: ObservedWorkFact::ForegroundTerminated,
+            identity: wrong_session,
+            source: "agent_status_projection".into(),
+            source_id: Some("opencode-status-2".into()),
+            observed_at_ms: 101,
+            authoritative: false,
+            fact: ObservedWorkFact::ForegroundTerminated,
         };
         assert_eq!(
             evidence.observe(&identity, &stale),
@@ -258,14 +320,24 @@ mod tests {
         // the work id was never registered as owned, so closing it cannot
         // supply the missing ownership coverage.
         let unknown_child = CircuitObservation {
-            identity: identity.clone(), source: "agent_status_projection".into(),
-            source_id: Some("opencode-child-1".into()), observed_at_ms: 102,
+            identity: identity.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("opencode-child-1".into()),
+            observed_at_ms: 102,
             authoritative: false,
-            fact: ObservedWorkFact::OwnedTerminated { work_id: "task:unknown".into() },
+            fact: ObservedWorkFact::OwnedTerminated {
+                work_id: "task:unknown".into(),
+            },
         };
         evidence.observe(&identity, &unknown_child);
-        assert!(!evidence.completion_verified(), "unknown owned work must never become completion");
-        assert!(!evidence.lifecycle_verified(), "foreground alone without ownership coverage is unverified");
+        assert!(
+            !evidence.completion_verified(),
+            "unknown owned work must never become completion"
+        );
+        assert!(
+            !evidence.lifecycle_verified(),
+            "foreground alone without ownership coverage is unverified"
+        );
     }
 
     #[test]
