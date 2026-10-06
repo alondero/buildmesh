@@ -1,3 +1,8 @@
+# Stable-profile launcher (buildmesh). Exit code contract and the
+# early-closing-consumer caveat are documented in scripts/run-dev.ps1 and apply
+# here identically: 0 = launched and verified, 1 = failed, and a non-zero that
+# still carries an `OK - ` line on stdout is a host-level pipeline teardown, not
+# a launch failure (issue #2043).
 $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
@@ -17,7 +22,10 @@ $PanicEarlyLogPath = "$env:APPDATA\com.alond.buildmesh\logs\panic_early.log"
 $existing = Get-Process -Name 'buildmesh' -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Output "Stopping existing buildmesh..."
-    $existing | Stop-Process -Force
+    # -ErrorAction SilentlyContinue: on a re-run the previous instance can exit
+    # between Get-Process and Stop-Process. Under $ErrorActionPreference="Stop"
+    # that race aborted the script before it ever launched (issue #2043).
+    $existing | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 1000
 }
 
@@ -36,20 +44,30 @@ if (-not (Test-Path $Binary)) {
 }
 
 # 4. Record log position
-$BeforeLines = 0
-if (Test-Path $LogPath) {
-    $BeforeLines = (Get-Content $LogPath).Count
+# Issue #2043 - the exit code must report the LAUNCH VERDICT and nothing else.
+# $ErrorActionPreference = "Stop" is script-wide, so a read that failed for an
+# incidental reason (the app still holds buildmesh.log open for writing, a panic
+# log momentarily locked, a transient sharing violation) aborted the script and
+# left powershell.exe reporting 1 for a launch that was already up and healthy.
+# A failed read means "no evidence from this source", so it falls through to the
+# next one instead of deciding the verdict. Write-Host keeps the warning off the
+# success stream, which would otherwise corrupt this function's return value.
+function Get-LogLines {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    try {
+        return @(Get-Content -LiteralPath $Path)
+    } catch {
+        Write-Host "WARN: could not read $Path ($($_.Exception.Message))"
+        return @()
+    }
 }
+
+$BeforeLines = (Get-LogLines $LogPath).Count
 # Same delta-capture for the panic-hook outputs (issue #158). Echo the
 # counts to stdout so callers can parse them and slice the post-launch file.
-$BeforePanicLines = 0
-if (Test-Path $PanicLogPath) {
-    $BeforePanicLines = (Get-Content $PanicLogPath).Count
-}
-$BeforePanicEarlyLines = 0
-if (Test-Path $PanicEarlyLogPath) {
-    $BeforePanicEarlyLines = (Get-Content $PanicEarlyLogPath).Count
-}
+$BeforePanicLines = (Get-LogLines $PanicLogPath).Count
+$BeforePanicEarlyLines = (Get-LogLines $PanicEarlyLogPath).Count
 Write-Output "Buildmesh pre-launch line count (buildmesh.log): $BeforeLines"
 Write-Output "Buildmesh pre-launch line count (panic.log): $BeforePanicLines"
 Write-Output "Buildmesh pre-launch line count (panic_early.log): $BeforePanicEarlyLines"
@@ -72,32 +90,36 @@ Start-Sleep -Seconds 3
 # running the script directly sees the panic message + backtrace.
 foreach ($p in @(@{Path=$PanicLogPath; BeforeCount=$BeforePanicLines},
                  @{Path=$PanicEarlyLogPath; BeforeCount=$BeforePanicEarlyLines})) {
-    if (Test-Path $p.Path) {
-        $c = (Get-Content $p.Path).Count
-        if ($c -gt $p.BeforeCount) {
-            Write-Output "ERROR: panic detected in $($p.Path) (was $($p.BeforeCount) lines, now $c). Launch aborted."
-            Write-Output "----- panic entry -----"
-            Get-Content $p.Path | Select-Object -Skip $p.BeforeCount | ForEach-Object { Write-Output $_ }
-            Write-Output "-----------------------"
-            exit 1
-        }
+    $c = (Get-LogLines $p.Path).Count
+    if ($c -gt $p.BeforeCount) {
+        Write-Output "ERROR: panic detected in $($p.Path) (was $($p.BeforeCount) lines, now $c). Launch aborted."
+        Write-Output "----- panic entry -----"
+        Get-LogLines $p.Path | Select-Object -Skip $p.BeforeCount | ForEach-Object { Write-Output $_ }
+        Write-Output "-----------------------"
+        exit 1
     }
 }
 
-if (Test-Path $LogPath) {
-    $AllLines = Get-Content $LogPath
-    if ($AllLines.Count -gt $BeforeLines) {
-        $NewLines = $AllLines[$BeforeLines..($AllLines.Count - 1)]
-        $started = $NewLines | Where-Object { $_ -match "started|ready" }
-        if ($started) {
-            Write-Output "OK - Buildmesh running"
-            exit 0
-        }
+$AllLines = Get-LogLines $LogPath
+if ($AllLines.Count -gt $BeforeLines) {
+    $NewLines = $AllLines[$BeforeLines..($AllLines.Count - 1)]
+    $started = $NewLines | Where-Object { $_ -match "started|ready" }
+    if ($started) {
+        Write-Output "OK - Buildmesh running"
+        exit 0
     }
 }
 
-# Fallback: check process is alive
-if (-not $proc.HasExited) {
+# Fallback: check process is alive. Querying a process that exited and was
+# already reaped throws under $ErrorActionPreference="Stop", which used to
+# abort instead of reporting the verdict (issue #2043).
+$Alive = $false
+try {
+    $Alive = -not $proc.HasExited
+} catch {
+    Write-Host "WARN: could not query the launched process ($($_.Exception.Message))"
+}
+if ($Alive) {
     Write-Output "OK - Process alive (no log confirmation)"
     exit 0
 }
