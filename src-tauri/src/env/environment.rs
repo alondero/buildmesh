@@ -376,21 +376,19 @@ pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
 }
 
 /// Resolve Muse credentials in the same login environment used for spawning.
+///
+/// On Windows the native `muse.exe` (1.3.0) login lives at
+/// `%USERPROFILE%/.config/muse/auth.json`, while older WSL-only installs keep
+/// it in the default distro's guest config dir. Prefer the WSL guest path when
+/// it resolves (existing behavior), otherwise fall back to the native Windows
+/// variables so a WSL-less host still finds the OAuth login its own spawn
+/// recipe uses. Without the fallback the usage meter serves a stale
+/// last-known reading while `/usage` shows live quota.
 pub(crate) fn muse_auth_path() -> Option<PathBuf> {
     if cfg!(windows) {
         static MUSE_AUTH_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
-            let mut command = command_no_window("wsl.exe");
-            command.args([
-                "-d", &get_default_wsl_distro()?, "--cd", "~", "--exec",
-                "sh", "-lc",
-                "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
-            ]);
-            let output = crate::process_util::run_command_with_timeout(
-                command, "WSL Muse credential location", std::time::Duration::from_secs(10),
-            ).ok()?;
-            if !output.status.success() { return None; }
-            let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
-            Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+            wsl_muse_auth_path()
+                .or_else(|| muse_auth_path_from_vars(|name| env::var_os(name)))
         });
         MUSE_AUTH_PATH.clone()
     } else {
@@ -398,11 +396,30 @@ pub(crate) fn muse_auth_path() -> Option<PathBuf> {
     }
 }
 
+/// Probe the default WSL distro for the guest Muse credential path. Returns
+/// `None` when WSL is unavailable, the distro lookup fails, or the guest
+/// environment carries `META_API_KEY` (API keys carry no subscription).
+fn wsl_muse_auth_path() -> Option<PathBuf> {
+    let mut command = command_no_window("wsl.exe");
+    command.args([
+        "-d", &get_default_wsl_distro()?, "--cd", "~", "--exec",
+        "sh", "-lc",
+        "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
+    ]);
+    let output = crate::process_util::run_command_with_timeout(
+        command, "WSL Muse credential location", std::time::Duration::from_secs(10),
+    ).ok()?;
+    if !output.status.success() { return None; }
+    let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
+    Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+}
+
 fn muse_auth_path_from_vars(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     if get("META_API_KEY").is_some_and(|value| !value.is_empty()) { return None; }
     get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()).map(PathBuf::from)
         .or_else(|| get("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
-            .or_else(|| get("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .or_else(|| get("HOME").filter(|v| !v.is_empty()).map(|home| PathBuf::from(home).join(".config")))
+            .or_else(|| get("USERPROFILE").filter(|v| !v.is_empty()).map(|profile| PathBuf::from(profile).join(".config")))
             .map(|root| root.join("muse/auth.json")))
 }
 
@@ -427,6 +444,32 @@ mod muse_path_tests {
             "MUSE_AUTH_PATH" => Some("/home/test/stale-oauth.json".into()),
             _ => None,
         }), None);
+    }
+
+    #[test]
+    fn muse_credential_path_falls_back_to_userprofile_on_windows_native() {
+        // Native Windows muse.exe (1.3.0) stores OAuth at
+        // %USERPROFILE%/.config/muse/auth.json and HOME is usually unset
+        // there. Without this fallback the Windows usage meter resolves no
+        // credential on WSL-less hosts and serves a stale last-known
+        // reading (weekly 3% vs live ~47%) while /usage shows live quota.
+        let resolved = muse_auth_path_from_vars(|name| match name {
+            "USERPROFILE" => Some("C:\\Users\\test".into()),
+            _ => None,
+        })
+        .expect("USERPROFILE must resolve a native Muse credential path");
+        assert_eq!(
+            resolved,
+            PathBuf::from("C:\\Users\\test/.config/muse/auth.json")
+        );
+        // Explicit overrides still win over USERPROFILE.
+        let resolved = muse_auth_path_from_vars(|name| match name {
+            "MUSE_AUTH_PATH" => Some("/var/lib/muse/auth.json".into()),
+            "USERPROFILE" => Some("C:\\Users\\test".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(resolved, PathBuf::from("/var/lib/muse/auth.json"));
     }
 
     #[test]

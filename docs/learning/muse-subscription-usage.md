@@ -46,9 +46,12 @@ or replace Muse's credentials. This is the CLI's key reconciliation call,
 not a dedicated read-only quota endpoint. No model inference is requested.
 
 Muse's launcher resolves `MUSE_AUTH_PATH`, then
-`${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json`. On Windows, resolve this
-inside WSL's `sh -lc` environment, matching Buildmesh's launch wrapper, then
-convert the guest path through the environment module before Windows I/O.
+`${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json`. On Windows, prefer the
+WSL guest path resolved inside WSL's `sh -lc` environment (converted through
+the environment module before Windows I/O), falling back to the native
+`%USERPROFILE%/.config/muse/auth.json` login that `muse.exe` 1.3.0 uses —
+without the fallback a WSL-less host serves a stale last-known reading while
+`/usage` shows live quota.
 An environment API key or stored non-OAuth mechanism cannot supply subscription
 quota. Authentication failures guide the user back to `muse login`; Buildmesh
 does not attempt an undocumented refresh flow or fall back to request estimates.
