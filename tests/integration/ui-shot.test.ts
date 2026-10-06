@@ -27,7 +27,17 @@ async function freePort() {
   return port;
 }
 
-function runUiShot(args, timeoutMs = 60000) {
+// Budget ordering matters. The child may spend up to 60s starting a dev server
+// plus 120s navigating, so the wrapper deadline must exceed that; the per-test
+// timeout must then exceed the wrapper, so the wrapper's own diagnostic (which
+// carries the child's stdout/stderr) is what fails the test rather than a bare
+// vitest timeout. A wrapper tighter than the child killed it under CPU load and
+// surfaced a transport error instead of the real diagnostic — the same class as
+// issue #2049.
+const WRAPPER_DEADLINE_MS = 150000;
+const TEST_DEADLINE_MS = WRAPPER_DEADLINE_MS + 30000;
+
+function runUiShot(args, timeoutMs = WRAPPER_DEADLINE_MS) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
     const child = spawn(process.execPath, [uiShot, ...args], {
       cwd: repoRoot,
@@ -86,7 +96,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('serves the fixture UI, drives a circuit, and writes a screenshot', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-'));
@@ -108,7 +118,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('keeps the node title and trailing close visible in a 240px pane', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-header-'));
@@ -131,7 +141,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('reports root mount failure and browser console errors', async () => {
     const { server, url } = await serveHtml(
@@ -150,5 +160,5 @@ describe('ui-shot mock mode', () => {
       await rm(folder, { recursive: true, force: true });
       await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
     }
-  }, MOUNT_FAILURE_DEADLINE_MS + 30000);
+  }, TEST_DEADLINE_MS);
 });

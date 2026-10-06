@@ -67,6 +67,14 @@ function gt(a: string, b: string) {
   return x.pre > y.pre;
 }
 
+// `latestTagVersion` shells out to `git describe`, which is ~75ms on an idle
+// machine but competes with the rest of the suite for CPU and can take tens of
+// seconds when the whole file runs alongside 287 others. The default 5s
+// per-test budget turned that contention into a spurious failure (the same
+// class as issue #2049), so the tests that shell out get an explicit budget.
+// The assertions themselves are unchanged — only how long they may take.
+const SUBPROCESS_TIMEOUT_MS = 60000;
+
 describe("app version manifests", () => {
   it("agree across every file that stores the version", () => {
     const versions = manifestVersions();
@@ -79,12 +87,12 @@ describe("app version manifests", () => {
         versions.pkg,
       );
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("is valid semver with optional prerelease suffix", () => {
     const { pkg } = manifestVersions();
     expect(pkg).toMatch(SEMVER);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("is at least as new as the latest published release (no update prompt for local builds)", () => {
     const { pkg } = manifestVersions();
@@ -93,7 +101,7 @@ describe("app version manifests", () => {
     // release and bumping back to the next -0 version), but the manifests
     // must never fall behind the published release.
     expect(gt(pkg, latestRelease) || pkg === latestRelease).toBe(true);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   // WiX ProductVersion is major.minor.patch[.build] with numeric-only fields
   // (each <= 65535). Tauri maps a semver prerelease into the 4th field, so
@@ -106,19 +114,19 @@ describe("app version manifests", () => {
       expect(pre).toMatch(/^\d+$/);
       expect(Number(pre)).toBeLessThanOrEqual(65535);
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("between-release prerelease is sticky -0, not a counter", () => {
     const { pre } = parseSemver(manifestVersions().pkg);
     // Null is the transient stripped-for-tag window; otherwise the marker
     // stays at 0 until the next release. `-1` / `-dev` must not land.
     expect(pre === null || pre === "0").toBe(true);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("prerelease compares above its base's previous minor but below its own release", () => {
     expect(gt("1.3.0-0", "1.2.0")).toBe(true);
     expect(gt("1.3.0", "1.3.0-0")).toBe(true);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 function runVersionSet(version: string): { status: number; stderr: string } {
@@ -142,7 +150,7 @@ describe("version:set", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/MSI-safe/);
     expect(manifestVersions()).toEqual(before);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("rejects a prerelease above the WiX 65535 cap without writing manifests", () => {
     const before = manifestVersions();
@@ -150,7 +158,7 @@ describe("version:set", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/MSI-safe/);
     expect(manifestVersions()).toEqual(before);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });
 
 // The fanout is the fix for a release that bumped four of the five version
@@ -232,7 +240,7 @@ describe("version:set fanout", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("leaves the working tree alone", () => {
     const before = manifestVersions();
@@ -243,7 +251,7 @@ describe("version:set fanout", () => {
       rmSync(dir, { recursive: true, force: true });
     }
     expect(manifestVersions()).toEqual(before);
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   // The corruption path the unbounded search opened: with no version on the
   // `packages[""]` entry, a search over the rest of the file falls through to
@@ -271,7 +279,7 @@ describe("version:set fanout", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 
   it("fails rather than half-updating when the lockfile has no packages map", () => {
     const dir = stageManifestTree();
@@ -292,5 +300,5 @@ describe("version:set fanout", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, SUBPROCESS_TIMEOUT_MS);
 });

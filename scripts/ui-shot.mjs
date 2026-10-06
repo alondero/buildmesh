@@ -157,7 +157,13 @@ async function getPage() {
       // NOT networkidle: index.html preconnects to Google Fonts, which never
       // settles on an offline/proxied host. Wait for the DOM, then for the app
       // to actually mount something under #root.
-      await page.goto(mockUrl, { waitUntil: 'domcontentloaded' }).catch((e) => {
+      //
+      // Navigation gets an explicit budget rather than Playwright's default
+      // 30s: a cold Vite server transforms the whole app on first request, and
+      // under CPU load that first response alone can exceed 30s. Defaulting
+      // made this fail intermittently with a misleading "start the dev server"
+      // message even though `--serve` had just started one.
+      await page.goto(mockUrl, { waitUntil: 'domcontentloaded', timeout: 120000 }).catch((e) => {
         throw new Error(
           `Could not load ${mockUrl}. Start the dev server (\`npm run dev\`), ` +
           `or pass --serve to have this script start it.\n${e.message}`
