@@ -238,6 +238,9 @@ test('the format gate passes baseline rustfmt debt and fails touched or unexplai
   const touched = await gate('Diff in /r/src-tauri/src/new.rs:3:', ['src-tauri/src/new.rs']);
   assert.equal(touched.outcome, 'FAIL');
   assert.match(touched.reason, /src-tauri\/src\/new\.rs/);
+  // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
+  assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs src-tauri\/src\/new\.rs/);
+  assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
   assert.equal((await gate('error: unexpected token', ['src-tauri/src/new.rs'])).outcome, 'FAIL');
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
@@ -305,9 +308,6 @@ test('hook stdin restores context, guards state writes and rejects stale complet
   assert.equal(fixture.hook({ hook_event_name: 'Stop', stop_hook_active: true }).stdout, '');
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'understand');
 });
-test('read-only sessions and unrelated hook events do not require a task', t => {
-  const fixture = repo(t);
-  assert.equal(fixture.hook({ hook_event_name: 'Stop' }).stdout, '');
 test('a failed gate keeps blocking Stop, names the way out, and releases once update records a blocked handoff', t => {
   const fixture = repo(t);
   const task = fixture.start();
@@ -327,6 +327,9 @@ test('a failed gate keeps blocking Stop, names the way out, and releases once up
   assert.equal(fixture.hook({ hook_event_name: 'Stop', stop_hook_active: true }).stdout, '');
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'blocked');
 });
+test('read-only sessions and unrelated hook events do not require a task', t => {
+  const fixture = repo(t);
+  assert.equal(fixture.hook({ hook_event_name: 'Stop' }).stdout, '');
   assert.equal(fixture.hook({ hook_event_name: 'OtherEvent' }).stdout, '');
 });
 test('evaluation corpus uses present tests and names remaining runtime gaps', () => {

@@ -105,9 +105,13 @@ Rust formatting follows the same rule: `cargo fmt --all --check` runs over
 the crate, a diff in a touched file fails, and the crate's existing
 formatting backlog (#2022) is reported as `formatDiffCount` instead of
 blocking every Rust change. Format touched files with
-`rustfmt --edition 2021 <file>`; `cargo fmt` rewrites the whole crate, and
-rustfmt on a module root (`lib.rs`, `mod.rs`) also formats its child modules,
-so revert hunks outside your change. A
+`node scripts/rustfmt-touched.mjs <file.rs>...`. Do not run `cargo fmt` (it
+rewrites the whole crate) or bare `rustfmt <file>`: on a module root
+(`lib.rs`, `mod.rs`) rustfmt also formats the child modules. The script
+restores every other Rust file (tracked, or untracked and not ignored) byte
+for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
+`rustfmt` or `cargo fmt` command that is not `--check`, but cannot see a
+command built at run time. A
 rustfmt failure that reports no diff (for example a parse error) stays red.
 Any other existing failure stays red too: reproduce at the recorded base
 before attributing it to baseline debt.

@@ -232,7 +232,7 @@ function classify(gate, code, output, paths) {
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
     if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
-    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format only those files with "rustfmt --edition 2021 <file>"; "cargo fmt" would rewrite the whole crate (#2022).`, formatDiffCount: total };
+    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with "node scripts/rustfmt-touched.mjs ${touched.join(' ')}", which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022).`, formatDiffCount: total };
     return { outcome: 'PASS', count: null, formatDiffCount: total };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
