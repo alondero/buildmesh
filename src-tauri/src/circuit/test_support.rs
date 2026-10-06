@@ -257,6 +257,24 @@ pub(crate) fn pre_publication_issue_review() -> CircuitGraph {
     graph
 }
 
+/// A saved issue-review circuit as a user's database held it before the
+/// feedback route repair (the fixture is that row's graph): the verdict upgrade
+/// had left a `completed` route into `follow_feedback` beside the `working` one.
+pub(crate) fn stuck_issue_review() -> CircuitGraph {
+    CircuitGraph::from_json(include_str!(
+        "../../tests/fixtures/stuck-issue-review-circuit.json"
+    ))
+    .unwrap()
+}
+
+/// [`stuck_issue_review`] after the repair and the upgrades it unblocks.
+pub(crate) fn repaired_stuck_issue_review() -> CircuitGraph {
+    let mut graph = stuck_issue_review();
+    assert!(graph.repair_issue_review_feedback_route());
+    assert!(graph.upgrade_issue_review_publication_flow());
+    graph
+}
+
 /// The title-bar review shape shipped before the publication flow: a fresh
 /// reviewer every round, closed after feedback, and no publish or merge.
 pub(crate) fn pre_publication_local_review(rounds: i32) -> CircuitGraph {

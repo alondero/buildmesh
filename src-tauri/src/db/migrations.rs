@@ -296,10 +296,16 @@ pub(crate) enum AlwaysStep {
     /// merge: GitHub must confirm the squash-merge before the implementation
     /// agent is closed. Existing runs are pinned to the graph they started with.
     UpgradeMergeVerification,
+    /// Remove the dead `completed` feedback route that the verdict upgrade used
+    /// to leave beside the `working` one, then apply the publication-flow and
+    /// merge-verification upgrades it had blocked (their flags were already
+    /// recorded). Unfinished runs lose only that route from their pinned graph.
+    RepairReviewFeedbackRoute,
 }
 
 const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgrade_v1";
 const MERGE_VERIFICATION_UPGRADE_FLAG: &str = "merge_verification_upgrade_v1";
+const REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG: &str = "review_feedback_route_repair_v1";
 
 const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
@@ -1096,6 +1102,7 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
     AlwaysStep::UpgradeReviewPublicationFlow,
     AlwaysStep::UpgradeMergeVerification,
+    AlwaysStep::RepairReviewFeedbackRoute,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1939,6 +1946,104 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
                 params![MERGE_VERIFICATION_UPGRADE_FLAG],
+            )?;
+        }
+        AlwaysStep::RepairReviewFeedbackRoute => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+                || !table_present(conn, "circuit_run_snapshots")?
+            {
+                return Ok(());
+            }
+            let already_done: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
+                |row| row.get(0),
+            )?;
+            if already_done {
+                return Ok(());
+            }
+            let to_sql_error = |error: String| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error,
+                )))
+            };
+            let circuits: Vec<(i64, String)> = {
+                let mut stmt =
+                    conn.prepare("SELECT id, graph_json FROM autopilot_circuits ORDER BY id")?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, graph_json) in circuits {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect circuit {} for the feedback route repair: {}",
+                            id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                if !graph.repair_issue_review_feedback_route() {
+                    continue;
+                }
+                // The stale route is what made the stock topology unrecognisable
+                // to these two upgrades, so they can apply now.
+                graph.upgrade_issue_review_publication_flow();
+                graph.upgrade_merge_prompt();
+                graph.upgrade_issue_review_merge_verification();
+                let repaired_json = graph.to_json().map_err(to_sql_error)?;
+                // Runs without a snapshot read the circuit row; pin them so
+                // active work and failed-run recovery keep their own graph.
+                conn.execute(
+                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
+                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
+                    params![id],
+                )?;
+                conn.execute(
+                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, repaired_json],
+                )?;
+            }
+            // A run that can still reach its review step would fail the same way
+            // on its pinned graph. Only the dead route is removed there: the
+            // topology a run started with is not upgraded under it.
+            let snapshots: Vec<(i64, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT s.run_id, s.graph_json FROM circuit_run_snapshots s
+                     JOIN autopilot_circuit_runs r ON r.id = s.run_id
+                     WHERE r.state != 'completed' ORDER BY s.run_id",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (run_id, graph_json) in snapshots {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect run {} snapshot for the feedback route repair: {}",
+                            run_id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                if !graph.repair_issue_review_feedback_route() {
+                    continue;
+                }
+                conn.execute(
+                    "UPDATE circuit_run_snapshots SET graph_json = ?2 WHERE run_id = ?1",
+                    params![run_id, graph.to_json().map_err(to_sql_error)?],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
             )?;
         }
     }

@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Where the Linux Rust jobs let apt keep its downloaded .debs so the set can be
+# cached between jobs (issue #2046). CI-only and never source: the composite
+# action recreates it on every runner.
+/.ci-apt-archives
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

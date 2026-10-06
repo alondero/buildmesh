@@ -163,7 +163,8 @@ fn muse_config_root_from_vars(
     {
         return Some(root.join("muse"));
     }
-    home.map(PathBuf::from).map(|home| home.join(MUSE_CONFIG_DIR))
+    home.map(PathBuf::from)
+        .map(|home| home.join(MUSE_CONFIG_DIR))
 }
 
 /// `trust.json` schema version Buildmesh writes when it creates the file.
@@ -488,7 +489,8 @@ fn ensure_trust_file(path: &Path, workspace: &str) -> Result<(), String> {
     if trailing_newline {
         content.push('\n');
     }
-    atomic_write(path, &content).map_err(|error| format!("failed to write muse trust.json: {error}"))?;
+    atomic_write(path, &content)
+        .map_err(|error| format!("failed to write muse trust.json: {error}"))?;
     tracing::info!("muse ensure_workspace_trusted: trusted {:?}", key);
     Ok(())
 }
@@ -571,6 +573,12 @@ impl AgentProvider for MuseAdapter {
     fn auto_resume_on_startup(&self) -> bool {
         true
     }
+    /// Issue #2060/#2061: Muse draws a mid-size paste in full in its input
+    /// box and collapses only the largest into a `[Pasted Content N chars]`
+    /// marker, so the paste gate also confirms a long draft by its tail.
+    fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
+        crate::agent::provider::PasteGatePolicy::RenderedWithTailAnchor
+    }
     fn self_assigns_session_id(&self) -> bool {
         true
     }
@@ -601,7 +609,10 @@ impl AgentProvider for MuseAdapter {
         let _guard = TRUST_WRITE_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        provision_trust_at(resolve_config_dir(resolved).as_deref(), workspace_for(resolved))
+        provision_trust_at(
+            resolve_config_dir(resolved).as_deref(),
+            workspace_for(resolved),
+        )
     }
 
     // Issue #1709: no native hook exists, so Muse's turn signal comes from the
@@ -914,7 +925,11 @@ mod tests {
             "available_on should pin to exactly {{Windows, Linux, Macos}} — got {:?}",
             platforms
         );
-        assert!(platforms.contains(&Platform::Windows), "muse is available on Windows since 1.3.0; got {:?}", platforms);
+        assert!(
+            platforms.contains(&Platform::Windows),
+            "muse is available on Windows since 1.3.0; got {:?}",
+            platforms
+        );
         assert!(platforms.contains(&Platform::Linux));
         assert!(platforms.contains(&Platform::Macos));
     }
@@ -1090,10 +1105,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let id = "01a0c54b-5ed4-7a61-91d7-a7a72c42fe24";
         let workspace = "F:\\src\\buildmesh\\.claude\\worktrees\\gh1816";
-        let dir = root
-            .path()
-            .join("sessions/1970/01/01")
-            .join(id);
+        let dir = root.path().join("sessions/1970/01/01").join(id);
         std::fs::create_dir_all(&dir).unwrap();
         let record = serde_json::json!({
             "payload_type": "runtime.session.metadata",
@@ -1214,7 +1226,9 @@ mod tests {
     }
 
     fn decision_for(value: &serde_json::Value, key: &str) -> Option<String> {
-        value["projects"][key]["decision"].as_str().map(str::to_string)
+        value["projects"][key]["decision"]
+            .as_str()
+            .map(str::to_string)
     }
 
     /// A workspace that exists on disk, so `trust_key` canonicalizes it the
@@ -1246,10 +1260,7 @@ mod tests {
                 key.starts_with("\\\\?\\"),
                 "a native Windows store keys a verbatim `\\\\?\\` path (observed on 1.3.0): {key}"
             );
-            assert!(
-                !key.contains('/'),
-                "a Windows key uses backslashes: {key}"
-            );
+            assert!(!key.contains('/'), "a Windows key uses backslashes: {key}");
         } else {
             assert!(
                 key.starts_with('/'),
@@ -1274,8 +1285,14 @@ mod tests {
     /// already-verbatim path is left alone.
     #[test]
     fn trust_key_builds_a_verbatim_windows_path() {
-        assert_eq!(trust_key("Q:/buildmesh-trust-probe/nope"), "\\\\?\\Q:\\buildmesh-trust-probe\\nope");
-        assert_eq!(trust_key("Q:\\buildmesh-trust-probe\\nope"), "\\\\?\\Q:\\buildmesh-trust-probe\\nope");
+        assert_eq!(
+            trust_key("Q:/buildmesh-trust-probe/nope"),
+            "\\\\?\\Q:\\buildmesh-trust-probe\\nope"
+        );
+        assert_eq!(
+            trust_key("Q:\\buildmesh-trust-probe\\nope"),
+            "\\\\?\\Q:\\buildmesh-trust-probe\\nope"
+        );
         assert_eq!(
             trust_key("\\\\?\\Q:\\buildmesh-trust-probe\\nope"),
             "\\\\?\\Q:\\buildmesh-trust-probe\\nope",
@@ -1543,8 +1560,7 @@ mod tests {
         let key = serde_json::to_string(&trust_key(&workspace)).unwrap();
         for decision in ["123", "null", "true", "{}"] {
             let home = tempfile::tempdir().unwrap();
-            let seeded =
-                format!(r#"{{ "projects": {{ {key}: {{ "decision": {decision} }} }} }}"#);
+            let seeded = format!(r#"{{ "projects": {{ {key}: {{ "decision": {decision} }} }} }}"#);
             std::fs::write(trust_path(home.path()), &seeded).unwrap();
 
             let result = provision_trust_at(Some(home.path()), &workspace);
