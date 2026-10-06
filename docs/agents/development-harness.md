@@ -152,9 +152,13 @@ rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
 suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. For a failed
-implementation that cannot be repaired, record `phase: blocked` and nonempty
-blockers to permit that handoff. None of these paths marks the task complete.
+recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. A FAIL is never
+released by a written report, however many times it is repeated. For a failed
+implementation that cannot be repaired, write
+`{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
+`npm run harness -- update --spec <file>`; the FAIL stop message repeats this
+command. Never edit `.harness/active-task.json` by hand. None of these paths
+marks the task complete.
 
 These hooks apply to Claude; other agents use the portable CLI and existing CI
 gates. Tasks must be started explicitly for this completion guard to apply;
