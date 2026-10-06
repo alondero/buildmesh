@@ -906,6 +906,68 @@ describe('TitleBar (bespoke window chrome)', () => {
         }
       });
 
+      // #2081 review — the focus move above reverses previously deliberate
+      // "no focus move" behaviour. It is defensible for a `role="dialog"`
+      // (an unannounced dialog is indistinguishable from a broken control),
+      // but nothing pinned it, so it could regress silently. These two cases
+      // pin it from BOTH routes that can open the panel.
+      it('moves focus into the panel when it opens on a request, not just a click', async () => {
+        // The Mesh Grid segment's route: a producer outside this component
+        // bumps the counter and the panel opens with no click on the trigger
+        // at all, so focus is still wherever the last real interaction left
+        // it. Without the focus move this press announces nothing.
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          // Park focus somewhere unrelated, so "focus is inside the dialog"
+          // cannot pass by accident.
+          const other = document.createElement('button');
+          document.body.appendChild(other);
+          other.focus();
+          expect(document.activeElement).toBe(other);
+
+          act(() => {
+            useUIStore.getState().requestOpenScopePicker();
+          });
+
+          const picker = screen.getByRole('dialog', { name: 'Select a Mesh' });
+          expect(picker.contains(document.activeElement)).toBe(true);
+          // The panel itself takes focus, never a Mesh row: Enter must not be
+          // able to pick a Mesh the user only looked at.
+          expect(document.activeElement).toBe(picker);
+          other.remove();
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
+      it('returns focus to the trigger when dismissed by an outside click', async () => {
+        // Outside-click dismissal used to call `setOpen(false)` directly,
+        // which unmounts the focused panel and drops focus to <body> — a
+        // keyboard user who opened the picker, clicked away and came back
+        // had lost their place entirely. It now returns focus exactly like
+        // Escape: both dismissals are "not a decision", so both hand the
+        // user back where they were.
+        const raf = mockRaf();
+        try {
+          await renderTitleBar();
+          const trigger = screen.getByTestId('scope-indicator');
+          fireEvent.click(trigger);
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeTruthy();
+
+          fireEvent.mouseDown(document.body);
+
+          expect(screen.queryByRole('dialog', { name: 'Select a Mesh' })).toBeNull();
+          expect(trigger.getAttribute('aria-expanded')).toBe('false');
+          expect(document.activeElement).toBe(trigger);
+          // Dismissal is still not a decision: the scope is untouched.
+          expect(useUIStore.getState().viewMode).toBe('all');
+          expect(useMeshStore.getState().selectedMeshId).toBeNull();
+        } finally {
+          raf.mockRestore();
+        }
+      });
+
       it('reports an empty Mesh list rather than an empty picker', async () => {
         act(() => {
           useMeshStore.setState({ meshes: [], meshesById: new Map() });

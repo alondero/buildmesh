@@ -135,6 +135,38 @@ workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history
 for the explicitly selected repository.
 
+## See which scope you are looking at
+
+The control left of the view modes always names what the canvas is showing.
+When a single Mesh is in scope it reads that Mesh's name; otherwise it reads
+the view and the node count, such as **Pinned across meshes · 3 nodes** or
+**Filtered across meshes · 2 of 5 nodes**. In **Single** it names the Agent
+Node you are soloing and its Mesh. On narrow windows the name collapses to an
+icon; hovering shows the same wording in full.
+
+Choose **All Nodes** to leave Mesh scope. It is the only route out, and it
+clears the Mesh selection.
+
+Open the same control to choose a Mesh. The list shows every Mesh with a tick
+beside the current one. Choosing a Mesh moves the canvas to that Mesh's nodes
+and retargets the Mesh-scoped tools in the inspector — Files, Properties,
+Worktree Manager, GitHub Issues and Archived Nodes all follow. Choosing the
+Mesh you are already in returns the canvas to its grid. Escape or a click
+outside closes the list and returns focus to the control, leaving the scope
+unchanged.
+
+Entering **Mesh Grid** with no Mesh selected asks which Mesh you meant rather
+than guessing one. The canvas stays on its "no Mesh selected" state until you
+choose, and the picker opens with focus inside it so you can tab straight to
+the list. `Ctrl+Alt+G` (`Cmd+Alt+G` on macOS) rotates through the view modes
+and asks the same way.
+
+Two scope changes announce themselves. A search that leaves a single Mesh
+tells you the results span every Mesh, because the search matches Agent Node
+names rather than one Mesh. Deleting the Mesh you are looking at tells you the
+canvas moved to **All Nodes**. Both are reminders only — the view still
+changes.
+
 ## Find agents that need attention
 
 Choose **Attention** in the sidebar to see failed, waiting and suspended nodes

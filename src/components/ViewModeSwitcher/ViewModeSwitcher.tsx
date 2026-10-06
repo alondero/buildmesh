@@ -1,4 +1,4 @@
-import { useMeshStore } from '../../stores/meshStore';
+import { enterMeshGrid } from '../../lib/gridShortcuts';
 import { useUIStore, type ViewMode } from '../../stores/uiStore';
 
 /**
@@ -13,13 +13,15 @@ import { useUIStore, type ViewMode } from '../../stores/uiStore';
  * Segment semantics:
  *   - Single:    solo the active node (subsumes the old maximize toggle).
  *   - Mesh Grid: scope to the sidebar-selected mesh. With no selection the
- *                segment asks for one instead of picking it (#2076): it sets
- *                the mode — so the canvas still lands in the Mesh Grid's
+ *                segment asks for one instead of picking it (#2076) — the
+ *                mode still flips, so the canvas lands in the Mesh Grid's
  *                "no Mesh selected" empty state, which #2071 made a real
  *                state after deleting the fallback that used to select the
  *                active node's mesh (or the first loaded one) for the user —
- *                and requests the title bar's Mesh picker so choosing a scope
- *                is an explicit act.
+ *                and it requests the title bar's Mesh picker so choosing a
+ *                scope is an explicit act. The Ctrl+Alt+G cycle routes
+ *                through the same `enterMeshGrid` helper (#2081 review), so
+ *                "Mesh Grid with nothing selected asks" is defined once.
  *   - Pinned:    cross-mesh filter over is_pinned; never touches
  *                selectedMeshId.
  *   - All Nodes: clear the mesh selection — the only route out of Mesh
@@ -134,11 +136,11 @@ export function ViewModeSwitcher() {
     // chooses nothing. The mode still flips first — the notice never
     // suppresses the path it describes, and the canvas keeps its honest
     // "no Mesh selected" state behind the panel.
+    //
+    // #2081 review — `enterMeshGrid` owns that rule now, so the Ctrl+Alt+G
+    // cycle asks identically instead of this being a second spelling of it.
     if (mode === 'mesh') {
-      setViewMode(mode);
-      if (useMeshStore.getState().selectedMeshId === null) {
-        useUIStore.getState().requestOpenScopePicker();
-      }
+      enterMeshGrid();
       return;
     }
     if (mode === 'filtered') {

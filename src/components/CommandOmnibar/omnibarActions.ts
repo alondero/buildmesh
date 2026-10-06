@@ -34,6 +34,7 @@ import { useMeshStore } from '../../stores/meshStore';
 import { useUIStore } from '../../stores/uiStore';
 import { PROBE_TAB_DEFINITIONS, PROBE_TAB_ORDER } from '../../lib/probeContext';
 import { requestIssueNavigation } from '../../lib/omnibar/issueNavigation';
+import { enterMeshGrid } from '../../lib/gridShortcuts';
 
 /** Everything `executeOmnibarItem` needs beyond the stores themselves. */
 export interface OmnibarActionContext {
@@ -73,21 +74,14 @@ export function runOmnibarCommand(id: string, ctx: OmnibarActionContext): boolea
       // #2070 review — this case used to re-inline the Mesh fallback chain
       // #2071 deleted (focused node's Mesh, else the first loaded Mesh), so
       // the palette could put the canvas in a scope nobody chose.
-      const selectedMeshId = useMeshStore.getState().selectedMeshId;
-      if (selectedMeshId !== null) {
-        // A Mesh is chosen: entering it is the same operation every other
-        // entrypoint performs, so a cross-Mesh View Mode returns to its grid.
-        useUIStore.getState().enterMeshScope(selectedMeshId);
-        return true;
-      }
-      // Nothing is chosen, so nothing is selected. Enter Mesh Grid anyway —
-      // the View Mode flip is the honest "no Mesh selected" state the canvas
-      // already knows how to show (#2071) — and ASK, the same two writes the
-      // Mesh Grid segment performs (#2076). Never guess the Mesh: this is
-      // User Story 9, and the picker is open in the title bar behind the
-      // closing palette either way.
-      ctx.setViewMode('mesh');
-      useUIStore.getState().requestOpenScopePicker();
+      //
+      // #2081 review — it then re-inlined the "enter Mesh Grid, and ask when
+      // nothing is selected" rule as well. `enterMeshGrid` is now the single
+      // definition of that gesture, shared with the Mesh Grid segment and the
+      // Ctrl+Alt+G cycle: a chosen Mesh enters its scope (never a guess), and
+      // nothing chosen means nothing selected — the mode flips to the honest
+      // "no Mesh selected" state and the picker is asked to open.
+      enterMeshGrid();
       return true;
     }
     case 'open-settings':

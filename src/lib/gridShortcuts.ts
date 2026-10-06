@@ -45,6 +45,40 @@ export function toggleGridMaximize(): void {
 const GRID_MODE_CYCLE: readonly NonSingleViewMode[] = ['mesh', 'pinned', 'all', 'filtered'];
 
 /**
+ * Enter Mesh Grid, asking for a Mesh when none is selected (#2071/#2076;
+ * #2081 review).
+ *
+ * This is the ONE definition of "the user asked for Mesh Grid", so the rule
+ * cannot drift between entrypoints. Before this helper existed the Mesh Grid
+ * segment and the `view-mesh` command each spelled out the same two writes,
+ * and `cycleGridMode` called `setViewMode` directly — so Ctrl/Cmd+Alt+G
+ * landing on 'mesh' with nothing selected sat silently on the empty state
+ * while every other route popped the picker (#2081 review).
+ *
+ * The order is load-bearing. The mode flips first and unconditionally: the
+ * ask is a notice about the path, never a gate on it, so the canvas still
+ * reaches its honest "no Mesh selected" state (#2071) behind the panel.
+ *
+ * Only the null-selection case asks. With a Mesh already selected this is
+ * exactly `setViewMode('mesh')`, so the rapid Ctrl+Alt+G rotation is
+ * undisturbed — the panel only opens in the degenerate case where the user
+ * has no Mesh at all and Mesh Grid is a dead end.
+ *
+ * Lives beside `cycleGridMode` because this module already owns grid-mode
+ * gestures as pure store mutators (App.tsx keeps the platform binding, the
+ * cooldown and the focus guard). The switcher segment and the omnibar's
+ * `view-mesh` command call it too — they need no shortcut binding to mean
+ * the same thing.
+ */
+export function enterMeshGrid(): void {
+  const ui = useUIStore.getState();
+  ui.setViewMode('mesh');
+  if (useMeshStore.getState().selectedMeshId === null) {
+    ui.requestOpenScopePicker();
+  }
+}
+
+/**
  * Rotate the canvas through the grid View Modes: Mesh → Pinned → All →
  * Filtered → Mesh (ticket #987; #1609 appends the Filtered view to the
  * switcher order). Bound to Ctrl+Alt+G / Cmd+Alt+G in App.tsx — a keyboard peer
@@ -56,6 +90,11 @@ const GRID_MODE_CYCLE: readonly NonSingleViewMode[] = ['mesh', 'pinned', 'all', 
  * press out of a solo view lands you back where you were, and the next
  * advances. Pure store-mutator (like `toggleGridMaximize`), so App.tsx owns the
  * platform binding, focus guard, and cooldown.
+ *
+ * The Mesh step routes through `enterMeshGrid` rather than `setViewMode`, so
+ * the cycle asks for a Mesh when it lands on Mesh Grid with nothing selected —
+ * the same thing the Mesh Grid segment and the `view-mesh` command do, rather
+ * than a third silent reading of "enter Mesh Grid" (#2081 review).
  */
 export function cycleGridMode(): void {
   const ui = useUIStore.getState();
@@ -64,7 +103,12 @@ export function cycleGridMode(): void {
     return;
   }
   const idx = GRID_MODE_CYCLE.indexOf(ui.viewMode);
-  ui.setViewMode(GRID_MODE_CYCLE[(idx + 1) % GRID_MODE_CYCLE.length]);
+  const next = GRID_MODE_CYCLE[(idx + 1) % GRID_MODE_CYCLE.length];
+  if (next === 'mesh') {
+    enterMeshGrid();
+    return;
+  }
+  ui.setViewMode(next);
 }
 
 // ---- Issue #998 — focus grid search ----

@@ -207,10 +207,23 @@ export function Sidebar() {
     openProbeTab('files');
   }, [openProbeTab]);
 
+  // #2081 review — the four Mesh-lens destinations below used to call bare
+  // `selectMesh`. A previous pass left them that way on the argument that
+  // they "open a destination rather than entering Mesh scope" — but that
+  // argument is exactly what produced the divergence: opening a Mesh's
+  // properties from Pinned returned the canvas to that Mesh's grid when done
+  // from the command palette (which routes through `enterMeshScope`) and
+  // stayed on Pinned when done from here. Same intent, two outcomes, so all
+  // four now run the same store operation as every other Mesh entrypoint.
+  //
+  // The select-then-open ORDER is load-bearing and unchanged: a Mesh-lens
+  // destination resolves its subject from `selectedMeshId`, so the selection
+  // must land before `openProbeTab` mounts the tab.
+
   const handleOpenPropertiesProbe = useCallback((meshId: number) => {
-    selectMesh(meshId);
+    enterMeshScope(meshId);
     openProbeTab('properties');
-  }, [selectMesh, openProbeTab]);
+  }, [enterMeshScope, openProbeTab]);
 
   // Issue #767 — the drift `!` badge in the sidebar opens the Probe
   // Panel on the 🌳 Worktree Manager tab, where the HealthBlock's
@@ -218,22 +231,22 @@ export function Sidebar() {
   // drifted and needs recovery"; the Properties tab has no such
   // controls, so routing there (the pre-#767 behaviour) was a dead-end.
   const handleOpenWorktreesProbe = useCallback((meshId: number) => {
-    selectMesh(meshId);
+    enterMeshScope(meshId);
     openProbeTab('worktrees');
-  }, [selectMesh, openProbeTab]);
+  }, [enterMeshScope, openProbeTab]);
 
   // Issue #378 — the right-click "GitHub Issues" and "Archive" entries
   // open the Probe Panel on the 🐙 / 🕒 tabs respectively. The mesh is
-  // selected first (same dance as the Properties entry point) so
+  // scoped first (same dance as the Properties entry point) so
   // `useProbeContext` resolves to the right row before the tab mounts.
   const handleOpenIssuesProbe = useCallback((meshId: number) => {
-    selectMesh(meshId);
+    enterMeshScope(meshId);
     openProbeTab('issues');
-  }, [selectMesh, openProbeTab]);
+  }, [enterMeshScope, openProbeTab]);
   const handleOpenSessionHistoryProbe = useCallback((meshId: number) => {
-    selectMesh(meshId);
+    enterMeshScope(meshId);
     openProbeTab('sessions');
-  }, [selectMesh, openProbeTab]);
+  }, [enterMeshScope, openProbeTab]);
 
   const handleSelectProvider = useCallback(async (mesh: Mesh, providerId: string, useWorktree?: boolean, configurationId?: string) => {
     setOpenDropdownFor(null);

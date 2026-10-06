@@ -23,10 +23,16 @@ import { ViewModeSwitcher } from '../../src/components/ViewModeSwitcher/ViewMode
 import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useUIStore, type ViewMode } from '../../src/stores/uiStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
+import { executeOmnibarItem } from '../../src/components/CommandOmnibar/omnibarActions';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 
+// Mutable so the Worktree Manager destination can be exercised: the drift
+// badge that opens it only renders when the Mesh reports drift, which the
+// default `null` health suppresses.
+const meshHealth = vi.hoisted(() => ({ value: null as { status: string } | null }));
+
 vi.mock('../../src/hooks/useMeshHealth', () => ({
-  useMeshHealth: () => ({ health: null, refresh: vi.fn() }),
+  useMeshHealth: () => ({ health: meshHealth.value, refresh: vi.fn() }),
 }));
 
 vi.mock('../../src/hooks/useGitBranchStatus', () => ({
@@ -184,5 +190,127 @@ describe('Sidebar Mesh selection gesture (issue #2072)', () => {
 
     expect(useUIStore.getState().viewMode).toBe('all');
     expect(useMeshStore.getState().selectedMeshId).toBeNull();
+  });
+});
+
+/**
+ * #2081 review — "enter Mesh scope for Mesh X" is one store operation, and
+ * every entrypoint that names a Mesh must go through it. The sidebar's
+ * context-menu Probe destinations used to call bare `selectMesh`, so the same
+ * intent landed differently depending on where the user clicked: from the
+ * command palette, opening a Mesh's properties while the canvas sat in
+ * Pinned returned to that Mesh's grid; from the sidebar it did not.
+ *
+ * "Identical" here is concrete and user-observable — the three facts a user
+ * can see after the gesture: which Mesh is selected, which View Mode the
+ * canvas renders in, and which Probe tab is showing. This suite pins the
+ * sidebar half against the palette half on all three.
+ */
+describe('Sidebar Probe destinations agree with the palette about Mesh scope (#2081)', () => {
+  /** What the sidebar's context-menu **Properties** entry did, read the same
+   *  way a user reads it: the selection, the View Mode, the open tab. */
+  function sidebarOutcome() {
+    return {
+      selectedMeshId: useMeshStore.getState().selectedMeshId,
+      viewMode: useUIStore.getState().viewMode,
+      probeTab: useUIStore.getState().probeTab,
+    };
+  }
+
+  /** Open the sidebar's right-click menu on a Mesh row — the real gesture,
+   *  through the real MeshItem menu. */
+  function openMeshMenu(meshId: number) {
+    const row = document.getElementById(`mesh-item-name-${meshId}`);
+    if (!row) throw new Error(`mesh row ${meshId} not rendered`);
+    fireEvent.contextMenu(row.parentElement!);
+  }
+
+  /** Open the sidebar's right-click menu on a Mesh row and choose
+   *  **Properties** — the real gesture, through the real MeshItem menu. */
+  async function openPropertiesFromSidebar(meshId: number) {
+    await renderSidebar();
+    openMeshMenu(meshId);
+    fireEvent.click(screen.getByRole('menuitem', { name: /properties/i }));
+    for (let i = 0; i < 5; i++) await act(async () => {});
+  }
+
+  it('lands on the same scope from the sidebar as the command palette does', async () => {
+    // --- sidebar half ---
+    seed('pinned', GAMMA.id);
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    await openPropertiesFromSidebar(GAMMA.id);
+    const fromSidebar = sidebarOutcome();
+
+    cleanup();
+    vi.clearAllMocks();
+
+    // --- palette half: the same Mesh's properties, same starting scope ---
+    seed('pinned', GAMMA.id);
+    expect(useUIStore.getState().viewMode).toBe('pinned');
+    act(() => {
+      executeOmnibarItem(`probe-in-mesh:properties:${GAMMA.id}`, {
+        meshes: MESHES,
+        spawnOptions: [],
+        setViewMode: useUIStore.getState().setViewMode,
+        openProbeTab: useUIStore.getState().openProbeTab,
+      });
+    });
+    const fromPalette = sidebarOutcome();
+
+    // The parity claim, stated as literals rather than as "the two agree" —
+    // an assertion that only compared the two could pass on two wrong
+    // answers. Pinned + the same Mesh selected is the exact state the
+    // pre-#2081 sidebar silently left on Pinned.
+    expect(fromSidebar).toEqual({
+      selectedMeshId: GAMMA.id,
+      viewMode: 'mesh',
+      probeTab: 'properties',
+    });
+    expect(fromPalette).toEqual(fromSidebar);
+  });
+
+  // The other three destinations carry the same Mesh id for the same reason
+  // (a Mesh-lens tab resolves its subject from `selectedMeshId`), so they
+  // move together. Driven through the real gestures, not by calling the
+  // handlers: Properties and GitHub Issues are context-menu entries,
+  // Archive is too, and the Worktree Manager is the drift badge (which needs
+  // a drifted Mesh before it renders).
+  it.each([
+    ['issues', 'GitHub Issues', 'menuitem'],
+    ['sessions', 'Archive', 'menuitem'],
+  ] as const)(
+    'the sidebar %s destination enters Mesh scope like the palette one',
+    async (tab, menuLabel, role) => {
+      seed('pinned', GAMMA.id);
+      await renderSidebar();
+      openMeshMenu(GAMMA.id);
+      fireEvent.click(screen.getByRole(role, { name: new RegExp(menuLabel, 'i') }));
+      for (let i = 0; i < 5; i++) await act(async () => {});
+
+      expect(useMeshStore.getState().selectedMeshId).toBe(GAMMA.id);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+      expect(useUIStore.getState().probeTab).toBe(tab);
+    },
+  );
+
+  it('the sidebar Worktree Manager badge enters Mesh scope too', async () => {
+    // The drift badge is a Mesh-scoped destination like the menu entries, so
+    // it must move the canvas the same way — otherwise the one gesture a
+    // user reaches for *because* their Mesh is broken leaves the canvas
+    // cross-Mesh.
+    meshHealth.value = { status: 'drift' };
+    try {
+      seed('pinned', GAMMA.id);
+      await renderSidebar();
+      // One badge per drifted row, so name the Mesh rather than the pattern.
+      fireEvent.click(screen.getByRole('button', { name: `Mesh health issue for ${GAMMA.name}` }));
+      for (let i = 0; i < 5; i++) await act(async () => {});
+
+      expect(useMeshStore.getState().selectedMeshId).toBe(GAMMA.id);
+      expect(useUIStore.getState().viewMode).toBe('mesh');
+      expect(useUIStore.getState().probeTab).toBe('worktrees');
+    } finally {
+      meshHealth.value = null;
+    }
   });
 });

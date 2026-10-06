@@ -433,9 +433,10 @@ interface UIState extends GridControls {
   // by meshStore without a circular import (meshStore already imports this
   // module; see its header).
   //
-  // Every entrypoint routes here: the sidebar Mesh row, the title-bar picker's
-  // Mesh rows, the omnibar's Mesh-scoped routes, and the `view-mesh` command.
-  // When the Mesh is already selected there is no selection change, so the
+  // Every entrypoint routes here: the sidebar Mesh row and its Mesh-lens
+  // Probe destinations, the title-bar picker's Mesh rows, the omnibar's
+  // Mesh-scoped routes, and the `view-mesh` command. When the Mesh is
+  // already selected there is no selection change, so the
   // mesh?mode subscription at the bottom of this file cannot fire - the View
   // Mode setter is what honours the sticky re-click (#2072). Already in that
   // Mesh's grid, it is a no-op. All Nodes clears the selection inside

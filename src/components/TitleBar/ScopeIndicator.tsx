@@ -31,13 +31,16 @@ import { dropdownId } from '../../lib/dropdownId';
  * ## The picker
  *
  * Choosing a Mesh calls `uiStore.enterMeshScope` and nothing else — the same
- * store operation the sidebar Mesh row and the omnibar's Mesh-scoped routes
- * call (#2070 review). That one operation moves the canvas and the Probe
- * destinations (which follow the selection since #2073 deleted the Context
- * Pins), so no action here can put the two out of step, and a re-pick of the
- * Mesh already in scope means the same thing in all four entrypoints. Escape
- * and an outside click are dismissal, not a decision: they close the panel,
- * restore focus to the trigger, and leave the scope exactly as it was.
+ * store operation the sidebar Mesh row, the sidebar's Mesh-lens Probe
+ * destinations and the omnibar's Mesh-scoped routes call (#2070 review,
+ * extended by #2081 when the sidebar's four destination handlers were still
+ * calling bare `selectMesh` and so diverged from the palette). That one
+ * operation moves the canvas and the Probe destinations (which follow the
+ * selection since #2073 deleted the Context Pins), so no action here can put
+ * the two out of step, and a re-pick of the Mesh already in scope means the
+ * same thing in every entrypoint. Escape and an outside click are dismissal,
+ * not a decision: they close the panel, restore focus to the trigger, and
+ * leave the scope exactly as it was.
  *
  * It is a disclosure dialog rather than an ARIA `menu` on purpose: the panel
  * holds plain buttons, so Tab order, Enter and Escape work without a roving
@@ -309,13 +312,20 @@ export function ScopeIndicator() {
 
   const { text, tooltip, Icon, meshScoped } = scopeLabel(scope, soloNode, meshes);
 
+  // Dismissal is not a decision, so every route that closes the panel hands
+  // the user back where they were instead of leaving focus on <body>: the
+  // panel is unmounted, and an unmounted focused element drops focus to
+  // <body>, which loses a keyboard user's place entirely (#2081 review).
+  // Escape and an outside click share this, so the two dismissals behave
+  // identically — matching the Escape contract `TitleBarOverflow` and
+  // `ZoomControl` already establish for this cluster.
   const closeAndReturnFocus = useCallback(() => {
     const trigger = triggerRef.current;
     setOpen(false);
     requestAnimationFrame(() => trigger?.focus());
   }, []);
 
-  useClickOutside(open ? PICKER_ID : null, () => setOpen(false));
+  useClickOutside(open ? PICKER_ID : null, closeAndReturnFocus);
   useEscapeKey(closeAndReturnFocus, open);
 
   // Hand focus to the panel as it opens, from whichever route opened it. A
