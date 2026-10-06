@@ -22,7 +22,8 @@ const caseKey = process.platform === 'win32' ? path => path.toLowerCase() : path
 export function rustfmtEdition(root) {
   const manifest = resolve(root, 'src-tauri', 'Cargo.toml');
   const contents = existsSync(manifest) ? readFileSync(manifest, 'utf8') : '';
-  const edition = /^edition\s*=\s*"([^"]+)"/m.exec(/^\[package\][^[]*/m.exec(contents)?.[0] ?? '')?.[1];
+  // The section ends at the next table header or end of input; `[^[]*` would stop at an array value such as `authors = [...]`.
+  const edition = /^edition\s*=\s*"([^"]+)"/m.exec(/^\[package\][\s\S]*?(?=^\[|(?![\s\S]))/m.exec(contents)?.[0] ?? '')?.[1];
   if (!edition) throw new Error(`Cannot read edition = from the [package] section of ${manifest}.`);
   return edition;
 }
