@@ -63,7 +63,10 @@ const terminalInstances: Array<{
 
 vi.mock('@xterm/xterm', () => {
   class TrackedTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     resizeCallback: ((size: { cols: number; rows: number }) => void) | undefined;
     onResize = vi.fn((callback: (size: { cols: number; rows: number }) => void) => {
@@ -725,6 +728,9 @@ describe('BuildRunTerminal component — survival of the user-reported bug', () 
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
-    expect(term.write).toHaveBeenCalledWith(startupFrame);
+    // The registry registers a completion-aware sink, so xterm is also handed
+    // its parse-completion callback (issue #2018): that is what lets the
+    // writer bound unparsed payloads instead of feeding xterm every frame.
+    expect(term.write).toHaveBeenCalledWith(startupFrame, expect.any(Function));
   });
 });

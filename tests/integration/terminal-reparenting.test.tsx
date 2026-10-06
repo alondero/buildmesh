@@ -63,7 +63,10 @@ vi.mock('@xterm/xterm', () => {
   };
 
   class MockTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     onTitleChange = vi.fn();
     onResize = vi.fn();
