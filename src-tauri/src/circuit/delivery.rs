@@ -1297,6 +1297,31 @@ mod tests {
         "\x1b[16;1H\x1b[2mesc to cancel · enter to send\x1b[0m",
     );
 
+    /// Earlier prompt sharing exactly the ending of `CODEX_MIDSIZE_PROMPT`
+    /// (its last two sentences) and nothing else, for the stale-redraw
+    /// limit pin: a redraw of this draft after a newer write carries the
+    /// newer draft's whole tail proof.
+    const CODEX_EARLIER_SAME_ENDING_PROMPT: &str = concat!(
+        "Summarize yesterday's incidents for the status page.\n",
+        "\n",
+        "- List each incident with its start time and duration.\n",
+        "- Note which ones paged and which stayed silent.\n",
+        "\n",
+        "So the author knows what remains before merge. Do not push any commits yourself.",
+    );
+
+    /// That earlier prompt's composer redraw: cursor chrome around A's full
+    /// text, no paste marker. It carries B's tail and none of B's head.
+    const CODEX_EARLIER_REDRAW_FRAME: &str = concat!(
+        "\x1b[5;1H\x1b[J› Summarize yesterday's incidents for the status page.\x1b[K",
+        "\x1b[6;1H\x1b[K",
+        "\x1b[7;1H› - List each incident with its start time and duration.\x1b[K",
+        "\x1b[8;1H› - Note which ones paged and which stayed silent.\x1b[K",
+        "\x1b[9;1H\x1b[K",
+        "\x1b[10;1H› So the author knows what remains before merge. Do not push any commits yourself.\x1b[K",
+        "\x1b[11;1H\x1b[2mesc to cancel · enter to send\x1b[0m",
+    );
+
     /// Create a Codex node in this test's own database and return a
     /// process-unique id for it (see `unique_node_id`).
     fn codex_worker_node(label: &str) -> i64 {
@@ -1412,43 +1437,50 @@ mod tests {
 
     #[test]
     fn paste_confirmation_policy_is_declared_per_harness() {
-        use crate::agent::provider::{adapters, AgentProvider};
-        // Tail-anchor harnesses draw mid-size pastes inline (issues #2060/#2061).
-        assert_eq!(
-            adapters::CODEX.paste_gate_policy(),
-            PasteGatePolicy::RenderedWithTailAnchor
-        );
-        assert_eq!(
-            adapters::MUSE.paste_gate_policy(),
-            PasteGatePolicy::RenderedWithTailAnchor
-        );
-        // Every other harness keeps the default: no rendered-paste gate, so no
-        // per-harness string comparison in delivery.rs can drift out of sync
-        // when a new harness is added.
-        assert_eq!(
-            adapters::TERMINAL.paste_gate_policy(),
-            PasteGatePolicy::Generic
-        );
-        assert_eq!(
-            adapters::ANTHROPIC.paste_gate_policy(),
-            PasteGatePolicy::Generic
-        );
-        assert_eq!(
-            adapters::OPENCODE.paste_gate_policy(),
-            PasteGatePolicy::Generic
-        );
+        use crate::agent::provider::{adapters, AgentProvider, PasteGatePolicy};
+        // Every adapter declares its paste-gate policy, so no per-harness
+        // string comparison in delivery.rs can drift out of sync when a new
+        // harness is added: extend this table alongside the new adapter.
+        // Tail-anchor harnesses draw mid-size pastes inline (issues
+        // #2060/#2061); every other harness keeps the default Generic gate.
+        let policies: &[(&str, PasteGatePolicy)] = &[
+            ("agy", adapters::AGY.paste_gate_policy()),
+            ("anthropic", adapters::ANTHROPIC.paste_gate_policy()),
+            ("cline", adapters::CLINE.paste_gate_policy()),
+            ("codex", adapters::CODEX.paste_gate_policy()),
+            ("commandcode", adapters::COMMANDCODE.paste_gate_policy()),
+            ("cursor", adapters::CURSOR.paste_gate_policy()),
+            ("dsh", adapters::DSH.paste_gate_policy()),
+            ("freebuff", adapters::FREEBUFF.paste_gate_policy()),
+            ("grok", adapters::GROK.paste_gate_policy()),
+            ("kimi", adapters::KIMI.paste_gate_policy()),
+            ("mcode", adapters::MCODE.paste_gate_policy()),
+            ("muse", adapters::MUSE.paste_gate_policy()),
+            ("opencode", adapters::OPENCODE.paste_gate_policy()),
+            ("terminal", adapters::TERMINAL.paste_gate_policy()),
+        ];
+        assert_eq!(policies.len(), 14, "one row per harness adapter");
+        for (name, policy) in policies {
+            let expected = if *name == "codex" || *name == "muse" {
+                PasteGatePolicy::RenderedWithTailAnchor
+            } else {
+                PasteGatePolicy::Generic
+            };
+            assert_eq!(*policy, expected, "paste-gate policy for {name}");
+        }
     }
 
     #[test]
     fn a_stale_redraw_with_an_identical_ending_is_a_known_tail_match_limit() {
         // Issue #2061 item 3: the tail proof cannot tell a fresh redraw from
-        // a stale one repainting an earlier prompt with an identical ending.
-        // Output-cursor scoping (only output after the write counts) plus the
-        // 1 s quiet gate narrow this but do not remove it: a redraw that lands
-        // after the write and repaints an identical-ending earlier prompt
-        // still satisfies the match. Pinned here so a future hardening (a
-        // prompt-specific token, or checking the composer region only)
-        // visibly flips this expectation.
+        // a stale one repainting an EARLIER prompt that shares only the
+        // ending. A and B below share exactly their last 64 normalized
+        // characters and differ everywhere else; staging B while A's redraw
+        // lands after the write still satisfies the match. Output-cursor
+        // scoping plus the 1 s quiet gate narrow this but do not remove it.
+        // Pinned here so a future hardening (a prompt-specific token, or
+        // checking the composer region only) visibly flips the final
+        // assertion to `assert!(!...)`.
         let _db = crate::db::test_support::isolated();
         let id = codex_worker_node("codex-stale-redraw-limit");
         evaluator::register(id);
@@ -1461,10 +1493,24 @@ mod tests {
         else {
             panic!("a multiline Codex prompt must use the rendered paste gate");
         };
-        // These bytes are framed as the earlier prompt's redraw arriving after
-        // this draft's write: the matcher sees the same tail either way.
+        // The earlier prompt shares B's tail and nothing else: if its redraw
+        // also carried B's head, this would re-test the happy path instead
+        // of the stale-redraw limit.
+        let b_normalized = crate::circuit::launch::normalize_for_match(CODEX_MIDSIZE_PROMPT);
+        let b_head: String = b_normalized.chars().take(30).collect();
+        let a_normalized =
+            crate::circuit::launch::normalize_for_match(CODEX_EARLIER_SAME_ENDING_PROMPT);
+        assert!(
+            a_normalized.ends_with(&content),
+            "fixture precondition: the earlier prompt shares B's tail"
+        );
+        assert!(
+            !a_normalized.contains(&b_head),
+            "fixture precondition: the earlier prompt shares ONLY the tail"
+        );
+        // A's redraw lands after B's write: the matcher sees B's tail in it.
         let cursor = evaluator::output_cursor(id).unwrap();
-        evaluator::on_output(id, CODEX_MIDSIZE_COMPOSER_FRAME);
+        evaluator::on_output(id, CODEX_EARLIER_REDRAW_FRAME);
         assert!(
             rendered_paste_visible(
                 &evaluator::cleaned_output_since(id, cursor),
@@ -1472,7 +1518,7 @@ mod tests {
                 normalized_chars,
                 &content
             ),
-            "known limit: an identical-ending redraw after the write satisfies the tail match"
+            "known limit: a stale redraw sharing only the ending satisfies the tail match"
         );
         evaluator::unregister(id);
     }
