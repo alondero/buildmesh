@@ -929,7 +929,40 @@ impl CircuitGraph {
                 changed = true;
             }
         }
+        changed |= self.repair_issue_review_feedback_route();
         changed
+    }
+
+    /// Drop the pre-verdict `completed -> follow_feedback` route from a graph
+    /// whose classifier is already the verdict gate. There `completed` means
+    /// approved and goes to `close_approved`; kept beside the `working` route
+    /// it makes `follow_feedback` wait for two outcomes of one verdict, so a
+    /// changes-requested review could never start the fix round and the run
+    /// failed. The leftover route also stopped the publication-flow and
+    /// merge-verification upgrades recognising the graph. Graphs without both
+    /// routes are left alone.
+    pub(crate) fn repair_issue_review_feedback_route(&mut self) -> bool {
+        let is_route = |edge: &CircuitEdge, outcome: StepOutcome| {
+            edge.from == "review_classifier"
+                && edge.to == "follow_feedback"
+                && edge.condition == EdgeCondition::OnOutcome(outcome)
+        };
+        if !self.is_issue_driven_autopilot_review()
+            || !matches!(
+                self.node("review_classifier").map(|n| &n.kind),
+                Some(CircuitNodeKind::ReviewVerdict { .. })
+            )
+            || !self.edges.iter().any(|e| is_route(e, StepOutcome::Working))
+            || !self
+                .edges
+                .iter()
+                .any(|e| is_route(e, StepOutcome::Completed))
+        {
+            return false;
+        }
+        self.edges
+            .retain(|edge| !is_route(edge, StepOutcome::Completed));
+        true
     }
 
     fn replace_legacy_injected_first_turn(
@@ -2999,6 +3032,93 @@ mod tests {
             extra_step, before,
             "a customized topology is left untouched"
         );
+    }
+
+    fn feedback_routes(graph: &CircuitGraph) -> Vec<EdgeCondition> {
+        graph
+            .edges
+            .iter()
+            .filter(|edge| edge.from == "review_classifier" && edge.to == "follow_feedback")
+            .map(|edge| edge.condition)
+            .collect()
+    }
+
+    /// A changes-requested verdict reached `follow_feedback` through a second,
+    /// `completed` route left over from the pre-verdict classifier. A node needs
+    /// every incoming edge satisfied and one verdict yields one outcome, so the
+    /// feedback step could never start and the run failed.
+    #[test]
+    fn verdict_upgrade_replaces_the_legacy_completed_feedback_route() {
+        let mut graph = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-issue-review-circuit.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            feedback_routes(&graph),
+            [EdgeCondition::OnOutcome(StepOutcome::Completed)],
+            "the saved legacy graph routes a finished review turn to the feedback step"
+        );
+
+        assert!(graph.upgrade_issue_review_verdict());
+        assert_eq!(
+            feedback_routes(&graph),
+            [EdgeCondition::OnOutcome(StepOutcome::Working)],
+            "only a changes-requested verdict feeds the implementer"
+        );
+        graph.validate().unwrap();
+    }
+
+    #[test]
+    fn stuck_issue_review_graph_is_repaired_and_reaches_the_current_flow() {
+        let mut graph = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/stuck-issue-review-circuit.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            feedback_routes(&graph),
+            [
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+                EdgeCondition::OnOutcome(StepOutcome::Working)
+            ],
+            "the saved graph carries both routes"
+        );
+
+        assert!(graph.repair_issue_review_feedback_route());
+        assert_eq!(
+            feedback_routes(&graph),
+            [EdgeCondition::OnOutcome(StepOutcome::Working)]
+        );
+        assert!(
+            !graph.repair_issue_review_feedback_route(),
+            "the repair is idempotent"
+        );
+
+        assert!(graph.upgrade_issue_review_publication_flow());
+        graph.validate().unwrap();
+        assert!(
+            graph.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+    }
+
+    #[test]
+    fn feedback_route_repair_leaves_unrelated_graphs_alone() {
+        // The canonical graph has only the `working` route.
+        let mut canonical = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        let before = canonical.clone();
+        assert!(!canonical.repair_issue_review_feedback_route());
+        assert_eq!(canonical, before);
+
+        // Before the verdict upgrade `completed` is the only feedback route and
+        // it is the correct one for that classifier.
+        let mut legacy = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/legacy-issue-review-circuit.json"
+        ))
+        .unwrap();
+        let before = legacy.clone();
+        assert!(!legacy.repair_issue_review_feedback_route());
+        assert_eq!(legacy, before);
     }
 
     #[test]

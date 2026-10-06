@@ -7787,6 +7787,36 @@ mod tests {
         );
     }
 
+    /// A saved circuit that carried a stale `completed` feedback route failed on
+    /// its first changes-requested verdict. Once repaired it must send the
+    /// findings to the implementer instead.
+    #[test]
+    fn repaired_saved_issue_review_sends_changes_requested_to_the_implementer() {
+        let mut run = issue_review_run();
+        run.graph = crate::circuit::test_support::repaired_stuck_issue_review();
+        issue_review_to_first_verdict(&mut run, 701);
+
+        advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Working),
+                Some("Changes requested: fix the race."),
+            ),
+        );
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
+        let feedback = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "follow_feedback".into(),
+            },
+        );
+        assert!(feedback.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+                if target == "implementer" && prompt.contains("fix the race"))));
+    }
+
     /// Approval, then the merge request delivered to the implementer; leaves the
     /// run waiting on the implementer's merge report (`merge_wait`).
     fn approve_and_deliver_merge(run: &mut RunView) {
