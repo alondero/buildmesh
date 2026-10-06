@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { formatTouched } from '../../scripts/rustfmt-touched.mjs';
+import { formatTouched, rustfmtEdition } from '../../scripts/rustfmt-touched.mjs';
 import { decide } from '../../.claude/hooks/guard-rustfmt.mjs';
 
 const tool = fileURLToPath(new URL('../../scripts/rustfmt-touched.mjs', import.meta.url));
@@ -21,6 +21,7 @@ function crate(t) {
   git('config', 'user.email', 'rustfmt@example.invalid');
   git('config', 'core.autocrlf', 'false');
   const put = (path, data) => { mkdirSync(join(cwd, path, '..'), { recursive: true }); writeFileSync(join(cwd, path), data); };
+  put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nedition = "2021"\n');
   put('src/lib.rs', 'mod child;\nfn  owner() {}\n');
   put('src/child.rs', 'fn  child() {}\r\nfn  mixed() {}\n');
   put('src/other.rs', 'fn  other() {}\n');
@@ -86,6 +87,21 @@ test('the rustfmt-touched command formats with the real rustfmt and leaves its c
   assert.equal(fixture.read('src/lib.rs').toString(), 'mod child;\nfn owner() {}\n');
   assert.deepEqual(fixture.read('src/child.rs'), child);
   assert.match(run.stdout, /Formatted: src\/lib\.rs/);
+});
+
+test('the edition comes from the crate manifest, not from a literal in the script', t => {
+  const fixture = crate(t);
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // A bumped edition must reach rustfmt without editing this script.
+  fixture.put('src-tauri/Cargo.toml', '[workspace]\nmembers = ["proc-macros"]\nedition = "2015"\n\n[package]\nname = "fixture"\nedition = "2024"\n\n[dependencies]\nserde = { version = "1", edition = "2021" }\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2024');
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nrust-version = "1.77"\n');
+  assert.throws(() => rustfmtEdition(fixture.cwd), /edition =/);
+  assert.throws(() => rustfmtEdition(join(fixture.cwd, 'absent')), /edition =/);
+  const run = spawnSync(process.execPath, [tool, 'src/lib.rs'], { cwd: fixture.cwd, encoding: 'utf8' });
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stderr, /edition =/);
+  assert.deepEqual(fixture.read('src/child.rs').toString(), 'fn  child() {}\r\nfn  mixed() {}\n');
 });
 
 test('formatTouched restores siblings even when the formatter fails after rewriting them', t => {

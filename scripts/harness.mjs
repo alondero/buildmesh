@@ -19,11 +19,24 @@ function saveJson(path, value) {
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`);
   renameSync(temporary, path);
 }
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+}
 function lock(root, name = 'lock') {
   mkdirSync(statePath(root, ''), { recursive: true });
   const path = statePath(root, name);
   let fd;
-  try { fd = openSync(path, 'wx'); } catch { throw new Error('BLOCKED: another harness operation owns .harness/lock. If interrupted, inspect its PID before removing the lock.'); }
+  try { fd = openSync(path, 'wx'); } catch {
+    // An interrupted process leaves the lock behind. Reclaim it when the recorded
+    // PID is gone, but never when the owner is still running, or when the file
+    // is unreadable and therefore cannot be attributed to a dead owner.
+    let owner = null;
+    try { owner = readJson(path); } catch { owner = null; }
+    if (!owner || typeof owner.pid !== 'number' || alive(owner.pid)) throw new Error(`BLOCKED: another harness operation owns .harness/${name}. If interrupted, inspect its PID before removing the lock.`);
+    unlinkSync(path);
+    try { fd = openSync(path, 'wx'); } catch { throw new Error(`BLOCKED: another harness operation owns .harness/${name}.`); }
+    event(root, { type: 'lock-reclaimed', lock: name, pid: owner.pid, startedAt: owner.startedAt ?? null });
+  }
   writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
   return () => { closeSync(fd); unlinkSync(path); };
 }
@@ -232,7 +245,7 @@ function classify(gate, code, output, paths) {
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
     if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
-    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with "node scripts/rustfmt-touched.mjs ${touched.join(' ')}", which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022).`, formatDiffCount: total };
+    if (touched.length) return { outcome: 'FAIL', reason: `rustfmt diffs in touched files: ${touched.join(', ')}. Format them with node scripts/rustfmt-touched.mjs ${touched.map(path => `"${path}"`).join(' ')}, which restores every other Rust file; bare "rustfmt <file>" also rewrites child modules and "cargo fmt" rewrites the whole crate (#2022).`, formatDiffCount: total };
     return { outcome: 'PASS', count: null, formatDiffCount: total };
   }
   if (code !== 0) return { outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' };
@@ -414,9 +427,12 @@ async function hook(root, payload) {
   } else if (payload.hook_event_name === 'Stop' && taskAt(root)) {
     const result = completion(root);
     if (result.outcome !== 'PASS') {
-      // A blocked handoff is allowed once the diagnostic has been presented.
-      // It never updates phase=complete, and finish still returns nonzero.
-      if (payload.stop_hook_active && (['BLOCKED', 'TIMEOUT'].includes(result.outcome) || taskAt(root).phase === 'blocked' && taskAt(root).blockers.length)) return;
+      const task = taskAt(root);
+      // A recorded blocked handoff is released on the very first stop, so the
+      // agent is not re-blocked once per later turn. It never updates
+      // phase=complete, and finish still returns nonzero.
+      if (task.phase === 'blocked' && task.blockers.length) return;
+      if (payload.stop_hook_active && ['BLOCKED', 'TIMEOUT'].includes(result.outcome)) return;
       // FAIL is never released by a written report: only recorded blockers permit a handoff, so say how to record them.
       const escape = result.outcome === 'FAIL' ? ' If the failure cannot be repaired here, write {"phase": "blocked", "blockers": ["<why>"]} to a JSON file and run npm run harness -- update --spec <file>; that permits an incomplete handoff.' : '';
       console.log(JSON.stringify({ decision: 'block', reason: `${result.outcome}: ${result.reason} Complete verification and evidence, or report an incomplete handoff with this diagnostic.${escape} Do not claim success.` }));
