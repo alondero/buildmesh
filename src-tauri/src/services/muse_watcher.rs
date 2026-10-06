@@ -1,12 +1,14 @@
 //! Passive turn detection for Meta Muse's durable session log (issue #1709).
 //!
-//! Muse 1.1.1 exposes no interactive attention-hook registration: `muse --help`
-//! has no hook/event flag and there is no workspace or global hook config file
-//! (unlike AGY's `.agents/hooks.json`, Codex's `.codex/hooks.json`, or Grok's
-//! global HTTP hooks). Its MSP method index (`muse schema generate-json-schema`)
-//! proves the agent loop *has* `turn/*`, `approval/*`, and `userInput/*` events,
-//! but those arrive only on the `muse serve` stdio plane — a separate headless
-//! architecture that does not render the interactive TUI Buildmesh PTY-spawns.
+//! Muse's interactive TUI has no attention-hook *flag* — `muse --help` exposes
+//! none — but Muse 1.3.0 **does** ship a claude-compatible plugin hook surface
+//! (`Stop`/`Notification`/… in a `.claude-plugin/plugin.json` bundle). It is
+//! deliberately not provisioned: installing it writes a global plugin cache and
+//! sits at `review_needed` until an explicit `muse plugins approve`, which
+//! Buildmesh must not do unattended. See `docs/research/muse-attention-signals.md`
+//! §(d) for that probe, including the supported/rejected hook-event vocabulary.
+//! (The 1.1.1-era claim that "no hook files exist" was superseded and is recorded
+//! there, not here.)
 //!
 //! What the interactive TUI *does* leave behind is the durable session log at
 //! `~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl` (unless
@@ -24,11 +26,32 @@
 //! that file and publishes a Node Turn on each terminal record, giving Muse the
 //! same turn signal the Command Code transcript watcher provides.
 //!
-//! **Launch mode is `SkipPermissions`.** Buildmesh launches with
-//! `--disable-approval` (the sandbox flag is issue #1788's separate concern); every
-//! observed `approval_disabled` session log carries
-//! zero `approval/requested` records, so a `PermissionRequested` signal is
-//! impossible by construction and is deliberately not classified here.
+//! The same log also records the durable `userInput/*` facts, which arrive as
+//! run-scoped events and pair strictly by `prompt_id`:
+//!
+//! ```json
+//! {"payload_type":"runtime.session","payload":{"kind":"run","run_id":"<uuid>",
+//!   "event":{"kind":"user_input_prompt_requested","prompt_id":"<uuid>","tool_name":"request_user_input",…}}}
+//! {"payload_type":"runtime.session","payload":{"kind":"run","run_id":"<uuid>",
+//!   "event":{"kind":"user_input_prompt_settled","prompt_id":"<uuid>","outcome":"answered",…}}}
+//! ```
+//!
+//! `requested` is the agent blocked on a **question**, so it publishes
+//! `QuestionRequested` (the node lands in `AwaitingInput`); `settled` publishes
+//! `WorkResumed`, which is what actually clears it. Both halves are needed: a
+//! watcher that opens the wait but never closes it strands the node in
+//! `AwaitingInput` whenever the answer does not clear it by some other path.
+//! These are the MSP `userInput/requested` and `userInput/settled`
+//! notifications folded to disk.
+//!
+//! **Launch mode is `SkipPermissions`, but a question is not an approval.**
+//! Buildmesh launches with `--disable-approval` (the sandbox flag is issue
+//! #1788's separate concern); every observed `approval_disabled` session log
+//! carries zero `approval/requested` records, so a tool-approval
+//! `PermissionRequested` signal is impossible by construction and is not
+//! classified here. `request_user_input` is not a tool approval, so it still
+//! fires under `--disable-approval` — observed live in retained 1.3.0 logs —
+//! and is the *only* way a Muse node reaches `AwaitingInput`.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
@@ -147,17 +170,43 @@ pub struct TurnTerminal {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One yielded-control fact read from the durable session log.
+///
+/// Three distinct transitions share one log and must not collapse into each
+/// other: `Completed` is a finished turn (`Ready`), `AwaitingInput` is a run
+/// still going with the agent blocked on an unanswered question
+/// (`AwaitingInput`), and `Resumed` is the other half of that contract — the
+/// question was answered and the agent is working again (`Running`). Emitting
+/// the first without the third strands the node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnSignal {
+    Completed(TurnTerminal),
+    AwaitingInput { run_id: String, prompt_id: String },
+    Resumed { run_id: String, prompt_id: String },
+}
+
+/// Where the node stands with respect to the run in the log.
+///
+/// "Blocked on a question" is a state, not a sidecar flag: folding the open
+/// prompt in here is what lets a reader tell at a glance that the agent is
+/// waiting, and it makes "terminal while a question is still open"
+/// unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RunState {
     Active,
+    /// The agent is blocked on an unanswered `request_user_input` question.
+    AwaitingInput {
+        prompt_id: String,
+    },
     Terminal,
 }
 
-/// Stateful session-log classifier which emits each terminal turn once.
+/// Stateful session-log classifier which emits each yield once.
 ///
-/// A terminal is only meaningful while its run is the current one: if a newer
-/// run has already `started`, the older terminal belongs to a turn the node
-/// moved past and must not be published.
+/// A fact is only meaningful while its run is the current one: if a newer run
+/// has already `started`, an older run's terminal or question belongs to a turn
+/// the node moved past and must not be published. A run this tracker has never
+/// seen is *not* stale — a resumed watcher legitimately starts mid-run.
 #[derive(Default)]
 pub struct MuseTurnTracker {
     state: Option<RunState>,
@@ -166,7 +215,21 @@ pub struct MuseTurnTracker {
 }
 
 impl MuseTurnTracker {
-    pub fn observe_session_log_line(&mut self, line: &str) -> Option<TurnTerminal> {
+    /// A record from a run this tracker has already moved past.
+    fn is_stale_run(&self, run_id: &str) -> bool {
+        self.current_run
+            .as_deref()
+            .is_some_and(|current| current != run_id)
+    }
+
+    fn awaiting(&self) -> Option<&str> {
+        match &self.state {
+            Some(RunState::AwaitingInput { prompt_id }) => Some(prompt_id),
+            _ => None,
+        }
+    }
+
+    pub fn observe_session_log_line(&mut self, line: &str) -> Option<TurnSignal> {
         let value: serde_json::Value = serde_json::from_str(line).ok()?;
         if value.get("payload_type")?.as_str()? != "runtime.session" {
             return None;
@@ -184,14 +247,15 @@ impl MuseTurnTracker {
                 None
             }
             "terminal" => {
-                if self.current_run.as_ref().is_some_and(|current| *current != run_id)
-                    || self.emitted_run.as_deref() == Some(run_id.as_str()) {
+                if self.is_stale_run(&run_id)
+                    || self.emitted_run.as_deref() == Some(run_id.as_str())
+                {
                     return None;
                 }
                 self.state = Some(RunState::Terminal);
                 self.current_run = Some(run_id.clone());
                 self.emitted_run = Some(run_id.clone());
-                Some(TurnTerminal {
+                Some(TurnSignal::Completed(TurnTerminal {
                     run_id,
                     terminal: event
                         .get("terminal")
@@ -202,7 +266,30 @@ impl MuseTurnTracker {
                         .get("reason")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_string),
-                })
+                }))
+            }
+            "user_input_prompt_requested" => {
+                let prompt_id = event.get("prompt_id")?.as_str()?.to_string();
+                // Same run-scoping the terminal arm applies: a question from a
+                // superseded run is not this node's current business.
+                if self.is_stale_run(&run_id) || self.awaiting() == Some(prompt_id.as_str()) {
+                    return None;
+                }
+                self.current_run = Some(run_id.clone());
+                self.state = Some(RunState::AwaitingInput {
+                    prompt_id: prompt_id.clone(),
+                });
+                Some(TurnSignal::AwaitingInput { run_id, prompt_id })
+            }
+            "user_input_prompt_settled" => {
+                let prompt_id = event.get("prompt_id")?.as_str()?.to_string();
+                // Only the question actually outstanding can be answered; a
+                // settle for a superseded prompt is not a resumption.
+                if self.is_stale_run(&run_id) || self.awaiting() != Some(prompt_id.as_str()) {
+                    return None;
+                }
+                self.state = Some(RunState::Active);
+                Some(TurnSignal::Resumed { run_id, prompt_id })
             }
             _ => None,
         }
@@ -211,12 +298,16 @@ impl MuseTurnTracker {
 
 pub(crate) fn report_turn_finished(lines: &[String]) -> bool {
     let mut tracker = MuseTurnTracker::default();
-    let mut terminal = None;
+    let mut completed = false;
     for line in lines {
-        if let Some(observed) = tracker.observe_session_log_line(line) { terminal = Some(observed); }
+        if let Some(TurnSignal::Completed(turn)) = tracker.observe_session_log_line(line) {
+            completed = turn.terminal == "completed";
+        }
     }
-    matches!(tracker.state, Some(RunState::Terminal))
-        && terminal.is_some_and(|terminal| terminal.terminal == "completed")
+    // The *final* state decides. A run blocked on an unanswered question has
+    // produced no finished turn to report, however many completions precede it
+    // — the node is waiting on the user, not finished.
+    matches!(tracker.state, Some(RunState::Terminal)) && completed
 }
 
 /// Incremental reader for an append-only Muse session log.
@@ -228,7 +319,7 @@ pub(crate) fn report_turn_finished(lines: &[String]) -> bool {
 struct SessionLogTail {
     offset: u64,
     tracker: MuseTurnTracker,
-    pending: Option<TurnTerminal>,
+    pending: Option<TurnSignal>,
 }
 
 impl SessionLogTail {
@@ -239,7 +330,14 @@ impl SessionLogTail {
         }
     }
 
-    fn read_turns(&mut self, path: &Path) -> Result<Vec<TurnTerminal>, String> {
+    /// Read whatever the log has appended and return the *one* transition that
+    /// is current, if any.
+    ///
+    /// Deliberately a single signal, not a batch: a late observer can see many
+    /// turns at once, but the node has one present state. Publishing a stale
+    /// completion just before the current question would flash `Ready` and fire
+    /// a rename for work that is not done.
+    fn read_turns(&mut self, path: &Path) -> Result<Option<TurnSignal>, String> {
         let file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         let file_len = file
             .metadata()
@@ -264,22 +362,45 @@ impl SessionLogTail {
                 break;
             }
             if !line.ends_with('\n') {
-                // The suffix could carry a new run boundary. Keep the
+                // The suffix could carry a run boundary or a question. Keep the
                 // candidate pending until we can inspect the complete record.
-                return Ok(vec![]);
+                return Ok(None);
             }
             self.offset += bytes as u64;
-            if let Some(turn) = self.tracker.observe_session_log_line(&line) {
-                self.pending = Some(turn);
+            let Some(signal) = self.tracker.observe_session_log_line(&line) else {
+                continue;
+            };
+            // A question opened and answered inside this same batch was never
+            // shown to the user, so neither half of it is news.
+            if matches!(signal, TurnSignal::Resumed { .. })
+                && matches!(self.pending, Some(TurnSignal::AwaitingInput { .. }))
+            {
+                self.pending = None;
+                continue;
             }
+            self.pending = Some(signal);
         }
-        // A late observer can read several turns at once. Only the current
-        // terminal state may be published; an earlier completion must not mark
-        // a node ready while a newer turn is already running.
-        if !matches!(self.tracker.state, Some(RunState::Terminal)) {
+        // Only a still-current fact may be published: an earlier completion must
+        // not mark a node ready while a newer turn is already running, and a
+        // question answered later in the batch must not leave the node waiting.
+        let stale = match &self.pending {
+            Some(TurnSignal::Completed(_)) => {
+                !matches!(self.tracker.state, Some(RunState::Terminal))
+            }
+            Some(TurnSignal::AwaitingInput { prompt_id, .. }) => {
+                self.tracker.awaiting() != Some(prompt_id.as_str())
+            }
+            Some(TurnSignal::Resumed { .. }) => {
+                // A resumption only means something if the node was actually
+                // waiting; a question reopened since makes it moot.
+                matches!(self.tracker.state, Some(RunState::AwaitingInput { .. }))
+            }
+            None => false,
+        };
+        if stale {
             self.pending = None;
         }
-        Ok(self.pending.take().into_iter().collect())
+        Ok(self.pending.take())
     }
 }
 
@@ -476,7 +597,7 @@ fn start(
             let mut tail = initial_offset
                 .map(SessionLogTail::from_offset)
                 .unwrap_or_default();
-            emit_turns(
+            emit_signal(
                 node_id,
                 &session_id,
                 &path_for_worker,
@@ -490,7 +611,7 @@ fn start(
                 if !worker_signal.is_active() {
                     return;
                 }
-                emit_turns(
+                emit_signal(
                     node_id,
                     &session_id,
                     &path_for_worker,
@@ -598,36 +719,74 @@ fn stop_if_current(node_id: i64, signal: &Arc<WorkerSignal>, preserve_activation
     }
 }
 
-fn emit_turns(
+fn emit_signal(
     node_id: i64,
     session_id: &str,
     log_path: &Path,
     app: &AppHandle,
     signal: &WorkerSignal,
-    turns: Result<Vec<TurnTerminal>, String>,
+    turn: Result<Option<TurnSignal>, String>,
 ) {
-    let turns = match turns {
-        Ok(turns) => turns,
+    let turn = match turn {
+        Ok(turn) => turn,
         Err(error) => {
             tracing::warn!("muse watcher: {error}");
             return;
         }
     };
-    for turn in turns {
-        if !signal.is_active() || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
-            return;
+    let Some(turn) = turn else { return };
+    if !signal.is_active() || !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
+        return;
+    }
+    let base = crate::agent::session_lifecycle::HookSignalDetail {
+        provider: Some("muse".to_string()),
+        provider_session_id: Some(session_id.to_string()),
+        transcript_path: Some(log_path.to_string_lossy().to_string()),
+        signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
+        ..Default::default()
+    };
+    match turn {
+        TurnSignal::Completed(turn) => {
+            let detail = crate::agent::session_lifecycle::HookSignalDetail {
+                provider_event: Some(format!("session-log:{}", turn.terminal)),
+                completion_reason: Some(turn.terminal),
+                message: turn.reason,
+                ..base
+            };
+            crate::node_turn::publish_ready(node_id, app, detail);
         }
-        let detail = crate::agent::session_lifecycle::HookSignalDetail {
-            provider: Some("muse".to_string()),
-            provider_event: Some(format!("session-log:{}", turn.terminal)),
-            provider_session_id: Some(session_id.to_string()),
-            completion_reason: Some(turn.terminal.clone()),
-            transcript_path: Some(log_path.to_string_lossy().to_string()),
-            signal_health: crate::agent::session_lifecycle::SignalHealth::Ok,
-            message: turn.reason.clone(),
-            ..Default::default()
-        };
-        crate::node_turn::publish_ready(node_id, app, detail);
+        TurnSignal::AwaitingInput { prompt_id, .. } => {
+            // `QuestionRequested`, not `InputRequired`: the log says exactly
+            // what this is. It also *disarms* the output-based autoclear safety
+            // net — background output and terminal redraws cannot answer a
+            // question, so they must not clear the attention behind the user's
+            // back.
+            let detail = crate::agent::session_lifecycle::HookSignalDetail {
+                kind: Some(crate::agent::session_lifecycle::LifecycleKind::QuestionRequested),
+                provider_event: Some("session-log:user_input_prompt_requested".to_string()),
+                message: Some(format!("Muse is waiting on question {prompt_id}")),
+                ..base
+            };
+            // No semantic turn: `request_user_input` is a question, not a
+            // tool-approval request, so it must land on the question lifecycle
+            // rather than `PermissionRequested`.
+            crate::node_turn::publish_with_signal(node_id, app, None, detail);
+        }
+        TurnSignal::Resumed { prompt_id, .. } => {
+            // The other half of the contract. Without this, a node put into
+            // `AwaitingInput` stays there whenever the answer does not come
+            // through a path that clears attention on its own (the PTY submit
+            // event, the autoclear net), stranding it forever. `WorkResumed`
+            // writes `Running` and clears the flag, and deliberately skips both
+            // the attention-mark and the AI rename.
+            let detail = crate::agent::session_lifecycle::HookSignalDetail {
+                kind: Some(crate::agent::session_lifecycle::LifecycleKind::WorkResumed),
+                provider_event: Some("session-log:user_input_prompt_settled".to_string()),
+                message: Some(format!("Muse resumed after question {prompt_id}")),
+                ..base
+            };
+            crate::node_turn::publish_with_signal(node_id, app, None, detail);
+        }
     }
 }
 
@@ -658,7 +817,6 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert!(!receipt.accepted(), "missing native evidence never falls back to redraw");
     }
-    use std::io::Write;
 
     fn run_started(run_id: &str) -> String {
         format!(
@@ -674,6 +832,52 @@ mod tests {
         format!(
             r#"{{"payload_type":"runtime.session","payload":{{"kind":"run","run_id":"{run_id}","event":{{"kind":"terminal","terminal":"{terminal}","reason":{reason},"turn_duration_ms":1027}}}}}}"#
         )
+    }
+
+    /// A `request_user_input` question opening, as Muse 1.3.0 records it.
+    fn prompt_requested(run_id: &str, prompt_id: &str) -> String {
+        format!(
+            r#"{{"payload_type":"runtime.session","payload":{{"kind":"run","run_id":"{run_id}","event":{{"kind":"user_input_prompt_requested","prompt_id":"{prompt_id}","tool_name":"request_user_input","questions":[{{"id":"scope","header":"Scope","question":"How far?","options":[{{"label":"Parity first"}}]}}]}}}}}}"#
+        )
+    }
+
+    /// The user answering that question; the run resumes.
+    fn prompt_settled(run_id: &str, prompt_id: &str) -> String {
+        format!(
+            r#"{{"payload_type":"runtime.session","payload":{{"kind":"run","run_id":"{run_id}","event":{{"kind":"user_input_prompt_settled","prompt_id":"{prompt_id}","outcome":"answered","answers":[{{"id":"scope","selected_label":"Parity first"}}]}}}}}}"#
+        )
+    }
+
+    fn completed(signal: &TurnSignal) -> &TurnTerminal {
+        match signal {
+            TurnSignal::Completed(turn) => turn,
+            other => panic!("expected a completed turn, got {other:?}"),
+        }
+    }
+
+    fn awaiting(signal: &TurnSignal) -> (&str, &str) {
+        match signal {
+            TurnSignal::AwaitingInput { run_id, prompt_id } => (run_id, prompt_id),
+            other => panic!("expected an awaiting-input yield, got {other:?}"),
+        }
+    }
+
+    fn resumed(signal: &TurnSignal) -> (&str, &str) {
+        match signal {
+            TurnSignal::Resumed { run_id, prompt_id } => (run_id, prompt_id),
+            other => panic!("expected a resumption, got {other:?}"),
+        }
+    }
+
+    /// Append records to a log the watcher is mid-way through tailing.
+    fn append(path: &std::path::Path, text: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("append open");
+        file.write_all(text.as_bytes()).expect("append write");
+        file.flush().expect("append flush");
     }
 
     #[test]
@@ -712,6 +916,7 @@ mod tests {
         let turn = tracker
             .observe_session_log_line(&run_terminal("run-1", "completed", None))
             .expect("terminal emits a turn");
+        let turn = completed(&turn);
         assert_eq!(turn.run_id, "run-1");
         assert_eq!(turn.terminal, "completed");
         assert_eq!(turn.reason, None);
@@ -748,39 +953,299 @@ mod tests {
         let turn = tracker
             .observe_session_log_line(&run_terminal("run-9", "failed", Some("process exited")))
             .expect("failed terminal yields the node back to the user");
+        let turn = completed(&turn);
         assert_eq!(turn.terminal, "failed");
         assert_eq!(turn.reason.as_deref(), Some("process exited"));
+    }
+
+    /// Issue #1709: the durable `userInput/requested` fold. Muse records a
+    /// `request_user_input` question as a run-scoped event, and it survives
+    /// `--disable-approval` because it is a question, not a tool approval. This
+    /// is the only way a Muse node reaches `AwaitingInput`.
+    #[test]
+    fn an_open_user_input_question_is_an_awaiting_input_yield() {
+        let mut tracker = MuseTurnTracker::default();
+        tracker.observe_session_log_line(&run_started("run-1"));
+        let signal = tracker
+            .observe_session_log_line(&prompt_requested("run-1", "p-1"))
+            .expect("a question must reach the user");
+        assert_eq!(awaiting(&signal), ("run-1", "p-1"));
+        // Idempotent: the same durable record must not publish twice.
+        assert_eq!(
+            tracker.observe_session_log_line(&prompt_requested("run-1", "p-1")),
+            None
+        );
+        // Answering is a transition in its own right — the clear half of the
+        // contract. Emitting nothing here would strand the node in
+        // `AwaitingInput` whenever the answer does not clear it by other means.
+        let resumed_signal = tracker
+            .observe_session_log_line(&prompt_settled("run-1", "p-1"))
+            .expect("answering a question must resume the node");
+        assert_eq!(resumed(&resumed_signal), ("run-1", "p-1"));
+        // A later question in the same run is its own yield.
+        let second = tracker
+            .observe_session_log_line(&prompt_requested("run-1", "p-2"))
+            .expect("a second question is a fresh yield");
+        assert_eq!(awaiting(&second), ("run-1", "p-2"));
+    }
+
+    /// F2: a question from a run the node has already moved past is stale, and
+    /// must be rejected exactly as a stale terminal is. Without this an
+    /// out-of-order record from an old run would drag a working node back into
+    /// `AwaitingInput`.
+    #[test]
+    fn a_question_from_a_superseded_run_is_rejected() {
+        let mut tracker = MuseTurnTracker::default();
+        tracker.observe_session_log_line(&run_started("run-2"));
+        assert_eq!(
+            tracker.observe_session_log_line(&prompt_requested("run-1", "p-old")),
+            None,
+            "a question from a run the tracker has moved past must not publish"
+        );
+        // The current run's question still works.
+        let signal = tracker
+            .observe_session_log_line(&prompt_requested("run-2", "p-new"))
+            .expect("the current run's question must publish");
+        assert_eq!(awaiting(&signal), ("run-2", "p-new"));
+        // ...and a settle for the rejected prompt is not a resumption.
+        assert_eq!(
+            tracker.observe_session_log_line(&prompt_settled("run-1", "p-old")),
+            None
+        );
+    }
+
+    /// A settled question is not a completion: the run is still in flight, so
+    /// the report snapshot must keep refusing to call it a finished turn.
+    #[test]
+    fn an_open_question_is_not_a_turn_completion() {
+        let mut lines = vec![run_started("run-1"), prompt_requested("run-1", "p-1")];
+        assert!(
+            !report_turn_finished(&lines),
+            "a run blocked on a question has produced no finished turn"
+        );
+        lines.push(prompt_settled("run-1", "p-1"));
+        lines.push(run_terminal("run-1", "completed", None));
+        assert!(report_turn_finished(&lines));
+    }
+
+    /// F1: a completed turn followed by a question in a *later* run. The
+    /// completion is real, but it is no longer the current state — the node is
+    /// waiting on the user, so reporting "turn finished" here would let a
+    /// consumer act on stale evidence.
+    #[test]
+    fn a_question_after_a_completed_turn_is_not_reported_as_a_finished_turn() {
+        let lines = vec![
+            run_started("run-1"),
+            run_terminal("run-1", "completed", None),
+            run_started("run-2"),
+            prompt_requested("run-2", "p-1"),
+        ];
+        assert!(
+            !report_turn_finished(&lines),
+            "an outstanding question must override an earlier completion"
+        );
+        // Once answered and that run completes, it is reportable again.
+        let mut settled = lines;
+        settled.push(prompt_settled("run-2", "p-1"));
+        settled.push(run_terminal("run-2", "completed", None));
+        assert!(report_turn_finished(&settled));
+    }
+
+    /// A question opened *and* answered before the watcher looked is not a
+    /// yield: the user is already past it, so the node must not light up — and
+    /// must not be told to resume from a wait it never entered.
+    #[test]
+    fn a_question_answered_within_one_read_batch_publishes_nothing() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            temp.path(),
+            format!(
+                "{}\n{}\n{}\n",
+                run_started("run-1"),
+                prompt_requested("run-1", "p-1"),
+                prompt_settled("run-1", "p-1"),
+            ),
+        )
+        .unwrap();
+        let mut tail = SessionLogTail::default();
+        assert!(
+            tail.read_turns(temp.path()).unwrap().is_none(),
+            "a prompt opened and answered in the same batch is not news either way"
+        );
+    }
+
+    /// The resumption is published when the answer arrives in a later batch,
+    /// which is the case that actually strands a node when it is dropped.
+    #[test]
+    fn answering_a_surfaced_question_publishes_the_resumption() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            temp.path(),
+            format!(
+                "{}\n{}\n",
+                run_started("run-1"),
+                prompt_requested("run-1", "p-1")
+            ),
+        )
+        .unwrap();
+        let mut tail = SessionLogTail::default();
+        let surfaced = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the question is news");
+        assert_eq!(awaiting(&surfaced), ("run-1", "p-1"));
+        // No new records: nothing re-published.
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
+
+        append(
+            temp.path(),
+            &format!("{}\n", prompt_settled("run-1", "p-1")),
+        );
+        let resumed_signal = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("answering a question the user actually saw must resume the node");
+        assert_eq!(resumed(&resumed_signal), ("run-1", "p-1"));
+    }
+
+    /// A question asked and then the turn ends in one batch: the node is done,
+    /// so the completion is the current state and must win.
+    #[test]
+    fn a_question_followed_by_a_terminal_in_one_batch_publishes_the_completion() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            temp.path(),
+            format!(
+                "{}\n{}\n{}\n",
+                run_started("run-1"),
+                prompt_requested("run-1", "p-1"),
+                run_terminal("run-1", "completed", None),
+            ),
+        )
+        .unwrap();
+        let mut tail = SessionLogTail::default();
+        let turn = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the terminal is current");
+        assert_eq!(completed(&turn).terminal, "completed");
+    }
+
+    /// The open question publishes once, and the run's terminal still reports
+    /// normally afterwards — the two transitions are independent.
+    #[test]
+    fn an_open_question_publishes_and_the_later_terminal_still_completes() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            temp.path(),
+            format!(
+                "{}\n{}\n",
+                run_started("run-1"),
+                prompt_requested("run-1", "p-1")
+            ),
+        )
+        .unwrap();
+        let mut tail = SessionLogTail::default();
+        let question = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the question is news");
+        assert_eq!(awaiting(&question), ("run-1", "p-1"));
+        // Re-reading the same records must not republish the question.
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
+
+        append(
+            temp.path(),
+            &format!(
+                "{}\n{}\n",
+                prompt_settled("run-1", "p-1"),
+                run_terminal("run-1", "completed", None)
+            ),
+        );
+        let turn = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the completion is the current state");
+        assert_eq!(completed(&turn).terminal, "completed");
+    }
+
+    /// A partial `user_input_prompt_requested` record must not be consumed: it
+    /// could be the question the user is staring at.
+    #[test]
+    fn a_partially_written_question_is_not_published() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp.path(), format!("{}\n", run_started("run-1"))).unwrap();
+        let mut tail = SessionLogTail::default();
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
+
+        append(temp.path(), prompt_requested("run-1", "p-1").trim_end());
+        assert!(
+            tail.read_turns(temp.path()).unwrap().is_none(),
+            "an unterminated record is not yet a question"
+        );
+
+        append(temp.path(), "\n");
+        let question = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the completed record is now a question");
+        assert_eq!(awaiting(&question), ("run-1", "p-1"));
+    }
+
+    /// Muse nests each subagent's log under
+    /// `<session>/subagent/<child-uuid>/session.jsonl`. A node's turn signal must
+    /// come from its own top-level log only: a child's turn is not the node's,
+    /// and treating it as one would mark the node ready mid-flight. The lookup
+    /// reads `…/<day>/<session-id>/session.jsonl` at a fixed depth and does not
+    /// recurse, so a nested log is unreachable by *any* id — the strongest form
+    /// of the guarantee. If the lookup ever grows a recursive fallback, this test
+    /// is what must stop a subagent from hijacking its parent's turn signal.
+    #[test]
+    fn a_subagent_log_is_unreachable_so_it_can_never_signal_for_its_parent() {
+        const PARENT: &str = "01a0c000-0000-7000-8000-000000000000";
+        const CHILD: &str = "01a0d000-0000-7000-8000-000000000000";
+        let dir = tempfile::tempdir().unwrap();
+        let day = dir.path().join("sessions/2026/10/06");
+        let parent_log = day.join(PARENT).join("session.jsonl");
+        let child_log = day
+            .join(PARENT)
+            .join("subagent")
+            .join(CHILD)
+            .join("session.jsonl");
+        std::fs::create_dir_all(child_log.parent().unwrap()).unwrap();
+        std::fs::write(&parent_log, format!("{}\n", run_started("run-1"))).unwrap();
+        std::fs::write(
+            &child_log,
+            format!("{}\n", run_terminal("child-run", "completed", None)),
+        )
+        .unwrap();
+
+        // The node's own session resolves to its own log...
+        assert_eq!(session_log_path_in(dir.path(), PARENT), Some(parent_log));
+        // ...and a subagent id resolves to nothing at all, so a child's
+        // completion can never be published as this node's turn.
+        assert_eq!(session_log_path_in(dir.path(), CHILD), None);
+        assert!(session_log_path_in(dir.path(), "unknown-session").is_none());
     }
 
     #[test]
     fn tail_defers_a_partial_suffix_until_the_record_completes() {
         let temp = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            temp.path(),
-            format!("{}\n", run_started("run-1")),
-        )
-        .unwrap();
+        std::fs::write(temp.path(), format!("{}\n", run_started("run-1"))).unwrap();
         let mut tail = SessionLogTail::default();
-        assert!(tail.read_turns(temp.path()).unwrap().is_empty());
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
 
         // An unterminated terminal record must not be consumed.
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(temp.path())
-            .unwrap()
-            .write_all(r#"{"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"completed""#.as_bytes())
-            .unwrap();
-        assert!(tail.read_turns(temp.path()).unwrap().is_empty());
+        append(
+            temp.path(),
+            r#"{"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"completed""#,
+        );
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
 
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(temp.path())
-            .unwrap()
-            .write_all(b"}}}\n")
-            .unwrap();
-        assert_eq!(tail.read_turns(temp.path()).unwrap().len(), 1);
+        append(temp.path(), "}}}\n");
+        assert!(tail.read_turns(temp.path()).unwrap().is_some());
         // Re-reading the completed log must not re-publish.
-        assert!(tail.read_turns(temp.path()).unwrap().is_empty());
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
     }
 
     #[test]
@@ -798,7 +1263,7 @@ mod tests {
         .unwrap();
         let mut tail = SessionLogTail::default();
         assert!(
-            tail.read_turns(temp.path()).unwrap().is_empty(),
+            tail.read_turns(temp.path()).unwrap().is_none(),
             "run-1's completion must not mark ready while run-2 is live"
         );
     }
@@ -818,9 +1283,11 @@ mod tests {
         )
         .unwrap();
         let mut tail = SessionLogTail::default();
-        let turns = tail.read_turns(temp.path()).unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].run_id, "run-2");
+        let turn = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the current completion is published");
+        assert_eq!(completed(&turn).run_id, "run-2");
     }
 
     #[test]
@@ -837,17 +1304,21 @@ mod tests {
         .unwrap();
         let baseline = std::fs::metadata(temp.path()).unwrap().len();
         let mut tail = SessionLogTail::from_offset(baseline);
-        assert!(tail.read_turns(temp.path()).unwrap().is_empty());
+        assert!(tail.read_turns(temp.path()).unwrap().is_none());
 
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(temp.path())
+        append(
+            temp.path(),
+            &format!(
+                "{}\n{}\n",
+                run_started("new-run"),
+                run_terminal("new-run", "completed", None)
+            ),
+        );
+        let turn = tail
+            .read_turns(temp.path())
             .unwrap()
-            .write_all(format!("{}\n{}\n", run_started("new-run"), run_terminal("new-run", "completed", None)).as_bytes())
-            .unwrap();
-        let turns = tail.read_turns(temp.path()).unwrap();
-        assert_eq!(turns.len(), 1);
-        assert_eq!(turns[0].run_id, "new-run");
+            .expect("the post-spawn turn is the only one published");
+        assert_eq!(completed(&turn).run_id, "new-run");
     }
 
     /// Contract guard: the checked-in recorded session log must classify to
@@ -862,9 +1333,11 @@ mod tests {
             include_str!("../../tests/fixtures/muse_session_log.jsonl"),
         )
         .unwrap();
-        let turns = tail.read_turns(temp.path()).unwrap();
-        assert_eq!(turns.len(), 1, "got {turns:?}");
-        assert_eq!(turns[0].terminal, "completed");
+        let turn = tail
+            .read_turns(temp.path())
+            .unwrap()
+            .expect("the recorded log's final completion must classify");
+        assert_eq!(completed(&turn).terminal, "completed");
     }
 
     /// The log path comes from Muse's `sessions` index. A schema/column rename
@@ -998,14 +1471,10 @@ mod tests {
             "the installed Muse must record the exact accepted prompt at its native run boundary");
         assert!(!PromptReceipt::from_log(log.clone(), "buildmesh live smoke").unwrap().accepted(),
             "a captured receipt must ignore the already-finished native run");
-        let turns = SessionLogTail::default()
+        let turn = SessionLogTail::default()
             .read_turns(&log)
-            .expect("read live session log");
-        assert_eq!(
-            turns.len(),
-            1,
-            "the watcher must classify exactly one turn from the live log; got {turns:?}"
-        );
-        assert_eq!(turns[0].terminal, "completed");
+            .expect("read live session log")
+            .expect("the live log must classify exactly one current turn");
+        assert_eq!(completed(&turn).terminal, "completed");
     }
 }

@@ -134,6 +134,11 @@ every `approval_disabled` session), so the watcher classifies only turn terminal
 permission. `failed`/`cancelled` terminals still yield the node back to the user and are
 published as turns with the terminal value carried in `completion_reason`.
 
+> Partly superseded by the 2026-10-06 update below: "classifies only turn terminals" described
+> the code, not the data. The log also carries `userInput` question records, which survive
+> `--disable-approval` and now yield `AwaitingInput`. The `PermissionRequested`-is-impossible
+> half still stands.
+
 The watcher resolves the log through the same `session-index.db` the adapter already uses
 for session recovery, converting the guest path with `env::to_host_path` for WSL hosts. It
 defers unterminated trailing lines (Muse may be mid-write), suppresses an earlier terminal
@@ -222,3 +227,62 @@ growth — a consent and shared-state cost it should not pay unattended. **Wirin
 belongs in a separate follow-up ticket once Muse workspace trust (#1706) lands**, at which
 point a project-scoped install avoids both the global cache and the consent bypass. This
 update corrects the record; it does not change the wiring.
+
+> #1706 has since landed (`ensure_workspace_trusted` pre-provisions the trust entry before
+> spawn), so that precondition is met. The consent cost above is unchanged, so the hook is
+> still not wired.
+
+## Update — the `userInput` fold is on disk too (2026-10-06)
+
+Re-enumerating **every** `payload_type | kind | event.kind` triple across all retained
+session logs on this host (535 logs: 122 top-level + 413 subagent, Muse 1.3.0) changed one
+conclusion in *Verdict and wiring* above. The enumeration was exhaustive — every record was
+parsed and counted, not keyword-filtered — so it cannot miss a record type.
+
+**The interactive log already carries the `userInput/*` facts**, as run-scoped `runtime.session`
+events, paired strictly by `prompt_id` and consecutive in `sequence`:
+
+```json
+{"payload_type":"runtime.session","payload":{"kind":"run","run_id":"<uuid>",
+  "event":{"kind":"user_input_prompt_requested","prompt_id":"<uuid>",
+           "tool_name":"request_user_input","questions":[{"id":"scope","question":"…","options":[…]}]}}}
+{"payload_type":"runtime.session","payload":{"kind":"run","run_id":"<uuid>",
+  "event":{"kind":"user_input_prompt_settled","prompt_id":"<uuid>","outcome":"answered",
+           "answers":[{"id":"scope","selected_label":"…"}]}}}
+```
+
+These are the MSP `userInput/requested` / `userInput/settled` notifications folded to disk — the
+same facts `muse serve` pushes on the wire, readable from the PTY path with no hook. Observed in
+two independent sessions (2026-10-03, 2026-10-06), both at top level.
+
+**This corrects the `SkipPermissions` reasoning.** `request_user_input` is not a tool approval,
+so `--disable-approval` does not suppress it — the earlier claim that "the watcher classifies
+only turn terminals" was true of the *code*, not of the *data*: the question records were always
+being written and always ignored. A Muse node could therefore never reach `AwaitingInput`,
+because the only yield the watcher published was a finished turn (`Ready`).
+
+`AwaitingInput` now comes from `user_input_prompt_requested` (and only there), published as
+`QuestionRequested` — the log distinguishes a question from an approval, so the more precise
+lifecycle kind applies, and it disarms the output-based autoclear safety net. `settled` publishes
+`WorkResumed`, which is the other half of the contract: without it a node put into `AwaitingInput`
+stays there whenever the answer does not clear it by another path. `PermissionRequested` remains
+impossible by construction under `--disable-approval` — that part of the original finding stands.
+
+Recording counts from the same exhaustive scan: `run/started` **788**, `run/terminal` **788**;
+`task/completed` **24368** (task-level, never a run boundary); `subagent.control.*` records
+**78** each; `run/user_prompt_display` **59**. `user_input_prompt_requested` and
+`user_input_prompt_settled` appear **2** times each, paired one-to-one.
+
+On approvals, this corpus is neutral rather than corrective: the enumeration found **no
+approval-shaped record type at all** — not `approval/requested`, not a `permission.requested`
+equivalent — even though 22 of the top-level logs here ran in `security_mode == "normal"`. So
+this host offers no evidence either way about whether normal-mode approvals fold to disk; the
+earlier §(b) observation (a different, smaller 20-log corpus probed against 1.1.1) stands as
+written. What is *not* in question is the `--disable-approval` half, which the 788/788 pairing
+and the live `userInput` records both support: with approvals disabled the loop has nothing to
+ask permission for, but it can still ask the user a **question**.
+
+Subagent logs live at `sessions/YYYY/MM/DD/<session>/subagent/<child-uuid>/session.jsonl`. The
+watcher resolves a log at the fixed depth `…/<day>/<session-id>/session.jsonl` and does **not**
+recurse, so a subagent log is unreachable by *any* id — a child's turn can never be published as
+its parent's node signal. Pinned by `a_subagent_log_is_unreachable_so_it_can_never_signal_for_its_parent`.
