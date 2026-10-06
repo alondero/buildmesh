@@ -126,6 +126,7 @@ test('the shell guard denies rustfmt and cargo fmt that would write, and names t
     'rustup run stable rustfmt src/lib.rs',
     'git ls-files "*.rs" | xargs rustfmt',
     'find src -name "*.rs" -exec rustfmt {} +',
+    'find src -name "*.rs" -execdir rustfmt {} +',
     'bash -c "rustfmt src/lib.rs"',
     'cmd /c rustfmt src\\lib.rs',
     'powershell -Command "rustfmt src\\lib.rs"',

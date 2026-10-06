@@ -22,7 +22,7 @@ const LAUNCHERS = String.raw`(?:[({&]\s*|\$\(\s*|(?:do|then|else)\s+|\w+=\S*\s+|
 // A command may be a path (`~/.cargo/bin/rustfmt.exe`); Windows is case-insensitive.
 const RUSTFMT = new RegExp(String.raw`^\s*${LAUNCHERS}(?:\S*[\\/])?rustfmt(?:\.exe)?(?=\s|$)`, 'i');
 const CARGO_FMT = new RegExp(String.raw`^\s*${LAUNCHERS}(?:\S*[\\/])?cargo(?:\.exe)?\s+(?:\+\S+\s+|--?[\w-]+(?:=\S+)?\s+(?:(?:never|always|auto)\s+)?)*fmt(?=\s|$)`, 'i');
-const FIND_EXEC = /\s-exec\s+(?:\S*[\\/])?rustfmt(?:\.exe)?(?=\s|$)/i;
+const FIND_EXEC = /\s-exec(dir)?\s+(?:\S*[\\/])?rustfmt(?:\.exe)?(?=\s|$)/i;
 const READ_ONLY = /(?:^|\s)(?:--check|--help|-h|--version|-V)(?=\s|$)/;
 // Quoted text that holds a shell separator is prose or a nested script; it must not start new segments.
 const SEPARATOR_IN_QUOTES = /"[^"]*[&|;\n][^"]*"|'[^']*[&|;\n][^']*'/g;
