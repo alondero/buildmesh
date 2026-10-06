@@ -25,7 +25,7 @@ import { useEscapeKey } from '../../hooks/useEscapeKey';
 const MIN_PANE_PERCENT = 15;
 
 interface ResizablePanesProps {
-  nodes: AgentNode[];
+  nodes: readonly AgentNode[];
   activityMembersByRoot: Readonly<Record<number, readonly number[]>>;
   // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986).
   draggable?: boolean;

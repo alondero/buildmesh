@@ -28,6 +28,60 @@ exercise the actual event dispatcher, both factories, manual invalidation, both
 completion orders, rejection, unsubscribe and timers. The watcher saturation test
 uses the production channel factory and coalescer.
 
+### Agent-node selector and usage-cache miss amplification (#2021)
+
+Measured on the current tree through the production code paths. The
+dereference counts are the load-bearing before/after evidence; the wall-clock
+figures are context only, for the reason given below.
+
+**All-node selector.** Seven components subscribe to the full derived node
+array. Counting every `nodesById` dereference the derivation performs (a
+deterministic measure, not a timing one), one store notification that changes
+no node cost:
+
+| Nodes | Dereferences before | After |
+|---|---|---|
+| 100 | 700 | 0 |
+| 500 | 3500 | 0 |
+| 1000 | 7000 | 0 |
+
+A notification that genuinely changes one node does not improve, and is not
+meant to: that derivation is required work. The derivation is now memoized on
+the identity of `nodesById`/`nodeIds`, so unrelated writes cost one
+`Object.is` pair per subscriber and a real change is derived once for all
+subscribers rather than once each. Component-commit time for 50 single-node
+patches was 3.1/6.4/10.2 ms at 100/500/1000 nodes before the change, but
+timings on this machine vary by ~2x between runs, so no after figure is
+claimed for them. Per-row `memo` already bailed out (row renders stayed at
+the patch count), so no row-level change was justified.
+
+Counting caveat: the instrumentation wraps `nodesById` in a Proxy, and any
+store write that replaces the container (e.g. `patchAgentNode`) spreads that
+Proxy into a plain object, so reads after such a write bypass the counter. The
+zero-cost result above is therefore only meaningful for notifications that leave
+the container in place -- which is exactly the case being measured. Cases that
+replace it are pinned by array-reference identity instead; see
+`tests/unit/agent-node-derived-selector.test.tsx`.
+
+**Usage cache misses.** Eight concurrent cold readers for one credential
+identity issued **8 vendor fetches** before coalescing, because the 5-minute
+TTL only collapses sequential reads. After per-`(provider, identity)`
+single-flight, the same burst issues **1**. Preserved: explicit force-refresh
+(skips the TTL read; simultaneous refreshes collapse to one live call),
+failures (every waiter receives the leader's real outcome, including
+`Rejected`, and the slot is released so the next caller retries), identity
+switches (two keys for one provider each reach the vendor), and meter
+visibility (followers receive the leader's `UsageOutcome`, not a value
+re-derived from the cached wire triple, so the `NoCredential`/`Rejected`
+distinction the gate depends on survives). No lock is held across the vendor
+round-trip, and a different provider is not serialized behind a slow one.
+
+Regression evidence: [agent-node-derived-selector.test.tsx](../../tests/unit/agent-node-derived-selector.test.tsx)
+(counts derivations, pins array-reference stability, ordering, pinned/status/mesh
+invariants and archived-row retention) and the issue #2021 tests in
+[catalog.rs](../../src-tauri/src/services/usage/catalog.rs) (controlled delayed
+adapters covering coalescing, identity switching, failure propagation,
+force-refresh and cross-provider independence).
 These fixes remove demonstrated amplification mechanisms. They do not establish
 the complete cause of the historic machine lockup in
 [#799](https://github.com/alondero/buildmesh/issues/799).
@@ -50,7 +104,6 @@ implementation contract.
 | P2 | Transcript tail streams the full file; last-assistant uses a 256 KiB window with deliberate full-scan fallback. Codex locates sessions by directory walks; Circuit ticks can reread unchanged evidence. [file.rs](../../src-tauri/src/services/transcript_reader/file.rs), [codex.rs](../../src-tauri/src/services/transcript_reader/readers/codex.rs), [native_completion.rs](../../src-tauri/src/services/transcript_reader/native_completion.rs) | Existing [#1753](https://github.com/alondero/buildmesh/issues/1753): proven-path/unchanged-file caching and WSL I/O counts. Preserve append/truncate/rotation/session/freshness fences and older-answer fallback. |
 | P2 | Circuit submission ordinals filter JSON in append-only history without a matching index. [evidence.rs](../../src-tauri/src/db/circuit/evidence.rs) | Existing [#1932](https://github.com/alondero/buildmesh/issues/1932): partial expression index, query-plan/migration/snapshot evidence and unchanged cross-run correlation. |
 | P2 | App eagerly imports canvas, probes, omnibar and modals. Terminals/addons already load dynamically. [App.tsx](../../src/App.tsx), [vite.config.ts](../../vite.config.ts) | Existing [#1750](https://github.com/alondero/buildmesh/issues/1750): current entry/startup measurements before splitting remaining cold surfaces. |
-| P2 | All-node selectors allocate/scan before shallow equality; consumers regroup on node updates. Usage cache misses can concurrently fetch one identity. [agentNodeStore.ts](../../src/stores/agentNodeStore.ts), [catalog.rs](../../src-tauri/src/services/usage/catalog.rs) | [#2021](https://github.com/alondero/buildmesh/issues/2021): profile large collections and coalesce identity-specific misses without locking unrelated network calls. |
 
 ## Safeguards to preserve
 

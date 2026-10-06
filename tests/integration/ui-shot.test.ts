@@ -6,6 +6,13 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  DEV_SERVER_STARTUP_MS,
+  NAVIGATION_TIMEOUT_MS,
+  MOUNT_TIMEOUT_MS,
+  ELEMENT_VISIBLE_TIMEOUT_MS,
+  UI_SHOT_STEP_BUDGETS_MS,
+} from '../../scripts/ui-shot-budgets.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const uiShot = resolve(repoRoot, 'scripts', 'ui-shot.mjs');
@@ -27,7 +34,23 @@ async function freePort() {
   return port;
 }
 
-function runUiShot(args, timeoutMs = 60000) {
+// Budget ordering matters, and the arithmetic has to actually hold against the
+// values the child really uses. The child spends, sequentially:
+// dev-server startup, then `page.goto`, then the `#root` mount wait, then a
+// selector-visible wait. The wrapper must exceed that whole sum or it kills the
+// child mid-flight and reports a bare transport error instead of the real
+// diagnostic (issue #2049 class). The per-test timeout then exceeds the wrapper,
+// so the wrapper's diagnostic — which carries the child's stdout/stderr — is what
+// fails the run.
+//
+// The child's budgets are IMPORTED, not copied: a literal here would drift the
+// moment a timeout is raised in the scripts and the check below would keep
+// passing while the wrapper silently fell below the real worst case again.
+const CHILD_WORST_CASE_MS = UI_SHOT_STEP_BUDGETS_MS;
+const WRAPPER_DEADLINE_MS = CHILD_WORST_CASE_MS + 30000;
+const TEST_DEADLINE_MS = WRAPPER_DEADLINE_MS + 30000;
+
+function runUiShot(args, timeoutMs = WRAPPER_DEADLINE_MS) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
     const child = spawn(process.execPath, [uiShot, ...args], {
       cwd: repoRoot,
@@ -65,11 +88,11 @@ async function serveHtml(html) {
   return { server, url: `http://127.0.0.1:${port}` };
 }
 
-// ui-shot waits 15s for `#root` before reporting a mount failure, and Chromium
-// startup competes for CPU with the rest of the suite. A tight wrapper deadline
-// killed the child under load and reported a transport timeout instead of the
-// real diagnostic, so budget generously (the same reason as issue #2049).
-const MOUNT_FAILURE_DEADLINE_MS = 120000;
+// This test serves its own static HTML (no `--serve`), so the child spends only
+// navigation plus the mount wait before reporting the failure. It still needs a
+// wrapper above that sum, and still needs enough budget for Chromium to start
+// while competing with the rest of the suite (issue #2049).
+const MOUNT_FAILURE_DEADLINE_MS = NAVIGATION_TIMEOUT_MS + MOUNT_TIMEOUT_MS + 30000;
 
 describe('ui-shot mock mode', () => {
   it('groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions', async () => {
@@ -86,7 +109,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('serves the fixture UI, drives a circuit, and writes a screenshot', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-'));
@@ -108,7 +131,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('keeps the node title and trailing close visible in a 240px pane', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-header-'));
@@ -131,7 +154,7 @@ describe('ui-shot mock mode', () => {
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
-  }, 90000);
+  }, TEST_DEADLINE_MS);
 
   it('reports root mount failure and browser console errors', async () => {
     const { server, url } = await serveHtml(
@@ -143,12 +166,30 @@ describe('ui-shot mock mode', () => {
       const result = await runUiShot(['--out', output, '--mock', '--mock-url', url], MOUNT_FAILURE_DEADLINE_MS);
 
       expect(result.code).toBe(1);
-      expect(result.stderr).toContain('#root never populated within 15s');
+      // Built from the constant the script formats its message with, so
+      // raising MOUNT_TIMEOUT_MS cannot leave this asserting a stale number.
+      expect(result.stderr).toContain(`#root never populated within ${MOUNT_TIMEOUT_MS / 1000}s`);
       expect(result.stderr).toContain('Page errors: mock mount exploded');
       await expect(readFile(output)).rejects.toThrow();
     } finally {
       await rm(folder, { recursive: true, force: true });
       await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
     }
-  }, MOUNT_FAILURE_DEADLINE_MS + 30000);
+  }, TEST_DEADLINE_MS);
+
+  it('keeps its wrapper deadline above the child it supervises', () => {
+    // The failure this guards is silent: a wrapper tighter than the child just
+    // produces a transport error that reads like "start the dev server" when
+    // `--serve` already started one. Assert the arithmetic against the values
+    // the scripts actually use (imported from `ui-shot-budgets.mjs`), so
+    // raising a child timeout widens the wrapper automatically.
+    // Strict equality against the four-term sum, not `>=`: a `>=` check holds
+    // by construction and would stay green if a term were dropped from
+    // `UI_SHOT_STEP_BUDGETS_MS`, leaving the wrapper under the real worst case.
+    expect(CHILD_WORST_CASE_MS).toBe(
+      DEV_SERVER_STARTUP_MS + NAVIGATION_TIMEOUT_MS + MOUNT_TIMEOUT_MS + ELEMENT_VISIBLE_TIMEOUT_MS,
+    );
+    expect(WRAPPER_DEADLINE_MS).toBeGreaterThan(CHILD_WORST_CASE_MS);
+    expect(TEST_DEADLINE_MS).toBeGreaterThan(WRAPPER_DEADLINE_MS);
+  });
 });

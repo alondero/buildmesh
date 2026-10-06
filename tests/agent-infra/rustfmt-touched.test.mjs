@@ -102,6 +102,24 @@ test('the edition comes from the crate manifest, not from a literal in the scrip
   assert.equal(run.status, 1, run.stderr);
   assert.match(run.stderr, /edition =/);
   assert.deepEqual(fixture.read('src/child.rs').toString(), 'fn  child() {}\r\nfn  mixed() {}\n');
+  // An inline array in the [package] section (`authors = [...]`, which the real
+  // manifest has) must not truncate the section before `edition` is found.
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nauthors = ["A B <a@example.com>"]\nedition = "2021"\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // ...and the scan must stop at the next section, so an `edition` key inside
+  // [dependencies] can never be mistaken for the package edition.
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nauthors = ["A B"]\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", edition = "2018" }\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // A manifest whose final line has no trailing newline still resolves.
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nedition = "2024"');
+  assert.equal(rustfmtEdition(fixture.cwd), '2024');
+  // CRLF is this project's primary line ending, and the section scan is
+  // newline-delimited, so it must not lose the edition there either.
+  fixture.put('src-tauri/Cargo.toml', '[package]\r\nname = "fixture"\r\nauthors = ["A B"]\r\nedition = "2021"\r\n\r\n[dependencies]\r\nserde = { edition = "2018" }\r\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // [package] need not be the first table in the manifest.
+  fixture.put('src-tauri/Cargo.toml', '[workspace]\nmembers = ["a"]\n\n[package]\nname = "fixture"\nedition = "2024"\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2024');
 });
 
 test('the edition is found after array values earlier in the [package] section', t => {

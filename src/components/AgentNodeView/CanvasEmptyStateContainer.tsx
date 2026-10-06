@@ -48,7 +48,7 @@ import { CanvasEmptyState } from './CanvasEmptyState';
 
 interface CanvasEmptyStateContainerProps {
   selectedMeshId: number | null;
-  agentNodes: AgentNode[];
+  agentNodes: readonly AgentNode[];
   /** The scope `AgentNodeView` already derived for this render (#2071).
    *  Everything the classifier needs about the active View Mode and the Mesh
    *  in scope comes from here, so this container passes no raw

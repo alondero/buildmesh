@@ -74,14 +74,16 @@ export function matchesGridControls(node: AgentNode, controls: FilterControls): 
  */
 export function scopeNodesForMode(
   mode: NonSingleViewMode,
-  agentNodes: AgentNode[],
+  agentNodes: readonly AgentNode[],
   selectedMeshId: number | null,
   controls: FilterControls = NO_FILTERS,
-): AgentNode[] {
+): readonly AgentNode[] {
   switch (mode) {
     case 'pinned':
       return agentNodes.filter(n => n.is_pinned);
     case 'all':
+      // Returned as-is: it is the shared derived array, so callers must treat
+      // the result as readonly too. Filtering cases return a fresh array.
       return agentNodes;
     case 'filtered':
       return agentNodes.filter(n => matchesGridControls(n, controls));
@@ -151,7 +153,7 @@ export function selectionMeshId(
 export interface ScopeInput {
   viewMode: ViewMode;
   lastNonSingleMode: NonSingleViewMode;
-  agentNodes: AgentNode[];
+  agentNodes: readonly AgentNode[];
   selectedMeshId: number | null;
   activeNodeId: number | null;
   /** The loaded Meshes, used only to resolve the display names the scope
@@ -174,8 +176,9 @@ export interface DerivedScope {
   /** `mesh !== null` — whether the scope is Mesh-scoped at all. */
   isMeshScoped: boolean;
   /** The ordered nodes the scope shows right now (grouping into Node
-   *  Activity cards and the Grid sorters happen downstream). */
-  visibleNodes: AgentNode[];
+   *  Activity cards and the Grid sorters happen downstream). Readonly: the
+   *  `all` view mode hands back the shared derived node array unchanged. */
+  visibleNodes: readonly AgentNode[];
   /** `visibleNodes.length`, for surfaces that render the number. */
   visibleNodeCount: number;
   /** How many nodes the scope holds BEFORE the Grid Controls narrow it —
@@ -241,7 +244,7 @@ export function deriveScope(input: ScopeInput): DerivedScope {
  * view falls back to another matching node rather than an unfiltered one.
  */
 export function resolveSingleNode(
-  agentNodes: AgentNode[],
+  agentNodes: readonly AgentNode[],
   activeNodeId: number | null,
   lastNonSingleMode: NonSingleViewMode,
   selectedMeshId: number | null,

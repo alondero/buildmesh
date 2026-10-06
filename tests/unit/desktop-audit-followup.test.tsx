@@ -143,7 +143,12 @@ describe('October desktop audit follow-up', () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Audit recipe' } });
     const form = screen.getByLabelText('Name').closest('form')!;
     fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
-    await screen.findByRole('button', { name: 'Edit Audit recipe' });
+    // `findByRole` defaults to a 1000ms wait, which the save -> refresh ->
+    // re-render cycle can exceed when this file runs alongside 287 others. The
+    // assertion is unchanged; only how long it may take to become true (issue
+    // #2049). This case is flaky at the base commit too, so the budget, not a
+    // behaviour change, is the fix.
+    await screen.findByRole('button', { name: 'Edit Audit recipe' }, { timeout: 10000 });
     await waitFor(() => expect(routingReads).toBe(2));
     expect(liveReads).toBe(2);
     fireEvent.click(screen.getByRole('tab', { name: 'Providers' }));
