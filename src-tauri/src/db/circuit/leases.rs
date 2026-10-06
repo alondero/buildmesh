@@ -213,6 +213,23 @@ const NODE_LEASE_TTL_SECS: i64 = 300;
 /// a squash-merge has been verified. Alias the step table as `s`.
 pub(crate) const RETIRABLE_STEP_AGENT: &str = "s.parent_agent_node_id IS NOT NULL";
 
+/// True when at least one of the run's agent nodes still has an outstanding
+/// or in-flight lease entry. Step recovery uses this to refuse to reopen a
+/// run while the worker is still mid-cleanup, so a retry doesn't start a
+/// second agent beside a live one.
+pub(crate) fn run_has_agents_being_cleaned(conn: &Connection, run_id: i64) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM autopilot_circuit_run_steps s
+            JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id
+            JOIN agent_nodes a ON a.id = s.agent_node_id
+            WHERE s.run_id = ?1 AND l.retired = 0 AND a.status != 'archived'
+              AND (l.cleanup_requested = 1 OR l.cleanup_generation IS NOT NULL))",
+        [run_id],
+        |row| row.get(0),
+    )
+}
+
 /// Failed associations remain the durable cleanup retry ledger. Historic
 /// terminal runs are not opted in unless their node-level cleanup request was
 /// recorded by the circuit terminal transition.

@@ -688,24 +688,20 @@ fn safety(has_uncommitted: bool) -> crate::git::worktree::WorktreeCloseSafety {
 
 #[test]
 fn a_close_never_deletes_an_implementation_worktree_with_uncommitted_changes() {
-    let blocker = close_blocker(false, &Ok(safety(true))).expect("dirty work is protected");
+    let blocker = close_blocker(false, &safety(true)).expect("dirty work is protected");
     assert!(blocker.contains("uncommitted changes"), "{blocker}");
 
     // A clean worktree closes, whatever its commits' push state: after a
     // squash-merge the branch's own commits never appear in the base.
-    assert_eq!(close_blocker(false, &Ok(safety(false))), None);
-}
-
-#[test]
-fn an_unreadable_implementation_worktree_is_left_open_rather_than_assumed_clean() {
-    let blocker = close_blocker(false, &Err("git status failed".into())).expect("fails closed");
-    assert!(blocker.contains("could not be inspected") && blocker.contains("git status failed"));
+    assert_eq!(close_blocker(false, &safety(false)), None);
 }
 
 #[test]
 fn a_helper_agent_is_closed_regardless_of_its_worktree() {
-    assert_eq!(close_blocker(true, &Ok(safety(true))), None);
-    assert_eq!(close_blocker(true, &Err("unreadable".into())), None);
+    // The caller turns a failed safety lookup into has_uncommitted=true before
+    // reaching close_blocker, so helpers still close on the same path.
+    assert_eq!(close_blocker(true, &safety(true)), None);
+    assert_eq!(close_blocker(true, &safety(false)), None);
 }
 
 #[test]

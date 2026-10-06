@@ -170,7 +170,9 @@ export function stepVerdict(
 }
 
 /** Written onto every sibling step the stepper cancels when a run fails. It
- *  explains nothing about why, so it must never be mistaken for the cause. */
+ *  explains nothing about why, so it must never be mistaken for the cause. The
+ *  Rust source of truth is `circuit::model::CIRCUIT_SWEEP_NOTE_PREFIX`; the
+ *  literal here must match. */
 const SIBLING_SWEEP_NOTE = 'Cancelled because the circuit run';
 
 const hasText = (value: string | null): value is string => value !== null && value.trim() !== '';

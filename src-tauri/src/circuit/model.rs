@@ -30,6 +30,15 @@ use serde::{Deserialize, Serialize};
 /// this version so a save upgrades the stored blueprint.
 pub const CIRCUIT_GRAPH_VERSION: i32 = 3;
 
+/// Prefix the stepper writes on every step it cancels when a run fails or
+/// is cancelled. The sole source of truth for "is this a sibling sweep
+/// note?" callers (Rust recovery module, frontend `runFailureStep`).
+/// Keep the literal in lockstep with `runStepPresentation.ts`.
+pub const CIRCUIT_SWEEP_NOTE_PREFIX: &str = "Cancelled because the circuit run";
+
+/// The exact string the stepper writes for the failure sweep.
+pub const CIRCUIT_SWEEP_NOTE_FAILED: &str = "Cancelled because the circuit run failed.";
+
 /// Maximum `SpawnAgentNode.timeout_seconds` the validator accepts
 /// (#1219 review). One week gives every realistic circuit room to wait
 /// (a flaky CI run, a long-running PR review) while bounding the

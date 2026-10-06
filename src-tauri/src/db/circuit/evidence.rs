@@ -1436,6 +1436,12 @@ pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, Str
 /// provenance vocabulary above; both are nullable for pre-v45 rows (issue
 /// #1909 / #1847). `observed_at` defaults to the append time, which for these
 /// synchronous events is the observed time.
+///
+/// The 7-arg signature covers run/node/attempt/kind/detail/source/disposition;
+/// the helper has a single, narrow INSERT and a 1-line body, so wrapping the
+/// arguments in a struct would just push the wiring to every call site. The
+/// allow is intentional and scoped to this function.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn append_history(
     db: &Connection,
     run_id: i64,

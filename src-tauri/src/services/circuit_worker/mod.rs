@@ -1052,21 +1052,25 @@ impl TransitionPersistFailure {
 ///
 /// A helper (the reviewer) is always closed. The implementation agent is the
 /// user's work: even after a merge GitHub confirmed, a close must not delete a
-/// worktree that still holds uncommitted changes. An unreadable worktree reads
-/// as "has changes" for the same reason.
+/// Why a circuit close must leave a node open, when it must.
+///
+/// A helper (the reviewer) is always closed. The implementation agent is the
+/// user's work: even after a merge GitHub confirmed, a close must not delete
+/// a worktree that still holds uncommitted changes. The caller resolves the
+/// safety lookup itself: helpers do not call the worktree helper at all, and
+/// an unreadable worktree is treated as "has changes" by the caller before
+/// reaching this function, so a DB error is never silently swallowed.
 pub(super) fn close_blocker(
     is_helper: bool,
-    safety: &Result<crate::git::worktree::WorktreeCloseSafety, String>,
+    safety: &crate::git::worktree::WorktreeCloseSafety,
 ) -> Option<String> {
     if is_helper {
         return None;
     }
-    match safety {
-        Ok(safety) if safety.has_uncommitted => {
-            Some("its worktree has uncommitted changes".to_string())
-        }
-        Ok(_) => None,
-        Err(error) => Some(format!("its worktree could not be inspected ({error})")),
+    if safety.has_uncommitted {
+        Some("its worktree has uncommitted changes".to_string())
+    } else {
+        None
     }
 }
 
@@ -2161,20 +2165,45 @@ pub(super) fn execute_effects(
                 match db::get_agent_node_by_id(target) {
                     Ok(_) => {
                         // An agent no step identifies as a helper is treated as
-                        // the user's work, the safer reading.
-                        let is_helper =
-                            db::circuit::agent_is_circuit_helper(target).unwrap_or(false);
-                        let safety = if is_helper {
-                            Ok(crate::git::worktree::WorktreeCloseSafety {
-                                worktree_path: None,
-                                has_uncommitted: false,
-                                has_unpushed: false,
-                                is_detached: false,
-                            })
-                        } else {
-                            crate::services::agent_node::get_worktree_close_safety(target)
-                                .map_err(|error| error.to_string())
+                        // the user's work, the safer reading. A failed DB read
+                        // here is the safer reading too: leave the agent open
+                        // and let the next sweep retry.
+                        let is_helper = match db::circuit::agent_is_circuit_helper(target) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "circuits: run {} could not read helper status for agent {}: {}; leaving the node open",
+                                    active.run.id,
+                                    target,
+                                    error
+                                );
+                                false
+                            }
                         };
+                        // Helpers are always closed without inspecting their
+                        // worktree. For the implementation agent, a failed
+                        // worktree inspection is reported as having changes so
+                        // the node stays open until a person looks at it.
+                        let mut safety = crate::git::worktree::WorktreeCloseSafety {
+                            worktree_path: None,
+                            has_uncommitted: false,
+                            has_unpushed: false,
+                            is_detached: false,
+                        };
+                        if !is_helper {
+                            match crate::services::agent_node::get_worktree_close_safety(target) {
+                                Ok(s) => safety = s,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "circuits: run {} could not inspect the worktree of agent {}: {}; leaving the node open",
+                                        active.run.id,
+                                        target,
+                                        error
+                                    );
+                                    safety.has_uncommitted = true;
+                                }
+                            }
+                        }
                         if let Some(reason) = close_blocker(is_helper, &safety) {
                             tracing::warn!(
                                 "circuits: run {} left agent {} open instead of closing it: {}",

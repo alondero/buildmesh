@@ -17,12 +17,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::evidence::{append_history, run_graph, DISPOSITION_APPLIED, SOURCE_OPERATOR};
-use crate::circuit::model::{CircuitGraph, CircuitNodeKind, GithubActionKind};
+use crate::circuit::model::{
+    CircuitGraph, CircuitNodeKind, GithubActionKind, CIRCUIT_SWEEP_NOTE_FAILED,
+    CIRCUIT_SWEEP_NOTE_PREFIX,
+};
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep, SessionStatus};
 
-/// Written on every sibling step the stepper cancels when a run fails. It says
-/// nothing about why, so it never counts as the failure and is cleared on reopen.
-const SIBLING_SWEEP_NOTE: &str = "Cancelled because the circuit run";
+/// True when a step was cancelled by the run's failure sweep rather than
+/// carrying its own reason. The stepper's note is the single source of truth
+/// (`circuit::model::CIRCUIT_SWEEP_NOTE_PREFIX`); matching it covers the
+/// `failed` and `cancelled` variants the stepper writes.
+fn is_failure_sweep_note(text: &str) -> bool {
+    text.starts_with(CIRCUIT_SWEEP_NOTE_PREFIX)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +97,7 @@ pub(crate) fn problem_step(steps: &[AutopilotCircuitRunStep]) -> Option<&Autopil
                         .error_message
                         .as_deref()
                         .unwrap_or("")
-                        .starts_with(SIBLING_SWEEP_NOTE)
+                        .starts_with(CIRCUIT_SWEEP_NOTE_PREFIX)
             })
         })
 }
@@ -216,18 +223,8 @@ fn reopen_blocker(
             return Ok(Some(format!("Run #{other} is already using this agent.")));
         }
     }
-    let closing: bool = db
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM autopilot_circuit_run_steps s
-                JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id
-                JOIN agent_nodes a ON a.id = s.agent_node_id
-                WHERE s.run_id = ?1 AND l.retired = 0 AND a.status != 'archived'
-                  AND (l.cleanup_requested = 1 OR l.cleanup_generation IS NOT NULL))",
-            [run.id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+    let closing =
+        super::leases::run_has_agents_being_cleaned(db, run.id).map_err(|e| e.to_string())?;
     if closing {
         return Ok(Some(
             "Autopilot is still closing one of this run's agents. Try again in a moment.".into(),
@@ -242,7 +239,7 @@ fn reopen_blocker(
                 .error_message
                 .as_deref()
                 .unwrap_or("")
-                .starts_with(SIBLING_SWEEP_NOTE)
+                .starts_with(CIRCUIT_SWEEP_NOTE_PREFIX)
     }) {
         let is_spawn = matches!(
             graph.node(&step.node_id).map(|node| &node.kind),
@@ -352,7 +349,9 @@ pub(crate) fn recover_failed_run_locked(
         .options
         .iter()
         .find(|option| option.action == request.action)
-        .expect("both actions are always listed");
+        .ok_or_else(|| {
+            "The recovery action is no longer available. Refresh the run and try again.".to_string()
+        })?;
     if let Some(reason) = &option.unavailable_reason {
         return Err(reason.clone());
     }
@@ -408,8 +407,10 @@ pub(crate) fn recover_failed_run_locked(
             };
             if let Some(effect_kind) = effect_kind {
                 tx.execute(
-                    "INSERT INTO circuit_effects VALUES (?1,?2,?3,?4,'attested_completed')
-                     ON CONFLICT(run_id,node_id,attempt,kind) DO UPDATE SET state='attested_completed'",
+                    "INSERT INTO circuit_effects (run_id, node_id, attempt, kind, state)
+                     VALUES (?1, ?2, ?3, ?4, 'attested_completed')
+                     ON CONFLICT(run_id, node_id, attempt, kind)
+                     DO UPDATE SET state = 'attested_completed'",
                     params![run.id, request.node_id, request.attempt, effect_kind],
                 )
                 .map_err(|e| e.to_string())?;
@@ -446,7 +447,11 @@ pub(crate) fn recover_failed_run_locked(
         "DELETE FROM autopilot_circuit_run_steps
          WHERE run_id = ?1 AND node_id != ?2 AND status = 'cancelled'
            AND error_message LIKE ?3",
-        params![run.id, request.node_id, format!("{SIBLING_SWEEP_NOTE}%")],
+        params![
+            run.id,
+            request.node_id,
+            format!("{CIRCUIT_SWEEP_NOTE_PREFIX}%")
+        ],
     )
     .map_err(|e| e.to_string())?;
     tx.execute(
@@ -558,7 +563,7 @@ mod tests {
             "finish_classifier",
             "cancelled",
             None,
-            Some("Cancelled because the circuit run failed."),
+            Some(CIRCUIT_SWEEP_NOTE_FAILED),
         );
         append_history(
             conn,
@@ -1093,7 +1098,7 @@ mod tests {
             "reviewer",
             "cancelled",
             Some(11),
-            Some("Cancelled because the circuit run failed."),
+            Some(CIRCUIT_SWEEP_NOTE_FAILED),
         );
 
         let recovery = recovery(&conn).unwrap();
