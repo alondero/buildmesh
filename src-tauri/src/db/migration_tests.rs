@@ -299,6 +299,112 @@ mod tests {
         assert_eq!(read(2), issue);
     }
 
+    /// Run 340: circuits whose verdict upgrade left a `completed` feedback route
+    /// beside the `working` one were skipped by the publication-flow and merge
+    /// verification upgrades, which have already recorded themselves as done.
+    #[test]
+    fn feedback_route_repair_unblocks_stuck_review_circuits_and_pins_run_graphs() {
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'repair', 'C:/repair')",
+            [],
+        )
+        .unwrap();
+
+        let stuck = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/stuck-issue-review-circuit.json"
+        ))
+        .unwrap();
+        let stuck_json = stuck.to_json().unwrap();
+        // A customized circuit is repaired but its topology is otherwise kept.
+        let mut customized = stuck.clone();
+        customized.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        let customized_json = customized.to_json().unwrap();
+        for (id, graph) in [(1, &stuck_json), (2, &customized_json)] {
+            conn.execute(
+                "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (?1, 1, 'c', ?2, 0)",
+                rusqlite::params![id, graph],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
+                (10, 1, 1, 'issue:7:a', 'running'),
+                (11, 1, 1, 'issue:7:b', 'failed'),
+                (12, 1, 1, 'issue:7:c', 'completed');
+             DELETE FROM app_settings WHERE key = 'review_feedback_route_repair_v1';",
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let read_circuit = |id: i64| -> CircuitGraph {
+            let json: String = conn
+                .query_row(
+                    "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            CircuitGraph::from_json(&json).unwrap()
+        };
+        let read_snapshot = |run: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let feedback_edges = |graph: &CircuitGraph| {
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from == "review_classifier" && edge.to == "follow_feedback")
+                .count()
+        };
+
+        // The stock circuit reaches the current flow in one step.
+        let repaired = read_circuit(1);
+        repaired.validate().unwrap();
+        assert!(
+            repaired.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(repaired.node("merge_verify").is_some());
+
+        let custom = read_circuit(2);
+        assert_eq!(feedback_edges(&custom), 1);
+        assert!(custom.node("announce").is_some());
+        assert!(custom.node("merge_verify").is_none());
+
+        // Unfinished runs lose only the dead route and keep the rest of the
+        // graph they started with; a completed run's record is untouched.
+        for run in [10, 11] {
+            let snapshot = CircuitGraph::from_json(&read_snapshot(run)).unwrap();
+            assert_eq!(feedback_edges(&snapshot), 1, "run {run}");
+            assert!(snapshot.node("close_reviewer").is_some(), "run {run}");
+            assert!(snapshot.node("merge_verify").is_none(), "run {run}");
+        }
+        assert_eq!(read_snapshot(12), stuck_json);
+
+        // The flag makes the scan one-shot.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 1",
+            [&stuck_json],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(feedback_edges(&read_circuit(1)), 2);
+    }
+
     #[test]
     fn merge_verification_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
         use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
