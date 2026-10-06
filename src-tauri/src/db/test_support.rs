@@ -72,9 +72,9 @@
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 
 use super::SqlResult;
 
@@ -180,7 +180,10 @@ fn open_isolated_at(db_path: &Path) -> SqlResult<&'static super::Database> {
 /// writes nothing.
 fn scratch_dir() -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| std::env::temp_dir().join(format!("buildmesh_lib_test_{}", std::process::id()))).clone()
+    DIR.get_or_init(|| {
+        std::env::temp_dir().join(format!("buildmesh_lib_test_{}", std::process::id()))
+    })
+    .clone()
 }
 
 /// The SQLite sidecar files a database path can leave behind, in the order
@@ -292,7 +295,10 @@ pub fn isolated_file() -> IsolatedDbGuard {
     let ordinal = NEXT_ORDINAL.fetch_add(1, Ordering::Relaxed);
     let scratch = scratch_dir();
     if let Err(error) = std::fs::create_dir_all(&scratch) {
-        panic!("db::test_support::isolated_file: creating {} failed: {error}", scratch.display());
+        panic!(
+            "db::test_support::isolated_file: creating {} failed: {error}",
+            scratch.display()
+        );
     }
     let db_path = scratch.join(format!("db-{ordinal}.sqlite"));
     install(db_path.clone(), database_files(&db_path))
@@ -457,7 +463,10 @@ impl IsolatedDbGuard {
 /// forgotten at one of the install paths.
 impl From<IsolatedDbHandle> for IsolatedDbGuard {
     fn from(handle: IsolatedDbHandle) -> Self {
-        IsolatedDbGuard { handle, _not_send: PhantomData }
+        IsolatedDbGuard {
+            handle,
+            _not_send: PhantomData,
+        }
     }
 }
 

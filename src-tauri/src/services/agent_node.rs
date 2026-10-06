@@ -6,25 +6,48 @@ use crate::db;
 /// Upgrade legacy history outside DB locks; the existing JSON column keeps the operation additive.
 pub fn migrate_launch_history() -> Result<(), String> {
     let prefs = crate::preferences::load()?;
-    let mut mappings: std::collections::HashMap<String, String> = prefs.spawn_configurations.iter().filter(|c| c.generated.is_some())
-        .filter(|c| !prefs.spawn_configurations.iter().any(|other| other.id == c.spawn_option_id))
-        .map(|c| (c.spawn_option_id.clone(), c.id.clone())).collect();
+    let mut mappings: std::collections::HashMap<String, String> = prefs
+        .spawn_configurations
+        .iter()
+        .filter(|c| c.generated.is_some())
+        .filter(|c| {
+            !prefs
+                .spawn_configurations
+                .iter()
+                .any(|other| other.id == c.spawn_option_id)
+        })
+        .map(|c| (c.spawn_option_id.clone(), c.id.clone()))
+        .collect();
     // Stored references to retired catalogue recipes (`launch/<harness>`)
     // heal to the equivalent bare Spawn Option; user-owned and explicitly
     // deleted ids are excluded by the helper.
-    mappings.extend(crate::preferences::launch_configurations::retired_configuration_aliases(&prefs));
+    mappings
+        .extend(crate::preferences::launch_configurations::retired_configuration_aliases(&prefs));
     db::migrate_launch_selections(&mappings).map_err(|e| e.to_string())?;
     let nodes = db::legacy_launch_nodes().map_err(|e| e.to_string())?;
     for node in nodes {
         let mut snapshot_prefs = prefs.clone();
         let selection = if let Some(configuration) = node.launch_configuration.as_ref() {
-            snapshot_prefs.spawn_configurations.retain(|c| c.id != configuration.id);
-            snapshot_prefs.spawn_configurations.push(configuration.clone());
+            snapshot_prefs
+                .spawn_configurations
+                .retain(|c| c.id != configuration.id);
+            snapshot_prefs
+                .spawn_configurations
+                .push(configuration.clone());
             configuration.id.as_str()
-        } else { node.provider.as_str() };
-        match crate::preferences::launch_configurations::capture_legacy(&snapshot_prefs, selection) {
-            Ok(plan) => db::set_node_launch_snapshot(node.id, &crate::preferences::launch_configurations::snapshot(plan))?,
-            Err(error) => tracing::warn!(node_id = node.id, "Legacy launch snapshot unavailable: {error}"),
+        } else {
+            node.provider.as_str()
+        };
+        match crate::preferences::launch_configurations::capture_legacy(&snapshot_prefs, selection)
+        {
+            Ok(plan) => db::set_node_launch_snapshot(
+                node.id,
+                &crate::preferences::launch_configurations::snapshot(plan),
+            )?,
+            Err(error) => tracing::warn!(
+                node_id = node.id,
+                "Legacy launch snapshot unavailable: {error}"
+            ),
         }
     }
     Ok(())
@@ -168,9 +191,18 @@ pub fn create_with_source_pr_fork(
     head_repo_clone_url: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_with_source_pr_fork_configured(
-        mesh_id, path, branch, provider, source_issue, source_pr,
-        source_pr_pinned_sha, use_worktree_override, name_override,
-        head_repo_owner, head_repo_clone_url, None,
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        use_worktree_override,
+        name_override,
+        head_repo_owner,
+        head_repo_clone_url,
+        None,
     )
 }
 
@@ -192,18 +224,25 @@ pub fn create_with_source_pr_fork_configured(
     let mesh = db::get_mesh_by_id(mesh_id)?;
     let mut prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
     let selection = crate::preferences::resolve_default_provider(
-        provider.map(str::to_string), mesh.default_provider.clone(), prefs.default_provider.clone());
+        provider.map(str::to_string),
+        mesh.default_provider.clone(),
+        prefs.default_provider.clone(),
+    );
     if let Some(value) = configuration {
         if value.spawn_option_id != selection && value.id != selection {
-            return Err(AgentNodeError::InvalidConfiguration("Configuration belongs to a different launch selection".into()));
+            return Err(AgentNodeError::InvalidConfiguration(
+                "Configuration belongs to a different launch selection".into(),
+            ));
         }
         prefs.spawn_configurations.retain(|c| c.id != value.id);
         prefs.spawn_configurations.push(value.clone());
     }
     let selected = configuration.map_or(selection.as_str(), |c| c.id.as_str());
-    let plan = if let Some(plan) = configuration.and_then(|c| c.resolved.clone()) { plan } else {
-        crate::preferences::launch_configurations::resolve(&prefs, selected,
-            &Default::default()).map_err(AgentNodeError::InvalidConfiguration)?
+    let plan = if let Some(plan) = configuration.and_then(|c| c.resolved.clone()) {
+        plan
+    } else {
+        crate::preferences::launch_configurations::resolve(&prefs, selected, &Default::default())
+            .map_err(AgentNodeError::InvalidConfiguration)?
     };
     let runtime = plan.harness.runtime;
     let provider_id = plan.spawn_option_id.clone();
@@ -240,8 +279,8 @@ pub fn create_with_source_pr_fork_configured(
         mesh.worktree_directory.as_deref(),
         app_dir.as_deref(),
     );
-    let worktree_path_owned: Option<String> = worktree_db_name
-        .map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
+    let worktree_path_owned: Option<String> =
+        worktree_db_name.map(|n| env::resolve_worktree_node_raw(&effective_dir, n));
     let resolved = env::resolve_agent_path_in_dir(path, &effective_dir, worktree_db_name);
     let env_type = runtime.unwrap_or(resolved.env_type);
     // Store the harness/profile id verbatim (issue #535) — no premature parse
@@ -330,8 +369,14 @@ pub fn create_blocking(
     pending: bool,
 ) -> Result<AgentNode, AgentNodeError> {
     create_blocking_configured(
-        mesh_id, provider, branch_override, source_issue, name_override,
-        use_worktree_override, pending, None,
+        mesh_id,
+        provider,
+        branch_override,
+        source_issue,
+        name_override,
+        use_worktree_override,
+        pending,
+        None,
     )
 }
 
@@ -476,8 +521,13 @@ pub fn create_pending(
 /// Agent Node row still records the branch-backed environment it needs.
 #[allow(clippy::too_many_arguments)]
 pub fn create_pending_with_worktree_override_configured(
-    mesh_id: i64, path: &str, branch: &str, provider: Option<&str>, source_issue: Option<i64>,
-    name_override: Option<&str>, use_worktree_override: Option<bool>,
+    mesh_id: i64,
+    path: &str,
+    branch: &str,
+    provider: Option<&str>,
+    source_issue: Option<i64>,
+    name_override: Option<&str>,
+    use_worktree_override: Option<bool>,
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_pending_with_source_pr_fork_and_worktree(
@@ -515,9 +565,17 @@ pub fn create_pending_with_source_pr_fork(
     head_repo_clone_url: Option<&str>,
 ) -> Result<AgentNode, AgentNodeError> {
     create_pending_with_source_pr_fork_configured(
-        mesh_id, path, branch, provider, source_issue, source_pr,
-        source_pr_pinned_sha, name_override, head_repo_owner,
-        head_repo_clone_url, None,
+        mesh_id,
+        path,
+        branch,
+        provider,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        name_override,
+        head_repo_owner,
+        head_repo_clone_url,
+        None,
     )
 }
 
@@ -670,6 +728,12 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // deleted node must release its entry even when it had no live PTY (the
     // normal `notify_process_terminated` path is otherwise never reached),
     // or every create/delete cycle permanently grows the global map.
+    //
+    // Only the process-scoped stores are released here. The PTY fanout channel
+    // is retired *after* the row delete commits, further down: a tombstone
+    // fences channel creation, so retiring a node whose row survived a failed
+    // delete would strand a live node with no way to get a channel back
+    // (#2019).
     crate::agent::node_teardown::release(session_id);
     // Drop autopilot state too. The ledger delete is explicit as a
     // defensive belt: the table declares ON DELETE CASCADE and the
@@ -689,6 +753,12 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     if let Some(node) = node.as_ref() {
         let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
         db::delete_agent_node_enqueueing_removal(session_id, removal)?;
+        // The row is gone, so this is the first moment the node is *permanently*
+        // deleted and its PTY fanout channel can be retired (issue #2019). After
+        // the commit, not before: a tombstone refuses channel creation, so
+        // retiring while the row could still survive an error above would leave
+        // a live node that can never stream again.
+        crate::http::ws::retire_pty_channel(session_id);
         // Announce the deletion so a frontend that did not initiate it — the
         // Circuit worker's `CloseAgentNode`, cancelled-run retirement, abort
         // compensation — drops the card and disposes its terminal. A
@@ -800,14 +870,16 @@ fn process_removals(
                     if let Err(e) = dequeue(&removal.worktree_path) {
                         tracing::error!(
                             "removed worktree {} but failed to dequeue it: {}",
-                            removal.worktree_path, e
+                            removal.worktree_path,
+                            e
                         );
                     }
                 }
                 Err(e) => {
                     tracing::warn!(
                         "worktree removal for {} failed, will retry: {}",
-                        removal.node_name, e
+                        removal.node_name,
+                        e
                     );
                     failures.push((removal, e));
                 }
@@ -957,9 +1029,7 @@ pub fn decide_resume(
 /// crossed a thread-pool boundary. Round-2 review caught it. The
 /// orchestrator is now inline in the command, where each helper
 /// call IS wrapped in `run_blocking`.
-pub fn regenerate_load_blocking(
-    node_id: i64,
-) -> Result<(String, bool), AgentNodeError> {
+pub fn regenerate_load_blocking(node_id: i64) -> Result<(String, bool), AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
     validate_status_eligible(node.status).map_err(AgentNodeError::Status)?;
     Ok((
@@ -983,11 +1053,27 @@ pub fn regenerate_apply_blocking(
 ) -> Result<bool, AgentNodeError> {
     let node = db::get_agent_node_by_id(node_id)?;
     let prefs = crate::preferences::load().map_err(AgentNodeError::Backend)?;
-    let plan = crate::preferences::launch_configurations::resolve(&prefs, new_provider, &Default::default())
-        .map_err(AgentNodeError::InvalidConfiguration)?;
-    let resume = decide_resume(old_provider, &plan.spawn_option_id, node.cli_session_id.as_deref()).is_some();
-    let runtime = plan.harness.runtime.unwrap_or_else(|| crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type);
-    db::replace_node_launch(node_id, &crate::preferences::launch_configurations::snapshot(plan), runtime).map_err(AgentNodeError::Backend)?;
+    let plan = crate::preferences::launch_configurations::resolve(
+        &prefs,
+        new_provider,
+        &Default::default(),
+    )
+    .map_err(AgentNodeError::InvalidConfiguration)?;
+    let resume = decide_resume(
+        old_provider,
+        &plan.spawn_option_id,
+        node.cli_session_id.as_deref(),
+    )
+    .is_some();
+    let runtime = plan.harness.runtime.unwrap_or_else(|| {
+        crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type
+    });
+    db::replace_node_launch(
+        node_id,
+        &crate::preferences::launch_configurations::snapshot(plan),
+        runtime,
+    )
+    .map_err(AgentNodeError::Backend)?;
     Ok(resume)
 }
 
@@ -1107,13 +1193,20 @@ mod tests {
             |_path| Ok(false),
         );
 
-        assert!(!good.exists(), "the real worktree directory must be removed");
+        assert!(
+            !good.exists(),
+            "the real worktree directory must be removed"
+        );
         assert_eq!(
             dequeued.into_inner(),
             vec![good.to_string_lossy().to_string()],
             "only the successful removal is dequeued"
         );
-        assert_eq!(failures.len(), 1, "the failed removal is returned for warning");
+        assert_eq!(
+            failures.len(),
+            1,
+            "the failed removal is returned for warning"
+        );
         assert_eq!(failures[0].0.node_name, "wt-bad");
     }
 
@@ -1270,31 +1363,90 @@ mod tests {
         let _db = crate::db::test_support::isolated();
         let mesh_id = fresh_mesh();
         let mut configuration = SpawnConfiguration {
-            id: "sol".into(), name: "Sol Max".into(), spawn_option_id: "codex".into(),
-            model: Some("gpt-5.6-sol".into()), effort: None, extra_args: Some("--search".into()),
+            id: "sol".into(),
+            name: "Sol Max".into(),
+            spawn_option_id: "codex".into(),
+            model: Some("gpt-5.6-sol".into()),
+            effort: None,
+            extra_args: Some("--search".into()),
             ..Default::default()
         };
         for pending in [false, true] {
-            let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
-                None, None, Some(false), pending, Some(&configuration)).unwrap();
+            let node = create_blocking_configured(
+                mesh_id,
+                Some("codex"),
+                Some("main"),
+                None,
+                None,
+                Some(false),
+                pending,
+                Some(&configuration),
+            )
+            .unwrap();
             assert_eq!(node.provider, "codex");
-            assert_eq!(node.status, if pending { SessionStatus::Pending } else { SessionStatus::Idle });
-            let saved = db::node_spawn_configuration(node.id, "codex").unwrap().unwrap();
+            assert_eq!(
+                node.status,
+                if pending {
+                    SessionStatus::Pending
+                } else {
+                    SessionStatus::Idle
+                }
+            );
+            let saved = db::node_spawn_configuration(node.id, "codex")
+                .unwrap()
+                .unwrap();
             assert_eq!(saved.id, configuration.id);
             assert_eq!(saved.model, configuration.model);
             assert_eq!(saved.resolved.unwrap().harness.harness, "codex");
         }
-        let node = create_blocking_configured(mesh_id, Some("codex"), Some("main"),
-            None, None, Some(false), false, Some(&configuration)).unwrap();
+        let node = create_blocking_configured(
+            mesh_id,
+            Some("codex"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+            Some(&configuration),
+        )
+        .unwrap();
         configuration.model = Some("edited-later".into());
-        assert_eq!(db::node_spawn_configuration(node.id, "codex").unwrap().unwrap().model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(
+            db::node_spawn_configuration(node.id, "codex")
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("gpt-5.6-sol")
+        );
         db::set_agent_node_provider(node.id, "claude:minimax").unwrap();
-        assert!(db::node_spawn_configuration(node.id, "claude:minimax").unwrap().is_none());
+        assert!(db::node_spawn_configuration(node.id, "claude:minimax")
+            .unwrap()
+            .is_none());
         db::set_agent_node_provider(node.id, "codex").unwrap();
-        assert!(db::node_spawn_configuration(node.id, "codex").unwrap().is_none());
-        let defaults = create_blocking(mesh_id, Some("codex"), Some("main"), None, None, Some(false), false).unwrap();
-        assert_eq!(db::node_spawn_configuration(defaults.id, "codex").unwrap().unwrap().id, "launch/codex");
-        assert!(db::node_spawn_configuration(i64::MAX, "codex").unwrap().is_none());
+        assert!(db::node_spawn_configuration(node.id, "codex")
+            .unwrap()
+            .is_none());
+        let defaults = create_blocking(
+            mesh_id,
+            Some("codex"),
+            Some("main"),
+            None,
+            None,
+            Some(false),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            db::node_spawn_configuration(defaults.id, "codex")
+                .unwrap()
+                .unwrap()
+                .id,
+            "launch/codex"
+        );
+        assert!(db::node_spawn_configuration(i64::MAX, "codex")
+            .unwrap()
+            .is_none());
     }
 
     /// Create a fresh mesh at a unique per-test path and return its id. Each
@@ -1936,8 +2088,8 @@ mod tests {
 
         db::set_agent_node_provider(node.id, "claude:minimax")
             .expect("set_agent_node_provider should succeed");
-        let reloaded = db::get_agent_node_by_id(node.id)
-            .expect("get_agent_node_by_id should succeed");
+        let reloaded =
+            db::get_agent_node_by_id(node.id).expect("get_agent_node_by_id should succeed");
         assert_eq!(
             reloaded.provider, "claude:minimax",
             "provider column must round-trip through the UPDATE",
@@ -1959,7 +2111,7 @@ mod tests {
         // values, then repeat it against the now-missing row.
         for remove_worktree in [false, true] {
             let _db = crate::db::test_support::isolated();
-        let mesh_id = fresh_mesh();
+            let mesh_id = fresh_mesh();
             let node = create(
                 mesh_id,
                 &format!("/tmp/buildmesh_close_idempotent_{remove_worktree}"),
@@ -1974,13 +2126,13 @@ mod tests {
             .expect("seed node should succeed");
 
             let state_owner = crate::agent::hook_state::for_node(node.id);
-            state_owner
-                .lock()
-                .question("pending", crate::agent::hook_state::QuestionKind::Foreground);
+            state_owner.lock().question(
+                "pending",
+                crate::agent::hook_state::QuestionKind::Foreground,
+            );
 
             // Real close order: Phase 1 (safety) precedes Phase 2 (delete).
-            get_worktree_close_safety(node.id)
-                .expect("Phase 1 safety on a live row must succeed");
+            get_worktree_close_safety(node.id).expect("Phase 1 safety on a live row must succeed");
             delete(node.id, remove_worktree).expect("Phase 2 close must succeed");
             let replacement_state = crate::agent::hook_state::for_node(node.id);
             assert!(
@@ -1997,13 +2149,69 @@ mod tests {
             );
 
             // The ghost retry: both phases must tolerate the missing row.
-            let safety = get_worktree_close_safety(node.id)
-                .expect("Phase 1 must tolerate a missing row");
+            let safety =
+                get_worktree_close_safety(node.id).expect("Phase 1 must tolerate a missing row");
             assert_eq!(safety.worktree_path, None);
             assert!(!safety.has_uncommitted && !safety.has_unpushed && !safety.is_detached);
             delete(node.id, remove_worktree)
                 .expect("Phase 2 must tolerate a missing row (remove_worktree=true included)");
         }
+    }
+
+    /// A close retires the node's PTY fanout channel, and it does so *after* the
+    /// row delete commits — because the retirement records a tombstone that
+    /// refuses future channel creation, so doing it while the row could still
+    /// survive an error would strand a live node with no way to stream again
+    /// (#2019).
+    #[test]
+    fn closing_a_node_retires_its_channel_only_once_the_row_is_gone() {
+        let _db = crate::db::test_support::isolated();
+        // An id no other test can reach: every isolated database numbers its
+        // rows from 1, and `delete` now records a tombstone for the id it
+        // deletes — so a database-assigned id here could be fenced by an
+        // unrelated test that deletes its own node 1.
+        const NODE_ID: i64 = 9_500_101;
+        let mesh_id = fresh_mesh();
+        {
+            let conn = db::write_conn();
+            conn.execute(
+                "INSERT INTO agent_nodes (id, mesh_id, name, path, status) \
+                 VALUES (?1, ?2, 'close-retires', '/tmp/buildmesh_close_retires', 'idle')",
+                (NODE_ID, mesh_id),
+            )
+            .expect("seed node with an explicit id should succeed");
+        }
+        let node = crate::db::get_agent_node_by_id(NODE_ID).expect("the seeded node should exist");
+
+        // A live node must keep a working channel.
+        crate::http::ws::ensure_pty_channel(node.id);
+        let mut before_close = crate::http::ws::subscribe_pty(node.id);
+        crate::http::ws::send_pty_output(node.id, b"before close");
+        assert_eq!(before_close.try_recv().unwrap().as_ref(), b"before close");
+
+        delete(node.id, false).expect("close should succeed");
+
+        assert!(
+            matches!(
+                db::get_agent_node_by_id(node.id),
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            ),
+            "the row must be gone before the channel is retired"
+        );
+        // The retirement took effect: the fence refuses a new channel, and the
+        // old receiver saw the close.
+        crate::http::ws::ensure_pty_channel(node.id);
+        assert!(
+            matches!(
+                crate::http::ws::subscribe_pty(node.id).try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "a deleted node must not get a channel back"
+        );
+        assert!(
+            before_close.try_recv().is_err(),
+            "the live receiver must be closed by the retirement"
+        );
     }
 
     // PR #1388 review feedback 2 — the service-layer `regenerate`
@@ -2119,8 +2327,7 @@ mod tests {
             None,
         )
         .expect("seed node");
-        db::update_cli_session_id(node.id, "sess-abc")
-            .expect("set cli_session_id");
+        db::update_cli_session_id(node.id, "sess-abc").expect("set cli_session_id");
 
         let resume = regenerate_apply_blocking(node.id, "claude", "claude:minimax")
             .expect("apply should succeed");
@@ -2158,8 +2365,7 @@ mod tests {
             None,
         )
         .expect("seed node");
-        db::update_cli_session_id(node.id, "claude-uuid")
-            .expect("set cli_session_id");
+        db::update_cli_session_id(node.id, "claude-uuid").expect("set cli_session_id");
 
         let resume = regenerate_apply_blocking(node.id, "claude:anthropic", "codex")
             .expect("apply should succeed");
