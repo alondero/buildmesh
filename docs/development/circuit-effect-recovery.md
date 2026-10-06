@@ -45,16 +45,26 @@ generation.
 ## Operator and test fences
 
 Multiline Codex and Muse prompt delivery waits for a complete matching paste
-echo (a marker, or full visible text for short drafts) and one second of quiet
+echo (a marker, full visible text for short drafts, or the draft's tail for
+mid-size pastes drawn inline) and one second of quiet
 output before sending Enter. Marker matching ignores terminal padding and line
 breaks while retaining the exact character
-count and closing bracket.
+count and closing bracket. Which confirmation applies is declared per harness
+by its adapter (`paste_gate_policy`), not by harness-name checks in delivery.
 
 Muse Code 1.3.0 draws a mid-size paste in full in its input box and only
 collapses larger ones to the marker. Probing a real Windows ConPTY on 2026-10-05
 showed 600 and 839 raw characters drawn in full and 1,509 collapsed to
 `[Pasted Content 1509 chars]`; the exact collapse point (characters or lines)
-is unmeasured. For Muse, a draft past the full-text limit (measured after
+is unmeasured, so the gate deliberately encodes none — marker or tail confirms
+at any size. Codex 0.160.0 showed the same shape in a partial 79x57 frame (a
+~600-character paste drawn inline with no marker), so Codex takes the same
+tail rule; a collapsed draft carries no visible tail, so only its marker can
+confirm it. The Codex frame in the regression is synthetic (full draft text in
+redraw chrome, no marker) because a clean live capture was blocked by a
+hooks-review dialog — it pins the rendering shape the rule relies on, and a
+byte-exact live capture is still outstanding. For either harness, a draft past
+the full-text limit (measured after
 normalization, like the matcher) is therefore also confirmed by its last 64
 letters and digits appearing in output received after the write. The paste is
 read in order, so the tail appearing means the text before it was accepted, and
@@ -63,12 +73,15 @@ prompt was visibly staged but waited the full budget for a marker Muse never
 prints, so the step ended Unverified with no Enter sent. Known limit: a stale
 redraw that repaints an earlier prompt with an identical ending could satisfy the
 tail match; the one-second quiet requirement narrows this but does not remove
-it. Codex keeps its stricter rule (marker, or full text up to the limit) until
-its mid-size rendering is captured.
+it (pinned as a regression test so a future token or composer-region hardening
+visibly flips it).
 
 A captured Codex 0.160.0 Windows ConPTY redraw at
 22 columns inserted extra spaces inside `[Pasted Content 9407 chars]`; the
-previous literal matcher rejected it. Run 320's ledger retained prompt intent
+previous literal matcher rejected it. The tail anchor survives the same
+fragmentation: normalization drops whitespace, so ConPTY padding and line
+breaks inside the tail region cannot hide it (covered by a narrow-width
+regression). Run 320's ledger retained prompt intent
 and timed out after 30 seconds; its Codex transcript later contained the full
 9,407-character feedback prompt. The historical paste screen was not retained,
 so that record alone cannot establish its exact rendering.
@@ -91,7 +104,10 @@ records an Unverified checkpoint; restart never repeats the uncertain prompt.
 
 The delivery regressions replay the captured ANSI fragment through the real
 evaluator, reject stale, incomplete and wrong-count markers, admit a late echo,
-and verify that readiness retries write no input. These are module-boundary
+and verify that readiness retries write no input; they additionally cover the
+Codex mid-size tail confirmation (full, partial and wrong-ending frames), the
+per-adapter policy declaration, the stale-redraw limit, narrow-width tail
+fragmentation, and size-independent tail anchoring. These are module-boundary
 checks with a capturing process registry. The live ConPTY capture establishes
 the provider rendering; it does not establish a rebuilt Circuit run end to end.
 

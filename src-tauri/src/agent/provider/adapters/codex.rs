@@ -1511,6 +1511,16 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
+    /// Issue #2061: a partial 79x57 Windows ConPTY frame from Codex 0.160.0
+    /// showed a ~600-character multiline paste drawn inline with no paste
+    /// marker, so Codex takes the same tail-anchor rule as Muse rather than
+    /// waiting out the readiness budget for a marker it never prints (the
+    /// run 343 stall). Marker-confirmed drafts are unaffected: a collapsed
+    /// paste carries no visible tail, so only its marker can confirm it.
+    fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
+        crate::agent::provider::PasteGatePolicy::RenderedWithTailAnchor
+    }
+
     fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
         use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
