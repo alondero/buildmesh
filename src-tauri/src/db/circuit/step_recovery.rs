@@ -23,14 +23,6 @@ use crate::circuit::model::{
 };
 use crate::models::{AutopilotCircuitRun, AutopilotCircuitRunStep, SessionStatus};
 
-/// True when a step was cancelled by the run's failure sweep rather than
-/// carrying its own reason. The stepper's note is the single source of truth
-/// (`circuit::model::CIRCUIT_SWEEP_NOTE_PREFIX`); matching it covers the
-/// `failed` and `cancelled` variants the stepper writes.
-fn is_failure_sweep_note(text: &str) -> bool {
-    text.starts_with(CIRCUIT_SWEEP_NOTE_PREFIX)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "RecoveryAction.ts")]

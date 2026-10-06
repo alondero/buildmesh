@@ -375,7 +375,16 @@ mod tests {
             &CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
         ));
         assert!(upgraded_issue.node("merge_verify").is_some());
-        assert_eq!(read(3), copy, "a user-owned copy is not rewritten");
+        // A user-owned copy whose merge prompt still matches the legacy stock
+        // text gains the branch-update hand-off too (its prompt is a literal
+        // match, so the upgrade is safe), but its topology is preserved.
+        let upgraded_copy = CircuitGraph::from_json(&read(3)).unwrap();
+        assert_ne!(read(3), copy, "a non-preset copy with stock merge text is rewritten");
+        assert!(upgraded_copy.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
+        assert!(matches!(
+            upgraded_copy.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+        ));
         // A customized topology is not rewritten; only its still-stock merge
         // prompt gains the branch-update step.
         let upgraded_custom = CircuitGraph::from_json(&read(4)).unwrap();
