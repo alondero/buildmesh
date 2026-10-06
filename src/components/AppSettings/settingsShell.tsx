@@ -53,9 +53,32 @@ export function useDirtySites() {
  * Shared error surface — outside the panes so a failed save is visible no
  * matter which pane the user is looking at. Panes call `setError` from the
  * shared context; only this component renders the result.
+ *
+ * Dismissible, and the dismissal clears the *context's* error rather than
+ * hiding it locally. That matters because the error outlives the pane that
+ * raised it: without a clear, a failure from one tab stays pinned across
+ * every other tab until some later unrelated write happens to call
+ * `setError(null)`, so the user reads a stale failure as belonging to
+ * whatever they are looking at now.
  */
 export function SettingsError() {
-  const { error } = useSettingsData();
+  const { error, setError } = useSettingsData();
   if (!error) return null;
-  return <div className="mb-4 text-status-error text-base">{error}</div>;
+  return (
+    <div
+      role="alert"
+      className="mb-4 flex items-start gap-3 text-status-error text-base"
+      data-testid="settings-error"
+    >
+      <span className="flex-1">{error}</span>
+      <button
+        type="button"
+        onClick={() => setError(null)}
+        className="shrink-0 px-2 py-0.5 text-base underline hover:no-underline"
+        aria-label="Dismiss settings error"
+      >
+        Dismiss
+      </button>
+    </div>
+  );
 }

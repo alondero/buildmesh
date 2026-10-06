@@ -62,38 +62,43 @@ export function RemoteAccessPane() {
   // Adopt each committed load *during render* (React's documented
   // adjust-state-while-rendering pattern) rather than from an effect. The
   // resource hook only publishes a payload for a read that still owned its
-  // request token, and the identity guard means only a genuinely new load
+  // request token, and each identity guard means only a genuinely new load
   // re-seeds. Doing it in an effect would leave one frame where the pane's
   // status says `loaded` while the values it renders are still the previous
   // ones — the same class of bug that made the harness-defaults cards show
   // blanks after a retry.
-  const [adopted, setAdopted] = useState<{
-    devices: DeviceSession[] | null;
-    coordinator: CoordinatorPayload | null;
-    network: NetworkPayload | null;
-  }>({ devices: null, coordinator: null, network: null });
+  //
+  // Three INDEPENDENT guards, one per payload, each seeding only its own
+  // state. A single combined guard would let an unrelated payload's arrival
+  // re-run every adoption, so a `devices` refresh would clobber the
+  // optimistic `lanEnabled` / `tlsActive` / `exposedInterfaces` that a
+  // just-issued LAN toggle owns — the exact race `refreshNetworkStatus`
+  // below is written to avoid.
+  const [adoptedDevices, setAdoptedDevices] = useState<DeviceSession[] | null>(null);
+  const [adoptedCoordinator, setAdoptedCoordinator] = useState<CoordinatorPayload | null>(null);
+  const [adoptedNetwork, setAdoptedNetwork] = useState<NetworkPayload | null>(null);
 
-  if (
-    (devicesPayload && devicesPayload !== adopted.devices) ||
-    (coordinatorPayload && coordinatorPayload !== adopted.coordinator) ||
-    (networkPayload && networkPayload !== adopted.network)
-  ) {
-    setAdopted({ devices: devicesPayload, coordinator: coordinatorPayload, network: networkPayload });
-    if (devicesPayload) setDevices(devicesPayload);
-    if (coordinatorPayload) {
-      setCoordEnabled(coordinatorPayload.enabled);
-      setCoordHasToken(coordinatorPayload.has_token);
-    }
-    // Issue #586 — the realized fields mirror the network status, but
-    // `lanEnabled` is *also* seeded here because this is the only place the
-    // persisted intent arrives. The toggle owns the value between writes
-    // (see `refreshNetworkStatus`); nothing else writes it until the next
-    // committed load.
-    if (networkPayload) {
-      setLanEnabled(networkPayload.lan_exposure_enabled);
-      setTlsActive(networkPayload.tls_active);
-      setExposedInterfaces(networkPayload.exposed_interfaces);
-    }
+  if (devicesPayload && devicesPayload !== adoptedDevices) {
+    setAdoptedDevices(devicesPayload);
+    setDevices(devicesPayload);
+  }
+
+  if (coordinatorPayload && coordinatorPayload !== adoptedCoordinator) {
+    setAdoptedCoordinator(coordinatorPayload);
+    setCoordEnabled(coordinatorPayload.enabled);
+    setCoordHasToken(coordinatorPayload.has_token);
+  }
+
+  // Issue #586 — the realized fields mirror the network status, but
+  // `lanEnabled` is *also* seeded here because this is the only place the
+  // persisted intent arrives. The toggle owns the value between writes (see
+  // `refreshNetworkStatus`); nothing else writes it until the next committed
+  // network load.
+  if (networkPayload && networkPayload !== adoptedNetwork) {
+    setAdoptedNetwork(networkPayload);
+    setLanEnabled(networkPayload.lan_exposure_enabled);
+    setTlsActive(networkPayload.tls_active);
+    setExposedInterfaces(networkPayload.exposed_interfaces);
   }
 
   // Re-read the realized network fields after a toggle completes so the

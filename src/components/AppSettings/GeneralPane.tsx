@@ -105,38 +105,48 @@ export function GeneralPane() {
   }, [loadProbeDefaults]);
 
   // Seed every draft from the latest winning preferences read *during render*
-  // rather than from an effect. The pool-size and worktree inputs are
-  // controlled by these drafts and their `disabled` gate flips in the same
-  // render as the resource status, so an effect would leave one committed
-  // frame where the input is enabled and still showing the previous value.
-  //
-  // This is React's documented adjust-state-while-rendering pattern. Each
-  // new payload is a distinct object (the resource hook only commits a read
-  // whose request token is still current), so identity is a sufficient "this
-  // load landed" signal — and re-seeding on a post-save refresh is exactly
-  // what picks up a backend normalise-on-write.
+  // rather than from an effect. These inputs are controlled by the drafts and
+  // their `disabled` gate flips in the same render as the resource status, so
+  // an effect would leave one committed frame where the input is enabled and
+  // still showing the previous value. Each payload is a distinct object (the
+  // hook only commits a read whose token is still current), so identity is a
+  // sufficient "this load landed" signal — and re-seeding on a post-save
+  // refresh is what picks up a backend normalise-on-write.
   if (preferences && preferences !== adoptedPrefs) {
     setAdoptedPrefs(preferences);
-    const storedPool = preferences.circuit_agent_pool_size == null ? '' : String(preferences.circuit_agent_pool_size);
-    setPoolDraft(storedPool);
-    poolSavedRef.current = storedPool;
-    const storedWorktreeDir = preferences.worktree_directory?.trim() ?? '';
-    setWorktreeDirDraft(storedWorktreeDir);
-    worktreeDirSavedRef.current = storedWorktreeDir;
+    setPoolDraft(preferences.circuit_agent_pool_size == null ? '' : String(preferences.circuit_agent_pool_size));
+    setWorktreeDirDraft(preferences.worktree_directory?.trim() ?? '');
     setProbePrompts({
       issue: preferences.issue_spawn_prompt ?? null,
       pr: preferences.pr_spawn_prompt ?? null,
     });
   }
 
-  // Syncing `useExitPromptStore` is the one part of the adoption that cannot
-  // happen in the render-phase block above: that store is external and
-  // `App.tsx` / `WindowCloseGuard` subscribe to it, so writing during
-  // render would update a *different* component mid-render (React warns
-  // "Cannot update a component while rendering a different component") and
-  // would run twice under StrictMode. An effect restores the post-commit
-  // timing the loader callback used to have, and keeps the checkbox and the
-  // window-close guard reading the same synchronous source of truth
+  // Last value confirmed saved (canonical string form), for rollback and the
+  // dirty comparison. A ref for the closure-staleness reason documented on the
+  // optimistically-rolled-back pickers (issue #581): two commits fired in quick
+  // succession must each roll back to the value as of their own selection, not
+  // to one shared snapshot.
+  //
+  // Seeded from an EFFECT rather than written inside the render-phase adoption
+  // above. React's adjust-state-while-rendering pattern licenses `setState` for
+  // the rendering component; writing a ref during render is impure, and a
+  // double-invoked render writes twice. The effect runs before any user
+  // interaction can blur or type, so the values are current by the time a
+  // commit reads them.
+  useEffect(() => {
+    if (!preferences) return;
+    poolSavedRef.current =
+      preferences.circuit_agent_pool_size == null ? '' : String(preferences.circuit_agent_pool_size);
+    worktreeDirSavedRef.current = preferences.worktree_directory?.trim() ?? '';
+  }, [preferences]);
+
+  // Syncing `useExitPromptStore` cannot happen in the render-phase block above:
+  // that store is external and `App.tsx` / `WindowCloseGuard` subscribe to it,
+  // so writing during render would update a *different* component mid-render
+  // (React warns) and would run twice under StrictMode. The effect restores
+  // the post-commit timing the loader callback used to have, and keeps the
+  // checkbox and the window-close guard on one synchronous source of truth
   // (issue #1501).
   useEffect(() => {
     if (!preferences) return;

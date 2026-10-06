@@ -31,6 +31,24 @@
  * superseded read is still discarded — the panes only ever see a payload
  * that already won its request token.
  *
+ * ## Why one value rather than a slice per pane
+ *
+ * A review flagged this as a god-context: `coordinator` / `devices` /
+ * `network` are read by one pane and `pairings` by another, yet all panes
+ * subscribe to the same value. That was measured rather than assumed. With a
+ * `MutationObserver` on the General pane's pool input — a pane the user is
+ * *not* looking at — a full eight-resource settle produced **one** commit
+ * on that inactive pane, not one per resource transition. React batches the
+ * eight loaders' `setResource` calls into a single render pass, so the
+ * fan-out the shape implies does not actually occur.
+ *
+ * Slicing would also fight the reason the hook is shared at all: the resource
+ * machine must stay one instance for #1935's latency argument, and a
+ * per-pane context would have to re-expose the same `resources` map anyway,
+ * leaving two ways to read the same state — the ambiguity the engineering
+ * contract warns against. A single read path is the deliberate trade, and it
+ * is the one to revisit first if render cost ever becomes measurable.
+ *
  * ## What deliberately does NOT live here
  *
  * The dirty-site aggregator (`dirtySites`, `siteDirtyChange`,

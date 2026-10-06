@@ -340,5 +340,5 @@ These do not block adoption, but a Coordinator may want to know about them:
 - `src-tauri/src/http/routes/coordinator.rs` — thin route handlers
 - `src-tauri/src/http/mod.rs` — dispatcher with the off-by-default auth gate
 - `src/components/AppSettings/RemoteAccessPane.tsx` — the Coordinator Read
-  API settings section (own its state since issue #1880 split the Settings
+  API settings section (owns its state since issue #1880 split the Settings
   modal into per-pane modules)

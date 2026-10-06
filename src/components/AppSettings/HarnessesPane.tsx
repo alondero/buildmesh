@@ -13,7 +13,7 @@
  * named resource loaders (issue #1534), so a failed refresh surfaces in a
  * banner instead of leaving a green "loaded" status over stale data.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import * as api from '../../lib/tauri';
 import { formatError } from '../../lib/errorUtils';
@@ -100,6 +100,22 @@ export function HarnessesPane({
   // lag a render behind the status flip that revealed the list.
   const storedPairingKeys = pairingsPayload?.storedKeys ?? EMPTY_STORED_PAIRING_KEYS;
   const compatibleByHarness = pairingsPayload?.compatible ?? EMPTY_COMPATIBLE_BY_HARNESS;
+
+  // The harness list `HarnessConfigList` renders, one entry per distinct
+  // harness id (excluding Terminal, which is not a routing host). Derived
+  // with `useMemo` rather than inline in the JSX: a fresh array identity on
+  // every render defeats `HarnessConfigList`'s own memoisation and re-runs
+  // its row reconciliation on unrelated state changes.
+  const proxiedHarnesses = useMemo<ProxyHarness[]>(
+    () => [
+      ...new Map(
+        providers
+          .filter((p) => p.harness_id !== 'terminal')
+          .map((p) => [p.harness_id, { id: p.harness_id, label: p.harness_id }]),
+      ).values(),
+    ],
+    [providers],
+  );
   // Issue #1150: per-harness application defaults, keyed by harness profile
   // id. Read straight off the shared preferences payload rather than copied
   // into local state by an effect: `HarnessDefaultsSection` latches each
@@ -414,10 +430,7 @@ export function HarnessesPane({
           />
         ) : (
           <HarnessConfigList
-            harnesses={
-              [...new Map(providers.filter((p) => p.harness_id !== 'terminal')
-                .map((p) => [p.harness_id, { id: p.harness_id, label: p.harness_id }])).values()] as ProxyHarness[]
-            }
+            harnesses={proxiedHarnesses}
             compatibleByHarness={compatibleByHarness}
             pairings={pairings}
             verifications={pairingVerifications}

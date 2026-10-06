@@ -17,7 +17,7 @@
  * Credential editing (the account cards and the add-provider form) lives
  * in `AccountsPane`.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import * as api from '../../lib/tauri';
 import type { AppPreferences } from '../../types/generated/AppPreferences';
 import { formatError } from '../../lib/errorUtils';
@@ -56,29 +56,50 @@ export function ProvidersPane() {
   // The preferences payload whose picker values are currently rendered.
   const [adoptedPrefs, setAdoptedPrefs] = useState<AppPreferences | null>(null);
 
-  const selectedRef = useRef<string>(NO_OVERRIDE);
-  // Mirror of `namingProvider` for the same closure-rollback reason as
-  // `selectedRef` (issue #581): a rapid second change rolls back to
-  // the value as of its own selection, not to a stale render snapshot.
-  const namingRef = useRef<string | null>(null);
-  useEffect(() => {
-    selectedRef.current = selected;
-  }, [selected]);
+  // Rollback baselines, one per picker, in a single shape so all four
+  // handlers share one convention (issue #581). Each ref is written
+  // SYNCHRONOUSLY inside its own handler at selection time, before the await.
+  // A rapid second change therefore rolls back to the value as of its own
+  // selection rather than to whatever a stale closure captured — which is
+  // what an effect-mirrored ref or a `const previous = state` closure gives
+  // you when two writes overlap.
+  const pickers = useRef({
+    selected: NO_OVERRIDE as string,
+    reviewer: NO_OVERRIDE as string,
+    classifier: null as string | null,
+    naming: null as string | null,
+  });
 
   // Seed the four pickers from the latest winning preferences read *during
   // render* (React's documented adjust-state-while-rendering pattern), so a
   // picker is never rendered enabled while still showing the pre-load value.
   // Each payload is a distinct object, so identity is a sufficient "this load
   // landed" signal.
+  //
+  // The baselines are re-seeded here too, because a committed load is the
+  // authoritative value every later rollback should target. Writing them in
+  // render alongside the state they mirror is deliberate: they are this
+  // component's own derived value, not an external side effect, and the
+  // handlers that read them all run after commit.
   if (preferences && preferences !== adoptedPrefs) {
     setAdoptedPrefs(preferences);
     const stored = preferences.default_provider;
-    setSelected(stored && stored.length > 0 ? stored : NO_OVERRIDE);
+    const nextSelected = stored && stored.length > 0 ? stored : NO_OVERRIDE;
     const storedReviewer = preferences.reviewer_provider;
-    setReviewerProvider(storedReviewer && storedReviewer.length > 0 ? storedReviewer : NO_OVERRIDE);
-    setClassifierProvider(preferences.circuit_classifier_provider ?? null);
+    const nextReviewer = storedReviewer && storedReviewer.length > 0 ? storedReviewer : NO_OVERRIDE;
+    const nextClassifier = preferences.circuit_classifier_provider ?? null;
     const storedNaming = preferences.naming_provider;
-    setNamingProvider(storedNaming && storedNaming.length > 0 ? storedNaming : null);
+    const nextNaming = storedNaming && storedNaming.length > 0 ? storedNaming : null;
+    pickers.current = {
+      selected: nextSelected,
+      reviewer: nextReviewer,
+      classifier: nextClassifier,
+      naming: nextNaming,
+    };
+    setSelected(nextSelected);
+    setReviewerProvider(nextReviewer);
+    setClassifierProvider(nextClassifier);
+    setNamingProvider(nextNaming);
   }
 
   // Per-resource readiness booleans. Controls that read or write a
@@ -91,12 +112,10 @@ export function ProvidersPane() {
   const routingChoices = providersLoaded ? providers : routingProviders;
   const routingReady = providersLoaded || routingLoaded;
 
-  // Persist the default-provider dropdown. Reads `previous` from `selectedRef`
-  // (issue #581) so a rapid second change rolls back to the value as of its
-  // own selection, not to a snapshot from the render that captured the first
-  // change's closure.
+  // Persist the default-provider dropdown.
   const handleSave = async (newValue: string) => {
-    const previous = selectedRef.current;
+    const previous = pickers.current.selected;
+    pickers.current.selected = newValue;
     setSelected(newValue);
     setSaving(true);
     setError(null);
@@ -109,6 +128,7 @@ export function ProvidersPane() {
       // rather than leaving the optimistic value lying.
       await loadPreferences();
     } catch (e) {
+      pickers.current.selected = previous;
       setSelected(previous);
       setError(formatError(e));
     } finally {
@@ -121,7 +141,8 @@ export function ProvidersPane() {
   // configuration is "use this independent Spawn Option" while preserving
   // the source-agent fallback when the selector is cleared.
   const handleSaveReviewer = async (newValue: string) => {
-    const previous = reviewerProvider;
+    const previous = pickers.current.reviewer;
+    pickers.current.reviewer = newValue;
     setReviewerProvider(newValue);
     setReviewerSaving(true);
     setError(null);
@@ -130,6 +151,7 @@ export function ProvidersPane() {
       await api.setAppReviewerProvider(providerArg);
       await loadPreferences();
     } catch (e) {
+      pickers.current.reviewer = previous;
       setReviewerProvider(previous);
       setError(formatError(e));
     } finally {
@@ -139,13 +161,12 @@ export function ProvidersPane() {
 
   // Issue #824: persist the rename backend. Distinct from `handleSave`
   // above — auto-naming runs frequently on trivial content, so it lives
-  // on its own picker with its own optimistic-rollback ref. Empty
-  // string is normalised to `null` so the picker value reads as
-  // "auto-naming off" rather than as some bizarre empty id.
+  // on its own picker. Empty string is normalised to `null` so the picker
+  // value reads as "auto-naming off" rather than as some bizarre empty id.
   const handleSaveNaming = async (newValue: string | null) => {
-    const previous = namingRef.current;
+    const previous = pickers.current.naming;
     const next = newValue && newValue.length > 0 ? newValue : null;
-    namingRef.current = next;
+    pickers.current.naming = next;
     setNamingProvider(next);
     setNamingSaving(true);
     setError(null);
@@ -157,7 +178,7 @@ export function ProvidersPane() {
       // reject / normalisation that the optimistic update missed.
       await loadPreferences();
     } catch (e) {
-      namingRef.current = previous;
+      pickers.current.naming = previous;
       setNamingProvider(previous);
       setError(formatError(e));
     } finally {
@@ -165,13 +186,24 @@ export function ProvidersPane() {
     }
   };
 
+  // The classifier picker is optimistic like the other three. It previously
+  // waited for the IPC before flipping the visible value, which made the
+  // control look unresponsive and left it showing a value the backend had
+  // just rejected. Same rollback contract as its siblings.
   const handleSelectClassifier = useCallback(
     (next: string | null) => {
+      const previous = pickers.current.classifier;
+      pickers.current.classifier = next;
+      setClassifierProvider(next);
       setClassifierSaving(true);
       setError(null);
-      void api.setCircuitClassifierProvider(next)
-        .then(() => setClassifierProvider(next))
-        .catch((cause: unknown) => setError(formatError(cause)))
+      void api
+        .setCircuitClassifierProvider(next)
+        .catch((cause: unknown) => {
+          pickers.current.classifier = previous;
+          setClassifierProvider(previous);
+          setError(formatError(cause));
+        })
         .finally(() => setClassifierSaving(false));
     },
     [setError],

@@ -117,6 +117,23 @@ export function HarnessCard({
     lastReportedDirtyRef.current = isDirty;
   }, [isDirty, onDirtyChange]);
 
+  // Clear the site on unmount, matching `AccountCard`. A half-filled attach
+  // form (provider + API key + base URL) unmounts when its harness drops out
+  // of the visible set — after a pairing refresh removes that harness, or
+  // when the modal closes. Without this the modal's `dirtySites` keeps a
+  // `harness-<id>` entry for a card that no longer exists, so a stray
+  // backdrop click raises the discard banner over an otherwise clean modal
+  // (issue #730).
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.(false);
+    };
+    // `onDirtyChange` is omitted deliberately: the captured reference is still
+    // valid at unmount time, and re-running this on every callback change
+    // would fire a spurious `false` while the card is still mounted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Prefill base URL + tiers from first-class defaults when the user picks a
   // provider. Clear synchronously on selection change so the previous
   // provider's URL/tiers never bleed into a fresh attach (a stale-URL race).
