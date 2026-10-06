@@ -727,11 +727,14 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     // HookState is keyed by node id and lives for the process lifetime. A
     // deleted node must release its entry even when it had no live PTY (the
     // normal `notify_process_terminated` path is otherwise never reached),
-    // or every create/delete cycle permanently grows the global map. This is
-    // the permanent-delete path, so it also retires the node's PTY broadcast
-    // channel — the counterpart of `kill_session` alone, which keeps the
-    // channel for a restart (#2019).
-    crate::agent::node_teardown::release_for_deleted_node(session_id);
+    // or every create/delete cycle permanently grows the global map.
+    //
+    // Only the process-scoped stores are released here. The PTY fanout channel
+    // is retired *after* the row delete commits, further down: a tombstone
+    // fences channel creation, so retiring a node whose row survived a failed
+    // delete would strand a live node with no way to get a channel back
+    // (#2019).
+    crate::agent::node_teardown::release(session_id);
     // Drop autopilot state too. The ledger delete is explicit as a
     // defensive belt: the table declares ON DELETE CASCADE and the
     // bundled SQLite build (rusqlite 0.32 / SQLite 3.46.0) has FK
@@ -750,6 +753,12 @@ pub fn delete(session_id: i64, remove_worktree: bool) -> Result<(), AgentNodeErr
     if let Some(node) = node.as_ref() {
         let removal = removal_path.as_deref().map(|p| (p, node.name.as_str()));
         db::delete_agent_node_enqueueing_removal(session_id, removal)?;
+        // The row is gone, so this is the first moment the node is *permanently*
+        // deleted and its PTY fanout channel can be retired (issue #2019). After
+        // the commit, not before: a tombstone refuses channel creation, so
+        // retiring while the row could still survive an error above would leave
+        // a live node that can never stream again.
+        crate::http::ws::retire_pty_channel(session_id);
         // Announce the deletion so a frontend that did not initiate it — the
         // Circuit worker's `CloseAgentNode`, cancelled-run retirement, abort
         // compensation — drops the card and disposes its terminal. A
@@ -2147,6 +2156,62 @@ mod tests {
             delete(node.id, remove_worktree)
                 .expect("Phase 2 must tolerate a missing row (remove_worktree=true included)");
         }
+    }
+
+    /// A close retires the node's PTY fanout channel, and it does so *after* the
+    /// row delete commits — because the retirement records a tombstone that
+    /// refuses future channel creation, so doing it while the row could still
+    /// survive an error would strand a live node with no way to stream again
+    /// (#2019).
+    #[test]
+    fn closing_a_node_retires_its_channel_only_once_the_row_is_gone() {
+        let _db = crate::db::test_support::isolated();
+        // An id no other test can reach: every isolated database numbers its
+        // rows from 1, and `delete` now records a tombstone for the id it
+        // deletes — so a database-assigned id here could be fenced by an
+        // unrelated test that deletes its own node 1.
+        const NODE_ID: i64 = 9_500_101;
+        let mesh_id = fresh_mesh();
+        {
+            let conn = db::write_conn();
+            conn.execute(
+                "INSERT INTO agent_nodes (id, mesh_id, name, path, status) \
+                 VALUES (?1, ?2, 'close-retires', '/tmp/buildmesh_close_retires', 'idle')",
+                (NODE_ID, mesh_id),
+            )
+            .expect("seed node with an explicit id should succeed");
+        }
+        let node = crate::db::get_agent_node_by_id(NODE_ID).expect("the seeded node should exist");
+
+        // A live node must keep a working channel.
+        crate::http::ws::ensure_pty_channel(node.id);
+        let mut before_close = crate::http::ws::subscribe_pty(node.id);
+        crate::http::ws::send_pty_output(node.id, b"before close");
+        assert_eq!(before_close.try_recv().unwrap().as_ref(), b"before close");
+
+        delete(node.id, false).expect("close should succeed");
+
+        assert!(
+            matches!(
+                db::get_agent_node_by_id(node.id),
+                Err(rusqlite::Error::QueryReturnedNoRows)
+            ),
+            "the row must be gone before the channel is retired"
+        );
+        // The retirement took effect: the fence refuses a new channel, and the
+        // old receiver saw the close.
+        crate::http::ws::ensure_pty_channel(node.id);
+        assert!(
+            matches!(
+                crate::http::ws::subscribe_pty(node.id).try_recv(),
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed)
+            ),
+            "a deleted node must not get a channel back"
+        );
+        assert!(
+            before_close.try_recv().is_err(),
+            "the live receiver must be closed by the retirement"
+        );
     }
 
     // PR #1388 review feedback 2 — the service-layer `regenerate`

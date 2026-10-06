@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::models::*;
 
@@ -65,14 +65,19 @@ fn map_mesh_row(row: &rusqlite::Row) -> rusqlite::Result<Mesh> {
 }
 
 pub(crate) fn get_mesh_by_id_inner(conn: &Connection, id: i64) -> SqlResult<Mesh> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM meshes WHERE id = ?1", mesh_columns())
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM meshes WHERE id = ?1",
+        mesh_columns()
+    ))?;
     stmt.query_row(params![id], map_mesh_row)
 }
 
 fn parse_str(s: String) -> Option<String> {
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 // --- Mesh operations ---
 
@@ -105,11 +110,13 @@ pub(crate) fn create_mesh_with_base_ref_inner(
     base_ref: &str,
 ) -> SqlResult<Mesh> {
     // Check if mesh with this path already exists (idempotent upsert)
-    let existing: Option<i64> = db.query_row(
-        "SELECT id FROM meshes WHERE path = ?1",
-        params![path],
-        |row| row.get(0),
-    ).ok();
+    let existing: Option<i64> = db
+        .query_row(
+            "SELECT id FROM meshes WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .ok();
 
     if let Some(id) = existing {
         return get_mesh_by_id_inner(db, id);
@@ -226,11 +233,7 @@ pub fn set_mesh_sandbox(id: i64, sandbox: bool) -> SqlResult<()> {
     set_mesh_sandbox_inner(&db, id, sandbox)
 }
 
-pub(crate) fn set_mesh_sandbox_inner(
-    conn: &Connection,
-    id: i64,
-    sandbox: bool,
-) -> SqlResult<()> {
+pub(crate) fn set_mesh_sandbox_inner(conn: &Connection, id: i64, sandbox: bool) -> SqlResult<()> {
     let rows = conn.execute(
         "UPDATE meshes SET sandbox = ?1 WHERE id = ?2",
         params![sandbox as i32, id],
@@ -271,7 +274,9 @@ pub(crate) fn set_mesh_worktree_directory_inner(
 }
 
 pub fn update_mesh_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     let db = write_conn();
     update_mesh_positions_batch_inner(&db, updates)
 }
@@ -285,7 +290,9 @@ pub(crate) fn update_mesh_positions_batch_inner(
     conn: &Connection,
     updates: &[(i64, i64)],
 ) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     // One bulk UPDATE per chunk, all chunks inside a single transaction.
     // Pre-issue-#1746 the loop paid N commits / fsyncs while holding the
     // process-global writer Mutex — every other DB user (UI reads via the
@@ -307,16 +314,13 @@ pub(crate) fn update_mesh_positions_batch_inner(
         let mut case_sql = String::with_capacity(64 + chunk.len() * 24);
         case_sql.push_str("UPDATE meshes SET position = CASE id ");
         for i in 0..chunk.len() {
-            let _ = write!(
-                case_sql,
-                "WHEN ?{} THEN ?{} ",
-                2 * i + 1,
-                2 * i + 2,
-            );
+            let _ = write!(case_sql, "WHEN ?{} THEN ?{} ", 2 * i + 1, 2 * i + 2,);
         }
         case_sql.push_str("END WHERE id IN (");
         for i in 0..chunk.len() {
-            if i > 0 { case_sql.push(','); }
+            if i > 0 {
+                case_sql.push(',');
+            }
             let _ = write!(case_sql, "?{}", 2 * i + 1);
         }
         case_sql.push(')');
@@ -333,9 +337,10 @@ pub(crate) fn update_mesh_positions_batch_inner(
 
 pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes ORDER BY position ASC, name ASC", mesh_columns())
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes ORDER BY position ASC, name ASC",
+        mesh_columns()
+    ))?;
     let rows = stmt.query_map([], map_mesh_row)?;
     rows.collect()
 }
@@ -343,13 +348,27 @@ pub fn list_meshes() -> SqlResult<Vec<Mesh>> {
 /// Look up a mesh by its path.
 pub fn get_mesh_by_path(path: &str) -> SqlResult<Mesh> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM meshes WHERE path = ?1", mesh_columns())
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM meshes WHERE path = ?1",
+        mesh_columns()
+    ))?;
     stmt.query_row(params![path], map_mesh_row)
 }
 
 pub fn delete_mesh(id: i64) -> SqlResult<()> {
+    let db = write_conn();
+    delete_mesh_inner(&db, id).map(|_| ())
+}
+
+/// Cascade-delete a mesh and report the agent-node ids it actually removed.
+///
+/// The ids come from the deleting statement itself, not from a pre-cascade
+/// SELECT: a node inserted between such a snapshot and the delete would have
+/// its row cascade-deleted while the caller never learned its id, so its
+/// per-node process state (PTY fanout channel included) would be orphaned
+/// forever — the leak issue #2019 is about. `DELETE ... RETURNING` needs SQLite
+/// 3.35+; the bundled build is 3.46 (see the FK notes below).
+pub fn delete_mesh_returning_node_ids(id: i64) -> SqlResult<Vec<i64>> {
     let db = write_conn();
     delete_mesh_inner(&db, id)
 }
@@ -358,7 +377,7 @@ pub fn delete_mesh(id: i64) -> SqlResult<()> {
 /// public function locks the process-global writer; this helper takes
 /// an explicit `&Connection` so parallel tests can each operate
 /// against their own in-memory DB.
-pub(crate) fn delete_mesh_inner(db: &Connection, id: i64) -> SqlResult<()> {
+pub(crate) fn delete_mesh_inner(db: &Connection, id: i64) -> SqlResult<Vec<i64>> {
     // Autopilot Circuits ledger (spec #1205): explicit child deletes —
     // same defensive rule as the warm pool below.
     crate::db::circuit::delete_circuits_for_mesh_inner(db, id)?;
@@ -373,7 +392,11 @@ pub(crate) fn delete_mesh_inner(db: &Connection, id: i64) -> SqlResult<()> {
     // `list_known_autopilot_issue_numbers` with ghost node ids /
     // issue numbers the poller would never respawn.
     db.execute("DELETE FROM autopilot_runs WHERE mesh_id = ?1", params![id])?;
-    db.execute("DELETE FROM agent_nodes WHERE mesh_id = ?1", params![id])?;
+    let deleted_nodes = {
+        let mut stmt = db.prepare("DELETE FROM agent_nodes WHERE mesh_id = ?1 RETURNING id")?;
+        let rows = stmt.query_map(params![id], |row| row.get::<_, i64>(0))?;
+        rows.collect::<SqlResult<Vec<i64>>>()?
+    };
     // The `warm_worktrees.mesh_id` FK declares ON DELETE CASCADE, and
     // the bundled SQLite build has FK enforcement on by default, so
     // the `meshes` DELETE at the bottom would cascade — we DELETE
@@ -382,7 +405,7 @@ pub(crate) fn delete_mesh_inner(db: &Connection, id: i64) -> SqlResult<()> {
     // `delete_autopilot_run` above.
     crate::db::warm_pool::delete_warm_worktrees_for_mesh_inner(db, id)?;
     db.execute("DELETE FROM meshes WHERE id = ?1", params![id])?;
-    Ok(())
+    Ok(deleted_nodes)
 }
 
 /// Safety net: re-apply the **mesh-default** Spawn Option composite-id

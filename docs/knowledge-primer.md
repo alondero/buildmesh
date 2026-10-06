@@ -296,7 +296,48 @@ The PTY reader thread still sees every OS `read()` (session-id capture, auto-nam
 The first-spawn path is the load-bearing one. The frontend subscribes as soon as the xterm exists, then `prepare_context` calls `kill_agent` even when there is no process. Unregistering there drops the Channel; the new reader's `ensure()` creates a disconnected pending sink and the viewport shows a cursor with no text. `kill_session` / the PTY-reader epilogue / `close_build_run` must not unregister. Pins: `kill_session_without_process_preserves_output_subscription`, `replacement_reader_reuses_the_live_channel`, `process_lifecycle_does_not_unregister_node_output_subscription`, `agent_and_build_run_maps_do_not_cross_talk`. Frontend: subscribe on `TerminalRegistry` / `BuildRunTerminalRegistry` create, unsubscribe only on `dispose` (never on remount, auto-spawn, detach, or `getOrCreate` reuse).
 
 
-The mobile terminal socket is a **separate** fanout (`http::ws`), keyed by node id in one process-global map, and it treats two lifecycle events as different operations. Process exit and restart - `kill_session` / PTY EOF / `clear_scrollback` - drop the retained bytes and **keep** the channel: a restarted agent comes back under the same node id, and the terminal context a phone reconnects to is intentional. Permanent node deletion - `node_teardown::release_for_deleted_node`, reached from `agent_node::delete` and the mesh cascade - retires the whole entry with `retire_pty_channel`, releasing the sender, its ring and its history, and fences the id so a reconnecting client cannot recreate the entry the retirement just reclaimed. Never let an exit path retire a channel, and never let a non-deletion path call the deleting variant. Fanout payloads are `Bytes` chunks of at most 32 KiB, so one allocation is shared by the history buffer, the ring and every subscriber; the ring's slot count is *derived* from a per-node byte budget rather than picked as a bare slot count, so a subscriber that never drains pins at most the budget instead of slots times batch size. `send_pty_output` never creates a channel, drops output for an unknown node, and trims an oversized write before copying it into the history rather than spiking the buffer to the size of the whole write. A subscriber that lags past the ring recovers by replaying the history tail. Pins: `retiring_a_deleted_node_releases_its_channel_and_its_allocations`, `a_process_exit_keeps_the_channel_so_a_restart_reuses_it`, `deleting_a_node_closes_its_live_terminal_socket`, `reconnecting_to_a_deleted_node_closes_instead_of_resurrecting_it`, `a_reconnecting_client_replays_history_then_receives_live_output`, `a_slow_subscriber_pins_at_most_the_byte_budget`, `repeated_node_lifetimes_reclaim_every_entry`.
+The mobile terminal socket is a **separate** fanout (`http::ws`), keyed by node id in one
+process-global map, and it treats three lifecycle facts as distinct. **Process exit and
+restart**  `kill_session` / PTY EOF / `clear_scrollback`  drop the retained bytes and
+**keep** the channel: a restarted agent comes back under the same node id, and the terminal
+context a phone reconnects to is intentional. **Permanent node deletion** retires the whole
+entry, and that retirement happens only *after* the row delete commits
+(`node_teardown::release_after_delete` for the mesh cascade, an explicit
+`http::ws::retire_pty_channel` after `delete_agent_node_enqueueing_removal` in
+`agent_node::delete`), because retiring records a tombstone that refuses channel creation 
+a tombstone applied to a row that survived a failed delete would strand a live node. The
+cascade learns which ids to retire from `DELETE ... RETURNING id` rather than a pre-delete
+SELECT, so a node created between a snapshot and the delete is not orphaned.
+
+Whether a channel may be created at all is decided by the `agent_nodes` row, which survives
+a process restart; the in-memory tombstone set (`RetiredFence`, a `HashSet` for O(1) lookup
+plus a `VecDeque` for bounded FIFO eviction) only closes the in-process window where a delete
+commits between that check and the create. `handle_ws_connection` therefore refuses an id with
+no row before it creates anything, which is why a phone that auto-reconnects to a node deleted
+while the app was closed cannot conjure an immortal channel per reconnect. The fence is
+consulted under the `KNOWN_NODES` write lock, and `retire_pty_channel` takes both locks in the
+same order while holding both, so a create either happens entirely before a delete (and is then
+removed) or entirely after it (and sees the tombstone).
+
+Fanout payloads are `Bytes` chunks of at most 32 KiB: one allocation is shared by the ring and
+every receiver, and the socket path moves a chunk into the frame without copying. The retained
+history is a separate byte `VecDeque` and is *not* one of those sharers  only ring-to-receiver
+sharing scales with subscriber count. The ring's slot count is *derived* from a per-node byte
+budget rather than picked as a bare slot number, so a subscriber that never drains pins at most
+the budget instead of slots times batch size. `send_pty_output` never creates a channel, drops
+output for an unknown node, and trims an oversized write before copying it into the history
+rather than spiking the buffer to the size of the whole write. A subscriber that lags past the
+ring recovers by replaying the history tail. Pins:
+`retiring_a_deleted_node_releases_its_channel_and_its_allocations`,
+`a_create_racing_a_retire_never_leaves_a_channel_behind`,
+`a_node_deleted_before_startup_is_refused_and_creates_no_channel`,
+`an_evicted_tombstone_does_not_reopen_the_channel`,
+`a_process_exit_keeps_the_channel_so_a_restart_reuses_it`,
+`deleting_a_node_closes_its_live_terminal_socket`,
+`reconnecting_to_a_deleted_node_closes_instead_of_resurrecting_it`,
+`a_reconnecting_client_replays_history_then_receives_live_output`,
+`a_slow_subscriber_pins_at_most_the_byte_budget`,
+`repeated_node_lifetimes_reclaim_every_entry`.
 Tauri 2.11's raw Channel transport has a payload-shape boundary: frames smaller than 1 KiB reach JavaScript directly as an `ArrayBuffer`, while frames at or above 1 KiB use the fetch path and arrive as a `Response`. `subscribeAgentOutput` / `subscribeBuildRunOutput` (shared `subscribeRawPtyOutput`) must consume `Response.arrayBuffer()` asynchronously and serialize those reads with later frames so terminal bytes cannot overtake each other. The boundary-to-xterm regression is pinned in `tests/integration/agent-terminal-auto-spawn.test.tsx` and `tests/unit/build-run-terminal-persistence.test.tsx`.
 
 `TerminalWriter` (`src/components/Terminal/TerminalWriter.ts`) buffers output per node behind one `requestAnimationFrame`, and it carries three independent budgets, because that flush scheduler suspends whenever the window is hidden. Bytes (`MAX_PENDING_BYTES`, 4 MiB) bound payload, chunk objects (`MAX_PENDING_CHUNKS`, 4096) bound the per-chunk headers a byte count cannot see, and in-flight parses (`MAX_INFLIGHT_WRITES`, 4) bound what xterm has been handed but not yet parsed. Eviction advances a head index and overwrites each dropped slot, so it is amortized constant-time and the discarded payload is released immediately; `slice` compaction keeps the backing array near twice the live window. The in-flight budget depends on xterm's parse-completion callback, so both registries register a completion-aware sink — a sink that ignores `done` cannot be budgeted and is therefore never deferred. While the cap is reached the writer holds its queue and does NOT re-arm a frame: that callback is the only wakeup, so a slow parse costs no polling and a finished burst costs no wakeup when nothing is waiting. The interactive fast path ignores the budget in both directions — a keystroke echo is never deferred and never consumes a bulk slot. The budgets bound queued work only: they must never dispose a hidden persistent terminal or shrink scrollback. `npm run bench:terminal-writer` measures append time, retained heap, queued chunks and in-flight depth against the real module; issue #2018 moved the paused-window case from ~11 s to ~65 ms for 200k lines and cut peak unparsed payloads from 200 to 4.

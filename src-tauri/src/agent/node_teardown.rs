@@ -8,7 +8,9 @@
 //! Process exit and permanent deletion are deliberately *different* calls
 //! (issue #2019): a restart reuses the node id, so its PTY fanout channel and
 //! the terminal context a reconnecting client replays must survive process
-//! teardown. Only [`release_for_deleted_node`] may retire that channel.
+//! teardown. Only [`release_after_delete`], and the explicit
+//! [`crate::http::ws::retire_pty_channel`] call inside `agent_node::delete`,
+//! may retire that channel — and only after the row delete has committed.
 
 /// Release all callback and attention state owned by `node_id`.
 ///
@@ -20,16 +22,16 @@ pub(crate) fn release(node_id: i64) {
     crate::agent::provider::muse::telemetry::forget(node_id);
 }
 
-/// Release every process-scoped store for a **permanently deleted** node and
-/// retire its PTY broadcast channel.
+/// Release every process-scoped store for a node whose row is **already
+/// gone**, and retire its PTY broadcast channel.
 ///
-/// This is the deletion-only half of [`release`]. Calling [`release`] from a
-/// process-exit path leaves the channel in place on purpose: the retained
-/// terminal context is intentional, and the node id comes back on restart.
-/// Calling *this* from a path that is not permanent deletion would strand a
-/// live node with no fanout, so the two entry points stay separate rather than
-/// being merged behind a flag.
-pub(crate) fn release_for_deleted_node(node_id: i64) {
+/// Call this only once the deletion has committed. Retiring a channel records a
+/// tombstone that refuses future channel creation, so a node whose row survived
+/// a failed delete would be stranded with no way to stream again (#2019). When
+/// the delete is still in flight, call [`release`] for the process-scoped stores
+/// and retire the channel afterwards — that is the shape `agent_node::delete`
+/// uses, because its per-node cleanup deliberately runs before the row delete.
+pub(crate) fn release_after_delete(node_id: i64) {
     release(node_id);
     crate::http::ws::retire_pty_channel(node_id);
 }
