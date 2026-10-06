@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  DEV_SERVER_STARTUP_MS,
+  NAVIGATION_TIMEOUT_MS,
+  MOUNT_TIMEOUT_MS,
+  UI_SHOT_STEP_BUDGETS_MS,
+} from '../../scripts/ui-shot-budgets.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const uiShot = resolve(repoRoot, 'scripts', 'ui-shot.mjs');
@@ -27,20 +33,21 @@ async function freePort() {
   return port;
 }
 
-// Budget ordering matters, and the arithmetic has to actually hold. The child
-// spends up to SERVER_DEADLINE_MS starting a dev server and then up to
-// NAVIGATION_DEADLINE_MS on the first `page.goto`, so the wrapper must exceed
-// their sum or it kills the child mid-flight and reports a bare transport
-// error instead of the real diagnostic (the same class as issue #2049). The
-// per-test timeout then exceeds the wrapper, so the wrapper's diagnostic — which
-// carries the child's stdout/stderr — is what fails the run.
-const WRAPPER_DEADLINE_MS = 180000;
+// Budget ordering matters, and the arithmetic has to actually hold against the
+// values the child really uses. The child spends, sequentially:
+// dev-server startup, then `page.goto`, then the `#root` mount wait, then a
+// selector-visible wait. The wrapper must exceed that whole sum or it kills the
+// child mid-flight and reports a bare transport error instead of the real
+// diagnostic (issue #2049 class). The per-test timeout then exceeds the wrapper,
+// so the wrapper's diagnostic — which carries the child's stdout/stderr — is what
+// fails the run.
+//
+// The child's budgets are IMPORTED, not copied: a literal here would drift the
+// moment a timeout is raised in the scripts and the check below would keep
+// passing while the wrapper silently fell below the real worst case again.
+const CHILD_WORST_CASE_MS = UI_SHOT_STEP_BUDGETS_MS;
+const WRAPPER_DEADLINE_MS = CHILD_WORST_CASE_MS + 30000;
 const TEST_DEADLINE_MS = WRAPPER_DEADLINE_MS + 30000;
-// Mirrors `scripts/ui-shot-server.mjs` (dev-server startup) and
-// `scripts/ui-shot.mjs` (navigation). Asserted here so the wrapper cannot
-// silently fall below the child's worst case again.
-const SERVER_DEADLINE_MS = 60000;
-const NAVIGATION_DEADLINE_MS = 120000;
 
 function runUiShot(args, timeoutMs = WRAPPER_DEADLINE_MS) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
@@ -80,11 +87,11 @@ async function serveHtml(html) {
   return { server, url: `http://127.0.0.1:${port}` };
 }
 
-// ui-shot waits 15s for `#root` before reporting a mount failure, and Chromium
-// startup competes for CPU with the rest of the suite. A tight wrapper deadline
-// killed the child under load and reported a transport timeout instead of the
-// real diagnostic, so budget generously (the same reason as issue #2049).
-const MOUNT_FAILURE_DEADLINE_MS = 120000;
+// This test serves its own static HTML (no `--serve`), so the child spends only
+// navigation plus the mount wait before reporting the failure. It still needs a
+// wrapper above that sum, and still needs enough budget for Chromium to start
+// while competing with the rest of the suite (issue #2049).
+const MOUNT_FAILURE_DEADLINE_MS = NAVIGATION_TIMEOUT_MS + MOUNT_TIMEOUT_MS + 30000;
 
 describe('ui-shot mock mode', () => {
   it('groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions', async () => {
@@ -170,11 +177,13 @@ describe('ui-shot mock mode', () => {
   it('keeps its wrapper deadline above the child it supervises', () => {
     // The failure this guards is silent: a wrapper tighter than the child just
     // produces a transport error that reads like "start the dev server" when
-    // `--serve` already started one. Assert the arithmetic instead of trusting
-    // the comment above it.
-    expect(WRAPPER_DEADLINE_MS).toBeGreaterThanOrEqual(
-      SERVER_DEADLINE_MS + NAVIGATION_DEADLINE_MS,
+    // `--serve` already started one. Assert the arithmetic against the values
+    // the scripts actually use (imported from `ui-shot-budgets.mjs`), so
+    // raising a child timeout widens the wrapper automatically.
+    expect(CHILD_WORST_CASE_MS).toBeGreaterThanOrEqual(
+      DEV_SERVER_STARTUP_MS + NAVIGATION_TIMEOUT_MS,
     );
+    expect(WRAPPER_DEADLINE_MS).toBeGreaterThan(CHILD_WORST_CASE_MS);
     expect(TEST_DEADLINE_MS).toBeGreaterThan(WRAPPER_DEADLINE_MS);
   });
 });

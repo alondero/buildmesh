@@ -66,6 +66,11 @@ import { dirname, resolve, join } from 'path';
 import { pathToFileURL } from 'url';
 import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
 import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
+import {
+  NAVIGATION_TIMEOUT_MS,
+  MOUNT_TIMEOUT_MS,
+  ELEMENT_VISIBLE_TIMEOUT_MS,
+} from './ui-shot-budgets.mjs';
 
 /**
  * Launch Chromium, tolerating a host whose pre-installed browser doesn't
@@ -163,15 +168,15 @@ async function getPage() {
       // under CPU load that first response alone can exceed 30s. Defaulting
       // made this fail intermittently with a misleading "start the dev server"
       // message even though `--serve` had just started one.
-      await page.goto(mockUrl, { waitUntil: 'domcontentloaded', timeout: 120000 }).catch((e) => {
+      await page.goto(mockUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch((e) => {
         throw new Error(
           `Could not load ${mockUrl}. Start the dev server (\`npm run dev\`), ` +
           `or pass --serve to have this script start it.\n${e.message}`
         );
       });
-      await page.locator('#root > *').first().waitFor({ state: 'attached', timeout: 15000 }).catch(() => {
+      await page.locator('#root > *').first().waitFor({ state: 'attached', timeout: MOUNT_TIMEOUT_MS }).catch(() => {
         const details = pageErrors.length > 0 ? ` Page errors: ${pageErrors.join(' | ')}` : '';
-        throw new Error(`[tauri-mock] #root never populated within 15s.${details}`);
+        throw new Error(`[tauri-mock] #root never populated within ${MOUNT_TIMEOUT_MS / 1000}s.${details}`);
       });
       return { browser, page, devServer };
     } catch (e) {
@@ -223,7 +228,7 @@ try {
   mkdirSync(dirname(resolve(out)), { recursive: true });
   if (selector) {
     const el = page.locator(selector).first();
-    await el.waitFor({ state: 'visible', timeout: 10000 });
+    await el.waitFor({ state: 'visible', timeout: ELEMENT_VISIBLE_TIMEOUT_MS });
     await el.screenshot({ path: out });
   } else {
     await page.screenshot({ path: out });
