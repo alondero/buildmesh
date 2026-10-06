@@ -3,6 +3,23 @@
 # /use, /verify and /verify-ui call. It only ever touches buildmesh-dev — never
 # the hub.
 #
+# EXIT CODE (issue #2043)
+#   0 = launched, verified. 1 = build failed, panic detected, or the app never
+#   came up. The exit code reports the launch verdict and nothing else: the log
+#   reads below treat a read failure as "no evidence" and fall through to the
+#   next source, so an incidental error while the app is already up and healthy
+#   can no longer turn a successful launch into exit 1.
+#
+#   Read the exit code together with stdout, and prefer the `OK - ` line as the
+#   success signal. If the CONSUMER stops reading stdout early (`... 2>&1 |
+#   Select-Object -First N`, `| head`, a truncated capture buffer) the pipe
+#   closes underneath powershell.exe and it returns a non-zero status even when
+#   this script reached `exit 0` and printed its OK line. That failure happens
+#   in the host at pipeline teardown — it is identical for Write-Output,
+#   Write-Host and [Console]::Out, is unaffected by $ErrorActionPreference, and
+#   cannot be prevented from in here. Treat a non-zero with an `OK - ` line as
+#   success; treat a non-zero WITHOUT one as a real failure.
+#
 # -CdpPort <n>: expose the WebView2 window over the Chrome DevTools Protocol on
 # 127.0.0.1:<n> so Playwright can attach to the REAL app window (drive the DOM,
 # take screenshots) — see scripts/ui-shot.mjs and the /verify-ui skill.
@@ -11,6 +28,9 @@ param([int]$CdpPort = 0)
 $ErrorActionPreference = "Stop"
 
 Set-Location "$PSScriptRoot\.."
+
+# Shared launcher helpers (Read-LogFile). Dot-sourced before first use.
+. (Join-Path $PSScriptRoot "launcher-common.ps1")
 
 # The dev profile must NOT share src-tauri\target\release\ with the stable
 # hub: cargo's binary output filename is fixed by the crate's [[bin]] name
@@ -41,7 +61,10 @@ $PanicEarlyLogPath = "$env:APPDATA\com.alond.buildmesh.dev\logs\panic_early.log"
 $existing = Get-Process -Name 'buildmesh-dev' -ErrorAction SilentlyContinue
 if ($existing) {
     Write-Output "Stopping existing buildmesh-dev..."
-    $existing | Stop-Process -Force
+    # -ErrorAction SilentlyContinue: on a re-run the previous instance can exit
+    # between Get-Process and Stop-Process. Under $ErrorActionPreference="Stop"
+    # that race aborted the script before it ever launched (issue #2043).
+    $existing | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 1000
 }
 
@@ -60,24 +83,23 @@ if (-not (Test-Path $Binary)) {
 }
 
 # 4. Record log position
-$BeforeLines = 0
-if (Test-Path $LogPath) {
-    $BeforeLines = (Get-Content $LogPath).Count
-}
-# Same delta-capture for the panic-hook outputs (issue #158). Echo the
-# counts to stdout so /verify can parse them and slice the post-launch
-# file without re-deriving from disk state.
-$BeforePanicLines = 0
-if (Test-Path $PanicLogPath) {
-    $BeforePanicLines = (Get-Content $PanicLogPath).Count
-}
-$BeforePanicEarlyLines = 0
-if (Test-Path $PanicEarlyLogPath) {
-    $BeforePanicEarlyLines = (Get-Content $PanicEarlyLogPath).Count
-}
-Write-Output "Buildmesh Dev pre-launch line count (buildmesh.log): $BeforeLines"
-Write-Output "Buildmesh Dev pre-launch line count (panic.log): $BeforePanicLines"
-Write-Output "Buildmesh Dev pre-launch line count (panic_early.log): $BeforePanicEarlyLines"
+# Issue #2043 - the exit code must report the LAUNCH VERDICT and nothing else.
+# $ErrorActionPreference = "Stop" is script-wide, so a read that failed for an
+# incidental reason (the app still holds buildmesh.log open for writing, a panic
+# log momentarily locked) aborted the script and left powershell.exe reporting 1
+# for a launch that was already up and healthy. Read-LogFile treats a failed
+# read as "no evidence" and the verification below falls through to the next
+# source instead of deciding the verdict.
+$BeforeLog = Read-LogFile $LogPath
+# Same delta-capture for the panic-hook outputs (issue #158). Echo the counts
+# to stdout so /verify can parse them and slice the post-launch file without
+# re-deriving from disk state. An unreadable baseline prints "unreadable"
+# rather than a misleading 0, which would make every post-launch line look new.
+$BeforePanic = Read-LogFile $PanicLogPath
+$BeforePanicEarly = Read-LogFile $PanicEarlyLogPath
+Write-Output "Buildmesh Dev pre-launch line count (buildmesh.log): $(Format-Count $BeforeLog)"
+Write-Output "Buildmesh Dev pre-launch line count (panic.log): $(Format-Count $BeforePanic)"
+Write-Output "Buildmesh Dev pre-launch line count (panic_early.log): $(Format-Count $BeforePanicEarly)"
 
 # 5. Launch raw binary. The WebView2 loader reads the env var at app start;
 #    it must be set only for the launch (not the build) and cleared after so
@@ -111,34 +133,45 @@ Start-Sleep -Seconds 3
 # new lines verbatim so a human running the script directly sees the panic
 # message + backtrace, matching the failure-summary shape /verify step 8
 # produces (skill.md `### panic.log + panic_early.log slices`).
-foreach ($p in @(@{Path=$PanicLogPath; BeforeCount=$BeforePanicLines},
-                 @{Path=$PanicEarlyLogPath; BeforeCount=$BeforePanicEarlyLines})) {
-    if (Test-Path $p.Path) {
-        $c = (Get-Content $p.Path).Count
-        if ($c -gt $p.BeforeCount) {
-            Write-Output "ERROR: panic detected in $($p.Path) (was $($p.BeforeCount) lines, now $c). Launch aborted."
-            Write-Output "----- panic entry -----"
-            Get-Content $p.Path | Select-Object -Skip $p.BeforeCount | ForEach-Object { Write-Output $_ }
-            Write-Output "-----------------------"
-            exit 1
-        }
+foreach ($p in @(@{Path=$PanicLogPath; Before=$BeforePanic},
+                 @{Path=$PanicEarlyLogPath; Before=$BeforePanicEarly})) {
+    $growth = Compare-LogGrowth -Path $p.Path -Before $p.Before
+    # Unchecked means a read failed (already warned). Skipping is deliberate:
+    # it is neither a panic nor a clean bill of health, and the launch falls
+    # through to the startup and process checks below.
+    if (-not $growth.Checked) { continue }
+    if ($growth.Grew) {
+        Write-Output "ERROR: panic detected in $($p.Path) (was $($p.Before.Lines.Count) lines, now $($growth.Lines.Count)). Launch aborted."
+        Write-Output "----- panic entry -----"
+        $growth.Lines | Select-Object -Skip $p.Before.Lines.Count | ForEach-Object { Write-Output $_ }
+        Write-Output "-----------------------"
+        exit 1
     }
 }
 
-if (Test-Path $LogPath) {
-    $AllLines = Get-Content $LogPath
-    if ($AllLines.Count -gt $BeforeLines) {
-        $NewLines = $AllLines[$BeforeLines..($AllLines.Count - 1)]
-        $started = $NewLines | Where-Object { $_ -match "started|ready" }
-        if ($started) {
-            Write-Output "OK - Buildmesh Dev running"
-            exit 0
-        }
+# Startup confirmation rides the same guard: an unreadable baseline or a failed
+# current read cannot prove startup, so the launch falls through to the process
+# check instead of guessing.
+$startup = Compare-LogGrowth -Path $LogPath -Before $BeforeLog
+if ($startup.Checked -and $startup.Grew) {
+    $NewLines = $startup.Lines[$BeforeLog.Lines.Count..($startup.Lines.Count - 1)]
+    $started = $NewLines | Where-Object { $_ -match "started|ready" }
+    if ($started) {
+        Write-Output "OK - Buildmesh Dev running"
+        exit 0
     }
 }
 
-# Fallback: check process is alive
-if (-not $proc.HasExited) {
+# Fallback: check process is alive. A query failure is reported as "not alive"
+# so this ends in the explicit failed-to-start verdict below rather than an
+# unhandled error whose exit code and message would be misleading.
+$Alive = $false
+try {
+    $Alive = -not $proc.HasExited
+} catch {
+    Write-Warning "could not query the launched process: $($_.Exception.Message)"
+}
+if ($Alive) {
     Write-Output "OK - Process alive (no log confirmation)"
     exit 0
 }

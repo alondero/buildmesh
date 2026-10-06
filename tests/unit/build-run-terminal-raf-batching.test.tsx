@@ -32,7 +32,10 @@ import { BuildRunTerminal } from '../../src/components/Terminal/BuildRunTerminal
 const terminalInstances: Array<{ write: ReturnType<typeof vi.fn> }> = [];
 vi.mock('@xterm/xterm', () => {
   class MockTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     onResize = vi.fn();
     open = vi.fn();

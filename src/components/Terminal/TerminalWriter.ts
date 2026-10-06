@@ -1,6 +1,13 @@
 export type TerminalWriteData = string | Uint8Array;
 
-type WriteFn = (data: TerminalWriteData) => void;
+/**
+ * Sink for one terminal. `done` is the sink's parse-completion signal: xterm's
+ * `write(data, callback)` invokes it once the payload has been parsed. Sinks
+ * registered with `{ completionAware: true }` receive it and the writer then
+ * keeps at most {@link MAX_INFLIGHT_WRITES} payloads outstanding; every other
+ * sink leaves it `undefined` and is written to without a parser budget.
+ */
+type WriteFn = (data: TerminalWriteData, done?: () => void) => void;
 type SchedulerFn = (cb: () => void) => void;
 
 /**
@@ -15,6 +22,38 @@ type SchedulerFn = (cb: () => void) => void;
  * any escape sequence a drop may have severed.
  */
 export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Cap on buffered chunk *objects* per node (issue #2018). The byte cap above
+ * does not bound retention: a PTY reading in small slices spends one array
+ * slot and one string object per chunk on top of the payload. Measured with
+ * rAF paused, 82-byte build lines sitting at the 4 MiB byte cap retained
+ * 17.4 MiB — over four times the byte budget.
+ *
+ * 4096 is far above what the native producer sends: the Rust batcher
+ * coalesces 8 ms / 32 KiB windows (`pty::batch`), so reaching the 4 MiB byte
+ * cap through the real output path takes ~128 chunks. The budget only bites
+ * on small-slice storms, where it trades dropped objects (already unreachable
+ * in xterm's scrollback) for bounded retention.
+ */
+export const MAX_PENDING_CHUNKS = 4096;
+
+/**
+ * Cap on *bulk* payloads handed to xterm that have not finished parsing
+ * (issue #2018). `term.write` queues: the parse happens asynchronously, so a
+ * producer outrunning the parser used to grow xterm's internal write queue
+ * without limit. Measured pre-#2018: 200 frames of output produced 200
+ * outstanding unparsed payloads.
+ *
+ * While the cap is reached the writer holds the backlog (still bounded by the
+ * two caps above) and does NOT re-arm a frame: xterm's parse-completion
+ * callback is the only wakeup, so a slow parse costs no polling. If xterm
+ * never completes, `append` keeps applying the drop-oldest policy.
+ *
+ * The interactive fast path is exempt in both directions: a keystroke echo is
+ * never deferred, and never consumes a bulk slot.
+ */
+export const MAX_INFLIGHT_WRITES = 4;
 
 /**
  * Maximum payload size that takes the interactive fast path (issue #1122).
@@ -35,11 +74,37 @@ export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
  */
 export const INTERACTIVE_FAST_PATH_BYTES = 16;
 
+/**
+ * Empty-string marker written over an evicted slot. Eviction advances a head
+ * index instead of `Array.shift` (issue #2018), so the dropped reference has
+ * to be overwritten explicitly or the whole buffer stays reachable from the
+ * backing array's tail. An empty string keeps the array packed-element; a
+ * `delete` would punch holes and deoptimise the whole store.
+ */
+const EVICTED = '';
+
 interface BufferEntry {
+  /**
+   * Backing store for the queue. Live chunks occupy `[head, length)`;
+   * everything below `head` holds {@link EVICTED}.
+   */
   chunks: TerminalWriteData[];
+  /** Index of the oldest live chunk. */
+  head: number;
   pendingBytes: number;
   frameRequested: boolean;
+  /** Payloads handed to xterm that have not reported parse completion. */
+  inFlight: number;
+  /** True when the registered sink reports parse completion via `done`. */
+  completionAware: boolean;
 }
+
+/**
+ * Rebuild the backing store once the evicted prefix is worth reclaiming.
+ * Amortized constant time: the slice fires once per `COMPACT_AFTER`
+ * evictions, so eviction stays O(1) per chunk (issue #2018).
+ */
+const COMPACT_AFTER = 1024;
 
 function byteLength(data: TerminalWriteData): number {
   return typeof data === 'string' ? data.length : data.byteLength;
@@ -49,24 +114,58 @@ function isByteChunk(data: TerminalWriteData): data is Uint8Array {
   return data instanceof Uint8Array;
 }
 
-function mergeByteChunks(chunks: Uint8Array[]): Uint8Array {
-  const totalLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+function mergeByteChunks(chunks: readonly TerminalWriteData[], head: number, count: number): Uint8Array {
+  const end = head + count;
+  let totalLength = 0;
+  for (let i = head; i < end; i++) {
+    totalLength += (chunks[i] as Uint8Array).byteLength;
+  }
   const merged = new Uint8Array(totalLength);
   let offset = 0;
-  for (const chunk of chunks) {
+  for (let i = head; i < end; i++) {
+    const chunk = chunks[i] as Uint8Array;
     merged.set(chunk, offset);
     offset += chunk.byteLength;
   }
   return merged;
 }
 
-function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
-  if (chunks.length === 0) return [];
-  if (chunks.every(chunk => typeof chunk === 'string')) {
-    return [chunks.join('')];
+/**
+ * Merge the live window `[head, head + count)` into the smallest payload
+ * xterm can parse in one pass. Reads through the backing store rather than a
+ * `slice()` copy, so a flush allocates only the merged payload itself.
+ */
+function coalesceChunks(
+  chunks: readonly TerminalWriteData[],
+  head: number,
+  count: number
+): TerminalWriteData[] {
+  if (count === 0) return [];
+  // One queued chunk is already the payload xterm wants. Handing the
+  // reference straight through avoids a redundant `Uint8Array` allocation +
+  // copy (or a `+=` string concat) on the common single-chunk-per-frame
+  // frame. Safe by ownership: `append` takes sole ownership of the chunks it
+  // buffers, and nothing here or downstream mutates them.
+  if (count === 1) return [chunks[head]];
+  const end = head + count;
+  let allStrings = true;
+  let allBytes = true;
+  for (let i = head; i < end; i++) {
+    const chunk = chunks[i];
+    if (typeof chunk !== 'string') allStrings = false;
+    if (!isByteChunk(chunk)) allBytes = false;
+    // Both false means the window is mixed, which fully determines the
+    // outcome; scanning the remaining chunks would only burn iterations over
+    // an already-decided answer.
+    if (!allStrings && !allBytes) break;
   }
-  if (chunks.every(isByteChunk)) {
-    return [mergeByteChunks(chunks)];
+  if (allStrings) {
+    let joined = '';
+    for (let i = head; i < end; i++) joined += chunks[i] as string;
+    return [joined];
+  }
+  if (allBytes) {
+    return [mergeByteChunks(chunks, head, count)];
   }
   // Mixed string + byte chunks (issue #1749): a bursty PTY flush with
   // interleaved types would otherwise hit xterm with one write per chunk.
@@ -85,7 +184,8 @@ function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
   // read-slice splits reassemble.
   const decoder = new TextDecoder();
   const parts: string[] = [];
-  for (const chunk of chunks) {
+  for (let i = head; i < end; i++) {
+    const chunk = chunks[i];
     if (typeof chunk === 'string') {
       parts.push(decoder.decode());
       parts.push(chunk);
@@ -97,13 +197,56 @@ function coalesceChunks(chunks: TerminalWriteData[]): TerminalWriteData[] {
   return [parts.join('')];
 }
 
-function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined): void {
-  if (entry.chunks.length === 0 || !writeFn) return;
-  const chunks = coalesceChunks(entry.chunks);
-  entry.chunks = [];
+/** Drop every queued chunk and release the backing store. */
+function releaseAll(entry: BufferEntry): void {
+  entry.chunks.length = 0;
+  entry.head = 0;
   entry.pendingBytes = 0;
+}
+
+interface FlushOptions {
+  /** Called when a budgeted payload finishes parsing (see `flushFrame`). */
+  onComplete?: () => void;
+  /**
+   * Whether the payload counts against `MAX_INFLIGHT_WRITES`. Defaults to
+   * true; the interactive fast path opts out.
+   */
+  budget?: boolean;
+}
+
+function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined, options: FlushOptions = {}): void {
+  const count = entry.chunks.length - entry.head;
+  if (count === 0 || !writeFn) return;
+  const chunks = coalesceChunks(entry.chunks, entry.head, count);
+  releaseAll(entry);
   for (const chunk of chunks) {
-    writeFn(chunk);
+    if (!entry.completionAware || options.budget === false) {
+      writeFn(chunk);
+      continue;
+    }
+    entry.inFlight++;
+    // Per-write latch, not a clamp. Clamping to zero only hides underflow: a
+    // duplicate `done()` from one write would still release a *different*
+    // write's slot, letting more payloads reach xterm than the cap allows
+    // while that write is still parsing. Each write releases its own slot
+    // exactly once.
+    let completed = false;
+    const done = () => {
+      if (completed) return;
+      completed = true;
+      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      options.onComplete?.();
+    };
+    try {
+      writeFn(chunk, done);
+    } catch (err) {
+      // A synchronous throw (torn-down terminal, failing addon) would
+      // otherwise leak this slot, and MAX_INFLIGHT_WRITES leaks brick the
+      // writer for the rest of the session. `done` is idempotent, so this is
+      // also the correct path when the sink called `done` and *then* threw.
+      done();
+      throw err;
+    }
   }
 }
 
@@ -157,6 +300,17 @@ function isFastPathSafe(data: TerminalWriteData): boolean {
   return true;
 }
 
+export interface TerminalWriterOptions {
+  /**
+   * Set when the sink honours the `done` callback of
+   * {@link WriteFn}. Only then does the writer keep an in-flight count and
+   * defer flushes under {@link MAX_INFLIGHT_WRITES} — a sink that accepts
+   * `done` but never calls it would otherwise stall the queue, so the
+   * capability has to be declared rather than inferred.
+   */
+  completionAware?: boolean;
+}
+
 export class TerminalWriter {
   private entries = new Map<number, BufferEntry>();
   private writeFns = new Map<number, WriteFn>();
@@ -166,12 +320,24 @@ export class TerminalWriter {
     this.scheduler = scheduler;
   }
 
-  register(nodeId: number, writeFn: WriteFn): void {
-    this.entries.set(nodeId, { chunks: [], pendingBytes: 0, frameRequested: false });
+  register(nodeId: number, writeFn: WriteFn, options: TerminalWriterOptions = {}): void {
+    this.entries.set(nodeId, {
+      chunks: [],
+      head: 0,
+      pendingBytes: 0,
+      frameRequested: false,
+      inFlight: 0,
+      completionAware: options.completionAware === true,
+    });
     this.writeFns.set(nodeId, writeFn);
   }
 
   unregister(nodeId: number): void {
+    const entry = this.entries.get(nodeId);
+    // Release the queued payloads even when a frame is still pending: the
+    // scheduled callback holds this entry until it runs, and a deleted node's
+    // backlog is unreachable by definition (issue #2018).
+    if (entry) releaseAll(entry);
     this.entries.delete(nodeId);
     this.writeFns.delete(nodeId);
   }
@@ -181,13 +347,20 @@ export class TerminalWriter {
     if (!entry) return;
     entry.chunks.push(data);
     entry.pendingBytes += byteLength(data);
-    // Enforce the cap by dropping the OLDEST chunks — never the one just
-    // appended (`length > 1` guard), so a single oversized chunk still
-    // flushes whole. See MAX_PENDING_BYTES for why the cap exists.
-    while (entry.pendingBytes > MAX_PENDING_BYTES && entry.chunks.length > 1) {
-      const dropped = entry.chunks.shift()!;
+    // Enforce both caps by dropping the OLDEST chunks — never the one just
+    // appended (`count > 1` guard), so a single oversized chunk still flushes
+    // whole. Eviction advances `head` instead of `Array.shift`: the old form
+    // re-indexed the entire array per dropped chunk, which is quadratic
+    // against the backlog a hidden window builds up (issue #2018).
+    let count = entry.chunks.length - entry.head;
+    while (count > 1 && (entry.pendingBytes > MAX_PENDING_BYTES || count > MAX_PENDING_CHUNKS)) {
+      const dropped = entry.chunks[entry.head];
+      entry.chunks[entry.head] = EVICTED;
+      entry.head++;
+      count--;
       entry.pendingBytes -= byteLength(dropped);
     }
+    this.compact(entry);
     // Fast path: a single small interactive echo (issue #1122) goes
     // straight to xterm. Without this, the chain is
     //   `agent-output` event → TerminalWriter rAF → term.write →
@@ -205,27 +378,64 @@ export class TerminalWriter {
     // PTY reader's `read()` typically returns a complete codepoint)
     // but we defer to rAF so the chunks can be merged in
     // `coalesceChunks` if the next chunk completes the sequence.
+    //
+    // The fast path deliberately ignores the parser budget in both
+    // directions: it must not be deferred while xterm is saturated, and a
+    // keystroke echo must not consume a slot of a budget that exists to bound
+    // bulk backlog. At most INTERACTIVE_FAST_PATH_BYTES per echo, it cannot
+    // itself become a backlog.
     if (
       entry.pendingBytes <= INTERACTIVE_FAST_PATH_BYTES &&
-      entry.chunks.length === 1 &&
+      count === 1 &&
       !entry.frameRequested &&
       isFastPathSafe(data)
     ) {
-      flushEntry(entry, this.writeFns.get(nodeId));
+      flushEntry(entry, this.writeFns.get(nodeId), { budget: false });
       return;
     }
     this.scheduleFlush(nodeId, entry);
   }
 
+  /**
+   * Reclaim the evicted prefix once it dominates the backing store, so the
+   * array cannot grow past roughly twice the live window. `slice` also covers
+   * the fully-drained case (an empty result), so no separate branch is needed.
+   */
+  private compact(entry: BufferEntry): void {
+    if (entry.head >= COMPACT_AFTER && entry.head * 2 >= entry.chunks.length) {
+      entry.chunks = entry.chunks.slice(entry.head);
+      entry.head = 0;
+    }
+  }
+
   private scheduleFlush(nodeId: number, entry: BufferEntry): void {
     if (entry.frameRequested) return;
     entry.frameRequested = true;
-    this.scheduler(() => {
-      const current = this.entries.get(nodeId);
-      if (current === entry) {
-        flushEntry(current, this.writeFns.get(nodeId));
-      }
-      entry.frameRequested = false;
+    this.scheduler(() => this.flushFrame(nodeId, entry));
+  }
+
+  private flushFrame(nodeId: number, entry: BufferEntry): void {
+    // Cleared first so an append landing during the flush can request a fresh
+    // frame.
+    entry.frameRequested = false;
+    if (this.entries.get(nodeId) !== entry) return;
+    if (entry.completionAware && entry.inFlight >= MAX_INFLIGHT_WRITES) {
+      // xterm is still parsing. Return WITHOUT re-arming: `onComplete` below
+      // is the wakeup, fired by xterm's parse-completion callback. Re-arming
+      // here would busy-poll rAF at vsync rate for the whole parse and also
+      // pin `frameRequested`, which would deny the interactive fast path. If
+      // the parser never completes, the queue simply stays capped and `append`
+      // keeps applying the drop-oldest policy (issue #2018).
+      return;
+    }
+    flushEntry(entry, this.writeFns.get(nodeId), {
+      onComplete: () => {
+        // Only wake the renderer when output is actually waiting: a burst that
+        // has ended must not cost a vsync tick per completed write.
+        if (this.entries.get(nodeId) === entry && entry.chunks.length > entry.head) {
+          this.scheduleFlush(nodeId, entry);
+        }
+      },
     });
   }
 
@@ -235,5 +445,16 @@ export class TerminalWriter {
 
   pendingBytes(nodeId: number): number {
     return this.entries.get(nodeId)?.pendingBytes ?? 0;
+  }
+
+  /** Live queued chunk count (excludes evicted slots below the head index). */
+  queuedChunks(nodeId: number): number {
+    const entry = this.entries.get(nodeId);
+    return entry ? entry.chunks.length - entry.head : 0;
+  }
+
+  /** Payloads handed to xterm that have not yet reported parse completion. */
+  inFlightWrites(nodeId: number): number {
+    return this.entries.get(nodeId)?.inFlight ?? 0;
   }
 }
