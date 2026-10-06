@@ -176,6 +176,25 @@ describe('TerminalWriter budgets (issue #2018)', () => {
       // Every byte is from the surviving window: the evicted one is absent.
       expect(written.every((byte: number) => byte === 103)).toBe(true);
     });
+
+    it('passes a single queued chunk through without copying it', () => {
+      // One chunk per frame is the common steady-state shape; merging it would
+      // allocate a redundant Uint8Array and copy every byte for nothing.
+      const bytes = new Uint8Array(64).fill(7);
+      const byteWriter = vi.fn();
+      writer.register(1, byteWriter);
+      writer.append(1, bytes);
+      flush();
+      expect(byteWriter.mock.calls[0][0]).toBe(bytes);
+
+      const text = 'x'.repeat(INTERACTIVE_FAST_PATH_BYTES + 1);
+      const stringWriter = vi.fn();
+      const stringNode = 2;
+      writer.register(stringNode, stringWriter);
+      writer.append(stringNode, text);
+      flush();
+      expect(stringWriter.mock.calls[0][0]).toBe(text);
+    });
   });
 
   describe('xterm in-flight budget', () => {
@@ -257,6 +276,80 @@ describe('TerminalWriter budgets (issue #2018)', () => {
       writer.append(1, 'a');
       expect(sink.calls).toHaveLength(callsBefore + 1);
       expect(sink.calls[sink.calls.length - 1]).toBe('a');
+      // ...and must not consume a bulk budget slot either: the cap exists to
+      // bound backlog, and four typed keys must not defer agent output.
+      expect(writer.inFlightWrites(1)).toBe(MAX_INFLIGHT_WRITES);
+    });
+
+    it('does not re-arm a frame while the parser is saturated', () => {
+      // The backoff is event-driven. Re-arming here would busy-poll rAF at
+      // vsync rate for the whole parse, and pinning `frameRequested` would
+      // also deny the interactive fast path above.
+      const sink = completionSink();
+      writer.register(1, sink.fn, { completionAware: true });
+      const block = 'b'.repeat(4096);
+      for (let frame = 0; frame < MAX_INFLIGHT_WRITES + 10; frame++) {
+        writer.append(1, block);
+        flush();
+      }
+
+      expect(sink.calls).toHaveLength(MAX_INFLIGHT_WRITES);
+      expect(scheduledCallbacks).toHaveLength(0);
+      expect(writer.queuedChunks(1)).toBeGreaterThan(0);
+    });
+
+    it('does not wake the renderer when a completion finds an empty queue', () => {
+      const sink = completionSink();
+      writer.register(1, sink.fn, { completionAware: true });
+      writer.append(1, rafChunk());
+      flush();
+      expect(writer.queuedChunks(1)).toBe(0);
+
+      sink.completeAll();
+      // A burst that has ended must not cost a vsync tick per completed write.
+      expect(scheduledCallbacks).toHaveLength(0);
+    });
+
+    it('does not leak an in-flight slot when the sink throws synchronously', () => {
+      // MAX_INFLIGHT_WRITES leaked slots and the writer is bricked for the
+      // rest of the session, so a synchronous throw must undo its own count.
+      let calls = 0;
+      writer.register(
+        1,
+        (_data, done) => {
+          if (calls++ === 0) throw new Error('terminal gone');
+          done?.();
+        },
+        { completionAware: true },
+      );
+
+      writer.append(1, rafChunk());
+      expect(() => flush()).toThrow('terminal gone');
+      expect(writer.inFlightWrites(1)).toBe(0);
+
+      // Still usable afterwards.
+      writer.append(1, rafChunk());
+      expect(() => flush()).not.toThrow();
+      expect(writer.inFlightWrites(1)).toBe(0);
+    });
+
+    it('ignores a duplicate parse completion instead of underflowing', () => {
+      let done: (() => void) | undefined;
+      writer.register(
+        1,
+        (_data, d) => {
+          done = d;
+        },
+        { completionAware: true },
+      );
+      writer.append(1, rafChunk());
+      flush();
+      expect(writer.inFlightWrites(1)).toBe(1);
+
+      done?.();
+      done?.();
+      done?.();
+      expect(writer.inFlightWrites(1)).toBe(0);
     });
 
     it('never defers a sink that does not report completion', () => {

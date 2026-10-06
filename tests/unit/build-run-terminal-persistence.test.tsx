@@ -63,7 +63,10 @@ const terminalInstances: Array<{
 
 vi.mock('@xterm/xterm', () => {
   class TrackedTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback (see `terminal-container.test.tsx`).
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     resizeCallback: ((size: { cols: number; rows: number }) => void) | undefined;
     onResize = vi.fn((callback: (size: { cols: number; rows: number }) => void) => {

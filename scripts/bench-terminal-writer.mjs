@@ -42,9 +42,8 @@ function pausedScheduler() {
     schedule(cb) {
       pending.push(cb);
     },
-    // One frame runs the callbacks queued at its start. A callback that
-    // re-arms (a flush deferred by the in-flight budget) belongs to the NEXT
-    // frame — draining until empty here would spin forever.
+    // One frame runs the callbacks queued at its start; anything a callback
+    // schedules belongs to the NEXT frame, as with a real rAF.
     run() {
       const frame = pending.splice(0, pending.length);
       for (const cb of frame) cb();

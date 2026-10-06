@@ -39,16 +39,19 @@ export const MAX_PENDING_BYTES = 4 * 1024 * 1024;
 export const MAX_PENDING_CHUNKS = 4096;
 
 /**
- * Cap on payloads handed to xterm that have not finished parsing (issue
- * #2018). `term.write` queues: the parse happens asynchronously, so a
+ * Cap on *bulk* payloads handed to xterm that have not finished parsing
+ * (issue #2018). `term.write` queues: the parse happens asynchronously, so a
  * producer outrunning the parser used to grow xterm's internal write queue
  * without limit. Measured pre-#2018: 200 frames of output produced 200
- * outstanding unparsed payloads. Once the budget is reached the writer keeps
- * buffering (still bounded by the two caps above) and resumes on a later
- * frame, so no new output class is lost.
+ * outstanding unparsed payloads.
  *
- * The interactive fast path is exempt: a keystroke echo must never wait on
- * parser backlog, and it is bounded by {@link INTERACTIVE_FAST_PATH_BYTES}.
+ * While the cap is reached the writer holds the backlog (still bounded by the
+ * two caps above) and does NOT re-arm a frame: xterm's parse-completion
+ * callback is the only wakeup, so a slow parse costs no polling. If xterm
+ * never completes, `append` keeps applying the drop-oldest policy.
+ *
+ * The interactive fast path is exempt in both directions: a keystroke echo is
+ * never deferred, and never consumes a bulk slot.
  */
 export const MAX_INFLIGHT_WRITES = 4;
 
@@ -138,6 +141,12 @@ function coalesceChunks(
   count: number
 ): TerminalWriteData[] {
   if (count === 0) return [];
+  // One queued chunk is already the payload xterm wants. Handing the
+  // reference straight through avoids a redundant `Uint8Array` allocation +
+  // copy (or a `+=` string concat) on the common single-chunk-per-frame
+  // frame. Safe by ownership: `append` takes sole ownership of the chunks it
+  // buffers, and nothing here or downstream mutates them.
+  if (count === 1) return [chunks[head]];
   const end = head + count;
   let allStrings = true;
   let allBytes = true;
@@ -191,20 +200,42 @@ function releaseAll(entry: BufferEntry): void {
   entry.pendingBytes = 0;
 }
 
-function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined, onComplete?: () => void): void {
+interface FlushOptions {
+  /** Called when a budgeted payload finishes parsing (see `flushFrame`). */
+  onComplete?: () => void;
+  /**
+   * Whether the payload counts against `MAX_INFLIGHT_WRITES`. Defaults to
+   * true; the interactive fast path opts out.
+   */
+  budget?: boolean;
+}
+
+function flushEntry(entry: BufferEntry, writeFn: WriteFn | undefined, options: FlushOptions = {}): void {
   const count = entry.chunks.length - entry.head;
   if (count === 0 || !writeFn) return;
   const chunks = coalesceChunks(entry.chunks, entry.head, count);
   releaseAll(entry);
   for (const chunk of chunks) {
-    if (entry.completionAware) {
-      entry.inFlight++;
-      writeFn(chunk, () => {
-        entry.inFlight--;
-        onComplete?.();
-      });
-    } else {
+    if (!entry.completionAware || options.budget === false) {
       writeFn(chunk);
+      continue;
+    }
+    entry.inFlight++;
+    const done = () => {
+      // Clamped: a sink that reports completion twice must not drive the
+      // count negative and hand out budget it never spent.
+      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      options.onComplete?.();
+    };
+    try {
+      writeFn(chunk, done);
+    } catch (err) {
+      // A synchronous throw (torn-down terminal, failing addon) would
+      // otherwise leak this slot; MAX_INFLIGHT_WRITES leaks and the writer is
+      // bricked for the rest of the session, so undo the count before
+      // propagating.
+      entry.inFlight = Math.max(0, entry.inFlight - 1);
+      throw err;
     }
   }
 }
@@ -338,16 +369,18 @@ export class TerminalWriter {
     // but we defer to rAF so the chunks can be merged in
     // `coalesceChunks` if the next chunk completes the sequence.
     //
-    // The fast path deliberately bypasses the in-flight budget: a keystroke
-    // echo must not queue behind a parse backlog, and at most
-    // INTERACTIVE_FAST_PATH_BYTES per echo it cannot itself become one.
+    // The fast path deliberately ignores the parser budget in both
+    // directions: it must not be deferred while xterm is saturated, and a
+    // keystroke echo must not consume a slot of a budget that exists to bound
+    // bulk backlog. At most INTERACTIVE_FAST_PATH_BYTES per echo, it cannot
+    // itself become a backlog.
     if (
       entry.pendingBytes <= INTERACTIVE_FAST_PATH_BYTES &&
       count === 1 &&
       !entry.frameRequested &&
       isFastPathSafe(data)
     ) {
-      flushEntry(entry, this.writeFns.get(nodeId));
+      flushEntry(entry, this.writeFns.get(nodeId), { budget: false });
       return;
     }
     this.scheduleFlush(nodeId, entry);
@@ -372,22 +405,27 @@ export class TerminalWriter {
   }
 
   private flushFrame(nodeId: number, entry: BufferEntry): void {
-    // Cleared first so the re-arm below is allowed, and so an append landing
-    // during the flush can request a fresh frame.
+    // Cleared first so an append landing during the flush can request a fresh
+    // frame.
     entry.frameRequested = false;
     if (this.entries.get(nodeId) !== entry) return;
     if (entry.completionAware && entry.inFlight >= MAX_INFLIGHT_WRITES) {
-      // xterm is still parsing. Re-arm instead of handing over more: the
-      // pending caps keep bounding what we hold, so a parser that never
-      // completes degrades to the established drop-oldest policy instead of
-      // unbounded growth (issue #2018).
-      this.scheduleFlush(nodeId, entry);
+      // xterm is still parsing. Return WITHOUT re-arming: `onComplete` below
+      // is the wakeup, fired by xterm's parse-completion callback. Re-arming
+      // here would busy-poll rAF at vsync rate for the whole parse and also
+      // pin `frameRequested`, which would deny the interactive fast path. If
+      // the parser never completes, the queue simply stays capped and `append`
+      // keeps applying the drop-oldest policy (issue #2018).
       return;
     }
-    // A completion frees budget and there may be a backlog waiting: ask for a
-    // frame so the flush resumes as soon as the parser is under budget again.
-    flushEntry(entry, this.writeFns.get(nodeId), () => {
-      if (this.entries.get(nodeId) === entry) this.scheduleFlush(nodeId, entry);
+    flushEntry(entry, this.writeFns.get(nodeId), {
+      onComplete: () => {
+        // Only wake the renderer when output is actually waiting: a burst that
+        // has ended must not cost a vsync tick per completed write.
+        if (this.entries.get(nodeId) === entry && entry.chunks.length > entry.head) {
+          this.scheduleFlush(nodeId, entry);
+        }
+      },
     });
   }
 
