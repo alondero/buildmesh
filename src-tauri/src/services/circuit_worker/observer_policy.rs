@@ -274,6 +274,30 @@ mod tests {
             CircuitObservation, HumanWaitKind, ObservationDisposition, ObservationIdentity,
             ObservedWorkFact, WorkEvidence,
         };
+        // Read the arm this test names. Without this the rest of the test
+        // would still pass if the `"cline"` arm were deleted outright, because
+        // the evidence below is built directly rather than through the
+        // policy — so the fencing assertions would guard nothing.
+        let policy = super::for_provider("cline");
+        assert_eq!(
+            policy.foreground,
+            "Unavailable: Cline 3.0.62 (Windows npm .cmd via cmd.exe /c; macOS/Linux direct) has no validated Circuit lifecycle adapter; the agent_end TaskComplete file hook marks a completed turn but carries no turn id, prompt echo or input stamp, and Cline dispatches no clean-exit event",
+            "Cline must keep its explicit unavailable lifecycle contract"
+        );
+        assert_eq!(
+            policy.owned_work,
+            "Unavailable: Cline exposes no child/background registry to Buildmesh (its --kanban/--zen/--team-name surfaces are never passed); unknown child/background work never establishes completion",
+            "Cline must keep its explicit unavailable ownership contract"
+        );
+        assert!(
+            policy.reconciliation.contains("no native Circuit receipt"),
+            "the recorded reconciliation must state that Cline yields no native receipt"
+        );
+        assert_eq!(
+            policy.yielded_budget_ms, 30_000,
+            "Cline's recorded yielded budget must stay bounded"
+        );
+
         // The identity a Cline turn would have to prove. Cline's `agent_end`
         // payload supplies `taskId` (the session) and nothing else, so this
         // is deliberately turn-token-free: `turn_id` stays `None` because no
