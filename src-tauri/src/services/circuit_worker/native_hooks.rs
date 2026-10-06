@@ -1197,6 +1197,62 @@ mod tests {
     }
 
     #[test]
+    fn cline_hook_payloads_never_enter_the_native_hook_path() {
+        // Issue #1902: Cline's file-hook layer is the riskiest cross-harness
+        // shape in the tree, because unlike every other provider it keys its
+        // event under `hookName` — the same key the Claude/Codex branch reads
+        // as a fallback — and it ships `taskId` plus `agent_id`, which are
+        // exactly the fields the generic parser folds into `session_id` and
+        // `child_id`. Each body below is a verbatim 3.0.62 payload shape.
+        let bodies = [
+            // afterRun, status === "completed" -> agent_end (the only event
+            // Buildmesh provisions, and the one attention maps to a turn end).
+            br#"{"clineVersion":"3.0.62","timestamp":"2026-09-18T10:00:00.000Z","taskId":"session_1790003303940_9ouga","sessionContext":{"rootSessionId":"session_1790003303940_9ouga"},"workspaceRoots":["C:\\repo"],"userId":"alond","agent_id":"agent-1","parent_agent_id":null,"hookName":"agent_end","iteration":3,"turn":{"outputText":"done","status":"completed"},"taskComplete":{"taskMetadata":{}}}"#.as_slice(),
+            // afterRun abort branch -> agent_abort, while the session is live.
+            br#"{"clineVersion":"3.0.62","timestamp":"2026-09-18T10:00:00.000Z","taskId":"session_1790003303940_9ouga","hookName":"agent_abort","reason":"user-cancel","taskCancel":{"taskMetadata":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_start","taskStart":{"taskMetadata":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_resume","taskResume":{"taskMetadata":{},"previousState":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"agent_error","error":{"name":"Error","message":"boom","stack":"at x"}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"tool_call","iteration":2,"tool_call":{"id":"call-1","name":"bash","input":{"command":"ls"}},"preToolUse":{"toolName":"bash","parameters":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"tool_result","iteration":2,"tool_result":{"name":"bash"},"postToolUse":{"toolName":"bash","parameters":{},"result":"ok","success":true,"executionTimeMs":5}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"prompt_submit","userPromptSubmit":{"prompt":"do the thing","attachments":[]}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"pre_tool_use","preToolUse":{"toolName":"bash","parameters":{}}}"#.as_slice(),
+            br#"{"clineVersion":"3.0.62","taskId":"session_1790003303940_9ouga","hookName":"mystery"}"#.as_slice(),
+            // Garbage and near-miss shapes.
+            br#"not json at all"#.as_slice(),
+            br#"{}"#.as_slice(),
+            br#"{"hookName":"agent_end"}"#.as_slice(),
+        ];
+        // `anthropic`/`codex` are included deliberately: they are the two
+        // harnesses whose branch would otherwise accept a Cline body, and
+        // `agy` owns a shape-keyed `Stop` fallback.
+        for body in bodies {
+            for provider in [
+                "cline",
+                "claude",
+                "claude_code",
+                "anthropic",
+                "codex",
+                "agy",
+                "terminal",
+                "",
+            ] {
+                assert!(
+                    NativeHook::parse(provider, body).is_none(),
+                    "cline-shaped payload must not parse as a native hook for {provider:?}"
+                );
+            }
+        }
+        // Cline genuinely supplies no native Circuit receipt at all, so the
+        // gate itself is provider-scoped: a sibling harness's event still
+        // parses under its own id, and Cline never borrows it.
+        assert!(NativeHook::parse("terminal", br#"{"hook_event_name":"Stop"}"#).is_none());
+        assert!(
+            NativeHook::parse("codex", br#"{"hook_event_name":"Stop","session_id":"s"}"#).is_some()
+        );
+    }
+
+    #[test]
     fn native_registry_preserves_all_task_types_and_scheduled_wakeups() {
         let hook = NativeHook::parse("anthropic", br#"{"hook_event_name":"Stop","background_tasks":[{"id":"a","type":"subagent"},{"id":"b","type":"future-task-type"}],"session_crons":[{"id":"a"}]}"#).unwrap();
         assert_eq!(

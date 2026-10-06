@@ -399,6 +399,71 @@ Never a crash, never a silent omission — the digest reports a typed reason:
   tail window that feeds `completed_turn` would truncate a document that has to
   be parsed whole.
 
+## Circuit lifecycle and ownership (issue #1902)
+
+Validated against **Cline 3.0.62** on Windows: the npm shim
+(`%APPDATA%\npm\cline.cmd`) resolves `node_modules/cline/bin/cline`, which
+selects the compiled `@cline/cli-windows-x64` binary (macOS/Linux spawn
+directly). Because the npm package ships a compiled bundle rather than the
+`.ts` sources, the facts below were read from the shipped SDK
+**type declarations** (`@cline/core/dist/hooks/hook-file-config.d.ts`,
+`hook-file-hooks.d.ts`) and the **compiled bundle**
+(`@cline/core/dist/index.js`), not from `sdk/packages/core/src/…`.
+
+No controlled live Circuit run has been performed for this provider, so
+Circuit execution stays visibly **unsupported/Unverified**. The observer
+policy records that explicitly (`services::circuit_worker::observer_policy`,
+`cline` arm) rather than falling through to the generic fallback.
+
+The file-hook config table maps exactly:
+
+| Config file | `hookName` | Notes |
+|---|---|---|
+| `TaskStart` | `agent_start` | `beforeRun` |
+| `TaskResume` | `agent_resume` | |
+| `TaskCancel` | `agent_abort` | abort branch only |
+| `TaskComplete` | `agent_end` | **the only event Buildmesh provisions** |
+| `TaskError` | `agent_error` | not provisioned |
+| `PreToolUse` | `tool_call` | not provisioned |
+| `PostToolUse` | `tool_result` | not provisioned |
+| `UserPromptSubmit` | `prompt_submit` | not provisioned |
+| `PreCompact` | *(undefined)* | never serialised |
+| `SessionShutdown` | `session_shutdown` | reached **only** from the abort branch of `afterRun` |
+
+| Fact | Verdict |
+|---|---|
+| Supported version / platform | 3.0.62, Windows native (`cmd.exe /c` over the npm `.cmd`); macOS/Linux direct spawn unexercised for Circuits |
+| Hook source | `agent_end`, dispatched from `afterRun` only when `result.status === "completed"` — a genuine completed-turn signal. The payload is `{clineVersion, timestamp, taskId, sessionContext, workspaceRoots, userId, agent_id, parent_agent_id, hookName, iteration, turn:{outputText, status}}`: it carries the **session** (`taskId`) and **no turn id, no prompt echo and no input stamp**, so no Buildmesh submission can be correlated |
+| Clean exit | None. `SessionShutdown` → `session_shutdown` fires only when `result.status === "aborted"` or the error message reads as a cancel/abort/interrupt — i.e. on a user interrupt of a **still-live** session, never on teardown. A node's exit remains PTY-EOF evidence |
+| Pull source | `<cline data dir>/sessions/<id>/<id>.messages.json` transcript only (`TranscriptFormat::Cline`); there is no native turn-completion pull (`completed_turn` has no meaning for a whole-document read) |
+| Freshness / recheck bounds | Yielded 30 s via the observer policy; active budget unchanged. No adapter-owned recheck is wired — a missing hook parks Unverified until the watchdog budget expires |
+| Foreground lifecycle | No validated adapter: `agent_end` proves a *turn* ended, never that the foreground process terminated |
+| Child / background coverage | None. Cline has an internal subagent model (`agent_id` / `parent_agent_id`) and reconciles it on its own `session_shutdown`, but exposes no registry Buildmesh can pull, and Buildmesh never passes Cline's background surfaces (`--kanban`, `-z`/`--zen`, `--team-name`). Unknown child/background work never becomes completion (`WorkEvidence` requires `ownership_covered`, which no Cline source sets) |
+| Final report | Assistant text from `<id>.messages.json` may inform interpretation (scrubbed, partial/unavailable labelled); it cannot prove lifecycle termination or ownership |
+
+**Cline produces no native Circuit receipt at all.** `NativeHook::parse_value`
+admits only `claude` / `claude_code` / `anthropic` / `codex` / `agy`, so a
+Cline turn is visible evidence in run history and a durable attention receipt,
+but it can never complete a step.
+
+Cline is the riskiest cross-harness payload shape in the tree, because it keys
+its event under **`hookName`** — the same key the Claude/Codex branch reads as
+a fallback — while shipping `taskId` and `agent_id`, the exact fields the
+generic parser folds into `session_id` and `child_id`. Malformed or
+mislabelled Cline data therefore must not be able to borrow another harness's
+lifecycle. Pinned by regression test
+(`services::circuit_worker::native_hooks::tests::cline_hook_payloads_never_enter_the_native_hook_path`):
+every 3.0.62 payload shape parses to `None` under **every** provider id,
+including `anthropic`, `codex` and `agy`, while a sibling harness's own event
+still parses under its own id.
+
+Identity fencing for this provider is pinned in
+`observer_policy::tests::cline_policy_advertises_no_authoritative_evidence`:
+foreground turn receipts are reduced-confidence and deduplicate, a foreign
+session id is rejected, a post-restart incarnation cannot carry over, an
+unanswered request blocks verification, a cancelled turn stays unresolved, and
+an unregistered child work id closing never verifies completion.
+
 ## Troubleshooting
 
 - **Windows Application Control / antivirus blocks `cline.exe`.** Cline's own
