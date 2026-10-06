@@ -66,6 +66,12 @@ function makeNodes(count: number): AgentNode[] {
  * is counted. Deterministic — not a timing assertion — so it distinguishes
  * "the derivation ran once" from "the derivation ran per subscriber" without
  * depending on machine load.
+ *
+ * Only usable for notifications that leave `nodesById` in place. Any store
+ * write that replaces the container (`patchAgentNode`, a refetch) spreads the
+ * Proxy into a plain object, so reads after that point bypass the counter and
+ * a count taken then would be blind to the derivation. Use reference identity
+ * to assert those cases instead.
  */
 function seedCounting(nodes: AgentNode[]): { reads: number } {
   const raw: Record<number, AgentNode> = {};
@@ -171,32 +177,30 @@ describe('useAllAgentNodes derived selector (issue #2021)', () => {
 
   it('derives once for all subscribers rather than once per subscriber', () => {
     const NODES = 500;
-    const counter = seedCounting(makeNodes(NODES));
-    // `patchAgentNode` itself reads `state.nodesById[id]` once to merge the
-    // patch; measure only the derivation by subtracting that single read.
-    const DERIVATION_READS = NODES;
-    // Three mounted subscribers. One derivation walks the id list exactly once,
-    // so it costs NODES dereferences; a per-subscriber selector would cost
-    // 3 * NODES for the same notification.
+    seedCounting(makeNodes(NODES));
+    // Three mounted subscribers. Each was handed its OWN array before this
+    // change; they now share one derived instance.
     const views = [
       render(createElement(Consumer)),
       render(createElement(Consumer)),
       render(createElement(Consumer)),
     ];
-    counter.reads = 0;
+    const rendersBefore = derived.length;
 
     act(() => {
       useAgentNodeStore.getState().patchAgentNode(2, { status: 'working' });
     });
 
-    // Exactly one derivation for the notification, not one per subscriber.
-    expect(counter.reads).toBe(DERIVATION_READS + 1);
-    // Every subscriber re-rendered, and all three were handed the same array
-    // instance rather than three equal-but-distinct ones.
-    const afterChange = derived.slice(derived.length - 3).map(d => d.nodes);
+    // Every subscriber re-rendered...
+    expect(derived.length - rendersBefore).toBe(3);
+    const afterChange = derived.slice(rendersBefore).map(d => d.nodes);
     expect(afterChange).toHaveLength(3);
+    // ...and all three were handed the SAME array instance rather than three
+    // equal-but-distinct ones. This is what proves the derivation ran once and
+    // was shared, rather than once per subscriber.
     expect(afterChange[1]).toBe(afterChange[0]);
     expect(afterChange[2]).toBe(afterChange[0]);
+    expect(afterChange[0].find(n => n.id === 2)?.status).toBe('working');
 
     for (const view of views) view.unmount();
   });

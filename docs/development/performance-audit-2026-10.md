@@ -30,7 +30,9 @@ uses the production channel factory and coalescer.
 
 ### Agent-node selector and usage-cache miss amplification (#2021)
 
-Measured before/after on the current tree, both with the production code paths.
+Measured on the current tree through the production code paths. The
+dereference counts are the load-bearing before/after evidence; the wall-clock
+figures are context only, for the reason given below.
 
 **All-node selector.** Seven components subscribe to the full derived node
 array. Counting every `nodesById` dereference the derivation performs (a
@@ -43,15 +45,23 @@ no node cost:
 | 500 | 3500 | 0 |
 | 1000 | 7000 | 0 |
 
-A notification that genuinely changes one node is unchanged (1001 dereferences
-at 1000 nodes) because that derivation is required work. The derivation is now
-memoized on the identity of `nodesById`/`nodeIds`, so unrelated writes cost
-one `Object.is` pair per subscriber and a real change is derived once for all
-subscribers instead of once each. Measured component-commit time for 50
-single-node patches moved 3.1/6.4/10.2 ms at 100/500/1000 nodes before, but
-timings on this machine vary by ~2x between runs, so the dereference counts
-above are the load-bearing evidence. Per-row `memo` already bailed out
-(row renders stayed at the patch count), so no row-level change was justified.
+A notification that genuinely changes one node does not improve, and is not
+meant to: that derivation is required work. The derivation is now memoized on
+the identity of `nodesById`/`nodeIds`, so unrelated writes cost one
+`Object.is` pair per subscriber and a real change is derived once for all
+subscribers rather than once each. Component-commit time for 50 single-node
+patches was 3.1/6.4/10.2 ms at 100/500/1000 nodes before the change, but
+timings on this machine vary by ~2x between runs, so no after figure is
+claimed for them. Per-row `memo` already bailed out (row renders stayed at
+the patch count), so no row-level change was justified.
+
+Counting caveat: the instrumentation wraps `nodesById` in a Proxy, and any
+store write that replaces the container (e.g. `patchAgentNode`) spreads that
+Proxy into a plain object, so reads after such a write bypass the counter. The
+zero-cost result above is therefore only meaningful for notifications that leave
+the container in place -- which is exactly the case being measured. Cases that
+replace it are pinned by array-reference identity instead; see
+`tests/unit/agent-node-derived-selector.test.tsx`.
 
 **Usage cache misses.** Eight concurrent cold readers for one credential
 identity issued **8 vendor fetches** before coalescing, because the 5-minute

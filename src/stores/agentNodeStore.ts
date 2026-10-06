@@ -523,6 +523,12 @@ interface AgentNodeState {
 /// `tests/unit/helpers/seedAgentNodes` and tests that `setState` directly rely
 /// on picking up a new derivation. Keying on both container references handles
 /// that: a reseed replaces both.
+///
+/// The returned array is SHARED by every subscriber, where the previous
+/// `useShallow` implementation handed each subscriber its own. No consumer
+/// mutates it today (they sort a `.filter()`/`.map()` copy), but a future
+/// in-place `agentNodes.sort(...)` would corrupt every subscriber and the
+/// cache. Consumers that need to reorder must copy first.
 let derivedNodesCache: {
   nodeIds: readonly number[];
   nodesById: Record<number, AgentNode>;

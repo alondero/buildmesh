@@ -19,12 +19,17 @@ const caseKey = process.platform === 'win32' ? path => path.toLowerCase() : path
 // rustfmt has no way to discover the edition, and a wrong one misparses the
 // file. Read it from the crate that owns the code instead of pinning a literal
 // that silently drifts from Cargo.toml.
-// Section ends at the next `[table]` header line — not the next `[` character,
-// which also matches inline arrays such as `authors = ["..."]`.
+// The section is every line from `[package]` up to (not including) the next
+// line that STARTS with `[`. Anchoring the terminator to the line start is
+// what makes this correct: it stops at `[dependencies]` while still including
+// inline arrays inside the section such as `authors = ["A B"]`, which a naive
+// "next `[` character" cut would truncate and lose the edition. Matching the
+// `edition` key within that slice also cannot pick up a later section's
+// `[dependencies] serde = { edition = "..." }`.
 export function rustfmtEdition(root) {
   const manifest = resolve(root, 'src-tauri', 'Cargo.toml');
   const contents = existsSync(manifest) ? readFileSync(manifest, 'utf8') : '';
-  const section = /^\[package\][^[]*(?:\[[^\]]*\][^[]*)*/m.exec(contents)?.[0] ?? '';
+  const section = /^\[package\][^\S\n]*\n(?:(?!^\[)[^\n]*\n?)*/m.exec(contents)?.[0] ?? '';
   const edition = /^edition\s*=\s*"([^"]+)"/m.exec(section)?.[1];
   if (!edition) throw new Error(`Cannot read edition = from the [package] section of ${manifest}.`);
   return edition;

@@ -106,6 +106,13 @@ test('the edition comes from the crate manifest, not from a literal in the scrip
   // manifest has) must not truncate the section before `edition` is found.
   fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nauthors = ["A B <a@example.com>"]\nedition = "2021"\n');
   assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // ...and the scan must stop at the next section, so an `edition` key inside
+  // [dependencies] can never be mistaken for the package edition.
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nauthors = ["A B"]\nedition = "2021"\n\n[dependencies]\nserde = { version = "1", edition = "2018" }\n');
+  assert.equal(rustfmtEdition(fixture.cwd), '2021');
+  // A manifest whose final line has no trailing newline still resolves.
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname = "fixture"\nedition = "2024"');
+  assert.equal(rustfmtEdition(fixture.cwd), '2024');
 });
 
 test('the edition is found after array values earlier in the [package] section', t => {

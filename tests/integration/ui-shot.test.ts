@@ -27,15 +27,20 @@ async function freePort() {
   return port;
 }
 
-// Budget ordering matters. The child may spend up to 60s starting a dev server
-// plus 120s navigating, so the wrapper deadline must exceed that; the per-test
-// timeout must then exceed the wrapper, so the wrapper's own diagnostic (which
-// carries the child's stdout/stderr) is what fails the test rather than a bare
-// vitest timeout. A wrapper tighter than the child killed it under CPU load and
-// surfaced a transport error instead of the real diagnostic — the same class as
-// issue #2049.
-const WRAPPER_DEADLINE_MS = 150000;
+// Budget ordering matters, and the arithmetic has to actually hold. The child
+// spends up to SERVER_DEADLINE_MS starting a dev server and then up to
+// NAVIGATION_DEADLINE_MS on the first `page.goto`, so the wrapper must exceed
+// their sum or it kills the child mid-flight and reports a bare transport
+// error instead of the real diagnostic (the same class as issue #2049). The
+// per-test timeout then exceeds the wrapper, so the wrapper's diagnostic — which
+// carries the child's stdout/stderr — is what fails the run.
+const WRAPPER_DEADLINE_MS = 180000;
 const TEST_DEADLINE_MS = WRAPPER_DEADLINE_MS + 30000;
+// Mirrors `scripts/ui-shot-server.mjs` (dev-server startup) and
+// `scripts/ui-shot.mjs` (navigation). Asserted here so the wrapper cannot
+// silently fall below the child's worst case again.
+const SERVER_DEADLINE_MS = 60000;
+const NAVIGATION_DEADLINE_MS = 120000;
 
 function runUiShot(args, timeoutMs = WRAPPER_DEADLINE_MS) {
   return new Promise<{ code: number | null; stdout: string; stderr: string }>((resolvePromise, reject) => {
@@ -161,4 +166,15 @@ describe('ui-shot mock mode', () => {
       await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
     }
   }, TEST_DEADLINE_MS);
+
+  it('keeps its wrapper deadline above the child it supervises', () => {
+    // The failure this guards is silent: a wrapper tighter than the child just
+    // produces a transport error that reads like "start the dev server" when
+    // `--serve` already started one. Assert the arithmetic instead of trusting
+    // the comment above it.
+    expect(WRAPPER_DEADLINE_MS).toBeGreaterThanOrEqual(
+      SERVER_DEADLINE_MS + NAVIGATION_DEADLINE_MS,
+    );
+    expect(TEST_DEADLINE_MS).toBeGreaterThan(WRAPPER_DEADLINE_MS);
+  });
 });
