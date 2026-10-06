@@ -2031,6 +2031,26 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     set_step(run, &mut t, node_id, StepStatus::Completed);
                     cascade_after_completion(run, &mut t, 1);
                     finish_run_if_done(run, &mut t);
+                } else if matches!(
+                    run.graph.node(node_id).map(|node| &node.kind),
+                    Some(CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::ConfirmPrMerged,
+                        ..
+                    })
+                ) {
+                    // "Not merged" is an answer, not a malfunction: route it so
+                    // the blueprint can leave the work open and say why. The run
+                    // is not failed, and nothing is attested on its behalf.
+                    run.context.set(
+                        "merge.unconfirmed_reason",
+                        error.clone().unwrap_or_else(|| {
+                            "GitHub did not report the pull request as merged".to_string()
+                        }),
+                    );
+                    t.context_changed = true;
+                    complete_with_outcome(run, &mut t, node_id, StepOutcome::Failed);
+                    cascade_after_completion(run, &mut t, 1);
+                    finish_run_if_done(run, &mut t);
                 } else {
                     let failure = error
                         .clone()
@@ -4445,6 +4465,171 @@ mod tests {
             },
         );
         assert_eq!(status_of(&run, "label"), StepStatus::Completed);
+    }
+
+    /// trigger -> verify (ConfirmPrMerged) -> merged / unmerged, so the routing
+    /// of a "not merged" answer is observable without the review blueprint.
+    fn confirm_merged_run() -> RunView {
+        let notify = |id: &str, message: &str| CircuitNode {
+            id: id.into(),
+            kind: CircuitNodeKind::Notify {
+                message: message.into(),
+            },
+        };
+        let edge = |from: &str, to: &str, condition| CircuitEdge {
+            from: from.into(),
+            to: to.into(),
+            condition,
+        };
+        RunView {
+            run_id: 1,
+            graph: CircuitGraph {
+                version: 1,
+                blueprint: None,
+                nodes: vec![
+                    CircuitNode {
+                        id: "t".into(),
+                        kind: CircuitNodeKind::Manual,
+                    },
+                    CircuitNode {
+                        id: "verify".into(),
+                        kind: CircuitNodeKind::GithubAction {
+                            action: GithubActionKind::ConfirmPrMerged,
+                            open_pr_policy: None,
+                            label: None,
+                            comment: None,
+                        },
+                    },
+                    notify("merged", "merged"),
+                    notify("unmerged", "not merged: {{merge.unconfirmed_reason}}"),
+                ],
+                edges: vec![
+                    edge("t", "verify", Default::default()),
+                    edge(
+                        "verify",
+                        "merged",
+                        EdgeCondition::OnOutcome(StepOutcome::Completed),
+                    ),
+                    edge(
+                        "verify",
+                        "unmerged",
+                        EdgeCondition::OnOutcome(StepOutcome::Failed),
+                    ),
+                ],
+            },
+            state: RunState::Pending,
+            context: CircuitContext::new(),
+            steps: vec![],
+        }
+    }
+
+    fn github_result(node_id: &str, success: bool, error: Option<&str>) -> CircuitEvent {
+        CircuitEvent::GithubActionResult {
+            node_id: node_id.into(),
+            success,
+            pr_number: success.then_some(314),
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_unmerged_pr_is_a_routed_outcome_that_does_not_fail_the_run() {
+        let mut run = confirm_merged_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        let started = advance(&mut run, &tick(2, 2));
+        assert!(started.effects.iter().any(|effect| matches!(effect,
+            Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
+                if node_id == "verify")));
+
+        let answered = advance(
+            &mut run,
+            &github_result(
+                "verify",
+                false,
+                Some("PR #314 is still open and has not been merged"),
+            ),
+        );
+        let settled = advance(&mut run, &tick(2, 2));
+
+        assert_eq!(status_of(&run, "verify"), StepStatus::Completed);
+        assert_eq!(
+            run.step("verify").unwrap().outcome,
+            Some(StepOutcome::Failed),
+            "the answer is routed as the Failed outcome"
+        );
+        assert!(
+            run.step("merged").is_none(),
+            "the merged branch is not taken"
+        );
+        assert_eq!(status_of(&run, "unmerged"), StepStatus::Completed);
+        assert_eq!(
+            run.state,
+            RunState::Completed,
+            "the run is handed back, not failed"
+        );
+        assert_eq!(
+            run.context.get("merge.unconfirmed_reason"),
+            Some("PR #314 is still open and has not been merged")
+        );
+        let message =
+            answered
+                .effects
+                .iter()
+                .chain(&settled.effects)
+                .find_map(|effect| match effect {
+                    Effect::Notify { message } => Some(message.clone()),
+                    _ => None,
+                });
+        assert!(
+            message.is_some_and(|m| m.contains("still open")),
+            "the person is told why: {:?} / {:?}",
+            answered.effects,
+            settled.effects
+        );
+    }
+
+    #[test]
+    fn a_merged_pr_takes_the_completed_branch() {
+        let mut run = confirm_merged_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &github_result("verify", true, None));
+        advance(&mut run, &tick(2, 2));
+
+        assert_eq!(status_of(&run, "merged"), StepStatus::Completed);
+        assert!(run.step("unmerged").is_none());
+        assert_eq!(run.context.get("merge.unconfirmed_reason"), None);
+        assert_eq!(run.state, RunState::Completed);
+    }
+
+    #[test]
+    fn other_github_actions_still_fail_the_run_when_they_fail() {
+        let mut run = linear_run();
+        run.graph.nodes.push(CircuitNode {
+            id: "comment".into(),
+            kind: CircuitNodeKind::GithubAction {
+                action: GithubActionKind::PostComment,
+                open_pr_policy: None,
+                label: None,
+                comment: Some("hi".into()),
+            },
+        });
+        run.graph.edges.push(CircuitEdge {
+            from: "spawn".into(),
+            to: "comment".into(),
+            condition: Default::default(),
+        });
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1, 1));
+        run.attach_agent_node("spawn", 900);
+        advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &github_result("comment", false, Some("403")));
+        assert_eq!(status_of(&run, "comment"), StepStatus::Failed);
+        assert_eq!(run.state, RunState::Failed);
     }
 
     #[test]
@@ -7602,8 +7787,35 @@ mod tests {
         );
     }
 
+    /// Approval, then the merge request delivered to the implementer; leaves the
+    /// run waiting on the implementer's merge report (`merge_wait`).
+    fn approve_and_deliver_merge(run: &mut RunView) {
+        advance_with_report_evidence(
+            run,
+            &classified_with_output(
+                "review_classifier",
+                Some(Classification::Completed),
+                Some("Approved. No remaining findings."),
+            ),
+        );
+        advance(run, &tick(8, 8));
+        advance(
+            run,
+            &CircuitEvent::AgentReady {
+                node_id: "merge".into(),
+            },
+        );
+        acknowledge_prompt(run, "merge");
+        advance(run, &tick(8, 8));
+        assert_eq!(status_of(run, "merge_wait"), StepStatus::Running);
+    }
+
+    fn closes_implementer(effect: &Effect) -> bool {
+        matches!(effect, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "implementer")
+    }
+
     #[test]
-    fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_hands_it_back() {
+    fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_waits_for_its_report() {
         let mut run = issue_review_run();
         issue_review_to_first_verdict(&mut run, 701);
         let approved = advance_with_report_evidence(
@@ -7634,46 +7846,298 @@ mod tests {
         assert!(merge.effects.iter().any(|effect| matches!(effect,
             Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
                 if node_id == "merge" && target == "implementer"
-                    && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314"))));
+                    && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314")
+                    && prompt.contains("gh pr update-branch 314"))));
         let delivered = acknowledge_prompt(&mut run, "merge");
-        assert_eq!(run.state, RunState::Completed);
-        assert!(delivered.effects.iter().any(|effect| matches!(effect,
-            Effect::Notify { message } if message.contains("approved for PR #314") && message.contains("handed back"))));
-        assert_eq!(
-            run.context.get("cleanup.pending"),
-            None,
-            "an approved run leaves the implementer open"
+        assert!(
+            delivered
+                .effects
+                .iter()
+                .all(|effect| !closes_implementer(effect)),
+            "asking for the merge never closes the implementer: {:?}",
+            delivered.effects
         );
+        assert_eq!(
+            run.state,
+            RunState::Running,
+            "delivering the request is not a merge: the run keeps waiting"
+        );
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
+        assert!(run.step("close_implementer").is_none());
         assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
     }
 
+    #[test]
+    fn issue_review_verified_merge_closes_the_implementer_then_completes() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        approve_and_deliver_merge(&mut run);
+
+        // The implementer reports the merge; only now is GitHub asked.
+        let mut effects = advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "merge_wait",
+                Some(Classification::Completed),
+                Some("Squash-merged PR 314."),
+            ),
+        )
+        .effects;
+        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        assert!(
+            effects.iter().any(|effect| matches!(effect,
+                Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
+                    if node_id == "merge_verify")),
+            "the merge is verified on GitHub: {effects:?}"
+        );
+        assert!(
+            effects.iter().all(|effect| !closes_implementer(effect)),
+            "nothing is closed on the strength of the agent's own report: {effects:?}"
+        );
+
+        let mut after = advance(&mut run, &github_result("merge_verify", true, None)).effects;
+        after.extend(advance(&mut run, &tick(8, 8)).effects);
+        after.extend(advance(&mut run, &tick(8, 8)).effects);
+        assert!(
+            after.iter().any(closes_implementer),
+            "a confirmed merge closes the implementer: {after:?}"
+        );
+        assert!(after.iter().any(|effect| matches!(effect,
+            Effect::Notify { message } if message.contains("approved for PR #314") && message.contains("squash-merged"))));
+        assert_eq!(run.state, RunState::Completed);
+        assert!(run.step("merge_unconfirmed").is_none() && run.step("merge_blocked").is_none());
+    }
+
+    #[test]
+    fn issue_review_unconfirmed_merge_leaves_the_implementer_open_and_says_why() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        approve_and_deliver_merge(&mut run);
+        advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "merge_wait",
+                Some(Classification::Completed),
+                Some("Squash-merged PR 314."),
+            ),
+        );
+        advance(&mut run, &tick(8, 8));
+
+        // The agent said it merged; GitHub says otherwise.
+        let mut effects = advance(
+            &mut run,
+            &github_result(
+                "merge_verify",
+                false,
+                Some("PR #314 is still open and has not been merged"),
+            ),
+        )
+        .effects;
+        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+
+        assert!(
+            effects.iter().all(|effect| !closes_implementer(effect)),
+            "{effects:?}"
+        );
+        assert!(run.step("close_implementer").is_none());
+        assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+        assert!(
+            effects.iter().any(|effect| matches!(effect,
+            Effect::Notify { message }
+                if message.contains("not confirmed") && message.contains("still open")
+                    && message.contains("left open"))),
+            "{effects:?}"
+        );
+        assert_eq!(
+            run.state,
+            RunState::Completed,
+            "the run is handed back, not failed"
+        );
+    }
+
+    #[test]
+    fn issue_review_blocked_merge_report_leaves_the_implementer_open_without_asking_github() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        approve_and_deliver_merge(&mut run);
+
+        let mut effects = advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "merge_wait",
+                Some(Classification::Blocked),
+                Some("A required check failed; I stopped instead of merging."),
+            ),
+        )
+        .effects;
+        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+
+        assert!(run.step("merge_verify").is_none(), "GitHub is never asked");
+        assert!(
+            effects.iter().all(|effect| !closes_implementer(effect)),
+            "{effects:?}"
+        );
+        assert!(effects.iter().any(|effect| matches!(effect,
+            Effect::Notify { message }
+                if message.contains("could not complete the squash-merge") && message.contains("left open"))),
+            "{effects:?}");
+        assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+        assert_eq!(run.state, RunState::Completed);
+    }
+
+    #[test]
+    fn issue_review_unfinished_merge_turn_keeps_waiting_and_closes_nothing() {
+        let mut run = issue_review_run();
+        issue_review_to_first_verdict(&mut run, 701);
+        approve_and_deliver_merge(&mut run);
+
+        let working = advance_with_report_evidence(
+            &mut run,
+            &classified_with_output(
+                "merge_wait",
+                Some(Classification::Working),
+                Some("Still waiting for the checks."),
+            ),
+        );
+        advance(&mut run, &tick(8, 8));
+
+        assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
+        assert!(run.step("merge_verify").is_none());
+        assert!(working
+            .effects
+            .iter()
+            .all(|effect| !closes_implementer(effect)));
+        assert_eq!(run.state, RunState::Running);
+    }
+
     // -- issue-driven Autopilot review blueprint contract (#1469) -----------
+
+    /// An issue run whose `finish` prompt step failed, exactly as the ledger
+    /// holds it once the worker has failed the run: finish Failed, run Failed.
+    fn issue_run_failed_at_finish() -> RunView {
+        let mut run = issue_review_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(8, 8));
+        advance(
+            &mut run,
+            &CircuitEvent::CollaboratorApproved {
+                node_id: "collaborator_gate".into(),
+            },
+        );
+        advance(&mut run, &tick(8, 8));
+        run.attach_agent_node("implementer", 700);
+        advance_with_completion_evidence(&mut run, &agent_finished(700, true));
+        advance_with_report_evidence(
+            &mut run,
+            &classified("implementation_classifier", Some(Classification::Completed)),
+        );
+        assert_eq!(status_of(&run, "finish"), StepStatus::Running);
+        let finish = run.step_mut("finish").unwrap();
+        finish.status = StepStatus::Failed;
+        finish.outcome = Some(StepOutcome::Failed);
+        finish.error = Some("Prompt delivery failed".into());
+        run.state = RunState::Failed;
+        run
+    }
+
+    /// The operator chose "Retry this step": the failed step is queued again as
+    /// the next attempt and the run re-enters the queue (what the recovery
+    /// command writes).
+    #[test]
+    fn a_run_reopened_by_retry_runs_the_failed_step_again_and_carries_on() {
+        let mut run = issue_run_failed_at_finish();
+        let finish = run.step_mut("finish").unwrap();
+        finish.status = StepStatus::Queued;
+        finish.attempt = 2;
+        finish.outcome = None;
+        finish.error = None;
+        run.state = RunState::Pending;
+
+        advance(&mut run, &CircuitEvent::Triggered);
+        assert_eq!(run.state, RunState::Running, "admission reopens the run");
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "finish"), StepStatus::Running);
+        assert_eq!(
+            run.step("finish").unwrap().attempt,
+            2,
+            "it is a new attempt"
+        );
+
+        let sent = advance(
+            &mut run,
+            &CircuitEvent::AgentReady {
+                node_id: "finish".into(),
+            },
+        );
+        assert!(
+            sent.effects.iter().any(|effect| matches!(effect,
+                Effect::InjectPty { node_id, target_node_id: Some(target), .. }
+                    if node_id == "finish" && target == "implementer")),
+            "the prompt is delivered to the implementer again: {:?}",
+            sent.effects
+        );
+        acknowledge_prompt(&mut run, "finish");
+        advance(&mut run, &tick(8, 8));
+        assert_eq!(status_of(&run, "finish"), StepStatus::Completed);
+        assert_eq!(
+            status_of(&run, "finish_classifier"),
+            StepStatus::Running,
+            "the run is on the next stage"
+        );
+        assert_ne!(run.state, RunState::Failed);
+    }
+
+    /// The operator chose "I've done this - continue": the step is recorded as
+    /// completed and the run re-enters the queue.
+    #[test]
+    fn a_run_reopened_by_continue_moves_straight_to_the_next_stage() {
+        let mut run = issue_run_failed_at_finish();
+        let finish = run.step_mut("finish").unwrap();
+        finish.status = StepStatus::Completed;
+        finish.outcome = Some(StepOutcome::Completed);
+        finish.error = None;
+        run.context.set("node.finish.status", "completed");
+        run.state = RunState::Pending;
+
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8, 8));
+
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(
+            run.step("finish").unwrap().attempt,
+            1,
+            "the step is not run again"
+        );
+        assert_eq!(
+            status_of(&run, "finish_classifier"),
+            StepStatus::Running,
+            "the work after the step starts without sending the prompt again"
+        );
+    }
 
     #[test]
     fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
         let mut run = issue_review_run();
         issue_review_to_first_verdict(&mut run, 701);
+        approve_and_deliver_merge(&mut run);
         advance_with_report_evidence(
             &mut run,
             &classified_with_output(
-                "review_classifier",
+                "merge_wait",
                 Some(Classification::Completed),
-                Some("Approved. No remaining findings."),
+                Some("Squash-merged PR 314."),
             ),
         );
         advance(&mut run, &tick(8, 8));
-        advance(
-            &mut run,
-            &CircuitEvent::AgentReady {
-                node_id: "merge".into(),
-            },
-        );
-        let t = acknowledge_prompt(&mut run, "merge");
+        let mut effects = advance(&mut run, &github_result("merge_verify", true, None)).effects;
+        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        effects.extend(advance(&mut run, &tick(8, 8)).effects);
         assert_eq!(run.state, RunState::Completed);
         assert!(run.step("follow_feedback").is_none());
         assert!(run.step("re_review").is_none());
-        assert!(t
-            .effects
+        assert!(effects
             .iter()
             .any(|e| matches!(e, Effect::Notify { message }
             if message.contains("approved") && message.contains("314"))));
@@ -7967,8 +8431,9 @@ mod tests {
         );
     }
 
-    /// The only reviewer close is on the approval path, and it targets the
-    /// reviewer: closing the implementer would discard the work to merge.
+    /// The reviewer is closed on approval. The implementer is closed in exactly
+    /// one place, after GitHub confirmed the merge: closing it any earlier would
+    /// discard the work.
     #[test]
     fn issue_review_only_approval_closes_the_reviewer() {
         let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
@@ -7982,7 +8447,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(closes, vec![("close_approved", Some("reviewer"))]);
+        assert_eq!(
+            closes,
+            vec![
+                ("close_approved", Some("reviewer")),
+                ("close_implementer", Some("implementer"))
+            ]
+        );
     }
 
     #[test]

@@ -176,11 +176,11 @@ Pending Circuit Runs have a persisted, per-Mesh queue position and are admitted 
 _Avoid_: workflow graph, pipeline (when meaning a Circuit), flow (when meaning the blueprint)
 
 **Review Blueprint**:
-The built-in local workflow for reviewing an Agent Node's work. It asks the Agent Node to publish a pull request, keeps one reviewer open across review rounds, and on approval asks the Agent Node to squash-merge and hands it back. It can be inspected read-only and copied into an independent, editable Review-derived Circuit tied to the built-in behavior revision at copy time.
+The built-in local workflow for reviewing an Agent Node's work. It asks the Agent Node to publish a pull request, keeps one reviewer open across review rounds, and on approval asks the Agent Node to update an out-of-date branch and squash-merge. The issue-driven form then verifies the merge on GitHub and closes the implementation agent only when the pull request is merged; otherwise it hands the agent back open. It can be inspected read-only and copied into an independent, editable Review-derived Circuit tied to the built-in behavior revision at copy time.
 _Avoid_: Automated review loop, issue-driven PR review blueprint
 
 **Hand-back**:
-The end of a completed Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed or cancelled run retires its owned agents instead.
+The end of a completed Circuit Run's control over the agents it did not close: the circuit stops observing and prompting them, and they stay open for the user. An approved review hands the implementation agent back after asking it to merge. A failed or cancelled run retires only its helper agents (such as the reviewer); the implementation agent stays open in every case, and is closed only by a squash-merge that GitHub confirmed.
 _Avoid_: Release, detach
 
 **Review-derived Circuit**:
@@ -200,8 +200,12 @@ A revision identifying a change to the built-in Review Blueprint's behavior, suc
 _Avoid_: Graph schema version
 
 **Circuit Run History**:
-The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and review extensions are diagnosable uniformly.
+The continuous record of work and recovery decisions within one Circuit Run. Retrying a Circuit Step adds another attempt to that history rather than replacing what came before. Each entry names its source and disposition beside its step/attempt identity and time, so waits, capacity waits, pinned configuration and review extensions are diagnosable uniformly. The default view shows only the key events (state changes, steps needing a person, operator actions); the bookkeeping behind them is one toggle away. A run is named after its implementation agent and timed from when Autopilot started it, not from when it queued.
 _Avoid_: attempt snapshot, recovery session
+
+**Run Recovery**:
+A person's choice to reopen a failed Circuit Run at its failed step: retry the step as a new attempt, or record that they did its work themselves (an Operator-recorded Outcome) so the run continues. It is offered only where the engine can honestly continue, never for a review approval, a pull-request lookup or a spawn, and it keeps the earlier history.
+_Avoid_: resume (that means restarting an archived agent session), skip
 
 **Unverified Checkpoint**:
 A Circuit Step whose outcome or owned work Buildmesh cannot currently verify, requiring evidence recheck or operator intervention. It is not itself a failure, a completion, or permission to proceed.

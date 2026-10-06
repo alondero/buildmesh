@@ -21,6 +21,12 @@ pub(crate) const RE_REVIEW_DELIVERY: &str = "The author has addressed your previ
 
 /// The approval hand-off. `pr_argument` is appended to each `gh pr` command;
 /// an empty argument lets `gh` resolve the pull request for the current branch.
+///
+/// A branch that fell behind its base while it was reviewed is the usual reason
+/// a merge is refused, so the agent first brings it up to date (GitHub's own
+/// update when it can, a local rebase when it cannot) and only then waits for
+/// the checks that restarts. The final `gh pr view` gives the agent, and the
+/// reader of its report, a merge result that can be checked.
 pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
     format!(
         "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`). \
@@ -31,6 +37,14 @@ pub(crate) fn merge_approved_pr(subject: &str, pr_argument: &str) -> String {
         Then squash-merge it (`gh pr merge{pr_argument} --squash`). \
         If a required check genuinely fails on the code, or the merge stays blocked for any other reason, stop and report why instead of merging. \
         Report the merge result. The Circuit has finished and will not send further prompts to this session."
+    )
+}
+
+/// The hand-off text shipped before the branch-update and merge-check steps.
+/// Startup upgrades replace only this exact stock text.
+pub(crate) fn legacy_merge_approved_pr(subject: &str, pr_argument: &str) -> String {
+    format!(
+        "The independent reviewer approved {subject}. Squash and merge it now: if it is still a draft, mark it ready for review (`gh pr ready{pr_argument}`); wait for its required checks to pass (`gh pr checks{pr_argument} --watch`); then squash-merge it (`gh pr merge{pr_argument} --squash`). Do not make further changes. If a required check fails or the merge is blocked, stop and report why instead of merging. Report the merge result. The Circuit has finished and will not send further prompts to this session."
     )
 }
 

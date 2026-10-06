@@ -9,9 +9,7 @@
 
 use tauri::{command, AppHandle, Emitter};
 
-use crate::circuit::model::{
-    trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph,
-};
+use crate::circuit::model::{trigger_kind_to_node_kind, validate_circuit_request, CircuitGraph};
 pub use crate::circuit::model::{CircuitBlueprintKind, CircuitTriggerKind};
 use crate::models::{AutopilotCircuit, AutopilotCircuitRun, AutopilotCircuitRunStep};
 
@@ -36,7 +34,9 @@ pub struct CircuitRunDetail {
 }
 
 #[command]
-pub fn circuit_run_history(run_id: i64) -> Result<crate::db::circuit::evidence::CircuitEvidenceView, String> {
+pub fn circuit_run_history(
+    run_id: i64,
+) -> Result<crate::db::circuit::evidence::CircuitEvidenceView, String> {
     crate::db::circuit::evidence::history(run_id).map_err(|e| e.to_string())
 }
 
@@ -46,10 +46,48 @@ pub fn copy_review_blueprint(circuit_id: i64, name: String) -> Result<AutopilotC
 }
 
 #[command]
-pub fn record_circuit_outcome(app: AppHandle, request: crate::db::circuit::evidence::CheckpointRequest) -> Result<(), String> {
+pub fn record_circuit_outcome(
+    app: AppHandle,
+    request: crate::db::circuit::evidence::CheckpointRequest,
+) -> Result<(), String> {
     crate::db::circuit::evidence::record_outcome(&request)?;
     crate::services::circuit_worker::wake_circuit_worker();
-    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id: request.run_id, state: "running".into() });
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id: request.run_id,
+            state: "running".into(),
+        },
+    );
+    Ok(())
+}
+
+/// What the run card shows a person who has to act: the steps awaiting a
+/// decision, how a failed run can be recovered, and the revision to act against.
+/// Cheap by design: unlike the history it carries no log.
+#[command]
+pub fn circuit_run_attention(
+    run_id: i64,
+) -> Result<crate::db::circuit::evidence::CircuitRunAttention, String> {
+    crate::db::circuit::evidence::attention(run_id)
+}
+
+/// Retry a failed run's failed step, or record that the person finished it, and
+/// reopen the run. The worker is woken so it re-enters the queue promptly.
+#[command]
+pub fn recover_failed_circuit_run(
+    app: AppHandle,
+    request: crate::db::circuit::step_recovery::RecoveryRequest,
+) -> Result<(), String> {
+    crate::db::circuit::step_recovery::recover_failed_run(&request)?;
+    crate::services::circuit_worker::wake_circuit_worker();
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id: request.run_id,
+            state: "pending".into(),
+        },
+    );
     Ok(())
 }
 
@@ -89,14 +127,18 @@ pub fn list_circuit_agent_ownerships() -> Result<Vec<CircuitAgentOwnership>, Str
     crate::db::list_circuit_agent_ownerships()
         .map(|rows| {
             rows.into_iter()
-                .map(|(node_id, run_id, circuit_id, circuit_name, state, parent_node_id)| CircuitAgentOwnership {
-                    node_id,
-                    run_id,
-                    circuit_id,
-                    circuit_name,
-                    state,
-                    parent_node_id,
-                })
+                .map(
+                    |(node_id, run_id, circuit_id, circuit_name, state, parent_node_id)| {
+                        CircuitAgentOwnership {
+                            node_id,
+                            run_id,
+                            circuit_id,
+                            circuit_name,
+                            state,
+                            parent_node_id,
+                        }
+                    },
+                )
                 .collect()
         })
         .map_err(|error| error.to_string())
@@ -134,14 +176,20 @@ pub struct CircuitProbeSnapshot {
 }
 
 fn map_circuit_rows(
-    rows: Vec<(crate::models::AutopilotCircuit, Vec<crate::db::CircuitRunLedger>)>,
+    rows: Vec<(
+        crate::models::AutopilotCircuit,
+        Vec<crate::db::CircuitRunLedger>,
+    )>,
 ) -> Vec<CircuitWithRuns> {
     rows.into_iter()
         .map(|(circuit, ledgers)| CircuitWithRuns {
             circuit,
             runs: ledgers
                 .into_iter()
-                .map(|ledger| CircuitRunDetail { run: ledger.run, steps: ledger.steps })
+                .map(|ledger| CircuitRunDetail {
+                    run: ledger.run,
+                    steps: ledger.steps,
+                })
                 .collect(),
         })
         .collect()
@@ -191,8 +239,8 @@ pub fn list_circuit_probe(
     limit: Option<i64>,
 ) -> Result<CircuitProbeSnapshot, String> {
     let limit = limit.unwrap_or(10).clamp(1, 100);
-    let (circuits, queue) = crate::db::list_circuit_probe(mesh_id, limit)
-        .map_err(|e| e.to_string())?;
+    let (circuits, queue) =
+        crate::db::list_circuit_probe(mesh_id, limit).map_err(|e| e.to_string())?;
     let circuits = map_circuit_rows(circuits);
     let queue = map_queue_rows(queue);
     Ok(CircuitProbeSnapshot { circuits, queue })
@@ -244,10 +292,7 @@ pub fn create_circuit(
         CircuitBlueprintKind::IssueDrivenAutopilotReview => {
             // Guarded above: the model rejected every other trigger;
             // we still defensively unwrap the label here.
-            let crate::circuit::model::CircuitNodeKind::GithubIssueLabel {
-                label,
-            } = &kind
-            else {
+            let crate::circuit::model::CircuitNodeKind::GithubIssueLabel { label } = &kind else {
                 return Err(
                     "the issue-driven Circuit review blueprint requires an issue-label trigger"
                         .to_string(),
@@ -385,24 +430,31 @@ fn retire_cancelled_agents_with(
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(format!("run was cancelled, but cleanup failed for {}", failures.join("; ")))
+        Err(format!(
+            "run was cancelled, but cleanup failed for {}",
+            failures.join("; ")
+        ))
     }
 }
 
 fn retire_cancelled_agents(agent_ids: Vec<i64>) -> Result<(), String> {
-    retire_cancelled_agents_with(agent_ids, |agent_id| {
-        match crate::db::get_agent_node_by_id(agent_id) {
-            Ok(_) => crate::services::agent_node::delete(agent_id, true)
-                .map_err(|error| error.to_string()),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
-            Err(error) => Err(format!("lookup failed: {}", error)),
+    retire_cancelled_agents_with(agent_ids, |agent_id| match crate::db::get_agent_node_by_id(
+        agent_id,
+    ) {
+        Ok(_) => {
+            crate::services::agent_node::delete(agent_id, true).map_err(|error| error.to_string())
         }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(()),
+        Err(error) => Err(format!("lookup failed: {}", error)),
     })
 }
 
 fn release_circuit_source(run_id: i64) {
-    if let Some(source) = crate::db::get_circuit_run(run_id).ok().flatten()
-        .and_then(|run| run.source_agent_node_id) {
+    if let Some(source) = crate::db::get_circuit_run(run_id)
+        .ok()
+        .flatten()
+        .and_then(|run| run.source_agent_node_id)
+    {
         crate::circuit::evaluator::unregister(source);
     }
 }
@@ -464,10 +516,12 @@ pub fn move_circuit_run(run_id: i64, direction: CircuitQueueDirection) -> Result
             crate::db::move_queued_circuit_run(run_id, false).map_err(|error| error.to_string())?;
         }
         CircuitQueueDirection::Top => {
-            crate::db::move_queued_circuit_run_to_edge(run_id, true).map_err(|error| error.to_string())?;
+            crate::db::move_queued_circuit_run_to_edge(run_id, true)
+                .map_err(|error| error.to_string())?;
         }
         CircuitQueueDirection::Bottom => {
-            crate::db::move_queued_circuit_run_to_edge(run_id, false).map_err(|error| error.to_string())?;
+            crate::db::move_queued_circuit_run_to_edge(run_id, false)
+                .map_err(|error| error.to_string())?;
         }
     }
     crate::services::circuit_worker::wake_circuit_worker();
@@ -505,11 +559,16 @@ pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), Stri
     // A timeout does not fail the batch: the DB txn below terminalises the
     // runs anyway and late spawns self-compensate.
     for run_id in &deduped {
-        if let Err(wait_error) = crate::services::circuit_worker::with_circuit_run_spawns_quiesced(
-            *run_id,
-            || Ok::<(), String>(()),
-        ) {
-            tracing::warn!("circuits: batch cancel quiescence for run {}: {}", run_id, wait_error);
+        if let Err(wait_error) =
+            crate::services::circuit_worker::with_circuit_run_spawns_quiesced(*run_id, || {
+                Ok::<(), String>(())
+            })
+        {
+            tracing::warn!(
+                "circuits: batch cancel quiescence for run {}: {}",
+                run_id,
+                wait_error
+            );
         }
     }
     let batch = crate::db::cancel_circuit_runs(&deduped).map_err(|error| error.to_string())?;
@@ -527,10 +586,18 @@ pub fn cancel_circuit_runs(app: AppHandle, run_ids: Vec<i64>) -> Result<(), Stri
     let cleanup = retire_cancelled_agents(batch.agents);
     // One event refreshes the Probe once; the listener ignores the payload
     // and reloads the snapshot.
-    let signal_run = batch.cancelled.first().copied().or(deduped.first().copied()).unwrap_or(0);
+    let signal_run = batch
+        .cancelled
+        .first()
+        .copied()
+        .or(deduped.first().copied())
+        .unwrap_or(0);
     let _ = app.emit(
         "circuit-run-updated",
-        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id: signal_run, state: "cancelled".into() },
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id: signal_run,
+            state: "cancelled".into(),
+        },
     );
     cleanup
 }
@@ -630,7 +697,11 @@ pub fn trigger_circuit_now(circuit_id: i64) -> Result<i64, String> {
         trigger_circuit_now_prepared_locked(&mut db, circuit_id, &preferences)?
     };
     crate::services::circuit_worker::wake_circuit_worker();
-    tracing::info!("circuits: manual trigger for circuit {} → run {}", circuit_id, run_id);
+    tracing::info!(
+        "circuits: manual trigger for circuit {} → run {}",
+        circuit_id,
+        run_id
+    );
     Ok(run_id)
 }
 
@@ -648,7 +719,11 @@ pub fn trigger_circuit_now_locked(
     conn: &mut rusqlite::Connection,
     circuit_id: i64,
 ) -> Result<i64, String> {
-    trigger_circuit_now_prepared_locked(conn, circuit_id, &crate::preferences::AppPreferences::default())
+    trigger_circuit_now_prepared_locked(
+        conn,
+        circuit_id,
+        &crate::preferences::AppPreferences::default(),
+    )
 }
 
 fn trigger_circuit_now_prepared_locked(
@@ -681,9 +756,11 @@ fn trigger_circuit_now_prepared_locked(
     );
     let mut context = crate::circuit::context::CircuitContext::new();
     context.with_circuit(circuit.id, &circuit.name, circuit.mesh_id);
-    context.set("review.provider", preferences.reviewer_provider.as_deref().unwrap_or(""));
-    let action =
-        "draft_pr".to_string();
+    context.set(
+        "review.provider",
+        preferences.reviewer_provider.as_deref().unwrap_or(""),
+    );
+    let action = "draft_pr".to_string();
     context.with_circuit_finish_prompt(None, Some(action.as_str()));
     let run_id = crate::db::circuit::create_circuit_run_prepared_locked(
         conn,
@@ -730,15 +807,17 @@ pub fn trigger_circuit_from_node(
     if node.provider == "terminal" {
         return Err("Review loops require an AI agent.".into());
     }
-    let run_id = crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
+    let run_id =
+        crate::db::create_node_circuit_run(node_id, circuit_id, max_rounds, reviewer_provider)?;
     crate::circuit::evaluator::register_circuit(node_id);
     let state = crate::db::get_circuit_run(run_id)
         .map_err(|e| e.to_string())?
         .map(|run| run.state)
         .unwrap_or_else(|| "pending".into());
-    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
-        run_id, state,
-    });
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload { run_id, state },
+    );
     crate::services::circuit_worker::wake_circuit_worker();
     Ok(run_id)
 }
@@ -767,14 +846,25 @@ pub fn list_circuit_runs(
 /// the same lifecycle lease as Archive, so cleanup and process launch cannot
 /// own the agent concurrently.
 #[command]
-pub async fn continue_circuit_review(app: AppHandle, run_id: i64, additional_rounds: i32) -> Result<i64, String> {
-    if !(1..=10).contains(&additional_rounds) { return Err("Additional review rounds must be between 1 and 10.".into()); }
+pub async fn continue_circuit_review(
+    app: AppHandle,
+    run_id: i64,
+    additional_rounds: i32,
+) -> Result<i64, String> {
+    if !(1..=10).contains(&additional_rounds) {
+        return Err("Additional review rounds must be between 1 and 10.".into());
+    }
     if let Some(existing) = crate::commands::run_blocking("existing_review_target", move || {
         crate::db::circuit::recovery::existing_review_target(run_id)
-    }).await? { return Ok(existing); }
+    })
+    .await?
+    {
+        return Ok(existing);
+    }
     let source_id = crate::commands::run_blocking("review_recovery_source", move || {
         crate::db::circuit::recovery::review_recovery_source(run_id)
-    }).await?;
+    })
+    .await?;
     if !crate::agent::process::PROCESS_REGISTRY.is_alive(&source_id) {
         use crate::agent::spawn::{ResumeCause, SpawnIntent, SpawnRequest};
         crate::agent::spawn::spawn_with_intent(&app,
@@ -786,16 +876,24 @@ pub async fn continue_circuit_review(app: AppHandle, run_id: i64, additional_rou
         }
     }
     let (next_id, state) = crate::commands::run_blocking("extend_failed_review", move || {
-        let next_id = crate::db::circuit::recovery::extend_failed_review(run_id, additional_rounds)?;
-        let state = crate::db::get_circuit_run(next_id).map_err(|e| e.to_string())?
-            .map(|run| run.state).unwrap_or_else(|| "pending".into());
+        let next_id =
+            crate::db::circuit::recovery::extend_failed_review(run_id, additional_rounds)?;
+        let state = crate::db::get_circuit_run(next_id)
+            .map_err(|e| e.to_string())?
+            .map(|run| run.state)
+            .unwrap_or_else(|| "pending".into());
         Ok((next_id, state))
-    }).await?;
+    })
+    .await?;
     crate::circuit::evaluator::register_circuit(source_id);
     crate::services::circuit_worker::wake_circuit_worker();
-    let _ = app.emit("circuit-run-updated", crate::services::circuit_worker::CircuitRunUpdatedPayload {
-        run_id: next_id, state,
-    });
+    let _ = app.emit(
+        "circuit-run-updated",
+        crate::services::circuit_worker::CircuitRunUpdatedPayload {
+            run_id: next_id,
+            state,
+        },
+    );
     Ok(next_id)
 }
 
@@ -808,12 +906,18 @@ pub fn pause_circuit_run(run_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("run {} does not exist", run_id))?;
     if run.state != "running" {
-        return Err(format!("only running runs can be paused (run {} is {})", run_id, run.state));
+        return Err(format!(
+            "only running runs can be paused (run {} is {})",
+            run_id, run.state
+        ));
     }
     if !crate::db::transition_circuit_run_state(run_id, "running", "paused")
         .map_err(|e| e.to_string())?
     {
-        return Err(format!("run {} changed state before it could be paused", run_id));
+        return Err(format!(
+            "run {} changed state before it could be paused",
+            run_id
+        ));
     }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} paused", run_id);
@@ -827,12 +931,18 @@ pub fn resume_circuit_run(run_id: i64) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("run {} does not exist", run_id))?;
     if run.state != "paused" {
-        return Err(format!("only paused runs can be resumed (run {} is {})", run_id, run.state));
+        return Err(format!(
+            "only paused runs can be resumed (run {} is {})",
+            run_id, run.state
+        ));
     }
     if !crate::db::transition_circuit_run_state(run_id, "paused", "running")
         .map_err(|e| e.to_string())?
     {
-        return Err(format!("run {} changed state before it could be resumed", run_id));
+        return Err(format!(
+            "run {} changed state before it could be resumed",
+            run_id
+        ));
     }
     crate::services::circuit_worker::wake_circuit_worker();
     tracing::info!("circuits: run {} resumed", run_id);
@@ -886,17 +996,24 @@ mod tests {
     fn the_built_in_review_blueprint_cannot_be_triggered_on_its_own() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        let mesh = crate::db::create_mesh_inner(&conn, "trigger guard", "/tmp/trigger-guard").unwrap();
+        let mesh =
+            crate::db::create_mesh_inner(&conn, "trigger guard", "/tmp/trigger-guard").unwrap();
         crate::db::circuit::ledger::ensure_review_blueprint_inner(&conn, mesh.id).unwrap();
         let mut conn = conn;
-        let blueprint = crate::db::circuit::list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()[0].0.id;
+        let blueprint =
+            crate::db::circuit::list_circuits_with_recent_runs_inner(&conn, mesh.id, 10).unwrap()
+                [0]
+            .0
+            .id;
 
         assert_eq!(
             super::trigger_circuit_now_locked(&mut conn, blueprint).unwrap_err(),
             "Start this Circuit from the source agent's title bar."
         );
         assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row.get::<_, i64>(0)).unwrap(),
+            conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
             0,
             "the refused trigger left no run behind"
         );

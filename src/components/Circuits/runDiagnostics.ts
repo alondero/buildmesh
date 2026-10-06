@@ -46,6 +46,9 @@ export interface ReviewCircuitMetadata {
 }
 
 const MERGE_HAND_OFF_NODE_ID = 'merge';
+/** Steps the issue-review blueprint adds once the merge is checked on GitHub. */
+const MERGE_VERIFIED_NODE_ID = 'close_implementer';
+const MERGE_UNCONFIRMED_NODE_IDS = ['merge_unconfirmed', 'merge_blocked'];
 
 /** Review semantics come from the persisted graph, not `is_preset`. */
 export function reviewCircuitMetadata(
@@ -113,6 +116,22 @@ export function reviewResult(detail: CircuitRunDetail, reviewCircuit: ReviewCirc
   // Runs approved before the merge hand-off existed never delivered it.
   const mergeRequested = reviewCircuit.mergeNodeId !== undefined
     && detail.steps.some((s) => s.node_id === reviewCircuit.mergeNodeId && s.status === 'completed');
+  const stepDone = (nodeId: string) => detail.steps.some((s) => s.node_id === nodeId && s.status === 'completed');
+  // Approved is not merged: say which of the two happened when the run knows.
+  if (approved && stepDone(MERGE_VERIFIED_NODE_ID)) {
+    return {
+      label: 'Review approved',
+      detail: `${pass === null ? '' : `Approved on pass ${pass}. `}GitHub confirmed the squash-merge and the implementation agent was closed.`,
+      needsAttention: false,
+    };
+  }
+  if (approved && MERGE_UNCONFIRMED_NODE_IDS.some(stepDone)) {
+    return {
+      label: 'Merge needs attention',
+      detail: `${pass === null ? '' : `Approved on pass ${pass}. `}The squash-merge was not confirmed on GitHub, so the implementation agent was left open. Open it, finish the merge, then close it yourself.`,
+      needsAttention: true,
+    };
+  }
   return approved
     ? {
         label: 'Review approved',

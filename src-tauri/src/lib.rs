@@ -407,6 +407,8 @@ pub fn run() {
             commands::circuit::list_circuit_runs,
             commands::circuit::circuit_run_history,
             commands::circuit::record_circuit_outcome,
+            commands::circuit::circuit_run_attention,
+            commands::circuit::recover_failed_circuit_run,
             commands::circuit::pause_circuit_run,
             commands::circuit::resume_circuit_run,
             commands::circuit::continue_circuit_review,
@@ -726,8 +728,10 @@ fn run_profile_startup(
     // migrated, rather than migrating the one they are replacing.
     db::init(&db_path).map_err(|error| {
         startup::report(
-            startup::StartupFailure::database(&db_path, &error)
-                .with_paths(Some(bootstrap.main_log().to_path_buf()), Some(app_dir.clone())),
+            startup::StartupFailure::database(&db_path, &error).with_paths(
+                Some(bootstrap.main_log().to_path_buf()),
+                Some(app_dir.clone()),
+            ),
         )
     })?;
 
@@ -868,8 +872,10 @@ fn run_profile_startup(
     // Commit legacy cancellation before crash recovery can offer auto-resume.
     services::legacy_retirement::retire_legacy_automation().map_err(|error| {
         startup::report(
-            startup::StartupFailure::services("retiring legacy automation", &error)
-                .with_paths(Some(bootstrap.main_log().to_path_buf()), Some(app_dir.clone())),
+            startup::StartupFailure::services("retiring legacy automation", &error).with_paths(
+                Some(bootstrap.main_log().to_path_buf()),
+                Some(app_dir.clone()),
+            ),
         )
     })?;
 
@@ -880,7 +886,10 @@ fn run_profile_startup(
     // the startup sweep.
     match crate::agent::session_lifecycle::recover_from_crash() {
         Ok(count) if count > 0 => {
-            tracing::info!("Crash recovery: marked {} orphaned sessions as suspended", count);
+            tracing::info!(
+                "Crash recovery: marked {} orphaned sessions as suspended",
+                count
+            );
         }
         Ok(_) => {}
         Err(e) => tracing::error!("Crash recovery failed: {}", e),
@@ -896,11 +905,7 @@ fn run_profile_startup(
     if let Some(window) = app.get_webview_window("main") {
         // The prefix is shared with `instance_guard`, which matches on it to
         // find this window when a second launch is forwarded here (issue #1521).
-        let title = format!(
-            "{}{}",
-            instance_guard::MAIN_WINDOW_TITLE_PREFIX,
-            git_sha
-        );
+        let title = format!("{}{}", instance_guard::MAIN_WINDOW_TITLE_PREFIX, git_sha);
         window.set_title(&title).ok();
         tracing::info!("Main window found, ready to load content: {}", title);
     } else {
@@ -992,7 +997,10 @@ fn run_profile_startup(
         } else {
             "Unknown panic".to_string()
         };
-        let location = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_else(|| "unknown".to_string());
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
         let thread_info = std::thread::current();
         let thread = thread_info.name().unwrap_or("unnamed");
         let thread_id = thread_info.id();

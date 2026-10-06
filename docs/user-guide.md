@@ -229,7 +229,7 @@ issue-driven review flow run the same loop:
    to the implementation agent, which commits and pushes fixes. The same reviewer,
    still open, is then asked to review again, up to the round limit.
 3. On approval the reviewer is closed and the implementation agent is asked to
-   squash and merge the pull request. It marks a draft ready, brings an
+squash and merge the pull request. It marks a draft ready, brings an
    out-of-date branch up to date with the base branch first, and waits for
    required checks before merging. It stops and reports instead of merging only
    if a check genuinely fails on the code or the merge stays blocked for any
@@ -268,6 +268,20 @@ the Circuits tab.
 An **Unverified Checkpoint** means Buildmesh cannot currently establish the
 evidence needed for the next circuit step. It does not mean the agent failed,
 and a Done label on the agent does not by itself prove the circuit can advance.
+
+A run that needs you says so on its card: a **What to do next** box explains
+what happened in plain words (the raw error is under *Technical detail*) and offers
+the actions that apply. On a failed run, **Retry this step** runs the failed step
+again, and **I've done this — continue** records that you did the step yourself
+(you write a short note, which is kept in the history) and lets the run carry on.
+An action that cannot work is not offered; the box says why instead, for example
+that a closed agent has to be resumed from Archive before a retry. A review
+approval can never be recorded on the reviewer's behalf; use **Review again**.
+
+Each run is named after its implementation agent, with when it started and
+finished and how long it ran. Time spent waiting in the queue is not counted.
+Circuit Run History opens on the key events; **Show technical detail** reveals the
+rest.
 
 Expand the run and inspect its reason and Circuit Run History. The reason can
 identify missing session/report evidence, changed input, or uncertain input

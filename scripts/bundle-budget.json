@@ -4,13 +4,17 @@
     {
       "value": 1100000,
       "reason": "Issue #1530 added the PTY input retry buffer (`src/lib/terminalInputQueue.ts`) to the entry chunk: +4,567 B minified, +1.5 kB gzipped (326.6 -> 328.1 kB). The cap had 8.2 kB of headroom on main, of which ~4.5 kB is Windows-vs-Linux build variance for the same source, so CI landed 910 B over. Raised to absorb the variance as well as the feature, so an unrelated future diff cannot tip it for reasons that have nothing to do with that diff. The gzip cap is deliberately unchanged: it is the axis that governs transfer, and it retains ~23 kB of headroom."
+    },
+    {
+      "value": 1120000,
+      "reason": "PR #2080 added the circuit Run Card's wall-clock labels and the \"What to do next\" recovery panel to the Probe entry chunk via `src/components/Probe/CircuitRunCard.tsx` and `src/components/Circuits/runIdentity.ts` (+2.3 kB minified raw). The Run History Drawer, historyPresentation, and RunNextStepsPanel code-split into `CircuitsProbeTab-*.js` so they do not count here. Bumping the raw cap by 10 kB absorbs the feature plus a small margin for future probe-include fixes; the gzip cap stays unchanged at 360 kB (the axis that governs first-paint transfer) and the entry CSS cap is unaffected."
     }
   ],
   "checks": [
     {
       "label": "Desktop entry JS (dist/assets/index-*.js)",
       "pattern": "index-*.js",
-      "maxRaw": 1110000,
+      "maxRaw": 1120000,
       "maxGzip": 360000
     },
     {

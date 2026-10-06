@@ -603,12 +603,12 @@ fn terminal_cleanup_injected_kill_or_archive_failure_keeps_notifications_quiet()
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
         conn.execute_batch("INSERT INTO meshes (id, name, path) VALUES (1, 'cleanup-failure', '/repo');
-            INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (42,1,'owned','/repo','ready');
+            INSERT INTO agent_nodes (id, mesh_id, name, path, status) VALUES (42,1,'owned','/repo','ready'), (41,1,'implementer','/repo','ready');
             INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json) VALUES (1,1,'cleanup-failure','{}');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,trigger_identity,state,context_json)
                 VALUES (1,1,1,'failure','failed','{\"cleanup.pending\":\"1\"}');
-            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,status)
-                VALUES (1,'owned',42,'failed');").unwrap();
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,agent_node_id,parent_agent_node_id,status)
+                VALUES (1,'owned',42,41,'failed');").unwrap();
         let claim = crate::db::circuit::claim_circuit_agent_cleanup_inner(&conn, 42)
             .unwrap()
             .unwrap();
@@ -675,6 +675,33 @@ fn terminal_cleanup_injected_kill_or_archive_failure_keeps_notifications_quiet()
     );
     assert!(archive_failed.is_err());
     assert_recovery(&archive_conn);
+}
+
+fn safety(has_uncommitted: bool) -> crate::git::worktree::WorktreeCloseSafety {
+    crate::git::worktree::WorktreeCloseSafety {
+        worktree_path: Some("/repo".into()),
+        has_uncommitted,
+        has_unpushed: true,
+        is_detached: false,
+    }
+}
+
+#[test]
+fn a_close_never_deletes_an_implementation_worktree_with_uncommitted_changes() {
+    let blocker = close_blocker(false, &safety(true)).expect("dirty work is protected");
+    assert!(blocker.contains("uncommitted changes"), "{blocker}");
+
+    // A clean worktree closes, whatever its commits' push state: after a
+    // squash-merge the branch's own commits never appear in the base.
+    assert_eq!(close_blocker(false, &safety(false)), None);
+}
+
+#[test]
+fn a_helper_agent_is_closed_regardless_of_its_worktree() {
+    // The caller turns a failed safety lookup into has_uncommitted=true before
+    // reaching close_blocker, so helpers still close on the same path.
+    assert_eq!(close_blocker(true, &safety(true)), None);
+    assert_eq!(close_blocker(true, &safety(false)), None);
 }
 
 #[test]
@@ -2971,7 +2998,6 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         may_admit_run(&pending_row_3, &mesh_row),
         "after terminal — third pending must admit (FIFO promotion)",
     );
-
 }
 
 /// Install this test's private database.
@@ -3035,6 +3061,22 @@ fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
         }],
     )
     .unwrap();
+    // Archival is for helper agents: this one was launched for an implementer.
+    {
+        let writer = db::write_conn();
+        writer
+            .execute(
+                "INSERT INTO agent_nodes (mesh_id, name, path) VALUES (?1, 'implementer', ?2)",
+                rusqlite::params![mesh.id, path],
+            )
+            .unwrap();
+        writer
+            .execute(
+                "UPDATE autopilot_circuit_run_steps SET parent_agent_node_id = last_insert_rowid() WHERE run_id = ?1",
+                rusqlite::params![run_id],
+            )
+            .unwrap();
+    }
     db::commit_circuit_advance(run_id, Some("failed"), None, &[]).unwrap();
     let calls = std::cell::Cell::new(0);
     let claim = db::claim_circuit_agent_cleanup(node.id).unwrap().unwrap();
@@ -3146,7 +3188,6 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
         }
         other => panic!("expected a capacity tick, got {other:?}"),
     }
-
 }
 
 /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,

@@ -3,4 +3,4 @@
 /**
  * The GitHub mutation vocabulary of [`CircuitNodeKind::GithubAction`].
  */
-export type GithubActionKind = "add_label" | "remove_label" | "post_comment" | "open_pr" | "close_issue";
+export type GithubActionKind = "add_label" | "remove_label" | "post_comment" | "open_pr" | "close_issue" | "confirm_pr_merged";
