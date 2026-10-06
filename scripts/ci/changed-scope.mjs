@@ -8,8 +8,11 @@
 // and the frontend suites — even when the change touched one side only. The
 // merge gate skips whole graphs from this job's outputs, so a Rust-only pull
 // request no longer boots Chromium or runs vitest, a frontend-only pull
-// request no longer compiles Rust, and a docs-only pull request runs neither
-// (the static gates in `Quality (Linux)` still run).
+// request no longer compiles Rust, and a docs-only pull request runs neither.
+// The static gates are the exception and always run: they live in
+// `Quality gates (Linux)`, and the required `Quality (Linux)` aggregate fails
+// when they do, so a docs-only pull request still cannot merge on a lint,
+// docs, or bundle-budget failure.
 //
 // Classification is deliberately conservative: a path that is not clearly
 // documentation and not clearly one graph runs BOTH graphs. Under-testing is
