@@ -166,9 +166,9 @@ describe('ui-shot mock mode', () => {
       const result = await runUiShot(['--out', output, '--mock', '--mock-url', url], MOUNT_FAILURE_DEADLINE_MS);
 
       expect(result.code).toBe(1);
-      // Built from the constant the script formats its message with, so raising
-// MOUNT_TIMEOUT_MS cannot leave this asserting a stale number.
-expect(result.stderr).toContain(`#root never populated within ${MOUNT_TIMEOUT_MS / 1000}s`);
+      // Built from the constant the script formats its message with, so
+      // raising MOUNT_TIMEOUT_MS cannot leave this asserting a stale number.
+      expect(result.stderr).toContain(`#root never populated within ${MOUNT_TIMEOUT_MS / 1000}s`);
       expect(result.stderr).toContain('Page errors: mock mount exploded');
       await expect(readFile(output)).rejects.toThrow();
     } finally {
