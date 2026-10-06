@@ -261,10 +261,12 @@ only turn terminals" was true of the *code*, not of the *data*: the question rec
 being written and always ignored. A Muse node could therefore never reach `AwaitingInput`,
 because the only yield the watcher published was a finished turn (`Ready`).
 
-`AwaitingInput` now comes from `user_input_prompt_requested` (and only there). `PermissionRequested`
-remains impossible by construction under `--disable-approval` — that part of the original finding
-stands. The watcher publishes the question as `InputRequired`, not `PermissionRequested`, because
-`request_user_input` is a question rather than a consent gate.
+`AwaitingInput` now comes from `user_input_prompt_requested` (and only there), published as
+`QuestionRequested` — the log distinguishes a question from an approval, so the more precise
+lifecycle kind applies, and it disarms the output-based autoclear safety net. `settled` publishes
+`WorkResumed`, which is the other half of the contract: without it a node put into `AwaitingInput`
+stays there whenever the answer does not clear it by another path. `PermissionRequested` remains
+impossible by construction under `--disable-approval` — that part of the original finding stands.
 
 Recording counts from the same exhaustive scan: `run/started` **788**, `run/terminal` **788**;
 `task/completed` **24368** (task-level, never a run boundary); `subagent.control.*` records

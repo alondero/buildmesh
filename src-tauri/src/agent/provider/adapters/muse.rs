@@ -128,9 +128,10 @@
 //! notifications to disk as run-scoped events, paired by `prompt_id`. Because
 //! `request_user_input` asks the user a question rather than gating a tool, it
 //! still fires under `--disable-approval`, and
-//! `user_input_prompt_requested` is therefore classified as `AwaitingInput`
-//! (as `InputRequired`, never `PermissionRequested`). That is the only way a
-//! Muse node reaches `AwaitingInput`.
+//! `user_input_prompt_requested` is therefore classified as `QuestionRequested`
+//! (node `AwaitingInput`). `user_input_prompt_settled` publishes `WorkResumed`:
+//! the wait must be closed as well as opened, or a node whose answer does not
+//! clear the flag by another path stays stranded in `AwaitingInput`.
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
