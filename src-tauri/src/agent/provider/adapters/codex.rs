@@ -69,7 +69,11 @@ fn attention_hook_unix_command(url: &str) -> String {
     )
 }
 
-fn attention_hook_windows_shell_command(url: &str) -> String {
+/// A Windows host driving a *WSL* Codex runs a Linux binary, so `command`
+/// reaches `$SHELL -lc` — not cmd.exe. `curl.exe` leaves WSL to reach the
+/// Windows loopback listener the node's Buildmesh owns; a Linux curl would
+/// resolve `localhost` inside the distro and find nothing.
+fn attention_hook_wsl_shell_command(url: &str) -> String {
     format!(
         "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
     )
@@ -106,20 +110,45 @@ fn valid_loopback_relay_origin(value: &str) -> Option<&str> {
     Some(origin)
 }
 
-fn attention_hook_handler(node_id: i64) -> serde_json::Value {
+/// The callback a Windows Codex binary runs. Encoded PowerShell carries the
+/// URL, the stdin read and the `{}` stdout contract without shell-specific
+/// quoting, so it survives Codex's own `cmd.exe /C` and a PowerShell host
+/// alike.
+fn attention_hook_windows_command(url: &str) -> String {
+    crate::env::windows_attention_command_with_json_output(Some(url))
+        .unwrap_or_else(|| attention_hook_windows_fallback_command(url))
+}
+
+/// The `command` Codex runs when it does not prefer `commandWindows`.
+///
+/// Codex 0.131.0+ resolves a command hook with
+/// `command_windows.unwrap_or(command)` under `cfg!(windows)`
+/// (`codex-rs/hooks/src/engine/discovery.rs`), so only a Windows binary reads
+/// the override. An older binary ignores the unknown key and hands `command`
+/// to `cmd.exe /C`, which fails on a POSIX script with `-v was unexpected at
+/// this time.` — so `command` has to be written for the shell that will really
+/// parse it, which is the *target* Codex binary, not the Buildmesh host.
+fn attention_hook_default_command(url: &str, env_type: EnvType) -> String {
+    if env_type == EnvType::Wsl && cfg!(windows) {
+        return attention_hook_wsl_shell_command(url);
+    }
+    // Every other runtime whose Codex is a Windows binary — spawned natively,
+    // or reached through WSL interop — parses `command` with cmd.exe.
+    let native = cfg!(windows) && env_type == EnvType::Windows;
+    if native || env_type == EnvType::WindowsInterop {
+        return attention_hook_windows_command(url);
+    }
+    attention_hook_unix_command(url)
+}
+
+fn attention_hook_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let relay_url = std::env::var(CODEX_HOOK_RELAY_ENV).ok();
     let url = attention_hook_url(node_id, port, relay_url.as_deref());
     serde_json::json!({
         "type": "command",
-        "command": if cfg!(windows) {
-            attention_hook_windows_shell_command(&url)
-        } else {
-            attention_hook_unix_command(&url)
-        },
-        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| {
-            attention_hook_windows_fallback_command(&url)
-        }),
+        "command": attention_hook_default_command(&url, env_type),
+        "commandWindows": attention_hook_windows_command(&url),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -1477,7 +1506,10 @@ fn ensure_codex_project_files(
     let config_existing = &existing[0];
     let config_updated = ensure_hooks_feature_content(config_existing)?;
     let hooks_existing = &existing[1];
-    let hooks_updated = ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
+    let hooks_updated = ensure_hooks_json_content(
+        hooks_existing,
+        &attention_hook_handler(node_id, resolved.env_type),
+    )?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
     if config_updated != *config_existing {
@@ -2705,6 +2737,22 @@ mod tests {
         serde_json::from_str(&content).expect("hooks.json is not valid JSON")
     }
 
+    /// Every provisioned command must POST the hook's stdin JSON as the
+    /// request body: curl reads it from `@-`, the WSL relay from a quoted
+    /// `'@-'`, and the PowerShell callbacks from the console.
+    fn forwards_hook_stdin(command: &str) -> bool {
+        command.contains("--data-binary @-")
+            || command.contains("--data-binary '@-'")
+            || (command.contains("[Console]::In.ReadToEnd()")
+                && command.contains("Invoke-WebRequest"))
+    }
+
+    /// A Windows callback is installed as encoded PowerShell, so decode it
+    /// before asserting on the script it carries.
+    fn decoded_hook_command(command: &str) -> String {
+        crate::env::decode_powershell_command(command).unwrap_or_else(|| command.to_string())
+    }
+
     fn provision_codex(project: &Path) {
         let path = project.to_string_lossy().into_owned();
         let resolved = ResolvedPath {
@@ -2746,13 +2794,14 @@ mod tests {
         ] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
+                .map(decoded_hook_command)
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
             assert!(
                 command.contains("/api/attention/"),
                 "{event} must POST to the attention endpoint: {command}"
             );
             assert!(
-                command.contains("--data-binary @-"),
+                forwards_hook_stdin(&command),
                 "{event} must forward the hook stdin as the POST body: {command}"
             );
             if event == "PreToolUse" {
@@ -2828,6 +2877,31 @@ mod tests {
             .args(["-c", &script])
             .output()
             .expect("run attention hook in a POSIX shell");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"{}");
+    }
+
+    /// The `command` a WSL node runs: a POSIX script, not the cmd-runnable
+    /// PowerShell a Windows node gets. `sh` has no `curl.exe`, so the probe
+    /// takes its Linux branch; stubbing `curl` then fails the callback, which
+    /// must still emit `{}`.
+    #[cfg(unix)]
+    #[test]
+    fn wsl_shell_attention_hook_emits_json_after_callback_failure() {
+        use std::process::Command;
+
+        let command = attention_hook_wsl_shell_command("http://localhost:1992/api/attention/42");
+        let script = format!("set -e; curl() {{ return 22; }}; {command}");
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .expect("run the WSL attention hook in a POSIX shell");
 
         assert!(
             output.status.success(),
@@ -2978,7 +3052,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path().join(".codex");
         std::fs::create_dir_all(&codex_dir).unwrap();
-        let old_hook = attention_hook_handler(42);
+        let old_hook = attention_hook_handler(42, EnvType::Windows);
         let old = serde_json::json!({
             "hooks": {
                 "PostToolUse": [{
@@ -2996,6 +3070,57 @@ mod tests {
         assert!(hooks["hooks"]["PostToolUse"][0].get("matcher").is_none());
     }
 
+    /// Issue #2036 upgrade path: a node provisioned by an older Buildmesh has
+    /// the bash-script `command` on disk. That handler still carries the
+    /// Buildmesh `statusMessage`, so re-provisioning has to replace it in
+    /// place — appending a second handler would leave cmd.exe parsing the
+    /// script forever.
+    #[test]
+    fn stale_windows_command_is_replaced_not_duplicated() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let stale = serde_json::json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": attention_hook_wsl_shell_command("http://localhost:1992/api/attention/42"),
+                        "commandWindows": attention_hook_windows_command("http://localhost:1992/api/attention/42"),
+                        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        provision_codex(temp.path());
+
+        let hooks = read_hooks_json(temp.path());
+        let handlers = hooks["hooks"]["Stop"][0]["hooks"]
+            .as_array()
+            .expect("Stop handlers");
+        assert_eq!(
+            handlers.len(),
+            1,
+            "a stale Buildmesh handler must be replaced, not duplicated: {hooks:#}"
+        );
+        let url = format!(
+            "http://localhost:{}/api/attention/42",
+            crate::http_server::current_http_port()
+        );
+        let expected = attention_hook_default_command(&url, EnvType::Windows);
+        assert_eq!(
+            handlers[0]["command"].as_str(),
+            Some(expected.as_str()),
+            "Stop must be re-provisioned with the cmd-runnable callback: {handlers:#?}"
+        );
+    }
+
     #[test]
     fn hooks_json_merge_does_not_overwrite_malformed_user_file() {
         let temp = TempDir::new().unwrap();
@@ -3006,7 +3131,7 @@ mod tests {
 
         let error = ensure_hooks_json_content(
             &std::fs::read_to_string(&path).unwrap(),
-            &attention_hook_handler(42),
+            &attention_hook_handler(42, EnvType::Windows),
         )
         .unwrap_err();
         assert!(error.contains("parse hooks.json"));
@@ -3162,77 +3287,82 @@ web_search = true
     }
 
     /// The native fallback is encoded PowerShell so Codex can invoke it through
-    /// either PowerShell or cmd.exe without shell-specific quoting.
+    /// either PowerShell or cmd.exe without shell-specific quoting. Both
+    /// `command` and `commandWindows` carry it on a native Windows node, so
+    /// exercise both: a pre-0.131.0 Codex ignores the override and runs
+    /// `command` through cmd.exe (issue #2036).
     #[cfg(windows)]
     #[test]
     fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
-        for shell in ["powershell.exe", "cmd.exe"] {
-            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-            let endpoint = format!("http://{}/api/attention/42", server.server_addr());
-            let handler = attention_hook_handler(42);
-            let original_url = format!(
-                "http://localhost:{}/api/attention/42",
-                crate::http_server::current_http_port()
-            );
-            let encoded_command = handler["commandWindows"]
-                .as_str()
-                .expect("commandWindows hook missing");
-            let script = crate::env::decode_powershell_command(encoded_command)
-                .expect("Windows hook command must be encoded PowerShell")
-                .replace(&original_url, &endpoint);
-            let command = format!(
-                "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-                crate::env::encode_powershell(&script)
-            );
-            let receiver = std::thread::spawn(move || {
-                let mut request = server
-                    .recv_timeout(std::time::Duration::from_secs(15))
-                    .unwrap()?;
-                let mut body = String::new();
-                request.as_reader().read_to_string(&mut body).unwrap();
-                let path = request.url().to_owned();
-                request.respond(tiny_http::Response::empty(200)).unwrap();
-                Some((path, body))
-            });
-            let mut process = Command::new(shell);
-            if shell == "powershell.exe" {
-                process.args(["-NoProfile", "-NonInteractive", "-Command"]);
-                process.arg(&command);
-            } else {
-                process.args(["/D", "/C"]);
-                // `/C` consumes a shell command line. Passing it through
-                // `arg()` adds Windows quoting that changes cmd's parse.
-                process.raw_arg(format!(" {command}"));
+        for field in ["command", "commandWindows"] {
+            for shell in ["powershell.exe", "cmd.exe"] {
+                let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+                let endpoint = format!("http://{}/api/attention/42", server.server_addr());
+                let handler = attention_hook_handler(42, EnvType::Windows);
+                let original_url = format!(
+                    "http://localhost:{}/api/attention/42",
+                    crate::http_server::current_http_port()
+                );
+                let encoded_command = handler[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{field} hook missing"));
+                let script = crate::env::decode_powershell_command(encoded_command)
+                    .expect("Windows hook command must be encoded PowerShell")
+                    .replace(&original_url, &endpoint);
+                let command = format!(
+                    "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+                    crate::env::encode_powershell(&script)
+                );
+                let receiver = std::thread::spawn(move || {
+                    let mut request = server
+                        .recv_timeout(std::time::Duration::from_secs(15))
+                        .unwrap()?;
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let path = request.url().to_owned();
+                    request.respond(tiny_http::Response::empty(200)).unwrap();
+                    Some((path, body))
+                });
+                let mut process = Command::new(shell);
+                if shell == "powershell.exe" {
+                    process.args(["-NoProfile", "-NonInteractive", "-Command"]);
+                    process.arg(&command);
+                } else {
+                    process.args(["/D", "/C"]);
+                    // `/C` consumes a shell command line. Passing it through
+                    // `arg()` adds Windows quoting that changes cmd's parse.
+                    process.raw_arg(format!(" {command}"));
+                }
+                let mut child = process
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .unwrap();
+                let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(payload.as_bytes())
+                    .unwrap();
+                let output = child.wait_with_output().unwrap();
+                let received = receiver.join().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{field} through {shell} command {command:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    received,
+                    Some(("/api/attention/42".into(), payload.into())),
+                    "{field} through {shell}"
+                );
+                assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
             }
-            let mut child = process
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .creation_flags(0x08000000)
-                .spawn()
-                .unwrap();
-            let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(payload.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            let received = receiver.join().unwrap();
-            assert!(
-                output.status.success(),
-                "{shell} command {command:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(
-                received,
-                Some(("/api/attention/42".into(), payload.into())),
-                "{shell}"
-            );
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
         }
     }
 
@@ -3245,47 +3375,72 @@ web_search = true
             let handler = &hooks["hooks"][event][0]["hooks"][0];
             let command = handler["command"]
                 .as_str()
-                .unwrap_or_else(|| panic!("{event} unix command missing: {hooks:#}"));
+                .map(decoded_hook_command)
+                .unwrap_or_else(|| panic!("{event} command missing: {hooks:#}"));
             let windows = handler["commandWindows"]
                 .as_str()
+                .map(decoded_hook_command)
                 .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
-            let decoded_windows = crate::env::decode_powershell_command(windows);
-            let windows = decoded_windows.as_deref().unwrap_or(windows);
-            assert!(
-                !command.contains("cmd.exe") && !command.contains("sh -c"),
-                "{event} unix command must not nest a shell Codex already launches: {command}"
-            );
-            assert!(
-                !windows.contains("cmd.exe"),
-                "{event} commandWindows must not nest cmd.exe; the Codex hook runner owns shell execution: {windows}"
-            );
-            assert!(
-                !command.contains("BUILDMESH_PORT")
-                    && !command.contains("BUILDMESH_SESSION_ID")
-                    && !windows.contains("BUILDMESH_PORT")
-                    && !windows.contains("BUILDMESH_SESSION_ID"),
-                "{event} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {command} / {windows}"
-            );
-            assert!(
-                command.contains("/api/attention/42") && windows.contains("/api/attention/42"),
-                "{event} must bake the node id into the callback URL: {command} / {windows}"
-            );
-            assert!(
-                command.contains("http://localhost:") && windows.contains("http://localhost:"),
-                "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
-            );
-            assert!(
-                command.contains("-o /dev/null"),
-                "{event} must discard HTTP response bodies: {command}"
-            );
-            if crate::env::is_wsl_host() {
-                assert!(windows.contains("-o /dev/null"), "{event}: {windows}");
-            } else {
+            for (field, value) in [("command", &command), ("commandWindows", &windows)] {
                 assert!(
-                    windows.contains("Invoke-WebRequest") && windows.contains("Out-Null"),
-                    "{event}: {windows}"
+                    !value.contains("cmd.exe") && !value.contains("sh -c"),
+                    "{event} {field} must not nest a shell Codex already launches: {value}"
+                );
+                assert!(
+                    !value.contains("BUILDMESH_PORT") && !value.contains("BUILDMESH_SESSION_ID"),
+                    "{event} {field} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {value}"
+                );
+                assert!(
+                    value.contains("/api/attention/42"),
+                    "{event} {field} must bake the node id into the callback URL: {value}"
+                );
+                assert!(
+                    value.contains("http://localhost:"),
+                    "{event} {field} must use localhost (WSL loopback relay), not 127.0.0.1: {value}"
+                );
+                assert!(
+                    forwards_hook_stdin(value),
+                    "{event} {field} must POST the hook stdin as the request body: {value}"
+                );
+                assert!(
+                    value.contains("-o /dev/null") || value.contains("Out-Null"),
+                    "{event} {field} must discard the HTTP response body: {value}"
                 );
             }
+        }
+    }
+
+    /// Issue #2036: `command` is the fallback a pre-0.131.0 Codex runs when it
+    /// does not know `commandWindows`, and it is also what a non-Windows Codex
+    /// always runs. It therefore has to be written for the shell that will
+    /// really parse it — the target Codex binary, not the Buildmesh host.
+    #[test]
+    fn command_is_written_for_the_target_codex_binary() {
+        let url = "http://localhost:1992/api/attention/42";
+
+        // A WSL node runs a Linux Codex on either host, so `command` reaches
+        // `$SHELL -lc` and must stay a POSIX script.
+        let wsl = attention_hook_default_command(url, EnvType::Wsl);
+        assert!(
+            crate::env::decode_powershell_command(&wsl).is_none(),
+            "a WSL Codex parses `command` with $SHELL -lc, never PowerShell: {wsl}"
+        );
+        assert!(wsl.contains("printf '{}'"), "{wsl}");
+
+        // Every runtime whose Codex is a Windows binary gets the cmd-runnable
+        // callback in both fields.
+        let windows_targets: &[EnvType] = if cfg!(windows) {
+            &[EnvType::Windows, EnvType::WindowsInterop]
+        } else {
+            &[EnvType::WindowsInterop]
+        };
+        for env_type in windows_targets {
+            assert_eq!(
+                attention_hook_default_command(url, *env_type),
+                attention_hook_windows_command(url),
+                "{env_type} Codex falls back to `command` on pre-0.131.0 binaries, so it must \
+                 be the same cmd-runnable callback as commandWindows"
+            );
         }
     }
 

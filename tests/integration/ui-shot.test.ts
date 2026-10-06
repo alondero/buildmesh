@@ -65,6 +65,12 @@ async function serveHtml(html) {
   return { server, url: `http://127.0.0.1:${port}` };
 }
 
+// ui-shot waits 15s for `#root` before reporting a mount failure, and Chromium
+// startup competes for CPU with the rest of the suite. A tight wrapper deadline
+// killed the child under load and reported a transport timeout instead of the
+// real diagnostic, so budget generously (the same reason as issue #2049).
+const MOUNT_FAILURE_DEADLINE_MS = 120000;
+
 describe('ui-shot mock mode', () => {
   it('groups, reloads, swaps and ungroups nodes through pointer and keyboard interactions', async () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-groups-'));
@@ -134,7 +140,7 @@ describe('ui-shot mock mode', () => {
     const folder = await mkdtemp(join(tmpdir(), 'buildmesh-ui-shot-'));
     try {
       const output = join(folder, 'should-not-exist.png');
-      const result = await runUiShot(['--out', output, '--mock', '--mock-url', url], 30000);
+      const result = await runUiShot(['--out', output, '--mock', '--mock-url', url], MOUNT_FAILURE_DEADLINE_MS);
 
       expect(result.code).toBe(1);
       expect(result.stderr).toContain('#root never populated within 15s');
@@ -144,5 +150,5 @@ describe('ui-shot mock mode', () => {
       await rm(folder, { recursive: true, force: true });
       await new Promise<void>((resolvePromise, reject) => server.close((error) => error ? reject(error) : resolvePromise()));
     }
-  }, 45000);
+  }, MOUNT_FAILURE_DEADLINE_MS + 30000);
 });

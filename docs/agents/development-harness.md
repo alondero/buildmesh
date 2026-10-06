@@ -61,6 +61,12 @@ requires recording them again.
 
 ## Verify and finish
 
+Run verification in the background, not as a foreground tool call: a full run can
+exceed the ten-minute cap of a single tool invocation, and a killed run leaves
+`.harness/lock` behind. Each gate writes `.harness/logs/<timestamp>-<gate>.log`
+as it runs, so a backgrounded attempt can be read while it is still going, and
+the receipt reports the outcome, gate list and log paths.
+
 ```powershell
 npm run verify
 npm run harness -- update --spec .tmp/progress.json
@@ -156,7 +162,9 @@ rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
 suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. A FAIL is never
+recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. Once recorded
+blockers exist, the very first stop of every later turn is released, so the
+diagnostic is not repeated once per turn. A FAIL is never
 released by a written report, however many times it is repeated. For a failed
 implementation that cannot be repaired, write
 `{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
@@ -172,9 +180,12 @@ Do not disable hooks or edit a receipt to obtain green. CI independently tests
 the harness through `test:agent`; it does not trust local receipts.
 
 Task operations serialize with `.harness/lock`; advisory fast checks use
-`.harness/fast-lock` and publish only if the tested tree stayed current.
-After an interrupted process,
-inspect the PID recorded there before removing a stale lock. Otherwise resume
+`.harness/fast-lock` and publish only if the tested tree stayed current. An
+operation reclaims a lock whose recorded PID is no longer alive, so a killed
+run (a `verify` past the tool cap, for example) does not need manual cleanup;
+the reclaim is recorded as a `lock-reclaimed` event. A lock that cannot be
+read, or whose owner is still running, is left in place: inspect the PID
+recorded there before removing it by hand. Otherwise resume
 the existing task and rerun verification. State survives context resets and
 process restarts, but deleting the worktree deletes its local continuity data.
 
