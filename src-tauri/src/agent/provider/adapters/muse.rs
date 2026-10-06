@@ -100,22 +100,22 @@
 //! Buildmesh instances can still lose each other's entry, because the atomic
 //! write is atomic, not additive.
 //!
-//! **Attention (issue #1709).** The interactive TUI exposes no hook/event flag,
-//! so Muse's turn signal comes from the passive watcher
-//! (`services::muse_watcher`), mirroring Command Code: `requires_attention_hook`
-//! stays `false` and `attention_capability` stays `None`. The watcher consumes
-//! the durable session log's run boundaries
+//! **Attention (issue #1709).** Muse's turn signal comes from the passive
+//! watcher (`services::muse_watcher`), mirroring Command Code:
+//! `requires_attention_hook` stays `false` and `attention_capability` stays
+//! `None`. The watcher consumes the durable session log
 //! (`~/.local/share/muse/sessions/YYYY/MM/DD/<uuid>/session.jsonl`).
 //!
 //! Muse 1.3.0 *does* ship a claude-compatible plugin hook surface (a
 //! `.claude-plugin/plugin.json` bundle with `Stop`/`Notification`/… handlers; a
 //! live `Stop` posts the payload `http::routes::attention` already classifies
-//! as a clean turn completion). It is deliberately **not** provisioned:
-//! third-party hooks sit at `review_needed` until an explicit
-//! `muse plugins approve`, the install lands in the user's *global* plugin
-//! cache, and the node-local `--scope project` path is refused until the
-//! workspace is trusted (issue #1706). Wiring it is a separate follow-up — see
-//! `docs/research/muse-attention-signals.md`.
+//! as a clean turn completion) even though `muse --help` exposes no hook/event
+//! flag. It is deliberately **not** provisioned: third-party hooks sit at
+//! `review_needed` until an explicit `muse plugins approve`, and the install
+//! lands in the user's *global* plugin cache — a consent step Buildmesh must not
+//! take unattended. Workspace trust (#1706) has since landed and removes the
+//! other blocker, but the consent cost stands. Wiring it is a separate follow-up
+//! — see `docs/research/muse-attention-signals.md`.
 //!
 //! **Launch mode is `SkipPermissions`.** With `--disable-approval` the harness
 //! never raises a tool-approval prompt — every observed `approval_disabled`
@@ -123,6 +123,14 @@
 //! `PermissionRequested` lifecycle signal is impossible by construction and is
 //! deliberately not classified. A `run/terminal` record yields the node back
 //! to the user; `terminal` is `completed | failed | cancelled`.
+//!
+//! **A question is not an approval.** The same log folds the MSP `userInput/*`
+//! notifications to disk as run-scoped events, paired by `prompt_id`. Because
+//! `request_user_input` asks the user a question rather than gating a tool, it
+//! still fires under `--disable-approval`, and
+//! `user_input_prompt_requested` is therefore classified as `AwaitingInput`
+//! (as `InputRequired`, never `PermissionRequested`). That is the only way a
+//! Muse node reaches `AwaitingInput`.
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
