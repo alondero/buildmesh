@@ -476,7 +476,7 @@ pub(crate) fn recovery_circuit_inner(
     if let Some(existing) = existing {
         return Ok(existing);
     }
-    db.execute("INSERT INTO autopilot_circuits (mesh_id,name,description,enabled,concurrency_limit,graph_json,is_preset) VALUES (?1,?2,?3,0,2,?4,0)",
+    db.execute("INSERT INTO autopilot_circuits (mesh_id,name,description,enabled,graph_json,is_preset) VALUES (?1,?2,?3,0,?4,0)",
         params![mesh_id, recovery.name, "Continue a failed review on its retained worktree", graph]).map_err(|e| e.to_string())?;
     Ok((db.last_insert_rowid(), recovery.name.clone()))
 }

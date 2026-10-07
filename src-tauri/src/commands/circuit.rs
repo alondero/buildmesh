@@ -251,7 +251,7 @@ pub fn list_circuit_probe(
 /// Milestone 3 (issue #1208) added the trigger vocabulary: `trigger_kind`
 /// selects the root node (see [`CircuitTriggerKind`]). All domain
 /// restrictions — the review blueprint's GitHub-issue-label trigger
-/// requirement, concurrency floors, interval clamp, label trim — live in
+/// requirement, interval clamp, label trim — live in
 /// [`crate::circuit::model::validate_circuit_request`].
 /// This Tauri command is a dumb router: parse → call the model →
 /// persist → wake the GitHub poll for labelled circuits.

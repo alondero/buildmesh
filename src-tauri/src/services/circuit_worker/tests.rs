@@ -3180,84 +3180,145 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
 }
 
 /// ADR 0042 / issue #2114: sibling runs of one circuit used to time-share a
-/// per-circuit step budget, so the third admitted run parked with "all 2 of
-/// this circuit's step slots are busy" while the mesh allowed more runs.
-/// Only the run's own agent lease may gate its spawn step now; a stale value
-/// left in the retired `concurrency_limit` column must be ignored.
+/// per-circuit step budget. On the live ledger two runs of a "Review agent"
+/// circuit each held an `await_source` step, so the third admitted run's step
+/// parked with "all 2 of this circuit's step slots are busy" while the mesh
+/// allowed more runs. This drives three runs of that real graph through the
+/// worker's own load, observe-capacity, advance and commit path against a real
+/// database, and checks the ledger. A stale value in the retired
+/// `concurrency_limit` column must be ignored.
 #[test]
-fn sibling_runs_of_one_circuit_do_not_gate_each_others_spawn_step() {
+fn three_admitted_review_runs_of_one_circuit_all_start_their_first_step() {
     let _db = install_temp_db();
-    let mesh = crate::db::create_mesh("sibling-runs", "/tmp/sibling-runs").unwrap();
-    let graph = crate::circuit::model::CircuitGraph::walking_skeleton("fixture");
-    let circuit = crate::db::create_autopilot_circuit(
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().to_str().unwrap();
+    let mesh = db::create_mesh("sibling-review-runs", path).unwrap();
+    let circuit = db::create_autopilot_circuit(
         mesh.id,
-        "sibling-runs-circuit",
+        "Review agent",
         "",
-        &graph.to_json().unwrap(),
+        &CircuitGraph::agent_review(None, None, 3).to_json().unwrap(),
     )
     .unwrap();
-    crate::db::write_conn()
+    db::write_conn()
         .execute(
             "UPDATE autopilot_circuits SET concurrency_limit = 2 WHERE id = ?1",
             [circuit.id],
         )
         .unwrap();
+
+    let running_steps_on_circuit = || -> i64 {
+        db::read_conn()
+            .query_row(
+                "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
+                 JOIN autopilot_circuit_runs r ON r.id = s.run_id \
+                 WHERE r.circuit_id = ?1 AND s.status = 'running'",
+                [circuit.id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let active_for = |run_id: i64| {
+        db::list_active_circuit_runs()
+            .unwrap()
+            .into_iter()
+            .find(|active| active.run.id == run_id)
+            .expect("run should be active")
+    };
+    // The worker's commit: the transition's step writes plus any state flip.
+    let commit = |run_id: i64, view: &RunView, transition: &crate::circuit::stepper::Transition| {
+        let ops: Vec<db::CircuitStepOp> = transition
+            .step_writes
+            .iter()
+            .map(|w| db::CircuitStepOp {
+                node_id: w.node_id.clone(),
+                status: w.status.as_db_str().to_string(),
+                outcome: w.outcome.map(|o| o.map(|v| v.as_db_str().to_string())),
+                error: w.error.clone(),
+                agent_node_id: None,
+                attempt: w.attempt,
+                fresh_attempt: w.fresh_attempt,
+            })
+            .collect();
+        let context = view.context.to_json().unwrap();
+        db::commit_circuit_advance(
+            run_id,
+            transition
+                .run_state_changed
+                .then_some(view.state.as_db_str()),
+            Some(&context),
+            &ops,
+        )
+        .unwrap();
+    };
+
     let mut run_ids = Vec::new();
     for n in 0..3 {
-        let run_id = crate::db::create_circuit_run(
-            circuit.id,
+        let source = db::create_agent_node(
             mesh.id,
-            &format!("manual:sibling-{n}"),
-            "{}",
+            &format!("Source {n}"),
+            path,
+            "work",
+            crate::models::EnvType::Windows,
+            "terminal",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
         )
         .unwrap();
-        crate::db::set_circuit_run_state(run_id, "running").unwrap();
-        assert!(crate::db::reserve_circuit_agent_slots(run_id, 1).unwrap());
+        let context = serde_json::json!({
+            "source.agent_id": source.id.to_string(),
+            "source.review_preset": "1",
+        })
+        .to_string();
+        let run_id =
+            db::create_circuit_run(circuit.id, mesh.id, &format!("manual:review-{n}"), &context)
+                .unwrap();
         run_ids.push(run_id);
     }
-    // Runs 1 and 2 each hold a running step: exactly the saturation that
-    // used to exhaust the circuit's two step slots.
-    for (n, run_id) in run_ids.iter().take(2).enumerate() {
-        crate::db::commit_circuit_advance(
-            *run_id,
-            None,
-            None,
-            &[crate::db::CircuitStepOp {
-                node_id: "await_source".into(),
-                status: "running".into(),
-                outcome: None,
-                error: None,
-                agent_node_id: Some(900 + n as i64),
-                attempt: 1,
-                fresh_attempt: false,
-            }],
-        )
-        .unwrap();
+
+    for (n, run_id) in run_ids.iter().copied().enumerate() {
+        if n == 2 {
+            assert_eq!(
+                running_steps_on_circuit(),
+                2,
+                "two sibling runs already hold a running step: the old budget of 2 was saturated here"
+            );
+        }
+        let active = active_for(run_id);
+        let mut view = RunView {
+            run_id,
+            graph: CircuitGraph::from_json(&active.circuit_graph_json).unwrap(),
+            state: RunState::from_db_str(&active.run.state),
+            context: CircuitContext::from_json(&active.run.context_json).unwrap(),
+            steps: load_steps(run_id).unwrap(),
+        };
+        let triggered = advance(&mut view, &CircuitEvent::Triggered);
+        commit(run_id, &view, &triggered);
+        // Admission reserves the blueprint's declared footprint (issue #1467).
+        assert!(db::reserve_circuit_agent_slots(run_id, required_agent_slots(&active)).unwrap());
+        let event = observe_capacity(&active_for(run_id), None);
+        let ticked = advance(&mut view, &event);
+        commit(run_id, &view, &ticked);
     }
 
-    let third = crate::db::list_active_circuit_runs()
-        .unwrap()
-        .into_iter()
-        .find(|active| active.run.id == run_ids[2])
-        .expect("third running run should be observable");
-    let event = observe_capacity(&third, None);
-    let mut view = super::observe_parity_tests::view(
-        super::observe_parity_tests::spawn(),
-        RunState::Running,
-        StepStatus::Queued,
-        None,
-    );
-    let transition = crate::circuit::stepper::advance(&mut view, &event);
-    assert!(
-        transition
-            .effects
-            .contains(&crate::circuit::stepper::Effect::SpawnAgentNode {
-                node_id: "step".into()
-            }),
-        "the third admitted run must start its spawn step; got {:?}",
-        transition.effects
-    );
-    assert_eq!(view.step("step").unwrap().status, StepStatus::Running);
+    for run_id in run_ids {
+        let steps = db::list_circuit_run_steps(run_id).unwrap();
+        let await_source = steps
+            .iter()
+            .find(|step| step.node_id == "await_source")
+            .unwrap_or_else(|| panic!("run {run_id} never reached await_source: {steps:?}"));
+        assert_eq!(
+            await_source.status, "running",
+            "run {run_id} must progress, not park behind its siblings"
+        );
+    }
+    assert_eq!(running_steps_on_circuit(), 3);
 }
 
 /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,

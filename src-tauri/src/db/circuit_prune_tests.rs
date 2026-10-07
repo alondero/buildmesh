@@ -66,8 +66,20 @@ fn insert_run(conn: &Connection, identity: &str, state: &str, days_ago: i64, bod
 #[test]
 fn circuit_retention_preserves_unfinished_cleanup_intent() {
     let conn = prune_db();
-    let manual = insert_run(&conn, "manual:old", "failed", 40, r#"{"cleanup.pending":"1"}"#);
-    let issue = insert_run(&conn, "issue:cleanup", "failed", 40, r#"{"cleanup.pending":"1"}"#);
+    let manual = insert_run(
+        &conn,
+        "manual:old",
+        "failed",
+        40,
+        r#"{"cleanup.pending":"1"}"#,
+    );
+    let issue = insert_run(
+        &conn,
+        "issue:cleanup",
+        "failed",
+        40,
+        r#"{"cleanup.pending":"1"}"#,
+    );
     insert_run(&conn, "manual:new", "completed", 0, "{}");
     conn.execute(
         "INSERT INTO agent_nodes (id, mesh_id, name, path) VALUES (1, 1, 'cleanup', '/tmp/cleanup')",
@@ -78,18 +90,37 @@ fn circuit_retention_preserves_unfinished_cleanup_intent() {
         conn.execute(
             "UPDATE autopilot_circuit_run_steps SET agent_node_id = 1 WHERE run_id = ?1",
             [run_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
     conn.execute(
         "INSERT INTO agent_node_lifecycle_leases (node_id, cleanup_requested) VALUES (1, 1)",
         [],
-    ).unwrap();
-    assert_eq!(prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap(), (0, 0));
+    )
+    .unwrap();
+    assert_eq!(
+        prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap(),
+        (0, 0)
+    );
     for id in [manual, issue] {
-        let body: String = conn.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        let body: String = conn
+            .query_row(
+                "SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(body.contains("cleanup.pending"));
     }
-    assert_eq!(conn.query_row("SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id = 1", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    assert_eq!(
+        conn.query_row(
+            "SELECT cleanup_requested FROM agent_node_lifecycle_leases WHERE node_id = 1",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
 }
 
 fn insert_run_for(
@@ -163,7 +194,10 @@ fn prune_drops_old_terminal_interval_runs_and_their_steps() {
 
     let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
 
-    assert_eq!(deleted, 2, "both non-newest terminal interval rows are swept");
+    assert_eq!(
+        deleted, 2,
+        "both non-newest terminal interval rows are swept"
+    );
     assert_eq!(count(&conn, "autopilot_circuit_runs"), 1);
     assert_eq!(
         count(&conn, "autopilot_circuit_run_steps"),
@@ -372,12 +406,18 @@ fn prune_on_an_empty_table_is_a_no_op() {
 /// regression for issue #1924.
 #[test]
 fn retention_keeps_a_review_successor_resolvable() {
-    use crate::db::circuit::recovery::{ContinuationTarget, continuation_target_inner};
+    use crate::db::circuit::recovery::{continuation_target_inner, ContinuationTarget};
 
     let conn = prune_db();
     // The failed review on the author's Circuit, and the follow-up on the
     // recovery Circuit `continue_failed_review` mints for it.
-    let ancestor = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    let ancestor = insert_run(
+        &conn,
+        "manual:agent:7:aaa",
+        "failed",
+        400,
+        r#"{"source.review_preset":"1"}"#,
+    );
     conn.execute(
         "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
         [],
@@ -396,11 +436,22 @@ fn retention_keeps_a_review_successor_resolvable() {
     ).unwrap();
 
     let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
-    assert_eq!((deleted, compacted), (0, 0), "a continuable lineage is swept by neither tier");
+    assert_eq!(
+        (deleted, compacted),
+        (0, 0),
+        "a continuable lineage is swept by neither tier"
+    );
     let body: String = conn
-        .query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1", [successor], |r| r.get(0))
+        .query_row(
+            "SELECT context_json FROM autopilot_circuit_runs WHERE id = ?1",
+            [successor],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert!(body.contains(&format!(r#""recovery.from_run_id":"{ancestor}""#)), "the lineage key survives the sweep");
+    assert!(
+        body.contains(&format!(r#""recovery.from_run_id":"{ancestor}""#)),
+        "the lineage key survives the sweep"
+    );
     // A failed successor is not a reuse target, so the walk reports it as the
     // deepest generation to continue from. Landing on the successor rather than
     // on the ancestor is what proves the sweep did not orphan the chain.
@@ -416,10 +467,16 @@ fn retention_keeps_a_review_successor_resolvable() {
 /// recovery Circuit `recovery_circuit_inner` reuses on the frozen graph.
 #[test]
 fn retention_keeps_a_generation_whose_successor_still_names_it() {
-    use crate::db::circuit::recovery::{ContinuationTarget, continuation_target_inner};
+    use crate::db::circuit::recovery::{continuation_target_inner, ContinuationTarget};
 
     let conn = prune_db();
-    let root = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    let root = insert_run(
+        &conn,
+        "manual:agent:7:aaa",
+        "failed",
+        400,
+        r#"{"source.review_preset":"1"}"#,
+    );
     conn.execute(
         "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
         [],
@@ -445,7 +502,11 @@ fn retention_keeps_a_generation_whose_successor_still_names_it() {
 
     let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
 
-    assert_eq!((deleted, compacted), (0, 0), "every generation of a continuable lineage is retained");
+    assert_eq!(
+        (deleted, compacted),
+        (0, 0),
+        "every generation of a continuable lineage is retained"
+    );
     assert_eq!(count(&conn, "autopilot_circuit_runs"), 3);
     // Continuing any generation resolves through the retained chain to the newest
     // one rather than stopping at the gap and minting a sibling.
@@ -463,7 +524,13 @@ fn retention_keeps_a_generation_whose_successor_still_names_it() {
 #[test]
 fn retention_still_sweeps_a_manual_run_outside_any_lineage() {
     let conn = prune_db();
-    let root = insert_run(&conn, "manual:agent:7:aaa", "failed", 400, r#"{"source.review_preset":"1"}"#);
+    let root = insert_run(
+        &conn,
+        "manual:agent:7:aaa",
+        "failed",
+        400,
+        r#"{"source.review_preset":"1"}"#,
+    );
     conn.execute(
         "INSERT INTO autopilot_circuits (id, mesh_id, name, is_preset) VALUES (2, 1, 'Continued review', 0)",
         [],
@@ -478,26 +545,55 @@ fn retention_still_sweeps_a_manual_run_outside_any_lineage() {
     );
     // Older than the root and named by nothing, so it is sweepable even though a
     // lineage is in flight on another Circuit.
-    let unrelated = insert_run(&conn, "manual:unrelated", "failed", 500, r#"{"note":"no lineage here"}"#);
+    let unrelated = insert_run(
+        &conn,
+        "manual:unrelated",
+        "failed",
+        500,
+        r#"{"note":"no lineage here"}"#,
+    );
 
     let (deleted, compacted) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
 
-    assert_eq!((deleted, compacted), (1, 0), "only the lineage-less manual run goes");
     assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM autopilot_circuit_runs WHERE id = ?1", [unrelated], |r| r.get::<_, i64>(0)).unwrap(),
+        (deleted, compacted),
+        (1, 0),
+        "only the lineage-less manual run goes"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM autopilot_circuit_runs WHERE id = ?1",
+            [unrelated],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
         0,
         "nothing named the unrelated run, so the lineage guard did not retain it"
     );
-    assert_eq!(identities(&conn), vec!["manual:agent:7:aaa", "manual:agent:7:bbb"]);
+    assert_eq!(
+        identities(&conn),
+        vec!["manual:agent:7:aaa", "manual:agent:7:bbb"]
+    );
 }
 
-/// A row exactly at the retention boundary is kept — the sweep uses
-/// `updated_at <`, mirroring the drive-ledger sweep, so a row that just turned
-/// 30 days old is not swept on the same tick.
+/// A row at the retention boundary is kept — the sweep uses `updated_at <`,
+/// mirroring the drive-ledger sweep, so a row that is only just turning 30 days
+/// old is not swept on the same tick. The row sits one minute inside the window:
+/// stamping it at exactly `now - 30 days` races the sweep's own `now` (the
+/// clock ticking over a second between the two made the row older than the
+/// cutoff), and the sweep has no injectable clock to pin it.
 #[test]
 fn prune_keeps_a_row_at_the_retention_boundary() {
     let conn = prune_db();
-    insert_run(&conn, "interval:1000", "completed", 30, "{}");
+    let boundary = insert_run(&conn, "interval:1000", "completed", 30, "{}");
+    conn.execute(
+        "UPDATE autopilot_circuit_runs
+         SET created_at = datetime('now', '-30 days', '+1 minutes'),
+             updated_at = datetime('now', '-30 days', '+1 minutes')
+         WHERE id = ?1",
+        [boundary],
+    )
+    .unwrap();
     insert_run(&conn, "interval:2000", "completed", 1, "{}"); // newest, fresh
 
     let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
