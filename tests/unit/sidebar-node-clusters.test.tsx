@@ -4,10 +4,11 @@
  *
  * Two claims are pinned here:
  *
- *  1. **Rendering** — a paired cluster draws one root row plus an indented,
- *     rail-joined sub-row per member, while an unpaired node renders exactly
- *     the bare row it always did. Members stay individually clickable, because
- *     a paired member is still an independent Agent Node.
+ *  1. **Rendering** — a paired cluster draws one root row plus one
+ *     same-indent sub-row per member, all joined by a single continuous
+ *     rail, while an unpaired node renders exactly the bare row it always
+ *     did. Members stay individually clickable, because a paired member is
+ *     still an independent Agent Node.
  *  2. **Agreement** — the sidebar's clusters match the grid's cards for the
  *     same nodes, because both resolve through `activityRootId`. This is the
  *     regression that matters: if the two surfaces ever disagree, the sidebar
@@ -253,8 +254,10 @@ describe('sidebar node-activity clusters', () => {
   it('draws the pairing as one continuous rail, not a header marker plus a member-list rail', () => {
     // The reported bug: the header marker stopped above the reviewer while the
     // member list drew its own separate rail, reading as nested hierarchy
-    // rather than one flat pairing. The cluster must carry exactly one rail
-    // element, and the member list must not draw a second one of its own.
+    // rather than one flat pairing. Pin the actual invariant: exactly one
+    // rail-drawing element, spanning the cluster top to bottom, with member
+    // rows at the header's indent. (jsdom class assertions, not rendered
+    // pixels — the before/after screenshots on the PR carry the visual proof.)
     const root = makeNode(1, { name: 'implementer', status: 'running' });
     const reviewer = makeNode(2, { name: 'reviewer', status: 'running' });
     const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
@@ -262,9 +265,20 @@ describe('sidebar node-activity clusters', () => {
     const { container } = renderMeshItem(clusterActivityNodes([root, reviewer], ownerships, []));
     const cluster = container.querySelector('[data-node-cluster-id="1"]');
     expect(cluster).not.toBeNull();
-    expect(cluster?.querySelectorAll('[data-cluster-marker]')).toHaveLength(1);
+    const markers = cluster?.querySelectorAll('[data-cluster-marker]');
+    expect(markers).toHaveLength(1);
+    // The single rail spans the cluster (top AND bottom insets), instead of
+    // the old header-only `h-full` marker plus a second list rail.
+    const markerClass = markers?.[0].className ?? '';
+    expect(markerClass).toContain('top-2');
+    expect(markerClass).toContain('bottom-2');
+    expect(markerClass).not.toContain('h-full');
     const memberList = screen.getByLabelText('Paired agents');
     expect(memberList.className).not.toContain('border-l');
+    // Member rows carry no indent of their own — same indent as the header.
+    for (const li of Array.from(memberList.querySelectorAll('li'))) {
+      expect(li.getAttribute('class') ?? '').not.toMatch(/\b([mp]l-|indent)/);
+    }
   });
 
   it('splits a cross-mesh group into one cluster per mesh', () => {

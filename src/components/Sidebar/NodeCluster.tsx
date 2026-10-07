@@ -27,9 +27,9 @@ const RAIL_INDENT = 'ml-2';
  *  (a mesh with no pairings) is unchanged. Only a genuinely paired cluster pays
  *  for the chrome.
  *
- *  The root row keeps its full indent and the remaining members step in under a
- *  vertical rail, so the eye reads one card with sub-agents rather than N
- *  unrelated rows. Each member is still its own `NodeItem`: click, rename,
+ *  Header and members share one indent under a single continuous rail, so the
+ *  eye reads one flat pairing rather than nested hierarchy. Each member is
+ *  still its own `NodeItem`: click, rename,
  *  status, context menu, and delete all keep working per node, because a paired
  *  member remains an independent Agent Node with its own worktree and lifecycle
  *  (CONTEXT.md). */
