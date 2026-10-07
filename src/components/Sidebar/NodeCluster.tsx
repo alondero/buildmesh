@@ -29,8 +29,8 @@ const RAIL_INDENT = 'ml-2';
  *
  *  Header and members share one indent under a single continuous rail, so the
  *  eye reads one flat pairing rather than nested hierarchy. Each member is
- *  still its own `NodeItem`: click, rename,
- *  status, context menu, and delete all keep working per node, because a paired
+ *  still its own `NodeItem`: click, rename, status, context menu, and delete
+ *  all keep working per node, because a paired
  *  member remains an independent Agent Node with its own worktree and lifecycle
  *  (CONTEXT.md). */
 function NodeClusterView({ cluster, meshColor, providerList, onSelectNode, onDeleteNode }: NodeClusterProps) {
