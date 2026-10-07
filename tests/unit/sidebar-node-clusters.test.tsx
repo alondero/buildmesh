@@ -250,6 +250,23 @@ describe('sidebar node-activity clusters', () => {
     expect(marker?.className).toContain('bg-accent-cyan');
   });
 
+  it('draws the pairing as one continuous rail, not a header marker plus a member-list rail', () => {
+    // The reported bug: the header marker stopped above the reviewer while the
+    // member list drew its own separate rail, reading as nested hierarchy
+    // rather than one flat pairing. The cluster must carry exactly one rail
+    // element, and the member list must not draw a second one of its own.
+    const root = makeNode(1, { name: 'implementer', status: 'running' });
+    const reviewer = makeNode(2, { name: 'reviewer', status: 'running' });
+    const ownerships = { 1: ownership(1, null), 2: ownership(2, 1) };
+
+    const { container } = renderMeshItem(clusterActivityNodes([root, reviewer], ownerships, []));
+    const cluster = container.querySelector('[data-node-cluster-id="1"]');
+    expect(cluster).not.toBeNull();
+    expect(cluster?.querySelectorAll('[data-cluster-marker]')).toHaveLength(1);
+    const memberList = screen.getByLabelText('Paired agents');
+    expect(memberList.className).not.toContain('border-l');
+  });
+
   it('splits a cross-mesh group into one cluster per mesh', () => {
     const a = makeNode(1, { mesh_id: 3 });
     const b = makeNode(2, { mesh_id: 4 });
