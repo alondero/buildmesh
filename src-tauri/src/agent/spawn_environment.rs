@@ -130,8 +130,12 @@ pub fn wrap(
         // into a spawn error the user sees, which is the only outcome that
         // keeps "sandboxed" and "sandboxing was requested" the same statement.
         if crate::sandbox::sandbox_requested(sandbox) {
+            // `executable`, not `recipe.binary`: every other branch above runs
+            // the resolved override, and passing the raw recipe name here
+            // would confine and launch a *different* program than the one
+            // routing selected. Identical when no override is present.
             crate::agent::sandbox::seatbelt_command(
-                recipe.binary,
+                executable,
                 &recipe.base_args,
                 spawn_path,
                 session_id,
@@ -460,38 +464,39 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn requested_sandbox_without_a_writable_profile_yields_no_command() {
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: ENV_LOCK is held across the mutation window.
-        #[allow(unsafe_code)]
-        unsafe { std::env::set_var(crate::sandbox::DEV_SANDBOX_ENV, "1") };
-
         let session_id = -97_512 - (std::process::id() as i64 % 100_000);
         let profile = std::env::temp_dir().join(format!("buildmesh-sandbox-{session_id}.sb"));
-        std::fs::create_dir_all(&profile).expect("a directory at the profile path blocks the write");
+        // RAII: the gate restores the previous env value and the scratch
+        // directory is removed even if an assertion below panics.
+        let _scratch = crate::sandbox::test_support::block_writes_at(&profile);
 
-        let recipe = crate::agent::provider::SpawnRecipe {
-            binary: "claude",
-            base_args: vec!["--dangerously-skip-permissions".into()],
-            trailing_args: vec![],
-            windows_shell: crate::agent::provider::WindowsShell::Direct,
-        };
-        let result = super::wrap(
-            recipe,
-            EnvType::Windows,
-            None,
-            None,
-            &std::env::temp_dir().to_string_lossy(),
-            session_id,
-            true,
-        );
-        let _ = std::fs::remove_dir_all(&profile);
+        let result = crate::sandbox::test_support::with_dev_gate_result(Some("1"), || {
+            let recipe = crate::agent::provider::SpawnRecipe {
+                binary: "claude",
+                base_args: vec!["--dangerously-skip-permissions".into()],
+                trailing_args: vec![],
+                windows_shell: crate::agent::provider::WindowsShell::Direct,
+            };
+            super::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                None,
+                &std::env::temp_dir().to_string_lossy(),
+                session_id,
+                true,
+            )
+        });
 
         let error = match result {
             Ok(_) => panic!("a failed sandbox setup must not yield a launchable command"),
             Err(error) => error,
         };
         assert!(error.contains("sandbox setup failed"), "{error}");
-        assert!(error.contains(crate::sandbox::DEV_SANDBOX_ENV), "{error}");
+        // The remediation must name the real cause — a temp-directory write
+        // failure — not tell the user to re-enable a gate that was already
+        // open for this to be reachable.
+        assert!(error.contains("temporary directory"), "{error}");
     }
 
     /// #2034 — the developer gate is authoritative. Even with the Mesh flag on,
@@ -500,26 +505,23 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn mesh_flag_alone_does_not_reach_the_seatbelt_wrapper() {
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: ENV_LOCK is held across the mutation window.
-        #[allow(unsafe_code)]
-        unsafe { std::env::remove_var(crate::sandbox::DEV_SANDBOX_ENV) };
-
-        let recipe = crate::agent::provider::SpawnRecipe {
-            binary: "claude",
-            base_args: vec![],
-            trailing_args: vec![],
-            windows_shell: crate::agent::provider::WindowsShell::Direct,
-        };
-        let command = super::wrap(
-            recipe,
-            EnvType::Windows,
-            None,
-            None,
-            &std::env::temp_dir().to_string_lossy(),
-            -97_513 - (std::process::id() as i64 % 100_000),
-            true,
-        )
+        let command = crate::sandbox::test_support::with_dev_gate_result(None, || {
+            let recipe = crate::agent::provider::SpawnRecipe {
+                binary: "claude",
+                base_args: vec![],
+                trailing_args: vec![],
+                windows_shell: crate::agent::provider::WindowsShell::Direct,
+            };
+            super::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                None,
+                &std::env::temp_dir().to_string_lossy(),
+                -97_513 - (std::process::id() as i64 % 100_000),
+                true,
+            )
+        })
         .expect("the unsandboxed path always assembles");
         let argv = command.get_argv();
         assert_ne!(

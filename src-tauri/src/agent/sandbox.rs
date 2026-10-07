@@ -177,17 +177,22 @@ fn profile_path(session_id: i64) -> PathBuf {
 ///
 /// A requested sandbox that cannot be set up refuses the spawn (#2034), so this
 /// text is the *only* thing standing between the user and an unexplained
-/// failure. It therefore has to name the failing session, the underlying cause,
-/// and both ways out — retry with the gate open, or turn the toggle off
-/// deliberately. Kept separate from the `Err` conversion so the contract is
-/// unit-testable on every platform, not only where Seatbelt exists.
+/// failure.
+///
+/// It must not tell the user to enable the developer gate or the Mesh toggle:
+/// this message is only reachable once `sandbox_requested` is already true, so
+/// both are already on and suggesting them diagnoses an I/O failure as a
+/// configuration mistake. The remediation therefore targets the real cause —
+/// writing the profile into the system temporary directory — and the one
+/// deliberate escape hatch. Kept separate from the `Err` conversion so the
+/// contract is unit-testable on every platform, not only where Seatbelt exists.
 pub fn setup_failure_message(session_id: i64, binary: &str, error: &io::Error) -> String {
     format!(
-        "sandbox setup failed for session {session_id}: could not prepare the macOS Seatbelt \
-         profile for {binary} ({error}). The agent was not started. Relaunch Buildmesh with \
-         {gate}=1 and this Mesh's Sandbox toggle on to retry, or turn the toggle off in Project \
-         Settings to run agents unsandboxed.",
-        gate = crate::sandbox::DEV_SANDBOX_ENV,
+        "sandbox setup failed for session {session_id}: Buildmesh could not write the macOS \
+         Seatbelt profile for {binary} ({error}). The agent was not started — it will not be \
+         launched outside the sandbox. Check that the temporary directory is writable and has \
+         free space. To run this Mesh's agents without a sandbox, turn the Sandbox toggle off in \
+         Project Settings."
     )
 }
 
@@ -226,7 +231,6 @@ pub fn seatbelt_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     const WORKTREE: &str = "/Users/dev/repo/.claude/worktrees/wt-1";
 
@@ -344,8 +348,7 @@ mod tests {
         // runs several test binaries against one temp directory at a time.
         let session_id = -97_311 - (std::process::id() as i64 % 100_000);
         let path = profile_path(session_id);
-        std::fs::create_dir_all(&path).expect("a directory at the profile path blocks the write");
-        let _guard = scopeguard_remove_dir(&path);
+        let _scratch = crate::sandbox::test_support::block_writes_at(&path);
 
         let error = match seatbelt_command("claude", &[], WORKTREE, session_id) {
             Ok(_) => panic!(
@@ -363,24 +366,18 @@ mod tests {
         assert!(message.contains("sandbox setup failed"), "{message}");
         assert!(message.contains("claude"), "{message}");
         assert!(message.contains("not started"), "{message}");
-        assert!(
-            message.contains(crate::sandbox::DEV_SANDBOX_ENV),
-            "the message must name the retry env var: {message}"
-        );
         assert!(message.contains("Project Settings"), "{message}");
-    }
-
-    /// Removes a directory when the test body ends, so a failing assertion
-    /// cannot leave the scratch path behind for the next run.
-    struct ScopeguardRemoveDir(PathBuf);
-
-    impl Drop for ScopeguardRemoveDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn scopeguard_remove_dir(path: &Path) -> ScopeguardRemoveDir {
-        ScopeguardRemoveDir(path.to_path_buf())
+        // It must name the real cause — this only fires once the developer gate
+        // and the Mesh toggle are *already* on, so pointing the user back at
+        // them would misdiagnose a temp-directory write failure as a missing
+        // setting.
+        assert!(
+            message.contains("temporary directory"),
+            "the message must name the actual failure: {message}"
+        );
+        assert!(
+            !message.contains(crate::sandbox::DEV_SANDBOX_ENV),
+            "re-enabling the already-open gate is not a remediation: {message}"
+        );
     }
 }

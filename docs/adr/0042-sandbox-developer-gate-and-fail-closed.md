@@ -102,6 +102,28 @@ is inert; WSL is not contained.
 - **Removing the gate is a one-line change** plus the checkbox's condition, once
   the platform gaps close.
 
+## Accepted debt
+
+**The single-seam contract is now two predicates.** ADR-0012 and the ADR-0014
+pivot both specified `sandbox::sandbox_enabled` as *the* policy seam. macOS now
+asks `sandbox_requested` during command construction in `wrap`, while Windows
+still asks `sandbox_enabled` during PTY creation in `launch_process`, so the
+sandbox decision is taken at two different points in the spawn lifecycle.
+
+This is forced by the current backend split, not chosen: `sandbox_enabled` is
+`cfg!(target_os = "windows")`, so macOS cannot use it without permanently
+gating its own backend off. The two predicates share one body of logic
+(`sandbox_requested`) so the rule cannot drift, and the asymmetry is
+documented at each call site. It should be unified when the sandbox is
+un-gated and the backends are reworked together — until then the seam is
+documented as split rather than pretended whole.
+
+**Pre-existing, fixed here in passing:** the sandboxed macOS branch passed
+`recipe.binary` to `seatbelt_command` while every other branch ran the resolved
+`executable`. With a routing override that would have confined and launched a
+different program than the one routing selected. The change is a no-op when no
+override is present, so it is untestable at runtime on a non-macOS host.
+
 ## Verification
 
 - `sandbox::tests::persisted_flag_is_inert_without_the_developer_gate` — the
@@ -111,7 +133,9 @@ is inert; WSL is not contained.
 - `sandbox::tests::request_predicate_is_platform_agnostic` — guards the macOS
   branch from re-acquiring the fail-open via a stray `cfg!`.
 - `agent::sandbox::tests::seatbelt_command_reports_a_failed_profile_write_instead_of_a_command` —
-  a blocked profile path yields `Err`, never a launchable command.
+  a blocked profile path yields `Err`, never a launchable command; the message names the
+  temp-directory cause and deliberately does *not* tell the user to re-enable the gate or
+  the toggle, because both are already on for this path to be reachable.
 - `spawn_environment::tests::requested_sandbox_without_a_writable_profile_yields_no_command`
   (macOS) — no command at all, so `spawn_child` is never reached.
 - `project-settings-tab.test.tsx` — the toggle is absent by default (release) and

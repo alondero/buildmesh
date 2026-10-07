@@ -81,31 +81,68 @@ pub fn sandbox_enabled(mesh_sandbox: bool) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use super::DEV_SANDBOX_ENV;
 
-    /// Runs `body` with the developer gate forced to `value`. The process
-    /// environment is shared state, so the lock serialises it against sibling
-    /// tests that swap env vars (and `ENV_LOCK` is the repo-wide convention).
-    fn with_dev_gate(value: Option<&str>, body: impl FnOnce()) {
+    /// Runs `body` with the developer gate set to `value`, restoring the
+    /// previous environment even if `body` panics.
+    ///
+    /// The process environment is shared by every thread in the test binary, so
+    /// a test that sets the gate and returns — or panics — must not leave
+    /// `BUILDMESH_SANDBOX=1` behind for whichever test runs next. `with_env_vars`
+    /// wraps the body in `catch_unwind` and restores before re-panicking, and
+    /// `ENV_LOCK` is held across that whole window, so restoration cannot race a
+    /// sibling test. The lock is released only after `with_env_vars` returns.
+    pub(crate) fn with_dev_gate_result<T>(
+        value: Option<&str>,
+        body: impl FnOnce() -> T,
+    ) -> T {
         let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: ENV_LOCK is held for the whole mutation window, and the
-        // `cfg!(unix)` form is what Rust requires for set_var on 2024-edition
-        // toolchains that mark it unsafe.
-        #[allow(unsafe_code)]
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var(DEV_SANDBOX_ENV, v),
-                None => std::env::remove_var(DEV_SANDBOX_ENV),
-            }
-        }
-        body();
-        // Restore so a later test never inherits this one's value.
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::remove_var(DEV_SANDBOX_ENV);
+        crate::env::with_env_vars(
+            &[(DEV_SANDBOX_ENV, value.map(std::ffi::OsStr::new))],
+            body,
+        )
+    }
+
+    /// Unit variant of [`with_dev_gate_result`].
+    pub(crate) fn with_dev_gate(value: Option<&str>, body: impl FnOnce()) {
+        with_dev_gate_result(value, body);
+    }
+
+    /// Removes a directory when the guard drops, so a failing assertion cannot
+    /// leave a scratch path behind to corrupt the next run.
+    pub(crate) struct RemoveDirOnDrop(std::path::PathBuf);
+
+    impl RemoveDirOnDrop {
+        pub(crate) fn new(path: impl Into<std::path::PathBuf>) -> Self {
+            Self(path.into())
         }
     }
+
+    impl Drop for RemoveDirOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Blocks a file write at `path` by creating a directory there, returning a
+    /// guard that removes it again.
+    ///
+    /// Portable (no chmod, no root), which is what lets the fail-closed
+    /// contract be asserted on every CI host rather than only where Seatbelt
+    /// exists.
+    pub(crate) fn block_writes_at(path: impl Into<std::path::PathBuf>) -> RemoveDirOnDrop {
+        let path = path.into();
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("a directory at {} must be creatable: {e}", path.display()));
+        RemoveDirOnDrop::new(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::with_dev_gate;
+    use super::*;
 
     #[test]
     fn disabled_when_mesh_opts_out() {
