@@ -43,4 +43,35 @@ The dev launcher prints pre-launch line counts for `buildmesh.log`, `panic.log`,
 
 State the base/working tree, requested scope, commands actually run, results and executed counts. Separate passed, failed, and not run. Label browser evidence as mock IPC or real backend. Include the observed acceptance outcome and any limitation that matters to the reviewer. Add a durable lesson to the owning documentation only when it changes a future decision; do not accumulate one-off recipes in this skill.
 
-When the verification includes remote state — a pushed branch, a PR awaiting checks, merge readiness — read the `Verifying a push or merge` section of the shared contract before reporting a verdict. Poll one run id rather than the `gh pr checks` rollup, and read a PowerShell condition as an exit code (`$LASTEXITCODE`), never as command output.
+When the verification includes remote state — a pushed branch, a PR awaiting checks, merge readiness — read `Remote CI` below before reporting a verdict.
+
+## Remote CI
+
+Remote state comes from one run, never from a PR rollup. `gh pr checks <pr>` aggregates every workflow run the branch ever triggered, so a `pending` entry from a superseded or cancelled run keeps being reported after the live run has already finished. Resolve the run for the pushed commit — `--commit`, not `--branch`, so a new run that has not registered yet cannot hand you the previous one — then poll that run's jobs:
+
+```powershell
+$sha = git rev-parse HEAD
+$run = gh run list --commit $sha --limit 1 --json databaseId --jq '.[0].databaseId'
+gh run view $run --json status,conclusion,jobs
+```
+
+Inside one run there is no rollup, and a job that is still executing keeps the same job id on every poll. **A stable pending job id is what in-flight execution looks like — keep waiting on it.** Staleness only exists when comparing across runs, and the tell is that `gh run view <run>` reports `status: completed` while `gh pr checks` still lists something pending; that entry can only be left by an older or cancelled run. If `gh run list --commit` returns nothing yet, the workflow has not registered — re-poll for the run rather than reporting the push as unverified.
+
+A red required check is not automatically a code failure — classify it before acting. List the run's job conclusions, then read the failing job's own log (`gh run view --job <job-id> --log-failed`); the `Rust tests + TS bindings` aggregate only reports that something upstream was not green, so a red aggregate with a red `Detect changes` or `Rust build` needs the upstream log, not the aggregate's. Compiler and test errors (`E0425`, a failing assertion, `test result: FAILED`) mean fix the code. Infrastructure leaves different signatures: `was not acquired by Runner of type hosted`, a lost runner with no step conclusion and no retrievable log, `apt-get` or download timeouts, or `cancelled`. Those mean re-run the failed jobs (`gh run rerun <run-id> --failed`) and change nothing — editing code in response to an infrastructure failure only adds churn on top of a healthy tree.
+
+PowerShell evaluates a command's **output**, not its exit code, so a silent native command used as a bare condition is always false. `git merge-base --is-ancestor` prints nothing on success, which makes the condition the empty string and sends every call down the `else` branch — the check can never report success, whatever the real state:
+
+```powershell
+# WRONG - always false on success: the condition is the command's empty output
+if (git merge-base --is-ancestor $sha origin/main 2>$dev) { "YES" } else { "NO" }
+
+# RIGHT - run the command, then branch on its exit code
+git merge-base --is-ancestor $sha origin/main 2>$dev
+if ($LASTEXITCODE -eq 0) { "YES" } else { "NO" }
+```
+
+The same trap applies to any silent native command in a condition: `git diff --quiet`, `gh`, `cargo`. Cmdlets that return a value are unaffected — `if (Test-Path $log)` is fine — as are explicit output comparisons such as `if ((git status --porcelain).Length -gt 0)`. The `guard-antipatterns.mjs` hook and `npm run check:agent` enforce this in `src/`, `src-tauri/`, and `scripts/`; both skip Markdown, which is why the wrong form above can be quoted here to teach it.
+
+When two commands disagree about repo state, check the commands before blaming the cache. One always-wrong command and one correct command produce two mutually inconsistent readings, and "stale refs" explains them no better than the bug that is actually there; trusting the first confident story instead of reading both commands is how a five-minute mistake becomes a ten-minute one.
+
+Which checks are required on `main`, and what each one covers, is not restated here: read `docs/development/releasing.md#required-checks-and-branch-protection`, which is the single source of truth and stays in step with `.github/workflows/verify.yml`.

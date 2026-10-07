@@ -1,5 +1,7 @@
 # Coordinator Read API — User Guide
 
+Status: current
+
 > **Audience:** anyone wiring an external agent (Hermes, an in-app superagent, a
 > cron, a script) to Buildmesh's read surface. **Prerequisite:** Buildmesh
 > running on the same machine, local or remote-reachable over your own tunnel.
@@ -335,7 +337,7 @@ These do not block adoption, but a Coordinator may want to know about them:
 - `src-tauri/src/coordinator/node_digest.rs` — the pure Node Digest builder
 - `src-tauri/src/coordinator/enrichment.rs` — provider-capability gate + path
   resolution + bounded transcript read
-- `src-tauri/src/services/transcript_reader.rs` — the JSONL parser (quarantines
+- `src-tauri/src/services/transcript_reader/` — the JSONL parser (quarantines
   all Claude-Code-format brittleness)
 - `src-tauri/src/http/routes/coordinator.rs` — thin route handlers
 - `src-tauri/src/http/mod.rs` — dispatcher with the off-by-default auth gate

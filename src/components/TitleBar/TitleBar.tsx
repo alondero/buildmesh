@@ -24,7 +24,7 @@ import { UsageIcon } from '../Probe/probeIcons';
  * lights are drawn by us and their rest / hover / pressed / inactive states
  * are emulated from `NSWindow` (ADR-0036). Drag-region placement
  * (per-target, never on buttons or SVGs) is the load-bearing detail; see
- * the recipe in `docs/knowledge-primer.md`.
+ * the recipe in `docs/development/windows.md`.
  *
  * Issue #1375 moved navigation title-bar-first: a labelled "Search or
  * open…" command field opens the Universal Command Omnibar (the palette
@@ -112,8 +112,8 @@ function SearchIcon({ className }: IconProps) {
     field is the global entry point to the command palette (views, commands,
     nodes, issues, pull requests); the header's `1fr auto 1fr` grid centres
     it on the viewport. It opens a surface rather than displaying data
-    inline. The kbd hint is read from the shortcut catalog (the
-    knowledge-primer's single source for display labels) so it can never
+    inline. The kbd hint is read from the shortcut catalog (see
+    docs/development/windows.md for the keyboard-shortcut rule) so it can never
     drift from the cheatsheet row. */
 function NavigationControls() {
   // The read below drives the field's visible aria state — `aria-expanded`

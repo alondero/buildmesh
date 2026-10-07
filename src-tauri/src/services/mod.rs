@@ -38,6 +38,6 @@ pub mod warm_pool;
 ///
 /// Extracted from `services::usage` for issue #956 so the OAuth dance's
 /// `write` / `delete` calls don't have to live inside the usage module. See
-/// `docs/knowledge-primer.md` for the credentials section.
+/// `docs/development/providers.md` for the credentials section.
 #[cfg(windows)]
 pub mod windows_cred;

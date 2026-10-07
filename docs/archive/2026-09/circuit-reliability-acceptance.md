@@ -15,7 +15,7 @@ Source inspection, deterministic automated checks, and live delivery are separat
 | Child/background work (9, 11-13) | #1844: foreground termination and all owned work must be terminal | `WorkEvidence`, atomic observation batches; pure tests | Windows scripted ownership tests pass, including late child termination and missing registry entries | No available live harness establishes complete owned-work coverage. Codex live result stays Unverified |
 | Human waits (10, 15, 21) | #1846: human waits do not expire or grant authorization | Typed wait observations, stepper, history UI | Windows regression reproduced generic Working incorrectly clearing permission; typed identity/request matching and UI tests added | Claude/Codex exact-request callbacks are wired; uncorrelated waits remain open with an explicit limitation. Live question correlation passed below; permission resolution and human-input-only progression gating remain Unverified |
 | Restart and cancellation (22-23) | #1846: terminal cancellation and identity-proven reattachment | Ledger, worker restart, process registry; serial Rust tests | Windows tests pass for cancelled-run fences, ambiguous spawn recovery, receipt reopen, and process generations. Current rebuilt app cancellation left Codex run 45 terminal at attempt one with history retained | Actual app restart resumed the saved Codex session and retained evidence (below); the pending question was interrupted rather than restored, so full reattachment acceptance remains Unverified |
-| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt, spawn, continuation, local status, close, and notification recovery policies are inventoried in [the effect recovery contract](circuit-effect-recovery.md). SetNodeStatus now commits with its step; review continuation rollback, reopen deduplication, and publication exclusion have focused DB coverage | Live process crashes and live GitHub mutations remain unverified. Non-OpenPr GitHub actions have no automated read-only recheck and require operator outcome records |
+| Unknown effects and recovery races (16-21) | #1846: uncertainty never authorizes replay | Stepper, transactional journal, worker dispatch; serial Rust tests | GitHub, prompt, spawn, continuation, local status, close, and notification recovery policies are inventoried in [the effect recovery contract](../../development/circuit-effect-recovery.md). SetNodeStatus now commits with its step; review continuation rollback, reopen deduplication, and publication exclusion have focused DB coverage | Live process crashes and live GitHub mutations remain unverified. Non-OpenPr GitHub actions have no automated read-only recheck and require operator outcome records |
 | Operator history and outcomes (24-28) | #1847: append-only causal trace and actionable uncertainty | Ledger, IPC, rendered Probe; Rust and Vitest/live IPC | Typed observation/classification provenance, effect history, scrubbed complete/partial/unavailable reports, operator reasons and capabilities exercised. Wait, capacity/admission, configuration-revision and recovery entries carry source/disposition/identity/time (schema v45) with `resolved` on a cleared wait; reopen tests prove the history (including recovery) survives restart and agrees with the run/step projection; mock-mode and real WebView2 240px runs render every state (working / waiting / Unverified / failed / recovery) with its next safe action. Current rebuilt WebView2 shows Codex's ownership limitation and same-attempt Recheck | Live delivery of hook-driven transitions per harness stays covered by the rows above; this row's history/operator-surface closure is recorded below |
 | Review snapshots/continuation (29-32) | #1848: frozen graph/configuration and successor deduplication | Review ledger, launch capture, blueprint UI; Rust/Vitest/live IPC | Frozen effective launch configuration and graph tests pass. Live blueprint copy was disabled/manual/independent; original mutation rejected. Current-build live copy, disable, concurrent continuation, lineage and cancellation checks pass; the continuation link is now durable in the run's own history | The live reviewer dispatch is Unverified: the borrowed-source gate parks Unverified on this harness (see the #1910 section). A run on a copied Review Blueprint offers no Continue review control, so continuation of a *first* review on a copy has no UI entry point. Blueprint mutation refusal is deterministic-only (the read-only surface has no control to click) |
 | Legacy retirement/capacity (33-36) | #1849: retained history, no conversion/restart, separate capacity | Startup retirement, spawn/borrow claims, generation-fenced teardown, retained-settings UI | Windows deterministic cutover/reopen tests pass; no Circuit conversion or capacity transfer. Current source build passed real dev IPC, retained-node, 240px, and reload checks. A forced process kill at each durable cleanup boundary is now covered end to end (issue #1911): crash before/inside the intent, after the intent, between the owned-process kill and its acknowledgement, and after the acknowledgement, each followed by a relaunch that retries cleanup | A real agent session is not what the crash phases run against — the contained processes are real PTY-backed fixture children in kill-on-close jobs, and the two in-transaction boundaries are forced with a statement abort rather than a kill inside the commit. The suite is Windows-only: the process claims depend on Win32 job containment, so Linux and macOS run the #1889 retirement checks but not these scenarios (see the #1911 section) |
@@ -409,7 +409,7 @@ The #1889 checkpoint below recorded Claude submission correlation as
 unavailable, on the grounds that a native turn ID cannot acknowledge a
 Buildmesh input. That premise was half right and has now been resolved against
 the documented contract. The full mechanism, hazards and limits are in
-[Claude Code harness capabilities](../learning/claude-code-harness-capabilities.md).
+[Claude Code harness capabilities](../../learning/claude-code-harness-capabilities.md).
 
 **The native fields.** Claude Code's hooks reference documents `prompt_id` — a
 UUID naming the prompt currently being processed — as a common input field on
@@ -998,15 +998,15 @@ horizontally.
 
 Inspected captures (committed under `docs/pr-screenshots/issue-1909/`):
 
-![Activity: working, waiting, Unverified with its Recheck action, and the resolved evidence wait](../pr-screenshots/issue-1909/activity-states-and-recheck.png)
+![Activity: working, waiting, Unverified with its Recheck action, and the resolved evidence wait](../../pr-screenshots/issue-1909/activity-states-and-recheck.png)
 
-![Continuation: the successor's "Continued a failed review" entry with source and disposition](../pr-screenshots/issue-1909/continuation.png)
+![Continuation: the successor's "Continued a failed review" entry with source and disposition](../../pr-screenshots/issue-1909/continuation.png)
 
-![History: the failed run's readable reason](../pr-screenshots/issue-1909/history-failed.png)
+![History: the failed run's readable reason](../../pr-screenshots/issue-1909/history-failed.png)
 
-![Queue: the pending run's admission reason](../pr-screenshots/issue-1909/queue-admission.png)
+![Queue: the pending run's admission reason](../../pr-screenshots/issue-1909/queue-admission.png)
 
-![The Probe at the 240px minimum width](../pr-screenshots/issue-1909/probe-240px.png)
+![The Probe at the 240px minimum width](../../pr-screenshots/issue-1909/probe-240px.png)
 
 This is a synthetic fixture (no agents spawned): it establishes the real-IPC
 read path, the 240px layout, and the operator copy — not a live harness
@@ -1081,7 +1081,7 @@ that, and unsupported or untested combinations stay unverified. Platform:
 Windows, development configuration.
 ## Durable effect-kind audit (#1908)
 
-The [Circuit effect recovery contract](circuit-effect-recovery.md) maps every
+The [Circuit effect recovery contract](../../development/circuit-effect-recovery.md) maps every
 stepper effect to its durable state and safe restart policy. The external
 journal now uses a closed Rust enum for its `spawn`, `prompt`, and `github`
 claims; the worker maps every effect variant explicitly. Classifier

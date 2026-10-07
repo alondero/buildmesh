@@ -1,9 +1,11 @@
 # Circuit effect recovery contract
 
+Status: current
+
 This contributor reference maps every effect emitted by the Circuit stepper to
 its durable intent, dispatch, result, cancellation, and restart policy. It
 describes the current implementation and the automated evidence that pins it.
-The [September 30 recovery audit](circuit-recovery-2026-09-30.md) records the
+The [September 30 recovery audit](../archive/2026-09/circuit-recovery-2026-09-30.md) records the
 live failures behind the report-commit and inherited-attempt regression tests.
 The user workflow for uncertain actions is in
 [Agent Node Circuits](agent-node-circuits.md).

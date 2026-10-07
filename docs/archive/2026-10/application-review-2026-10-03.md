@@ -1,7 +1,7 @@
 # Application bug and UX review - October 3, 2026
 
 Status: review of baseline `3a5f5b4865c0cc2697f8c7c3a776769f88d84584`.
-Audience: maintainers. Current usage belongs in the [user guide](../user-guide.md).
+Audience: maintainers. Current usage belongs in the [user guide](../../user-guide.md).
 
 ## Scope and evidence
 
@@ -110,8 +110,8 @@ Rust, survives switching away/back, and leaves Beta's notes unchanged.
 Notes enablement is a functional DOM assertion; its pixels alone do not
 establish the disabled state.
 
-The inspected [before](../pr-screenshots/meager-hooded-dandy/settings-before.png)
-and [after](../pr-screenshots/meager-hooded-dandy/settings-after.png) captures
+The inspected [before](../../pr-screenshots/meager-hooded-dandy/settings-before.png)
+and [after](../../pr-screenshots/meager-hooded-dandy/settings-after.png) captures
 contain only review fixtures. Native log inspection found the injected
 settings error and expected occupied-port/global-shortcut warnings from
 running alongside existing instances; no panic files were created.

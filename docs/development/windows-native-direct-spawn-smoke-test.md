@@ -1,5 +1,7 @@
 # Smoke test: Windows-native direct-spawn (MiniMax + Kimi)
 
+Status: current
+
 Manual runtime verification for the Windows-native `claude.exe` → ConPTY
 spawn path. Out of scope for CI: requires real `claude.exe` + real
 third-party API keys + real Windows ConPTY, none of which work in a

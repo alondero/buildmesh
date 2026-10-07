@@ -40,9 +40,9 @@ export function resolveKeyAction(state: KeyEventState): KeyAction {
     if (k === 'f') return 'find';
     // Issue #1568 — Ctrl+Shift+K is owned by the Omnibar's Tauri global
     // shortcut (App.tsx:146). Remap terminal clear off that chord to
-    // Ctrl+Shift+L, following the primer rule "remap the terminal side
+    // Ctrl+Shift+L, following the documented rule "remap the terminal side
     // or augment the modifier rather than stealing the user's keystroke"
-    // (docs/knowledge-primer.md:133).
+    // (docs/development/terminals.md, "Command Code keyboard").
     if (k === 'l') return 'clear';
     return 'passthrough';
   }

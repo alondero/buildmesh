@@ -22,7 +22,7 @@ use crate::{db, env};
 /// test). If a future UI re-exposes a worktree-mode selector, re-introduce
 /// the TS constant alongside it and re-couple by doc comment + paired test
 /// (see [[feedback_cross-language-default-coupling]]). See
-/// `docs/knowledge-primer.md` (Worktree Support) for the branched-vs-detached
+/// `docs/development/agent-nodes.md` (Worktree Support) for the branched-vs-detached
 /// rationale.
 pub const DEFAULT_WORKTREE_MODE: &str = "branched";
 

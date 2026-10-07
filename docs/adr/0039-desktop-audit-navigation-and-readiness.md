@@ -71,6 +71,6 @@ Repository retain their separate configuration and maintenance roles.
 
 Behavioral tests cover routing-before-probes, preferences failure safety,
 keyboard tabs, combined filters/reset, recovery, archived reads and reopening.
-The [October audit](../development/desktop-ux-audit-2026-10.md) records desktop
+The [October audit](../archive/2026-10/desktop-ux-audit-2026-10.md) records desktop
 screenshots and runtime evidence. See the [user guide](../user-guide.md) for
 the resulting navigation and readiness flow.

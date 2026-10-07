@@ -823,7 +823,7 @@ pub struct MeshGitStatic {
 /// timeout), and this command fires on every sidebar mesh mount —
 /// running it on a Tauri async worker would park that worker for the
 /// call's duration and, across several simultaneous mounts, starve the
-/// pool (see *Command Threading* in `docs/knowledge-primer.md`). The
+/// pool (see *Command Threading* in `docs/development/rust-conventions.md`). The
 /// sync core `get_mesh_git_static_blocking` stays directly callable
 /// (the cache-behaviour tests exercise it without a runtime).
 ///

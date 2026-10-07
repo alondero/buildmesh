@@ -12,9 +12,10 @@ others are welcome. This document is the contract for contributing.
    - [`docs/README.md`](docs/README.md) — documentation map and audience-based starting points.
    - [`CONTEXT.md`](CONTEXT.md) — domain language (what a *Mesh* and *Agent
      Node* are, and how they relate).
-   - [`docs/knowledge-primer.md`](docs/knowledge-primer.md) — architecture,
-     conventions, and **anti-patterns**. Required reading before touching
-     backend, terminal, agent-spawn, or path code.
+   - [`docs/knowledge-primer.md`](docs/knowledge-primer.md) — the **index** to the
+     architecture and **anti-patterns**. Find the row for the area you are changing,
+     then read that focused owner document in `docs/development/`; required reading
+     before touching backend, terminal, agent-spawn, or path code.
 3. **Match existing patterns.** The codebase has a strong opinionated style.
    New abstractions, dependencies, or speculative generality aren't wanted.
    PRs that match the surrounding code land faster.
