@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { changedPaths, completion, fingerprint, runGate, scopePaths } from '../../scripts/harness.mjs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { changedPaths, completion, fingerprint, runGate, scopePaths, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
+import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -270,7 +271,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -363,4 +364,300 @@ test('evaluation corpus uses present tests and names remaining runtime gaps', ()
     assert.ok(row.promise && row.boundary && row.remaining);
     for (const path of row.gate.command.filter(arg => arg.startsWith('tests/'))) assert.ok(readFileSync(join(root, path)).length);
   }
+});
+
+// --- Parallel lanes, machine-wide heavy-gate slots and `harness wait` (#2104) ---
+const settle = () => new Promise(done => setImmediate(done));
+// Fake gates that run until the test finishes them, so overlap and ordering are
+// observed directly instead of inferred from timings.
+function controlledGates() {
+  const log = [];
+  const open = new Map();
+  const execute = gate => new Promise(resolve => {
+    log.push(`start ${gate.id}`);
+    open.set(gate.id, outcome => { log.push(`end ${gate.id}`); resolve({ id: gate.id, outcome }); });
+  });
+  const started = async id => { for (let i = 0; i < 1000 && !open.has(id); i += 1) await settle(); assert.ok(open.has(id), `${id} never started: ${log}`); };
+  const finish = async (id, outcome = 'PASS') => { await started(id); const resolve = open.get(id); open.delete(id); resolve(outcome); };
+  const idle = async () => { for (let i = 0; i < 20; i += 1) await settle(); };
+  return { log, execute, started, finish, idle };
+}
+const lanePlan = () => [
+  { id: 'infra' },
+  { id: 'build', lane: 'frontend' }, { id: 'ui-tests', lane: 'frontend' },
+  { id: 'fmt', lane: 'rust' }, { id: 'compile', lane: 'rust', after: ['build'] }, { id: 'rust-tests', lane: 'rust' },
+];
+
+test('the product plan splits into frontend and Rust lanes that wait for the build before compiling', () => {
+  const both = planGates(['unknown/input']);
+  const byId = id => both.find(row => row.id === id);
+  assert.deepEqual(both.filter(row => !row.lane).map(row => row.id).slice(0, 3), ['whitespace', 'staged-content', 'agent-rules']);
+  assert.deepEqual(both.filter(row => row.lane === 'frontend').map(row => row.id), ['frontend-build', 'bundle', 'frontend-tests', 'browser-smoke']);
+  assert.deepEqual(both.filter(row => row.lane === 'rust').map(row => row.id), ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift']);
+  // vite build empties dist/mobile, which the Rust crate embeds.
+  assert.deepEqual(byId('rust-clippy').after, ['frontend-build']);
+  assert.deepEqual(byId('rust-tests').after, ['frontend-build']);
+  assert.equal(byId('rust-format').after, undefined);
+  assert.equal(byId('browser-smoke').after, undefined);
+  assert.deepEqual(both.filter(row => row.heavy).map(row => row.id), ['frontend-tests', 'rust-tests']);
+  // Without a frontend build the mobile build opens the Rust lane, so nothing needs to wait.
+  const rustOnly = planGates(['src-tauri/src/lib.rs']);
+  assert.deepEqual(rustOnly.filter(row => row.lane === 'rust').map(row => row.id).slice(0, 2), ['mobile-build', 'rust-format']);
+  assert.ok(rustOnly.filter(row => row.after).every(row => row.after.length === 0));
+  assert.ok(planGates(['docs/page.md']).every(row => !row.lane));
+});
+test('lanes run concurrently, and a gate starts only after the gates it names have passed', async () => {
+  const fake = controlledGates();
+  const run = runPlan(lanePlan(), { execute: fake.execute });
+  await fake.finish('infra');
+  // Both lanes are in flight at once.
+  await fake.started('build');
+  await fake.started('fmt');
+  await fake.finish('fmt');
+  await fake.idle();
+  assert.ok(!fake.log.includes('start compile'), 'compile must wait for the build');
+  await fake.finish('build');
+  await fake.finish('compile');
+  await fake.finish('ui-tests');
+  await fake.finish('rust-tests');
+  await run;
+  assert.ok(fake.log.indexOf('end build') < fake.log.indexOf('start compile'));
+});
+test('a failed gate stops further gates from starting in every lane but lets running ones finish', async () => {
+  const fake = controlledGates();
+  const rows = [];
+  const run = runPlan(lanePlan(), { execute: fake.execute, onResult: row => rows.push(`${row.id}:${row.outcome}`) });
+  await fake.finish('infra');
+  await fake.started('build');
+  await fake.started('fmt');
+  await fake.finish('build', 'FAIL');
+  await fake.finish('fmt');
+  await fake.idle();
+  // Nothing after the failure started, including the gate that depended on the build.
+  assert.deepEqual(fake.log.filter(entry => entry.startsWith('start')).sort(), ['start build', 'start fmt', 'start infra']);
+  await run;
+  assert.deepEqual(rows.sort(), ['build:FAIL', 'fmt:PASS', 'infra:PASS']);
+});
+test('a failing infrastructure gate keeps the lanes from starting', async () => {
+  const fake = controlledGates();
+  const run = runPlan(lanePlan(), { execute: fake.execute });
+  await fake.finish('infra', 'TIMEOUT');
+  await fake.idle();
+  assert.deepEqual(fake.log, ['start infra', 'end infra']);
+  await run;
+});
+test('a queued gate that finds the plan already failed leaves no row and starts nothing after it', async () => {
+  const fake = controlledGates();
+  const rows = [];
+  let leaveQueue;
+  const queue = new Promise(done => { leaveQueue = done; });
+  const run = runPlan([{ id: 'a', lane: 'x' }, { id: 'b', lane: 'y' }, { id: 'c', lane: 'y' }, { id: 'd', lane: 'z', after: ['b'] }], {
+    // b models a heavy gate waiting for a machine-wide slot.
+    execute: async (gate, isStopped) => gate.id === 'b' ? (await queue, isStopped() ? null : { id: 'b', outcome: 'PASS' }) : fake.execute(gate),
+    onResult: row => rows.push(`${row.id}:${row.outcome}`),
+  });
+  await fake.finish('a', 'FAIL');
+  await fake.idle();
+  leaveQueue();
+  await run;
+  assert.deepEqual(rows, ['a:FAIL']);
+  assert.deepEqual(fake.log, ['start a', 'end a']);
+});
+test('a gate whose dependency did not pass is not run', async () => {
+  const fake = controlledGates();
+  const run = runPlan([{ id: 'a', lane: 'x' }, { id: 'b', lane: 'y', after: ['a'] }], { execute: fake.execute });
+  await fake.finish('a', 'BLOCKED');
+  await fake.idle();
+  assert.deepEqual(fake.log, ['start a', 'end a']);
+  await run;
+});
+
+test('overlapping heavy suites split the cores, and a lone one keeps the whole machine', () => {
+  const both = planGates(['unknown/input']);
+  const byId = id => both.find(row => row.id === id);
+  assert.deepEqual(heavyGateEnv(byId('frontend-tests'), both, 24), { VITEST_MAX_WORKERS: '12' });
+  assert.deepEqual(heavyGateEnv(byId('rust-tests'), both, 24), { RUST_TEST_THREADS: '12', BUILDMESH_RUST_TEST_JOBS: '2' });
+  assert.deepEqual(heavyGateEnv(byId('frontend-tests'), both, 1), { VITEST_MAX_WORKERS: '2' });
+  assert.deepEqual(heavyGateEnv(byId('lint'), both, 24), {});
+  for (const paths of [['src/owner.ts'], ['src-tauri/src/lib.rs']]) {
+    const lone = planGates(paths);
+    for (const row of lone.filter(item => item.heavy)) assert.deepEqual(heavyGateEnv(row, lone, 24), {}, row.id);
+  }
+});
+
+const slotsDir = t => {
+  const dir = mkdtempSync(join(tmpdir(), 'buildmesh-slots-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+};
+test('heavy-gate slots admit up to the limit, queue the rest with a notice, and free on release', async t => {
+  const dir = slotsDir(t);
+  const options = { dir, limit: 2, pollMs: 10, root: 'wt' };
+  const first = await acquireSlot({ ...options, gate: 'a' });
+  const second = await acquireSlot({ ...options, gate: 'b' });
+  const queued = [];
+  const third = acquireSlot({ ...options, gate: 'c', onQueued: holders => queued.push(holders.map(held => held.gate).sort()) });
+  let admitted = false;
+  third.then(() => { admitted = true; });
+  for (let i = 0; i < 400 && !queued.length; i += 1) await new Promise(done => setTimeout(done, 5));
+  assert.deepEqual(queued[0], ['a', 'b']);
+  await new Promise(done => setTimeout(done, 60));
+  assert.equal(admitted, false, 'a third gate must not run while two hold slots');
+  first.release();
+  const slot = await third;
+  assert.ok(slot.queuedMs > 0);
+  second.release();
+  slot.release();
+  assert.equal(slotHolders(dir, 2).length, 0);
+});
+test('a slot left by a dead process is reclaimed, and a stale release never frees a newer owner', async t => {
+  const dir = slotsDir(t);
+  const dead = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+  writeFileSync(join(dir, 'slot-0.json'), JSON.stringify({ pid: dead, token: 'old', gate: 'crashed' }));
+  const mine = await acquireSlot({ dir, limit: 1, pollMs: 10, gate: 'a', root: 'wt' });
+  assert.equal(mine.queuedMs, 0, 'a dead owner must not queue anyone');
+  // Someone else takes over this slot (e.g. after we were reclaimed while paused).
+  writeFileSync(join(dir, 'slot-0.json'), JSON.stringify({ pid: process.pid, token: 'newer', gate: 'b' }));
+  mine.release();
+  assert.equal(JSON.parse(readFileSync(join(dir, 'slot-0.json'), 'utf8')).token, 'newer');
+});
+test('the heavy-gate limit defaults to two and rejects nonsense values', () => {
+  assert.equal(heavyGateLimit({}), 2);
+  assert.equal(heavyGateLimit({ BUILDMESH_HEAVY_GATE_LIMIT: '3' }), 3);
+  for (const bad of ['0', '-1', '1.5', 'many', '']) assert.equal(heavyGateLimit({ BUILDMESH_HEAVY_GATE_LIMIT: bad }), 2, bad);
+});
+test('separate processes never hold more heavy-gate slots than the limit', async t => {
+  const dir = slotsDir(t);
+  const marks = mkdtempSync(join(tmpdir(), 'buildmesh-marks-'));
+  t.after(() => rmSync(marks, { recursive: true, force: true }));
+  const lanes = pathToFileURL(join(root, 'scripts/harness-lanes.mjs')).href;
+  // Each child is a stand-in for a worktree's heavy gate: it counts the markers
+  // present while it holds a slot, so a leak above the limit shows as a count.
+  const child = [
+    "import { appendFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    `import { acquireSlot } from ${JSON.stringify(lanes)};`,
+    "const slot = await acquireSlot({ dir: process.argv[1], limit: 2, pollMs: 15, gate: 'fake', root: 'wt' });",
+    "const mark = join(process.argv[2], String(process.pid));",
+    "writeFileSync(mark, '');",
+    "appendFileSync(join(process.argv[2], 'counts.log'), readdirSync(process.argv[2]).filter(name => name !== 'counts.log').length + '\\n');",
+    "await new Promise(done => setTimeout(done, 300));",
+    "rmSync(mark);",
+    "slot.release();",
+  ].join('\n');
+  const runs = Array.from({ length: 5 }, () => new Promise((resolve, reject) => {
+    const proc = spawn(process.execPath, ['--input-type=module', '-e', child, dir, marks], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    proc.stderr.on('data', chunk => { stderr += chunk; });
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(stderr)));
+  }));
+  await Promise.all(runs);
+  const counts = readFileSync(join(marks, 'counts.log'), 'utf8').trim().split('\n').map(Number);
+  assert.equal(counts.length, 5);
+  assert.ok(Math.max(...counts) <= 2, `concurrent heavy gates: ${counts}`);
+});
+
+function writeReceipt(fixture, overrides = {}) {
+  fixture.put('.harness/receipt.json', JSON.stringify({
+    startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:05:00.000Z', durationMs: 300000, outcome: 'PASS',
+    gatePlan: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], gates: [{ id: 'a', outcome: 'PASS' }, { id: 'b', outcome: 'PASS' }, { id: 'c', outcome: 'PASS' }], ...overrides,
+  }));
+}
+const spawnWait = (fixture, ...args) => new Promise(resolve => {
+  const proc = spawn(process.execPath, [script, 'wait', ...args], { cwd: fixture.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  proc.stdout.on('data', chunk => { stdout += chunk; });
+  proc.on('close', status => resolve({ status, stdout }));
+});
+test('wait reports a finished PASS receipt and exits 0', t => {
+  const fixture = repo(t);
+  writeReceipt(fixture);
+  const result = fixture.cli('wait');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^PASS: 3\/3 gates in 300s\. Receipt: \.harness\/receipt\.json/);
+});
+test('wait on FAIL names the failed gates with their logs in at most 30 lines and exits 1', async t => {
+  const fixture = repo(t);
+  const gates = Array.from({ length: 20 }, (_, index) => ({ id: `gate-${index}`, outcome: 'FAIL', reason: `broke\n${'x'.repeat(2000)}`, log: `.harness/logs/${index}.log` }));
+  writeReceipt(fixture, { outcome: 'FAIL', gates, gatePlan: gates.map(({ id }) => ({ id })) });
+  const summary = await waitForVerify(fixture.cwd, { graceMs: 0 });
+  assert.equal(summary.outcome, 'FAIL');
+  assert.ok(summary.lines.length <= 30, `${summary.lines.length} lines`);
+  assert.ok(summary.lines.every(line => line.length < 400));
+  assert.match(summary.lines.join('\n'), /FAIL gate-0: broke/);
+  assert.match(summary.lines.join('\n'), /\.harness\/logs\/0\.log/);
+  assert.match(summary.lines.at(-1), /\+12 more/);
+  assert.equal(fixture.cli('wait').status, 1);
+});
+test('wait blocks while a verify holds the lock, then reports the receipt that verify wrote', async t => {
+  const fixture = repo(t);
+  writeReceipt(fixture, { startedAt: '2020-01-01T00:00:00.000Z', outcome: 'PASS' });
+  fixture.put('.harness/lock', JSON.stringify({ pid: process.pid, action: 'verify', startedAt: '2026-06-01T00:00:00.000Z' }));
+  const waiting = spawnWait(fixture, '--max-seconds', '30');
+  await new Promise(done => setTimeout(done, 1500));
+  // The old green receipt must not be reported while the run is still going.
+  writeReceipt(fixture, { startedAt: '2026-06-01T00:00:01.000Z', outcome: 'FAIL', gates: [{ id: 'a', outcome: 'FAIL', reason: 'broke', log: '.harness/logs/a.log' }] });
+  unlinkSync(join(fixture.cwd, '.harness/lock'));
+  const result = await waiting;
+  assert.equal(result.status, 1, result.stdout);
+  assert.match(result.stdout, /FAIL a: broke/);
+});
+test('wait times out with exit 124 and the gates finished so far while the run is still going', t => {
+  const fixture = repo(t);
+  writeReceipt(fixture, { finishedAt: undefined, outcome: 'BLOCKED', gates: [{ id: 'a', outcome: 'PASS' }] });
+  fixture.put('.harness/lock', JSON.stringify({ pid: process.pid, action: 'verify', startedAt: '2020-01-01T00:00:00.000Z' }));
+  const result = fixture.cli('wait', '--max-seconds', '1');
+  assert.equal(result.status, 124, result.stderr);
+  assert.match(result.stdout, /^TIMEOUT: still running after \d+s.*a:PASS.*wait again/);
+});
+test('wait never reports a stale or missing result as success', async t => {
+  const fixture = repo(t);
+  assert.equal((await waitForVerify(fixture.cwd, { graceMs: 0 })).outcome, 'BLOCKED');
+  // A verify that was killed leaves an unfinished receipt and a dead owner's lock.
+  writeReceipt(fixture, { finishedAt: undefined, outcome: 'BLOCKED' });
+  const dead = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+  fixture.put('.harness/lock', JSON.stringify({ pid: dead, action: 'verify', startedAt: '2026-01-01T00:00:00.000Z' }));
+  const interrupted = await waitForVerify(fixture.cwd, { graceMs: 0 });
+  assert.equal(interrupted.outcome, 'BLOCKED');
+  assert.match(interrupted.lines[0], /never finished/);
+  // A verify that ended before it wrote any receipt leaves the previous run's PASS.
+  writeReceipt(fixture, { startedAt: '2020-01-01T00:00:00.000Z' });
+  const stale = await waitForVerify(fixture.cwd, { graceMs: 0 });
+  assert.equal(stale.outcome, 'BLOCKED');
+  assert.match(stale.lines[0], /without writing a receipt/);
+});
+test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
+  const fixture = repo(t);
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
+  fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
+  fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
+  fixture.put('npm-cli.mjs', [
+    'const script = process.argv[3];',
+    "if (script === 'test') console.log('Tests  1 passed (1)');",
+    "else if (script.startsWith('test:')) console.log('# pass 1');",
+  ].join('\n'));
+  const base = fixture.commit();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  const slots = slotsDir(t);
+  // Another worktree's heavy gate (a live process: this one) holds the only slot.
+  writeFileSync(join(slots, 'slot-0.json'), JSON.stringify({ pid: process.pid, token: 'other-worktree', gate: 'rust-tests', root: 'elsewhere' }));
+  const proc = spawn(process.execPath, [script, 'verify', '--base', base], { cwd: fixture.cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, npm_execpath: join(fixture.cwd, 'npm-cli.mjs'), BUILDMESH_GATE_SLOTS_DIR: slots, BUILDMESH_HEAVY_GATE_LIMIT: '1' } });
+  t.after(() => proc.kill());
+  let stdout = '';
+  proc.stdout.on('data', chunk => { stdout += chunk; });
+  const closed = new Promise(resolve => proc.on('close', resolve));
+  for (let i = 0; i < 600 && !/QUEUED frontend-tests/.test(stdout); i += 1) await new Promise(done => setTimeout(done, 100));
+  assert.match(stdout, /QUEUED frontend-tests: waiting for a heavy-gate slot \(limit 1; held by rust-tests in elsewhere\)/);
+  assert.doesNotMatch(stdout, /PASS frontend-tests/, 'the gate must not run while the slot is held');
+  unlinkSync(join(slots, 'slot-0.json'));
+  await closed;
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+  const rows = Object.fromEntries(receipt.gates.map(row => [row.id, row]));
+  assert.equal(rows['frontend-tests'].outcome, 'PASS', stdout);
+  assert.ok(rows['frontend-tests'].queuedMs > 0);
+  assert.equal(rows['frontend-build'].outcome, 'PASS');
+  // The receipt reads in plan order even though lanes finish in any order.
+  const order = receipt.gates.map(row => row.id);
+  assert.deepEqual(order, planGates(['src/owner.ts']).map(gate => gate.id).filter(id => order.includes(id)));
 });
