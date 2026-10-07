@@ -1366,7 +1366,8 @@ mod tests {
                 &guest_path,
                 0,
                 false,
-            );
+            )
+            .expect("an unsandboxed command always assembles");
             let argv = command.get_argv();
             let output = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
             assert!(
@@ -1420,7 +1421,8 @@ mod tests {
                 root.to_str().unwrap(),
                 0,
                 false,
-            );
+            )
+            .expect("an unsandboxed command always assembles");
             let argv = command.get_argv();
             assert_eq!(
                 argv[0].to_string_lossy(),

@@ -25,6 +25,10 @@ use std::borrow::Cow;
 /// forwards the resolved values verbatim and never re-consults capability
 /// flags. Empty / whitespace inputs and unsupported values are masked before
 /// they reach here.
+///
+/// `Err` means the spawn cannot be assembled safely — today only a macOS
+/// Seatbelt profile-write failure, which must not degrade into an unsandboxed
+/// launch (#2034). The caller surfaces it as a spawn error.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
@@ -35,7 +39,7 @@ pub fn build_spawn_command(
     config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
-) -> CommandBuilder {
+) -> Result<CommandBuilder, String> {
     build_spawn_command_prepared(
         resolved,
         provider_enum,
@@ -58,7 +62,7 @@ pub fn build_spawn_command_prepared(
     config: &crate::agent::capabilities::ResolvedAgentConfig,
     prefill: Option<&str>,
     sandbox: bool,
-) -> CommandBuilder {
+) -> Result<CommandBuilder, String> {
     let adapter = provider_enum.adapter();
     let platform = if resolved.env_type == EnvType::Wsl {
         Platform::Linux
@@ -149,7 +153,7 @@ pub fn build_spawn_command_prepared(
         &resolved.spawn_path,
         session_id,
         sandbox,
-    );
+    )?;
 
     // Apply the harness's environment policy (CLAUDE_BACKEND_ENV_VARS
     // reset + per-harness env_remove + env_set). The adapter owns this —
@@ -189,7 +193,7 @@ pub fn build_spawn_command_prepared(
         &command_wsl_env,
         adapter.wsl_passthrough_env(),
     );
-    cmd
+    Ok(cmd)
 }
 
 /// Apply the per-profile backend env (`PreparedLaunchRouting::Environment`)

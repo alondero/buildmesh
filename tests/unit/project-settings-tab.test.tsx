@@ -161,6 +161,11 @@ function capsFixture(harness_id: string): unknown {
  * `poolCount` drives the badge; the two `save*Fails` knobs flip the matching
  * save to a rejecting handler so the "do not revert on failure" rule can be
  * asserted.
+ *
+ * `sandboxDevMode` answers `sandbox_dev_mode_enabled`. It defaults to
+ * `false` — the released-build answer — so the shared mock renders the app
+ * as a user actually sees it, and only the tests that specifically exercise
+ * the experimental sandbox toggle opt in.
  */
 function mockBackend(
   overrides: {
@@ -168,11 +173,14 @@ function mockBackend(
     poolCount?: number;
     saveUseWorktreeFails?: boolean;
     saveBaseRefFails?: boolean;
+    sandboxDevMode?: boolean;
   } = {},
 ) {
   const poolCount = overrides.poolCount ?? 0;
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
+      case 'sandbox_dev_mode_enabled':
+        return Promise.resolve(overrides.sandboxDevMode ?? false);
       case 'list_providers':
         // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
         // (harness_id, provider_id, is_proxied, group_key). The mock
@@ -517,18 +525,37 @@ describe('ProjectSettingsTab (issue #1460)', () => {
     });
   });
 
-// OS-level sandbox toggle (macOS Seatbelt #497 / Windows AppContainer #498).
-  // The DB column is `sandbox` and is OS-agnostic at this layer; the OS-
-  // specific spawn policy is decided at `spawn_environment::wrap`.
-  it('renders the Sandbox toggle as an editable checkbox (#498)', async () => {
+// Experimental sandbox toggle (macOS Seatbelt #497 / Windows restricted
+  // token #528). The DB column is `sandbox` and is OS-agnostic at this layer;
+  // the OS-specific spawn policy is decided at `spawn_environment::wrap`.
+  //
+  // Issue #2034 — the whole feature is developer-gated behind
+  // BUILDMESH_SANDBOX=1, so these tests opt in through
+  // `sandbox_dev_mode_enabled` rather than relying on the toggle always
+  // being present. The release default (gate closed) is asserted separately
+  // below.
+  it('renders the Sandbox toggle as an editable checkbox when the dev gate is open', async () => {
+    mockBackend({ sandboxDevMode: true });
     openProbeDestination('properties');
-    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/)) as HTMLInputElement;
     expect(sandbox.type).toBe('checkbox');
     expect(sandbox.disabled).toBe(false);
   });
 
+  // The release guarantee: with BUILDMESH_SANDBOX unset the backend discards
+  // `meshes.sandbox`, so offering the control would advertise a setting that
+  // silently does nothing.
+  it('hides the Sandbox toggle when the developer gate is closed (release default)', async () => {
+    mockBackend({ sandboxDevMode: false });
+    openProbeDestination('properties');
+    await screen.findByLabelText('Default provider');
+    expect(screen.queryByLabelText(/Sandbox agent processes/)).toBeNull();
+  });
+
   it('preloads the saved sandbox state into the checkbox', async () => {
+    mockBackend({ sandboxDevMode: true });
     vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === 'sandbox_dev_mode_enabled') return Promise.resolve(true);
       if (cmd === 'get_mesh_properties') {
         return Promise.resolve({ ...MESH_CONFIG, sandbox: true });
       }
@@ -546,15 +573,16 @@ describe('ProjectSettingsTab (issue #1460)', () => {
       return Promise.resolve({});
     });
     openProbeDestination('properties');
-    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/)) as HTMLInputElement;
     expect(sandbox.checked).toBe(true);
   });
 
   it('saves the Sandbox toggle on change via update_mesh_sandbox', async () => {
     const user = userEvent.setup();
+    mockBackend({ sandboxDevMode: true });
     openProbeDestination('properties');
 
-    const sandbox = (await screen.findByLabelText('Sandbox agent processes')) as HTMLInputElement;
+    const sandbox = (await screen.findByLabelText(/Sandbox agent processes/)) as HTMLInputElement;
     expect(sandbox.checked).toBe(true);
     await user.click(sandbox);
 
@@ -567,9 +595,10 @@ describe('ProjectSettingsTab (issue #1460)', () => {
   });
 
   // Regression: the legacy #497 macOS-Seatbelt-specific toggle used to render
-  // alongside the unified #498 OS-agnostic one, both bound to `form.sandbox`.
+  // alongside the unified OS-agnostic one, both bound to `form.sandbox`.
   // The OS-agnostic surface (canonical per ADR 0012) is the only one allowed.
   it('renders exactly one Sandbox toggle (no duplicate #497 macOS-only block)', async () => {
+    mockBackend({ sandboxDevMode: true });
     openProbeDestination('properties');
     // Regex matches both "Sandbox agent processes" and the old
     // "Sandbox agent processes (macOS only)" accessible names.
@@ -1157,6 +1186,9 @@ describe('ProjectSettingsTab — section structure (issue #1460)', () => {
   });
 
   it('places each existing field in the section that describes it', async () => {
+    // The sandbox toggle only renders behind the developer gate (#2034), so
+    // this structural assertion has to open it.
+    mockBackend({ sandboxDevMode: true });
     openProbeDestination('properties');
     await screen.findByTestId('project-settings-general');
 

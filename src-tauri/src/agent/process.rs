@@ -1720,7 +1720,8 @@ mod tests {
             &cwd.to_string_lossy(),
             session_id,
             false,
-        );
+        )
+        .expect("an unsandboxed command always assembles");
         let pair = open_pty_pair(24, 80).expect("open pty pair");
         let child = spawn_child(&pair, cmd).expect("spawn child");
         let writer = pair.master.take_writer().expect("take writer");
@@ -2193,7 +2194,8 @@ mod tests {
             &cwd.to_string_lossy(),
             -915_4002,
             false,
-        );
+        )
+        .expect("an unsandboxed command always assembles");
 
         let pair = open_pty_pair(24, 80).expect("open pty pair");
         let child = spawn_child(&pair, cmd).expect("spawn child");
@@ -2287,7 +2289,8 @@ mod tests {
             &cwd.to_string_lossy(),
             session_id,
             false,
-        );
+        )
+        .expect("an unsandboxed command always assembles");
 
         let pair = open_pty_pair(24, 80).expect("open pty pair");
         let child = spawn_child(&pair, cmd).expect("spawn child");
@@ -2563,7 +2566,8 @@ mod tests {
             &cwd.to_string_lossy(),
             -915_4001,
             false,
-        );
+        )
+        .expect("an unsandboxed command always assembles");
 
         let pair = open_pty_pair(24, 80).expect("open pty pair");
         let child = spawn_child(&pair, cmd).expect("spawn child");

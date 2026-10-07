@@ -558,7 +558,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
-        );
+        )
+        .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(
             "REPRO direct argv: {:?}",
             cmd.get_argv()
@@ -958,7 +959,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             true, // sandbox
-        );
+        )
+        .expect("sandboxed command assembly (run with BUILDMESH_SANDBOX=1)");
         eprintln!(
             "SPIKE claude argv: {:?}",
             cmd.get_argv()
