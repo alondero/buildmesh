@@ -591,11 +591,20 @@ jobs:
   # property - a lost runner costs one group, not the suite - is also worth
   # more now that the groups are cheap. Revisit if the slowest shard grows
   # past the setup cost again.
+  #
+  # The job cap is the price of a lost runner: the guard below cannot fire on
+  # a runner that is gone, so the job waits out `timeout-minutes` before the
+  # CI retry can re-run it. At 40 minutes each of the five lost `services`
+  # runners in October 2026 held its run for 45-60 minutes. A healthy shard
+  # takes ~2 minutes including setup, and a cache miss that recompiles the
+  # crate takes about as long as `rust-build` (3-7 minutes), so 15 minutes
+  # still covers the slow honest case. tests/unit/ci-rust-timeout-guard.test.ts
+  # pins the cap and keeps the guard's deadline plus kill grace inside it.
   rust-tests:
     name: Rust tests (${{ matrix.shard.label }})
     needs: rust-build
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 15
     env:
       # Only the compiler *fingerprint* inputs need to match `rust-build` (which
       # owns the compile): a differing RUSTFLAGS or profile-debug value forces
@@ -673,8 +682,8 @@ jobs:
           # scripts/ci/run-guarded.mjs replaces the inline `timeout` shell
           # guard. It streams the command's output into this step's log
           # while appending it to the file the upload below preserves,
-          # kills the command's whole process tree at the 30-minute
-          # deadline (SIGTERM, then SIGKILL two minutes later), emits the
+          # kills the command's whole process tree at the 10-minute
+          # deadline (SIGTERM, then SIGKILL a minute later), emits the
           # annotation itself, and exits with the command's own code or 124
           # on the deadline. The guard is unit-tested
           # (tests/agent-infra/run-guarded.test.mjs), and because every
@@ -684,8 +693,8 @@ jobs:
           # step alive past the guard, and a job-level cancel still leaves
           # a log behind.
           node "$GITHUB_WORKSPACE/scripts/ci/run-guarded.mjs" \
-            --minutes 30 \
-            --kill-grace-seconds 120 \
+            --minutes 10 \
+            --kill-grace-seconds 60 \
             --log "cargo-${{ matrix.shard.label }}.log" \
             --label "The ${{ matrix.shard.label }} shard" \
             -- cargo test --locked --lib -- ${{ matrix.shard.args }}

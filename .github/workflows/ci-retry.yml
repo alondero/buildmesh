@@ -11,14 +11,22 @@ name: CI retry
 # invocation, re-running only each run's failed jobs (`--failed`), so one
 # wedged shard costs one shard rather than the whole fan-out.
 #
-# Every 15 minutes rather than on every push: the retry must observe runs
-# that failed with no follow-up event (a cancelled push run, a PR nobody
-# touched), and a scheduled workflow is the only trigger that fires on its
-# own. The workflow takes seconds, so the cadence costs almost nothing.
+# Two triggers. Completion of a Build run is the earliest moment a retry can
+# act, so a failed or cancelled run is picked up as soon as it ends instead of
+# at the next tick (a successful completion skips the job). Every 15 minutes
+# as well: the retry must also observe runs that failed with no completion
+# event to react to, and a scheduled workflow is the only trigger that fires
+# on its own. Each invocation re-selects from the recent run list, so a
+# completion and a tick landing together still retry a run only once. The
+# workflow takes seconds, so the cadence costs almost nothing.
 #
-# Schedule triggers only run from the default branch, which is also where
-# the rerun permissions below are evaluated - do not move this file.
+# Schedule and workflow_run triggers only run from the default branch, which
+# is also where the rerun permissions below are evaluated - do not move this
+# file.
 on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -40,6 +48,7 @@ jobs:
     name: Re-run failed Build jobs
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'success'
     # Job-level permissions replace the top-level set: rerunning runs needs
     # `actions: write`, reading pull request states needs `pull-requests:
     # read`, and the checkout needs `contents: read`. Nothing else is granted.

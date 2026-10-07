@@ -228,12 +228,13 @@ run cannot say which test did it; one job per group means a loss costs one
 group. The shards are **not** required checks — `Rust tests + TS bindings` is
 the gate, and the non-shard job is the single writer of the generated bindings.
 
-Each Rust test step runs under `scripts/ci/run-guarded.mjs` (30 minutes for a
-shard, 45 for the non-shard pass) beneath a longer job cap, and writes its log
-to a file that an `if: always()` upload step preserves. The guard streams the
-command's output into the step log while appending it to that file, kills the
-command's whole process tree at the deadline (SIGTERM, then SIGKILL two
-minutes later), emits the `::error::` annotation itself, and exits with the
+Each Rust test step runs under `scripts/ci/run-guarded.mjs` (10 minutes for a
+shard, 45 for the non-shard pass) beneath a longer job cap (15 and 60
+minutes), and writes its log to a file that an `if: always()` upload step
+preserves. The guard streams the command's output into the step log while
+appending it to that file, kills the command's whole process tree at the
+deadline (SIGTERM, then SIGKILL after a grace period), emits the `::error::`
+annotation itself, and exits with the
 command's own code — or 124 when the deadline fired. It is unit-tested in
 `tests/agent-infra/run-guarded.test.mjs`, which pins the exit-code contract,
 the tree kill, and the annotation.
@@ -320,14 +321,17 @@ scheduled run has no pull request to turn red. Its concurrency group is keyed
 by event name, so a push to `main` cannot cancel a weekly run and suppress the
 alert it would have raised.
 
-Infra flakiness clears itself, too: every 15 minutes `.github/workflows/
-ci-retry.yml` runs `scripts/ci/retry-failed-runs.mjs`, which re-runs the failed
-jobs of at most three Build runs — first attempts only, less than six hours
+Infra flakiness clears itself, too: whenever a Build run ends unsuccessfully,
+and every 15 minutes as a backstop, `.github/workflows/ci-retry.yml` runs
+`scripts/ci/retry-failed-runs.mjs`, which re-runs the failed jobs of at most
+three Build runs — first attempts only, less than six hours
 old, the newest run for their event and head branch, and for pull requests
 only while the PR is still open. It never retries a second time, so a
 genuinely broken tree stays red instead of being re-rolled until it goes
 green, and `--failed` means a blip in one shard re-runs that shard rather than
-the whole fan-out.
+the whole fan-out. A lost runner reports nothing until its job cap expires, so
+the Rust shards cap at 15 minutes: that cap, not the retry, is what a lost
+shard runner costs.
 
 `WSL Codex profile contract (opt-in)` is `workflow_dispatch`-only. It runs a
 `#[ignore]`d test that needs a real WSL guest, and a hosted Windows image ships

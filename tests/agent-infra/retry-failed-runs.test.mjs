@@ -197,3 +197,22 @@ test('main fails when every selected rerun fails', async () => {
   const code = await main([], { gh, now: NOW });
   assert.equal(code, 1);
 });
+
+test('the retry workflow fires when a Build run completes unsuccessfully, with the schedule as a backstop', async () => {
+  // A lost runner used to wait for the next 15-minute tick on top of its job
+  // cap. Completion of the Build run is the earliest moment a retry can act;
+  // the schedule stays for runs that end with no completion event to react to.
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+  const workflow = fs.readFileSync(path.join(repoRoot, '.github', 'workflows', 'ci-retry.yml'), 'utf8');
+
+  assert.match(workflow, /\n {2}workflow_run:\n {4}workflows: \[Build\]\n {4}types: \[completed\]\n/);
+  assert.match(workflow, /\n {2}schedule:\n {4}- cron: "\*\/15 \* \* \* \*"\n/);
+  assert.match(
+    workflow,
+    /\n {4}if: github\.event_name != 'workflow_run' \|\| github\.event\.workflow_run\.conclusion != 'success'\n/,
+    'a successful Build completion must not start a retry job',
+  );
+});

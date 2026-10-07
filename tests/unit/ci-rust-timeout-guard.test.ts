@@ -110,10 +110,17 @@ function logFile(script: string): string {
 const shard = runScript('Run the ${{ matrix.shard.label }} tests');
 const nonShard = runScript('Run Rust export, documentation, and integration tests');
 
+// `maxJobMinutes` is what a lost runner costs: the guard cannot fire on a
+// runner that is gone, so the run waits out the job cap before the CI retry
+// can act. Five lost `services` runners in October 2026 each held their run
+// 45-60 minutes under the old 40-minute cap; a healthy shard takes ~2.
 const guards = [
-  { job: 'rust-tests', script: shard, stepMinutes: 30 },
-  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45 },
+  { job: 'rust-tests', script: shard, stepMinutes: 10, maxJobMinutes: 15 },
+  { job: 'rust-nonshard', script: nonShard, stepMinutes: 45, maxJobMinutes: 60 },
 ];
+
+// Checkout, apt, toolchain and cache restore run before the guard starts.
+const SETUP_ALLOWANCE_SECONDS = 3 * 60;
 
 describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
   it('does not pipe the guarded test command', () => {
@@ -160,17 +167,27 @@ describe.each(guards)('$job timeout guard', ({ script, stepMinutes }) => {
   });
 });
 
-describe.each(guards)('$job bounds', ({ job, script, stepMinutes }) => {
+describe.each(guards)('$job bounds', ({ job, script, stepMinutes, maxJobMinutes }) => {
   it('keeps the in-step guard the release notes document', () => {
     expect(script).toContain('scripts/ci/run-guarded.mjs');
     expect(script).toMatch(new RegExp(`--minutes ${stepMinutes}\\b`));
   });
 
-  it('keeps a job-level backstop above the in-step guard', () => {
+  it('keeps a job-level backstop above the in-step guard and its kill grace', () => {
     // The job cap is the layer that does not depend on the runner's shell
-    // reporting back, so it has to outlive the in-step guard.
+    // reporting back, so it has to outlive the in-step guard including the
+    // SIGKILL escalation; otherwise the cap cuts a hung test off first and
+    // the guard's annotation and log never happen.
     const cap = jobBlock(job).match(/^\s*timeout-minutes: (\d+)$/m);
     expect(cap, `the ${job} job has no timeout-minutes backstop`).not.toBeNull();
-    expect(Number(cap?.[1])).toBeGreaterThan(stepMinutes);
+    const grace = Number(shellLines(script).match(/--kill-grace-seconds (\d+)/)?.[1]);
+    expect(Number(cap?.[1]) * 60).toBeGreaterThanOrEqual(
+      SETUP_ALLOWANCE_SECONDS + stepMinutes * 60 + grace,
+    );
+  });
+
+  it('caps what a lost runner costs', () => {
+    const cap = jobBlock(job).match(/^\s*timeout-minutes: (\d+)$/m);
+    expect(Number(cap?.[1])).toBeLessThanOrEqual(maxJobMinutes);
   });
 });
