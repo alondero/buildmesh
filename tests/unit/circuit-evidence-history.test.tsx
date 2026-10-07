@@ -36,7 +36,7 @@ it('renders wait, capacity, configuration and recovery history with source, disp
       detail: JSON.stringify({ reason: 'mesh_capacity', capacity: 3 }) }),
     historyEntry({ id: 2, kind: 'step_capacity_wait', node_id: 'spawn', attempt: 2,
       source: 'circuit_worker.capacity', disposition: 'waiting',
-      detail: JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }) }),
+      detail: JSON.stringify({ before: null, after: JSON.stringify({ agent_limit: true }) }) }),
     historyEntry({ id: 3, kind: 'configuration_pinned', source: 'run.configuration', disposition: 'applied',
       detail: JSON.stringify({ behavior_revision: 1, graph_sha256: 'abcdef0123456789', reviewers: [{ node_id: 'reviewer' }] }) }),
     historyEntry({ id: 4, kind: 'operator_attestation', node_id: 'open_pr', attempt: 1, source: 'operator', disposition: 'not_performed',
@@ -50,7 +50,7 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   // Capacity and configuration are bookkeeping: hidden until asked for.
   expect(screen.queryByText(/Step capacity wait/)).toBeNull();
   await showTechnical();
-  expect(screen.getByText(/Step capacity wait — step slots busy · agent slot free/)).toBeTruthy();
+  expect(screen.getByText(/Step capacity wait — agent slot busy\./)).toBeTruthy();
   expect(screen.getByText(/behavior revision 1/)).toBeTruthy();
   expect(screen.getByText(/graph abcdef012345…/)).toBeTruthy();
   expect(screen.getByText(/Continued a failed review — this run follows run #88/)).toBeTruthy();
@@ -67,6 +67,20 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   const capacity = screen.getByTestId('history-entry-2');
   expect(capacity.textContent).toContain('spawn');
   expect(capacity.textContent).toContain('pass 2');
+});
+
+it('keeps capacity rows recorded before ADR 0042 truthful about the retired step slots', async () => {
+  // Rows written while the per-circuit step budget existed still carry
+  // `circuit_limit`; the ledger is history, so they must keep saying so.
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, kind: 'step_capacity_wait', node_id: 'spawn', attempt: 1,
+      source: 'circuit_worker.capacity', disposition: 'waiting',
+      detail: JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }) }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
+  expect(await screen.findByText(/Step capacity wait — step slots busy · agent slot free/)).toBeTruthy();
 });
 
 it('renders a freed capacity window as cleared with a resolved disposition, not an active wait', async () => {

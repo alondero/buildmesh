@@ -54,8 +54,7 @@ static LAST_SWEEP_MS: AtomicI64 = AtomicI64::new(0);
 /// Epoch millis each agent was last observed, for the per-agent cooldown.
 /// Expired entries are pruned each sweep, so it is bounded by the agents
 /// currently inside their window.
-static LAST_OBSERVED: Lazy<Mutex<HashMap<i64, i64>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static LAST_OBSERVED: Lazy<Mutex<HashMap<i64, i64>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Fast-tick pass: reap circuit-piloted nodes that have gone observation-quiet
 /// past [`ZOMBIE_THRESHOLD_MS`]. Cheap on the common no-op tick — the
@@ -81,7 +80,10 @@ pub(super) fn zombie_sweep_pass(app: &AppHandle) {
                 node_id,
                 LifecycleKind::Lost,
                 SessionStatus::Lost,
-                &HookSignalDetail { provider, ..Default::default() },
+                &HookSignalDetail {
+                    provider,
+                    ..Default::default()
+                },
                 "Agent lost: it stayed running with no session identity or readable report.",
             ));
         },
@@ -118,8 +120,7 @@ where
 {
     // Phase 1 — candidate scan under a reader only. `list_zombie_candidates`
     // owns and releases its `read_conn`, and performs no I/O beyond SQLite.
-    let candidates =
-        db::list_zombie_candidates(threshold_ms, now_ms).map_err(|e| e.to_string())?;
+    let candidates = db::list_zombie_candidates(threshold_ms, now_ms).map_err(|e| e.to_string())?;
 
     // Apply the per-agent cooldown first so a suppressed node never reaches the
     // filesystem read below. The map lock is released before that read runs.
@@ -217,7 +218,9 @@ mod tests {
     }
 
     fn rfc3339(ms: i64) -> String {
-        chrono::DateTime::from_timestamp_millis(ms).unwrap().to_rfc3339()
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .to_rfc3339()
     }
 
     fn isolated_conn() -> Connection {
@@ -246,17 +249,23 @@ mod tests {
         .unwrap();
         let node = conn.last_insert_rowid();
         if piloted {
-            let circuit =
-                db::create_autopilot_circuit_inner(conn, mesh.id, "c", "", 2, &crate::circuit::model::CircuitGraph::walking_skeleton("fixture").to_json().unwrap()).unwrap();
-            let run = db::create_circuit_run_locked(
+            let circuit = db::create_autopilot_circuit_inner(
                 conn,
-                circuit.id,
                 mesh.id,
-                "manual:test",
-                "{}",
+                "c",
+                "",
+                &crate::circuit::model::CircuitGraph::walking_skeleton("fixture")
+                    .to_json()
+                    .unwrap(),
             )
             .unwrap();
-            conn.execute("UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1", [run]).unwrap();
+            let run = db::create_circuit_run_locked(conn, circuit.id, mesh.id, "manual:test", "{}")
+                .unwrap();
+            conn.execute(
+                "UPDATE autopilot_circuit_runs SET state='failed' WHERE id=?1",
+                [run],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO autopilot_circuit_run_steps (run_id, node_id, agent_node_id, status) \
                  VALUES (?1, 'worker', ?2, 'running')",
@@ -268,7 +277,9 @@ mod tests {
     }
 
     fn status_of(conn: &Connection, node_id: i64) -> SessionStatus {
-        db::get_agent_node_by_id_inner(conn, node_id).unwrap().status
+        db::get_agent_node_by_id_inner(conn, node_id)
+            .unwrap()
+            .status
     }
 
     /// A piloted node stuck `running` with no session identity past the
@@ -287,7 +298,11 @@ mod tests {
         );
 
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
-        assert_eq!(candidates, vec![node], "the stale sessionless piloted node is a candidate");
+        assert_eq!(
+            candidates,
+            vec![node],
+            "the stale sessionless piloted node is a candidate"
+        );
 
         let flipped = db::reap_zombie_agents_inner(&mut conn, &candidates).unwrap();
         assert_eq!(flipped, vec![node]);
@@ -297,14 +312,28 @@ mod tests {
     #[test]
     fn active_circuit_uncertainty_is_never_reaped_as_confirmed_loss() {
         let mut conn = isolated_conn();
-        let node = seed_node(&mut conn, "uncertain", "running", now_ms() - THRESHOLD - 60_000, None, true);
+        let node = seed_node(
+            &mut conn,
+            "uncertain",
+            "running",
+            now_ms() - THRESHOLD - 60_000,
+            None,
+            true,
+        );
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
         assert_eq!(candidates, vec![node]);
         for state in ["pending", "running", "paused"] {
-            conn.execute("UPDATE autopilot_circuit_runs SET state=?1", [state]).unwrap();
-            assert!(db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap().is_empty());
-            assert!(db::reap_zombie_agents_inner(&mut conn, &candidates).unwrap().is_empty(),
-                "the writer must recheck live ownership after the scan");
+            conn.execute("UPDATE autopilot_circuit_runs SET state=?1", [state])
+                .unwrap();
+            assert!(db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms())
+                .unwrap()
+                .is_empty());
+            assert!(
+                db::reap_zombie_agents_inner(&mut conn, &candidates)
+                    .unwrap()
+                    .is_empty(),
+                "the writer must recheck live ownership after the scan"
+            );
             assert_eq!(status_of(&conn, node), SessionStatus::Running);
         }
     }
@@ -313,10 +342,20 @@ mod tests {
     #[test]
     fn recently_running_node_is_untouched() {
         let mut conn = isolated_conn();
-        let node = seed_node(&mut conn, "recent", "running", now_ms() - 60_000, None, true);
+        let node = seed_node(
+            &mut conn,
+            "recent",
+            "running",
+            now_ms() - 60_000,
+            None,
+            true,
+        );
 
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
-        assert!(candidates.is_empty(), "a recently-running node is not a candidate");
+        assert!(
+            candidates.is_empty(),
+            "a recently-running node is not a candidate"
+        );
         assert_eq!(status_of(&conn, node), SessionStatus::Running);
     }
 
@@ -334,7 +373,10 @@ mod tests {
         );
 
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
-        assert!(candidates.is_empty(), "a session identity is proof of observation");
+        assert!(
+            candidates.is_empty(),
+            "a session identity is proof of observation"
+        );
         assert_eq!(status_of(&conn, node), SessionStatus::Running);
     }
 
@@ -353,7 +395,10 @@ mod tests {
         );
 
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
-        assert!(candidates.is_empty(), "an interactive node is not circuit-piloted");
+        assert!(
+            candidates.is_empty(),
+            "an interactive node is not circuit-piloted"
+        );
         assert_eq!(status_of(&conn, node), SessionStatus::Running);
     }
 
@@ -374,7 +419,10 @@ mod tests {
         }
 
         let candidates = db::list_zombie_candidates_inner(&conn, THRESHOLD, now_ms()).unwrap();
-        assert!(candidates.is_empty(), "only `running` is eligible: {candidates:?}");
+        assert!(
+            candidates.is_empty(),
+            "only `running` is eligible: {candidates:?}"
+        );
     }
 
     /// The batch write re-checks `status` + session absence, so a node that
@@ -401,7 +449,10 @@ mod tests {
         .unwrap();
 
         let flipped = db::reap_zombie_agents_inner(&mut conn, &candidates).unwrap();
-        assert!(flipped.is_empty(), "the conditional write must not clobber a now-observed node");
+        assert!(
+            flipped.is_empty(),
+            "the conditional write must not clobber a now-observed node"
+        );
         assert_eq!(status_of(&conn, node), SessionStatus::Running);
     }
 
@@ -410,15 +461,30 @@ mod tests {
     fn is_zombie_requires_no_session_and_no_report() {
         let mut conn = isolated_conn();
         let plain = seed_node(&mut conn, "plain", "running", now_ms(), None, false);
-        let sessioned =
-            seed_node(&mut conn, "sessioned", "running", now_ms(), Some("s"), false);
+        let sessioned = seed_node(
+            &mut conn,
+            "sessioned",
+            "running",
+            now_ms(),
+            Some("s"),
+            false,
+        );
 
         let plain = db::get_agent_node_by_id_inner(&conn, plain).unwrap();
         let sessioned = db::get_agent_node_by_id_inner(&conn, sessioned).unwrap();
 
-        assert!(is_zombie(&plain, false), "no session and no report is a zombie");
-        assert!(!is_zombie(&plain, true), "a readable report is an observation");
-        assert!(!is_zombie(&sessioned, false), "a session identity is an observation");
+        assert!(
+            is_zombie(&plain, false),
+            "no session and no report is a zombie"
+        );
+        assert!(
+            !is_zombie(&plain, true),
+            "a readable report is an observation"
+        );
+        assert!(
+            !is_zombie(&sessioned, false),
+            "a session identity is an observation"
+        );
         assert!(!is_zombie(&sessioned, true), "both observations");
     }
 
@@ -428,7 +494,10 @@ mod tests {
         let mut observed = HashMap::new();
         let t = 1_000_000_000_000;
 
-        assert_eq!(select_due_candidates(vec![7], &mut observed, t, COOLDOWN), vec![7]);
+        assert_eq!(
+            select_due_candidates(vec![7], &mut observed, t, COOLDOWN),
+            vec![7]
+        );
         assert!(
             select_due_candidates(vec![7], &mut observed, t + 60_000, COOLDOWN).is_empty(),
             "a tick inside the cooldown must not re-process the same agent"
@@ -445,7 +514,10 @@ mod tests {
     fn sweep_interval_gate_throttles_the_scan() {
         let t = 2_000_000_000_000;
         assert!(sweep_due(0, t), "the first sweep always runs");
-        assert!(!sweep_due(t, t + 1_000), "a fast tick does not re-run the sweep");
+        assert!(
+            !sweep_due(t, t + 1_000),
+            "a fast tick does not re-run the sweep"
+        );
         assert!(sweep_due(t, t + ZOMBIE_SWEEP_INTERVAL.as_millis() as i64));
     }
 

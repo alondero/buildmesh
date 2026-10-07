@@ -7,7 +7,7 @@ export type AutopilotCircuit = { id: number, mesh_id: number, name: string, desc
 /**
  * Enabled circuits are eligible for the worker's trigger pass.
  */
-enabled: boolean, concurrency_limit: number, 
+enabled: boolean, 
 /**
  * The `CircuitGraph` blueprint, JSON-encoded (see module note above).
  */

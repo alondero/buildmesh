@@ -50,14 +50,6 @@ pub struct BlueprintContract {
     /// AND the gate outcome conditions, so a refactor that drops a
     /// `OnOutcome(Green)` from a verifier→success edge surfaces here.
     pub required_edges: &'static [(&'static str, &'static str, EdgeCondition)],
-    /// Concurrency normalisation enforced by the domain model.
-    /// Mirrors [`CircuitBlueprintKind::min_concurrency_limit`] — the
-    /// model is the source of truth; the contract pins it so the
-    /// catalog and the model can't drift apart.
-    pub min_concurrency_limit: i64,
-    /// Default concurrency the Probe UI ships with. WalkingSkeleton = 1,
-    /// IssueDrivenAutopilotReview = 2 (reviewer slot).
-    pub default_concurrency_limit: i64,
     /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
     /// blueprint.
     pub allows_manual_trigger_now: bool,
@@ -97,8 +89,6 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             ("spawn", "inject", EdgeCondition::Always),
             ("inject", "notify", EdgeCondition::Always),
         ],
-        min_concurrency_limit: 1,
-        default_concurrency_limit: 1,
         allows_manual_trigger_now: true,
         prompt_assertions: &[],
     },
@@ -238,8 +228,6 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             ),
             ("re_review", "review_round", EdgeCondition::Always),
         ],
-        min_concurrency_limit: 2,
-        default_concurrency_limit: 2,
         // The review blueprint is labelled-issue-driven — a manual fire
         // would mint a run with no `issue.*` context.
         allows_manual_trigger_now: false,
@@ -346,16 +334,6 @@ mod tests {
                 contract.allowed_triggers,
                 contract.marker.allowed_triggers(),
                 "catalog's allowed_triggers drifted from the model"
-            );
-            assert_eq!(
-                contract.min_concurrency_limit,
-                contract.marker.min_concurrency_limit(),
-                "catalog's min_concurrency_limit drifted from the model"
-            );
-            assert_eq!(
-                contract.default_concurrency_limit,
-                contract.marker.default_concurrency_limit(),
-                "catalog's default_concurrency_limit drifted from the model"
             );
             assert_eq!(
                 contract.allows_manual_trigger_now,
@@ -485,23 +463,11 @@ mod tests {
     }
 
     #[test]
-    fn review_blueprint_requires_two_concurrency_slots_or_deadlocks() {
-        let review = BUILT_IN_CATALOG
-            .iter()
-            .find(|c| c.marker == CircuitBlueprintKind::IssueDrivenAutopilotReview)
-            .expect("review blueprint is in the catalog");
-        assert_eq!(review.min_concurrency_limit, 2);
-        assert_eq!(review.default_concurrency_limit, 2);
-    }
-
-    #[test]
-    fn walking_skeleton_default_concurrency_is_one_slot() {
+    fn walking_skeleton_allows_manual_trigger_now() {
         let walking = BUILT_IN_CATALOG
             .iter()
             .find(|c| c.marker == CircuitBlueprintKind::WalkingSkeleton)
             .expect("walking skeleton is in the catalog");
-        assert_eq!(walking.min_concurrency_limit, 1);
-        assert_eq!(walking.default_concurrency_limit, 1);
         assert!(walking.allows_manual_trigger_now);
     }
 
@@ -798,44 +764,11 @@ mod tests {
             Some(CircuitTriggerKind::Manual),
             None,
             None,
-            2,
         )
         .unwrap_err();
         assert!(
             err.contains("IssueDrivenAutopilotReview"),
             "error must name the blueprint: {err}"
-        );
-    }
-
-    #[test]
-    fn validate_circuit_request_clamps_review_concurrency_to_two_or_higher() {
-        let validated = validate_circuit_request(
-            CircuitBlueprintKind::IssueDrivenAutopilotReview,
-            Some(CircuitTriggerKind::GithubIssueLabel),
-            Some("buildmesh:run"),
-            None,
-            1, // caller asked for 1 — must be clamped to the model floor
-        )
-        .unwrap();
-        assert_eq!(validated.concurrency_limit, 2);
-    }
-
-    #[test]
-    fn clamp_concurrency_limit_enforces_blueprint_floor_and_shared_ceiling() {
-        // Floor: the review blueprint can never drop to a single slot.
-        assert_eq!(
-            CircuitBlueprintKind::IssueDrivenAutopilotReview.clamp_concurrency_limit(1),
-            2
-        );
-        // Ceiling: any blueprint clamps above the shared maximum.
-        assert_eq!(
-            CircuitBlueprintKind::WalkingSkeleton.clamp_concurrency_limit(99),
-            CircuitBlueprintKind::MAX_CONCURRENCY_LIMIT
-        );
-        // In-range values pass through untouched.
-        assert_eq!(
-            CircuitBlueprintKind::WalkingSkeleton.clamp_concurrency_limit(4),
-            4
         );
     }
 
@@ -863,7 +796,6 @@ mod tests {
                 } else {
                     None
                 },
-                1,
             )
             .unwrap_or_else(|err| panic!("walking_skeleton rejected {trigger:?}: {err}"));
         }
@@ -876,7 +808,6 @@ mod tests {
             Some(CircuitTriggerKind::GithubIssueLabel),
             Some("   "), // whitespace-only
             None,
-            1,
         )
         .unwrap_err();
         assert!(
@@ -892,7 +823,6 @@ mod tests {
             Some(CircuitTriggerKind::Interval),
             None,
             Some(5), // 5 seconds — clamped to 60s
-            1,
         )
         .unwrap();
         assert_eq!(validated.interval_seconds, Some(60));
@@ -902,7 +832,6 @@ mod tests {
             Some(CircuitTriggerKind::Interval),
             None,
             Some(30 * 24 * 3_600), // 30 days — clamped to 7 days
-            1,
         )
         .unwrap();
         assert_eq!(validated.interval_seconds, Some(7 * 24 * 3_600));

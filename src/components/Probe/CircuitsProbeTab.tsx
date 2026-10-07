@@ -364,8 +364,6 @@ function SortableQueueRow({
         data-testid={`queue-pending-reason-${entry.run.id}`}
       >
         {pendingAdmissionDetail({
-          concurrencyLimit: 0,
-          runningSteps: 0,
           meshRunCapacity,
           meshActiveRuns,
         })}
@@ -665,7 +663,6 @@ export function CircuitsProbeTab() {
         activeMeshId!,
         name,
         '',
-        isReviewBlueprint ? 2 : 1,
         '', // the prompt is authored in the canvas editor's inspector now
         effectiveTriggerKind,
         effectiveTriggerKind === 'manual' ? undefined : triggerLabel.trim(),
@@ -961,12 +958,10 @@ export function CircuitsProbeTab() {
         ) : (
           <ul className="flex flex-col gap-1 p-2">
             {view === 'history' && <li className="text-2xs text-text-muted px-1">History · failed and needs-review runs first, then newest finished runs (windowed per circuit)</li>}
-            {viewRows.map(({ circuit, visibleRuns, runningSteps, reviewCircuit, nodeIndex }) => {
+            {viewRows.map(({ circuit, visibleRuns, reviewCircuit, nodeIndex }) => {
               // The row model computes this once when the backend payload
               // changes; the duration clock does not repeat the scan.
               const capacity = {
-                concurrencyLimit: circuit.concurrency_limit,
-                runningSteps,
                 meshRunCapacity,
                 meshActiveRuns,
               };

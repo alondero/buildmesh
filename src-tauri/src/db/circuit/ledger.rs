@@ -372,8 +372,8 @@ fn create_node_circuit_run_with_recovery_locked(
         } else {
             tx.execute(
                 "INSERT INTO autopilot_circuits
-                 (mesh_id, name, description, enabled, concurrency_limit, graph_json, is_preset)
-                 VALUES (?1, ?2, ?3, 0, 2, ?4, 1)",
+                 (mesh_id, name, description, enabled, graph_json, is_preset)
+                 VALUES (?1, ?2, ?3, 0, ?4, 1)",
                 params![node.mesh_id, name, description, graph.to_json()?],
             )
             .map_err(|e| e.to_string())?;
@@ -584,18 +584,10 @@ pub fn create_autopilot_circuit(
     mesh_id: i64,
     name: &str,
     description: &str,
-    concurrency_limit: i64,
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
     let db = crate::db::write_conn();
-    create_autopilot_circuit_inner(
-        &db,
-        mesh_id,
-        name,
-        description,
-        concurrency_limit,
-        graph_json,
-    )
+    create_autopilot_circuit_inner(&db, mesh_id, name, description, graph_json)
 }
 
 pub fn copy_review_blueprint(circuit_id: i64, name: &str) -> Result<AutopilotCircuit, String> {
@@ -629,7 +621,6 @@ pub(crate) fn copy_review_blueprint_locked(
         original.mesh_id,
         name.trim(),
         "Independent copy of the Review Blueprint",
-        original.concurrency_limit,
         &graph.to_json()?,
     )
     .map_err(|error| error.to_string())?;
@@ -646,7 +637,6 @@ pub(crate) fn create_autopilot_circuit_inner(
     mesh_id: i64,
     name: &str,
     description: &str,
-    concurrency_limit: i64,
     graph_json: &str,
 ) -> SqlResult<AutopilotCircuit> {
     // Draft-first (issue #1356): new blueprints start disabled so the
@@ -656,9 +646,9 @@ pub(crate) fn create_autopilot_circuit_inner(
     // default is still 1 cannot silently enable a fresh circuit.
     db.execute(
         "INSERT INTO autopilot_circuits \
-             (mesh_id, name, description, enabled, concurrency_limit, graph_json) \
-         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
-        params![mesh_id, name, description, concurrency_limit, graph_json],
+             (mesh_id, name, description, enabled, graph_json) \
+         VALUES (?1, ?2, ?3, 0, ?4)",
+        params![mesh_id, name, description, graph_json],
     )?;
     get_autopilot_circuit_inner(db, db.last_insert_rowid())?
         .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
@@ -669,7 +659,7 @@ pub(crate) fn get_autopilot_circuit_inner(
     id: i64,
 ) -> SqlResult<Option<AutopilotCircuit>> {
     let mut stmt = conn.prepare(
-        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+        "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
          FROM autopilot_circuits WHERE id = ?1",
     )?;
@@ -689,11 +679,10 @@ fn map_circuit_row(row: &rusqlite::Row<'_>) -> SqlResult<AutopilotCircuit> {
         name: row.get(2)?,
         description: row.get(3)?,
         enabled: row.get::<_, i64>(4)? != 0,
-        concurrency_limit: row.get(5)?,
-        graph_json: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        is_preset: row.get::<_, i64>(9)? != 0,
+        graph_json: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+        is_preset: row.get::<_, i64>(8)? != 0,
     })
 }
 
@@ -708,7 +697,7 @@ pub(crate) fn list_autopilot_circuits_inner(
     mesh_id: i64,
 ) -> SqlResult<Vec<AutopilotCircuit>> {
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+        "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
          FROM autopilot_circuits WHERE mesh_id = ?1 AND is_preset = 0 ORDER BY id",
     )?;
@@ -728,7 +717,7 @@ pub fn list_enabled_circuits() -> SqlResult<Vec<AutopilotCircuit>> {
 /// Per-test isolated variant of [`list_enabled_circuits`] (issue #1691).
 pub(crate) fn list_enabled_circuits_inner(db: &Connection) -> SqlResult<Vec<AutopilotCircuit>> {
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+        "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
          FROM autopilot_circuits WHERE enabled = 1 AND is_preset = 0 ORDER BY id",
     )?;
@@ -795,8 +784,8 @@ pub(crate) fn ensure_review_blueprint_inner(db: &Connection, mesh_id: i64) -> Sq
     let graph = crate::circuit::model::CircuitGraph::agent_review(None, None, 3)
         .to_json()
         .map_err(rusqlite::Error::InvalidParameterName)?;
-    db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,concurrency_limit,graph_json,is_preset)
-        SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,2,?2,1
+    db.execute("INSERT INTO autopilot_circuits(mesh_id,name,description,enabled,graph_json,is_preset)
+        SELECT ?1,'Built-in Review Blueprint','Review an existing agent and return findings until approved',0,?2,1
         WHERE EXISTS(SELECT 1 FROM meshes WHERE id=?1)
         AND NOT EXISTS(SELECT 1 FROM autopilot_circuits WHERE mesh_id=?1 AND is_preset=1)", params![mesh_id,graph])?;
     Ok(())
@@ -818,7 +807,7 @@ pub(crate) fn list_circuits_with_recent_runs_inner(
     runs_per_circuit: i64,
 ) -> SqlResult<Vec<(AutopilotCircuit, Vec<CircuitRunLedger>)>> {
     let mut stmt = db.prepare(
-        "SELECT id, mesh_id, name, description, enabled, concurrency_limit, \
+        "SELECT id, mesh_id, name, description, enabled, \
                 graph_json, created_at, updated_at, is_preset \
          FROM autopilot_circuits
          WHERE mesh_id = ?1
@@ -958,30 +947,6 @@ pub(crate) fn set_autopilot_circuit_enabled_inner(
     let changed = db.execute(
         "UPDATE autopilot_circuits SET enabled = ?2, updated_at = datetime('now') WHERE id = ?1 AND is_preset = 0",
         params![id, i64::from(enabled)],
-    )?;
-    if changed == 0 {
-        return Err(rusqlite::Error::QueryReturnedNoRows);
-    }
-    Ok(())
-}
-
-/// Persist a circuit's step-slot budget — the canvas editor's per-circuit
-/// concurrency control. The IPC boundary clamps to the blueprint's
-/// `[floor, ceiling]` range; this accessor only writes. Errors when the
-/// row doesn't exist so a stale editor can't silently no-op. `updated_at`
-/// stamps so the Probe list shows fresh edit times.
-///
-/// Takes an explicit connection (issue #1691): the command already holds
-/// the writer guard for the read that derives the blueprint, so this shares
-/// that connection rather than re-locking the process-global writer.
-pub(crate) fn set_autopilot_circuit_concurrency_limit_inner(
-    db: &Connection,
-    id: i64,
-    concurrency_limit: i64,
-) -> SqlResult<()> {
-    let changed = db.execute(
-        "UPDATE autopilot_circuits SET concurrency_limit = ?2, updated_at = datetime('now') WHERE id = ?1 AND is_preset = 0",
-        params![id, concurrency_limit],
     )?;
     if changed == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -1426,7 +1391,6 @@ pub(crate) fn list_circuit_run_ids_for_cleanup_inner(
 pub struct ActiveCircuitRun {
     pub run: AutopilotCircuitRun,
     pub circuit_enabled: bool,
-    pub circuit_concurrency_limit: i64,
     pub circuit_graph_json: String,
     pub circuit_name: String,
 }
@@ -1441,7 +1405,7 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
     let mut stmt = db.prepare(
         "SELECT r.id, r.circuit_id, r.mesh_id, r.trigger_identity, r.state, \
                 r.context_json, r.source_agent_node_id, r.created_at, r.updated_at, \
-                c.enabled, c.concurrency_limit, COALESCE(snapshot.graph_json, c.graph_json), c.name \
+                c.enabled, COALESCE(snapshot.graph_json, c.graph_json), c.name \
          FROM autopilot_circuit_runs r \
          JOIN autopilot_circuits c ON c.id = r.circuit_id \
          LEFT JOIN circuit_run_snapshots snapshot ON snapshot.run_id = r.id \
@@ -1462,9 +1426,8 @@ pub(crate) fn list_active_circuit_runs_inner(db: &Connection) -> SqlResult<Vec<A
                 updated_at: row.get(8)?,
             },
             circuit_enabled: row.get::<_, i64>(9)? != 0,
-            circuit_concurrency_limit: row.get(10)?,
-            circuit_graph_json: row.get(11)?,
-            circuit_name: row.get(12)?,
+            circuit_graph_json: row.get(10)?,
+            circuit_name: row.get(11)?,
         })
     })?;
     rows.collect()
@@ -2037,28 +2000,6 @@ pub fn clear_circuit_step_agent_node_by_agent_id(run_id: i64, agent_node_id: i64
 // Concurrency counters — the inputs to the stepper's capacity snapshot.
 // ---------------------------------------------------------------------------
 
-/// Steps currently Running across this circuit's active runs — compared
-/// against `autopilot_circuits.concurrency_limit`. Paused runs count:
-/// their steps still hold real agents even though the graph is parked.
-pub fn count_running_circuit_steps(circuit_id: i64) -> SqlResult<i64> {
-    let db = crate::db::read_conn();
-    count_running_circuit_steps_inner(&db, circuit_id)
-}
-
-/// Per-test isolated variant of [`count_running_circuit_steps`] (issue #1691).
-pub(crate) fn count_running_circuit_steps_inner(
-    db: &Connection,
-    circuit_id: i64,
-) -> SqlResult<i64> {
-    db.query_row(
-        "SELECT COUNT(*) FROM autopilot_circuit_run_steps s \
-         JOIN autopilot_circuit_runs r ON r.id = s.run_id \
-         WHERE r.circuit_id = ?1 AND r.state IN ('running', 'paused') AND s.status = 'running'",
-        params![circuit_id],
-        |row| row.get(0),
-    )
-}
-
 /// **Admitted** circuit runs on this mesh (issue #1467) — the input to
 /// the run-admission gate. Counts runs in `running` or `paused` only.
 /// Deliberately excludes `pending`: a pending run has NOT yet claimed
@@ -2231,7 +2172,6 @@ mod reviewer_tests {
                 mesh.id,
                 "Review",
                 "",
-                2,
                 &graph.to_json().unwrap(),
             )
             .unwrap();
@@ -2261,15 +2201,9 @@ mod reviewer_tests {
         let mesh =
             crate::db::create_mesh_inner(&db, "trigger snapshot", "/tmp/trigger-snapshot").unwrap();
         let graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
-        let circuit = create_autopilot_circuit_inner(
-            &db,
-            mesh.id,
-            "Review",
-            "",
-            2,
-            &graph.to_json().unwrap(),
-        )
-        .unwrap();
+        let circuit =
+            create_autopilot_circuit_inner(&db, mesh.id, "Review", "", &graph.to_json().unwrap())
+                .unwrap();
         let mut prefs = crate::preferences::AppPreferences::default();
         prefs.reviewer_provider = Some("codex".into());
         prefs.harness_defaults.insert(

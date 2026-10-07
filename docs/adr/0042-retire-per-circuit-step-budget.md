@@ -1,6 +1,6 @@
 # ADR 0042: Retire the per-circuit shared step budget
 
-Status: proposed.
+Status: accepted.
 
 Issue: [#2114](https://github.com/alondero/buildmesh/issues/2114)
 
@@ -103,7 +103,9 @@ per-circuit budget.
   its `lib.rs` handler registration.
 - Persistence: `set_autopilot_circuit_concurrency_limit_inner`; decide the
   fate of the `autopilot_circuits.concurrency_limit` column (stop reading
-  it vs a drop migration) in the implementing issue.
+  it vs a drop migration) in the implementing issue. Decided in
+  [#2114](https://github.com/alondero/buildmesh/issues/2114): stop reading
+  and writing it, keep the column (see Implementation notes).
 - Scheduler: the circuit-wide running-step count, `queued_step_bind`'s
   step-slot branch, `CapacityBind::CircuitStepSlots`, and
   `circuit_free_slots` in the tick `Capacity`.
@@ -120,3 +122,25 @@ per-circuit budget.
 step-slot copy must have zero remaining producers; a circuit with three
 admitted review runs must show all three progressing, bound only by run
 capacity and pool.
+
+## Implementation notes
+
+Landed with [#2114](https://github.com/alondero/buildmesh/issues/2114).
+
+- **The `autopilot_circuits.concurrency_limit` column stays, vestigial.** No
+  code reads or writes it and new rows take the schema default. A drop
+  migration would break opening the database with an older build, which still
+  selects the column, for no benefit beyond tidiness. Rows seeded with any
+  value, including the old floor of 2 for review circuits, are ignored.
+- **The completion cascade lost its budget too.** After a step finishes,
+  `cascade_after_completion` used to start at most one non-agent successor
+  per finished step, purely so the shared budget stayed honest between Ticks.
+  With no budget it starts every newly eligible non-agent successor at once;
+  agent spawns still wait for the next Tick, which recounts lease and pool
+  slots.
+- **Wire and IPC.** `AutopilotCircuit` no longer carries `concurrency_limit`,
+  `create_circuit` no longer takes it, `update_circuit_concurrency_limit` is
+  gone, and the generated `CapacityBind` no longer has `circuit_step_slots`.
+- **History keeps its old shape.** The `step_capacity_wait` window now records
+  only `agent_limit`. Ledger rows written earlier still carry `circuit_limit`
+  and render as "step slots busy"; they are history, not a live producer.

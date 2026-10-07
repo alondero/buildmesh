@@ -24,8 +24,6 @@ pub struct AutopilotCircuit {
     pub description: String,
     /// Enabled circuits are eligible for the worker's trigger pass.
     pub enabled: bool,
-    #[ts(as = "i32")]
-    pub concurrency_limit: i64,
     /// The `CircuitGraph` blueprint, JSON-encoded (see module note above).
     pub graph_json: String,
     pub created_at: String,

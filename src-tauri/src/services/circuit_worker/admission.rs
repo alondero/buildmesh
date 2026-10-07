@@ -91,17 +91,13 @@ pub(super) fn global_agent_reservation_fits(
 
 /// Observe the capacity available to one running circuit. The worker injects
 /// the app-wide pool setting so this seam can exercise the real DB counters
-/// without a Tauri runtime. A circuit's durable lease is the agent budget;
-/// the retired per-mesh automation cap is deliberately not read here.
+/// without a Tauri runtime. A run's durable lease is the agent budget; the
+/// retired per-mesh automation cap and the retired per-circuit step budget
+/// (ADR 0042) are deliberately not read here.
 pub(super) fn observe_capacity(
     active: &db::ActiveCircuitRun,
     global_pool: Option<u32>,
 ) -> CircuitEvent {
-    let circuit_running =
-        db::count_running_circuit_steps(active.run.circuit_id).unwrap_or_else(|e| {
-            tracing::warn!("circuits: running-step count failed, failing closed: {}", e);
-            i64::MAX
-        });
     let global_free_slots = match global_pool {
         None => i64::MAX,
         Some(pool) => {
@@ -123,31 +119,21 @@ pub(super) fn observe_capacity(
     };
     let reserved_for_run = db::circuit_agent_slots_reserved(active.run.id).unwrap_or(0);
     let owned_by_run = db::count_active_circuit_agent_nodes_for_run(active.run.id).unwrap_or(0);
-    observe_capacity_with(
-        active.circuit_concurrency_limit,
-        CapacityCounts {
-            circuit_running,
-            reserved_for_run,
-            owned_by_run,
-            global_free_slots,
-        },
-    )
+    observe_capacity_with(CapacityCounts {
+        reserved_for_run,
+        owned_by_run,
+        global_free_slots,
+    })
 }
 
 pub(super) struct CapacityCounts {
-    pub circuit_running: i64,
     pub reserved_for_run: i64,
     pub owned_by_run: i64,
     pub global_free_slots: i64,
 }
 
-pub(super) fn observe_capacity_with(
-    concurrency_limit: i64,
-    counts: CapacityCounts,
-) -> CircuitEvent {
+pub(super) fn observe_capacity_with(counts: CapacityCounts) -> CircuitEvent {
     CircuitEvent::Tick(capacity::tick_capacity(
-        concurrency_limit,
-        counts.circuit_running,
         counts.reserved_for_run,
         counts.owned_by_run,
         counts.global_free_slots,

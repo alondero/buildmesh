@@ -29,7 +29,6 @@ import {
   isAdmittedRunState,
   isTerminalStepStatus,
   pendingRunBind,
-  queuedStepBind,
   STEP_STATUS_QUEUED,
 } from './circuitVocabulary';
 
@@ -203,7 +202,6 @@ function compareRunsNewestFirst(a: CircuitRunDetail | null, b: CircuitRunDetail 
 export interface CircuitProbeRow extends CircuitWithRuns {
   visibleRuns: CircuitRunDetail[];
   hasAttention: boolean;
-  runningSteps: number;
   reviewCircuit: ReviewCircuitMetadata | null;
   /** Circuit `node_id` → blueprint node, for the run card's role labels. */
   nodeIndex: NodeIndex;
@@ -219,7 +217,6 @@ export function annotateCircuitRows(rows: CircuitWithRuns[]): CircuitProbeRow[] 
       nodeIndex,
       visibleRuns: [],
       hasAttention: false,
-      runningSteps: 0,
     };
   });
 }
@@ -268,7 +265,6 @@ export function buildCircuitProbeRows(
         ...row,
         visibleRuns,
         hasAttention: visibleRuns.some((run) => runNeedsAttention(run, reviewCircuitForRun(run, reviewCircuit))),
-        runningSteps: countRunningSteps(row.runs),
         reviewCircuit,
         nodeIndex: facts.nodeIndex,
       };
@@ -363,7 +359,7 @@ export function isRunStale(
 }
 
 /**
- * Three distinct capacity budgets a stuck run can be bound by, kept
+ * Two distinct capacity budgets a stuck run can be bound by, kept
  * verbally distinct in the UI copy per the AC on issue #1467:
  *
  *   1. **Mesh circuit-run admission** — `meshes.circuit_run_capacity`,
@@ -371,37 +367,27 @@ export function isRunStale(
  *      of how many agent nodes the run's blueprint fans out to. A run
  *      in `state='pending'` is parked here until the mesh has fewer
  *      `running`/`paused` runs than the cap (issue #1475).
- *   2. **Per-circuit step slots** — `autopilot_circuits.concurrency_limit`,
- *      steps the circuit may run at once. A `pending_slot` step is
- *      parked here.
- *   3. **Circuit agent slots** — the run's durable blueprint lease,
- *      optionally bounded by the app-wide Circuit agent pool. A step
- *      needing a fresh agent with no circuit slot to spare gets parked on
- *      this too. The legacy mesh node setting is not a circuit budget.
+ *   2. **Circuit agent slots** — the run's durable blueprint lease,
+ *      optionally bounded by the app-wide Circuit agent pool. A
+ *      `pending_slot` step is parked here. The legacy mesh node setting
+ *      is not a circuit budget, and there is no per-circuit step budget
+ *      (ADR 0042 retired it).
  *
- * The Probe's three copy strings spell out which budget binds: "circuit-
- * run slots", "step slots", "circuit agent slot". A user reading
- * "waiting for a slot" should be able to tell which.
+ * The Probe's two copy strings spell out which budget binds: "circuit-
+ * run slots" and "circuit agent slot". A user reading "waiting for a
+ * slot" should be able to tell which.
  *
- * `runningSteps` and `meshActiveRuns` are both CLIENT-SIDE OBSERVATIONS
- * through a paginated window (`listCircuitsWithRuns(meshId, 10)`,
- * `listCircuitProbe`), not authoritative counts. The worker reads across
- * all runs (`db::count_running_circuit_steps` /
- * `db::count_active_circuit_runs`). In practice both wire observations
- * cover the admitted universe — `pending` lives in the queue, not the
+ * `meshActiveRuns` is a CLIENT-SIDE OBSERVATION through a paginated
+ * window (`listCircuitsWithRuns(meshId, 10)`, `listCircuitProbe`), not an
+ * authoritative count. The worker reads across all runs
+ * (`db::count_active_circuit_runs`). In practice the wire observation
+ * covers the admitted universe — `pending` lives in the queue, not the
  * ledger — but the ten-run terminal-history cap can still drop an
  * admitted run whose terminal row landed outside the window. The hedged
- * wording in `queuedReason` and `pendingAdmissionDetail` keeps that from
- * becoming a false statement. Issue #1467's bookkeeping did not expose a
- * per-circuit running-step count (it gates run admission at the mesh
- * level), so the window caveat stays.
+ * wording in `pendingAdmissionDetail` keeps that from becoming a false
+ * statement.
  */
 export interface CircuitCapacity {
-  /** `autopilot_circuits.concurrency_limit` — steps this circuit may run at once. */
-  concurrencyLimit: number;
-  /** Steps currently `running` across every *visible* run of this circuit
-   *  (see the window caveat above — this is a lower bound, not a total). */
-  runningSteps: number;
   /** `meshes.circuit_run_capacity` — circuit runs this mesh admits at once
    *  (issue #1467 / schema v36, default 2). Read from the mesh row the
    *  Probe already has in `meshStore`; no new IPC needed. */
@@ -414,21 +400,10 @@ export interface CircuitCapacity {
   meshActiveRuns: number;
 }
 
-/** Count the `running` steps across a circuit's visible runs — the
- *  frontend's stand-in for the worker's `count_running_circuit_steps`.
- *  A LOWER BOUND, not a total: it only sees the fetched window. See
- *  `CircuitCapacity` for what that costs the diagnosis. */
-export function countRunningSteps(runs: Array<{ steps: Array<Pick<StepLike, 'status'>> }>): number {
-  return runs.reduce(
-    (total, { steps }) => total + steps.filter((s) => s.status === 'running').length,
-    0
-  );
-}
-
 /**
  * Count this mesh's `running` + `paused` runs across every circuit —
  * the frontend's stand-in for the worker's `db::count_active_circuit_runs`.
- * Same window caveat as `countRunningSteps` (see `CircuitCapacity`).
+ * Same window caveat as the other client-side counts (see `CircuitCapacity`).
  *
  * `pending` is intentionally NOT counted: the backend excludes it for
  * the self-deadlock reason named on `CircuitCapacity.meshActiveRuns`,
@@ -538,7 +513,7 @@ export function runActivity(
       kind: 'queued',
       label: 'Queued',
       nodeId: queued.node_id,
-      detail: queuedReason(capacity),
+      detail: queuedReason(),
     };
   }
   // `pending` covers the brief window between a run's admission and the
@@ -584,13 +559,13 @@ function failedWithoutMessageDetail(
  *
  * Like `queuedReason`, the copy names *a* binding constraint rather than
  * claiming an exclusive cause. The two are deliberately visually
- * distinct (`queuedReason` says "step slots" or "circuit agent slot"; this says
+ * distinct (`queuedReason` says "circuit agent slot"; this says
  * "circuit-run slots") so a user reading "waiting for a slot" can tell
  * which budget binds.
  *
  * Singular vs plural wording follows the integer. A `meshRunCapacity`
  * of `0` falls through to a hedged statement rather than "All 0 slots
- * are busy" — same shape as `queuedReason` handles `concurrencyLimit`.
+ * are busy".
  */
 export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
   const { meshRunCapacity, meshActiveRuns } = capacity;
@@ -613,26 +588,12 @@ export function pendingAdmissionDetail(capacity: CircuitCapacity): string {
 }
 
 /**
- * A constraint we can see holding a queued step back. See `CircuitCapacity`
- * for why this is observation rather than the scheduler's own answer.
- *
- * The wording names *a* binding constraint, never "the" reason: when the
- * circuit's step budget AND its agent lease are both exhausted, both are
- * binding, and claiming one exclusively would be false. #1467 replaces this
- * with a capacity contract the ledger can state outright.
+ * What holds a queued step back. Only an agent spawn can park (ADR 0042
+ * retired the per-circuit step budget), and it parks on the run's agent
+ * lease or the optional app-wide agent pool.
  */
-export function queuedReason(capacity: CircuitCapacity): string {
-  const { concurrencyLimit } = capacity;
-  switch (queuedStepBind(capacity.concurrencyLimit, capacity.runningSteps)) {
-    case 'circuit_step_slots':
-      return concurrencyLimit === 1
-        ? "Waiting for a slot — this circuit runs one step at a time, and that slot is busy."
-        : `Waiting for a slot — all ${concurrencyLimit} of this circuit's step slots are busy.`;
-    case 'circuit_agent_lease':
-      return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
-    default:
-      return "Waiting for a slot — this circuit has spare step slots, so it is waiting on a circuit agent slot.";
-  }
+export function queuedReason(): string {
+  return "Waiting for a circuit agent slot — this run's agent lease, or the app-wide agent pool, has no free slot.";
 }
 
 /** Terminal-vs-live progress through the ledger, for the card's counter. */

@@ -85,17 +85,6 @@ export function stepStatusLabel(status: string): string {
 }
 
 /**
- * Which budget binds a queued step. Must match
- * `circuit::capacity::queued_step_bind`.
- */
-export function queuedStepBind(concurrencyLimit: number, runningSteps: number): CapacityBind {
-  if (concurrencyLimit > 0 && runningSteps >= concurrencyLimit) {
-    return 'circuit_step_slots';
-  }
-  return 'circuit_agent_lease';
-}
-
-/**
  * Which budget binds a parked run. Must match
  * `circuit::capacity::pending_run_bind`. Returns `null` when
  * no bind is in effect (free run slot) — only `mesh_run_admission`

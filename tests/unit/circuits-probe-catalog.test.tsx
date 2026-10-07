@@ -49,7 +49,6 @@ const CIRCUIT: AutopilotCircuit = {
   name: 'nightly-sweep',
   description: '',
   enabled: true,
-  concurrency_limit: 1,
   graph_json: '{"version":1,"nodes":[],"edges":[]}',
   created_at: '2026-08-22 10:00:00',
   updated_at: '2026-08-22 10:00:00',
@@ -76,9 +75,8 @@ const RUN_DONE: CircuitRunDetail = {
  * here (rather than importing from the Rust enum directly) lets us
  * assert the per-blueprint Probe UI affordances: every catalog
  * entry MUST appear as an `<option>` in the blueprint selector AND
- * its create-circuit wire shape MUST pass the right `blueprint` and
- * `concurrencyLimit` through to the IPC. Drift on either side fails
- * the test.
+ * its create-circuit wire shape MUST pass the right `blueprint`
+ * through to the IPC. Drift on either side fails the test.
  *
  * When adding a new built-in blueprint:
  *   1. Add the variant to `CircuitBlueprintKind` (Rust) + entry to
@@ -91,17 +89,14 @@ const RUN_DONE: CircuitRunDetail = {
 const PROBE_CATALOG: ReadonlyArray<{
   kind: CircuitBlueprintKind;
   label: string;
-  defaultConcurrencyLimit: number;
 }> = [
   {
     kind: 'walking_skeleton',
     label: 'Walking skeleton',
-    defaultConcurrencyLimit: 1,
   },
   {
     kind: 'issue_driven_autopilot_review',
     label: 'Issue-driven Autopilot + PR review',
-    defaultConcurrencyLimit: 2,
   },
 ];
 
@@ -193,7 +188,7 @@ describe('Circuits Probe catalog contract (#1469)', () => {
   );
 
   it.each(PROBE_CATALOG)(
-    'creating a $kind circuit passes the right blueprint + concurrencyLimit to create_circuit',
+    'creating a $kind circuit passes the right blueprint to create_circuit',
     async (entry) => {
       mockBackend();
       const user = userEvent.setup();
@@ -211,10 +206,8 @@ describe('Circuits Probe catalog contract (#1469)', () => {
       );
       await user.type(screen.getByTestId('circuit-name-input'), `${entry.kind}-test`);
 
-      // The review blueprint locks the trigger to GitHub issue label
-      // and forces a concurrency of 2 (otherwise the implementation
-      // and reviewer deadlock). The walking skeleton accepts Manual
-      // and defaults concurrency to 1.
+      // The review blueprint locks the trigger to GitHub issue label.
+      // The walking skeleton accepts Manual.
       if (entry.kind === 'issue_driven_autopilot_review') {
         // The Probe UI pins the trigger select to github_issue_label
         // and disables it. The label input is also visible.
@@ -233,7 +226,6 @@ describe('Circuits Probe catalog contract (#1469)', () => {
             meshId: 42,
             name: `${entry.kind}-test`,
             blueprint: entry.kind,
-            concurrencyLimit: entry.defaultConcurrencyLimit,
           })
         );
       });

@@ -3,5 +3,8 @@
 # a CRLF/LF mismatch on Windows runners where core.autocrlf may be enabled.
 # The harness catalog JSON snapshot (ADR-0037) is emitted by the same cargo
 # test pass and must stay LF for the same reason.
-src/types/generated/*.ts text eol=lf
+# ts-rs also leaves a trailing space after a field that is followed by a doc
+# comment. Regenerated output must not be hand-edited, so `git diff --check`
+# (the harness whitespace gate) skips trailing-space errors for these files.
+src/types/generated/*.ts text eol=lf whitespace=-trailing-space
 src/types/generated/*.json text eol=lf

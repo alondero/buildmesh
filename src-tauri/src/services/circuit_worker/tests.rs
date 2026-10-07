@@ -306,7 +306,6 @@ fn unavailable_set_node_status_target_fails_run_without_retrying_forever() {
             1,
             "status target failure",
             "",
-            1,
             &graph.to_json().unwrap(),
         )
         .unwrap();
@@ -347,7 +346,6 @@ fn unavailable_set_node_status_target_fails_run_without_retrying_forever() {
             ],
         };
         let event = CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 1,
         });
         let result = advance_and_persist_observed_event(&mut view, &event, |view, transition| {
@@ -1296,7 +1294,6 @@ fn review_handoff_without_transcript_or_native_evidence_remains_unverified() {
     view.context.set("source.review_preset", "1");
     advance(&mut view, &CircuitEvent::Triggered);
     let capacity = crate::circuit::stepper::Capacity {
-        circuit_free_slots: 2,
         agent_free_slots: 1,
     };
     advance(&mut view, &CircuitEvent::Tick(capacity));
@@ -1418,7 +1415,6 @@ fn review_handoff_clean_turn_does_not_require_task_completion_or_classifier() {
     view.context.set("source.review_preset", "1");
     advance(&mut view, &CircuitEvent::Triggered);
     let capacity = Capacity {
-        circuit_free_slots: 2,
         agent_free_slots: 1,
     };
     advance(&mut view, &CircuitEvent::Tick(capacity));
@@ -2317,7 +2313,6 @@ fn review_handoff_repeats_feedback_until_explicit_approval_for_new_and_saved_pre
             };
         }
         let capacity = Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 1,
         };
         let deliver = |view: &mut RunView, node: &str| {
@@ -2909,7 +2904,6 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         mesh.id,
         "c1",
         "",
-        4,
         &crate::circuit::model::CircuitGraph::walking_skeleton("fixture")
             .to_json()
             .unwrap(),
@@ -2919,7 +2913,6 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         mesh.id,
         "c2",
         "",
-        4,
         &crate::circuit::model::CircuitGraph::walking_skeleton("fixture")
             .to_json()
             .unwrap(),
@@ -2929,7 +2922,6 @@ fn may_admit_run_pending_saturated_mesh_defers() {
         mesh.id,
         "c3",
         "",
-        4,
         &crate::circuit::model::CircuitGraph::walking_skeleton("fixture")
             .to_json()
             .unwrap(),
@@ -3041,7 +3033,6 @@ fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
         mesh.id,
         "recovery",
         "",
-        1,
         &CircuitGraph::walking_skeleton("task").to_json().unwrap(),
     )
     .unwrap();
@@ -3160,7 +3151,6 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
         mesh.id,
         "observe-capacity-circuit",
         "",
-        2,
         &crate::circuit::model::CircuitGraph::walking_skeleton("fixture")
             .to_json()
             .unwrap(),
@@ -3183,11 +3173,91 @@ fn observed_capacity_ignores_legacy_mesh_node_cap() {
     let event = observe_capacity(&active, None);
     match event {
         CircuitEvent::Tick(capacity) => {
-            assert_eq!(capacity.circuit_free_slots, 2);
             assert_eq!(capacity.agent_free_slots, 2);
         }
         other => panic!("expected a capacity tick, got {other:?}"),
     }
+}
+
+/// ADR 0042 / issue #2114: sibling runs of one circuit used to time-share a
+/// per-circuit step budget, so the third admitted run parked with "all 2 of
+/// this circuit's step slots are busy" while the mesh allowed more runs.
+/// Only the run's own agent lease may gate its spawn step now; a stale value
+/// left in the retired `concurrency_limit` column must be ignored.
+#[test]
+fn sibling_runs_of_one_circuit_do_not_gate_each_others_spawn_step() {
+    let _db = install_temp_db();
+    let mesh = crate::db::create_mesh("sibling-runs", "/tmp/sibling-runs").unwrap();
+    let graph = crate::circuit::model::CircuitGraph::walking_skeleton("fixture");
+    let circuit = crate::db::create_autopilot_circuit(
+        mesh.id,
+        "sibling-runs-circuit",
+        "",
+        &graph.to_json().unwrap(),
+    )
+    .unwrap();
+    crate::db::write_conn()
+        .execute(
+            "UPDATE autopilot_circuits SET concurrency_limit = 2 WHERE id = ?1",
+            [circuit.id],
+        )
+        .unwrap();
+    let mut run_ids = Vec::new();
+    for n in 0..3 {
+        let run_id = crate::db::create_circuit_run(
+            circuit.id,
+            mesh.id,
+            &format!("manual:sibling-{n}"),
+            "{}",
+        )
+        .unwrap();
+        crate::db::set_circuit_run_state(run_id, "running").unwrap();
+        assert!(crate::db::reserve_circuit_agent_slots(run_id, 1).unwrap());
+        run_ids.push(run_id);
+    }
+    // Runs 1 and 2 each hold a running step: exactly the saturation that
+    // used to exhaust the circuit's two step slots.
+    for (n, run_id) in run_ids.iter().take(2).enumerate() {
+        crate::db::commit_circuit_advance(
+            *run_id,
+            None,
+            None,
+            &[crate::db::CircuitStepOp {
+                node_id: "await_source".into(),
+                status: "running".into(),
+                outcome: None,
+                error: None,
+                agent_node_id: Some(900 + n as i64),
+                attempt: 1,
+                fresh_attempt: false,
+            }],
+        )
+        .unwrap();
+    }
+
+    let third = crate::db::list_active_circuit_runs()
+        .unwrap()
+        .into_iter()
+        .find(|active| active.run.id == run_ids[2])
+        .expect("third running run should be observable");
+    let event = observe_capacity(&third, None);
+    let mut view = super::observe_parity_tests::view(
+        super::observe_parity_tests::spawn(),
+        RunState::Running,
+        StepStatus::Queued,
+        None,
+    );
+    let transition = crate::circuit::stepper::advance(&mut view, &event);
+    assert!(
+        transition
+            .effects
+            .contains(&crate::circuit::stepper::Effect::SpawnAgentNode {
+                node_id: "step".into()
+            }),
+        "the third admitted run must start its spawn step; got {:?}",
+        transition.effects
+    );
+    assert_eq!(view.step("step").unwrap().status, StepStatus::Running);
 }
 
 /// Test helper: an `ActiveCircuitRun` with only `mesh_id`, `id`,
@@ -3208,7 +3278,6 @@ fn active_row_with_state(mesh_id: i64, run_id: i64, state: &'static str) -> db::
             updated_at: String::new(),
         },
         circuit_enabled: true,
-        circuit_concurrency_limit: 1,
         circuit_graph_json: "{}".to_string(),
         circuit_name: String::new(),
     }
@@ -3396,7 +3465,6 @@ fn borrowed_source_loss_persists_cancelled_step_and_its_checkpoint() {
         1,
         "source-loss",
         "",
-        1,
         &graph.to_json().unwrap(),
     )
     .unwrap();
@@ -3806,7 +3874,6 @@ fn watchdog_run_104_background_report_does_not_publish_a_turn() {
         };
         view.context.set("source.agent_id", "3914");
         let capacity = Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 1,
         };
         advance(&mut view, &CircuitEvent::Triggered);
@@ -4034,7 +4101,6 @@ fn active_run(id: i64) -> db::ActiveCircuitRun {
             updated_at: String::new(),
         },
         circuit_enabled: true,
-        circuit_concurrency_limit: 0,
         circuit_graph_json: String::new(),
         circuit_name: String::new(),
     }
@@ -4999,7 +5065,6 @@ fn issue_review_spawn_seam_persists_parent_and_inherits_provider() {
         mesh.id,
         "issue-review-parent-provider",
         "",
-        2,
         &graph.to_json().unwrap(),
     )
     .unwrap();
