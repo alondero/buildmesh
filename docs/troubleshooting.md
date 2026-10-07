@@ -75,8 +75,9 @@ provider accounts, API keys, pairings, and Autopilot settings are still on
 disk. The three actions in the panel are described in
 [Settings that matter](user-guide.md#when-buildmesh-cannot-read-your-settings).
 
-The log line is content-free by design - a corrupt `preferences.json` holds
-plaintext API keys, so nothing from the file is ever written to the log:
+The log line is content-free by design - a `preferences.json` can still hold
+API keys (always so on a machine without Credential Manager), so nothing from the
+file is ever written to the log:
 
 ```
 WARN preferences::storage::read_state preferences.json is corrupt (invalid_json): the file is not valid JSON (malformed JSON at line 1 column 24) - left on disk untouched, settings writes are refused until it is recovered

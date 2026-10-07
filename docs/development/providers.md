@@ -200,7 +200,7 @@ every write rather than latching a flag that can disagree with the disk. A
 corrupt read still *serves* defaults so read-only callers (spawn routing, the
 circuit classifier, the usage panel) keep working; the defaults simply never
 reach the disk. `preferences::recovery` owns the bytes: `classify` is pure and
-returns a content-free `CorruptionInfo` (a corrupt file holds plaintext API
+returns a content-free `CorruptionInfo` (a corrupt file may still hold API
 keys, so no diagnostic may echo a value), every successful write refreshes an
 owner-only `preferences.json.bak`, and `restore_backup` / `reset_to_defaults`
 archive the current bytes before replacing them. Surface the state as a
@@ -246,11 +246,15 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
 
 - **Known targets** (extend-only — never delete from this list without a migration ticket):
   - `gemini:antigravity` — written by older Antigravity CLIs, read-only here. Current CLI (1.2+) refreshes `<agy_dir>/antigravity-oauth-token` instead and leaves this target stale; the Usage Meter prefers the file, then this keyring, and retries the alternate source on HTTP 401/403.
+  - `buildmesh:<profile>:provider-account:<account id>` and `buildmesh:<profile>:minimax-api-key` — a provider account's API key and the deprecated flat MiniMax key, written by `preferences::secrets` (issue #830). The blob is the key as UTF-8 text. `<profile>` is the app-data directory's leaf, i.e. the bundle identifier, so the stable and dev builds (same OS user, one vault) never read or delete each other's keys. Never rename either segment without a migration: the entry name is the only link from an account to its key.
   - `opencode:console` — written by Buildmesh for the OpenCode Go OAuth dance (issue #956). Persisted blob is JSON `{ access_token, workspace_id, refresh_token, expires_at, server_id }` (RFC-3339 string for `expires_at`, mirroring the original #957 fixture so the live probe still parses; the `server_id` field is the SolidStart deployment id captured into the `X-Server-Id` header).
+
+- **Provider API keys** (`src-tauri/src/preferences/secrets.rs`, issue #830) are ordinary `api_key` / `minimax_api_key` fields in memory and never fields on disk. `storage::write_to_disk` calls `secrets::externalize` (store each key, blank the ones the store accepted, delete the entry of a cleared key or removed account); `storage::read_state` calls `secrets::hydrate_json` through `recovery::classify_with` **before** the read-time migrations, because ADR-0025's migration creates a pairing only for an account that has a key. Rules a change must keep: a key leaves the file only after the store accepted it (no store means it stays in the file, never lost); a key present in the file wins over the stored one (hand edit, restored backup); a file from an older build is scrubbed in place on first load (`secrets::scrub_file`: only the secret fields change, no shape migration and no fabricated backup, preserving the read-never-persists rule), and so is its `.bak`; a recovery reset deletes nothing; a full-fidelity bundle (`state_recovery::build_bundle`) inlines the keys back through `secrets::with_keys_inlined`. Non-Windows builds have no store, so keys stay in the file. Tests use a per-thread in-memory vault (`secrets::test_support`), so they never touch the real Credential Manager; the OS wrapper has its own round-trip test that skips where Credential Manager is unreachable.
 
 - **Operator commands** for diagnosing drift:
   - `cmdkey /list | findstr antigravity` — confirm the legacy `gemini:antigravity` keyring target is present (metadata only; does not dump the blob).
   - `Get-Content $env:USERPROFILE\.gemini\antigravity-cli\antigravity-oauth-token` (or `$env:GEMINI_HOME\antigravity-cli\antigravity-oauth-token`) — inspect the live CLI oauth file; redact before pasting. Compare `token.expiry` against the keyring blob when the Usage Probe drops Antigravity.
+  - `cmdkey /list:buildmesh:*` — list the stored provider API key entries for every profile (metadata only; the entry name carries the profile and account id, never the key).
   - `cmdkey /list:opencode:console` — read the current blob's user/credential metadata without dumping bytes.
   - `cmdkey /list:buildmesh-test-*` — find any leftover test credentials from a failing test that didn't clean up. Each unit test uses a uuid-suffixed target name so collisions are vanishingly rare.
 
