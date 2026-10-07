@@ -393,26 +393,20 @@ impl SharedLog {
         })
     }
 
-    /// Write already-formatted bytes into the shared log, in full.
+    /// Write bytes into the shared log, in full.
     ///
     /// Inherent rather than an `io::Write` impl because the caller holds an
     /// `Arc<SharedLog>`, and an `Arc` only hands out `&T` — a trait method
     /// taking `&mut self` could not be reached through it. The interior
     /// `Mutex` is what makes `&self` sufficient.
     ///
-    /// Secrets are masked **before** the lock. The fmt subscriber hands over
-    /// one complete event per `write_all`, so the masker sees the whole line
-    /// rather than a slice of a token. The lock is then taken **once, around
-    /// the whole masked buffer**, and the standard library's `write_all` does
-    /// the looping. An earlier version looped here and called `self.with(..)`
-    /// per iteration, which released and re-took the mutex between chunks —
-    /// letting another thread interleave its own line into the middle of this
-    /// one.
-    fn write_all_through(&self, buf: &[u8]) -> io::Result<()> {
-        let scrubbed = scrub_log_bytes(buf);
-        self.write_raw(&scrubbed)
-    }
-
+    /// Takes bytes the caller has already passed through
+    /// [`scrub_log_bytes`] — the mask is computed once per event and shared
+    /// with the stderr mirror — and takes the lock **once, around the whole
+    /// buffer**, leaving the looping to the standard library's `write_all`. An
+    /// earlier version looped here and called `self.with(..)` per iteration,
+    /// which released and re-took the mutex between chunks — letting another
+    /// thread interleave its own line into the middle of this one.
     fn write_raw(&self, buf: &[u8]) -> io::Result<()> {
         use std::io::Write as _;
         self.with(|writer| writer.write_all(buf))
@@ -427,9 +421,13 @@ impl SharedLog {
 /// Mask a subscriber buffer before it is persisted.
 ///
 /// The fmt layer formats one event into a `String` and then `write_all`s
-/// those bytes, so a valid UTF-8 buffer is one complete line. Invalid UTF-8
-/// is written unchanged: there is no text to mask, and dropping the line
-/// would hide the failure this log exists to record.
+/// those bytes, so a valid UTF-8 buffer is one complete line — which is what
+/// lets the masker see the whole line rather than a slice of a token.
+/// Invalid UTF-8 is written unchanged: there is no text to mask, and dropping
+/// the line would hide the failure this log exists to record.
+///
+/// Returns borrowed bytes when nothing needed masking, so an ordinary
+/// diagnostic line costs no allocation.
 fn scrub_log_bytes(buf: &[u8]) -> Cow<'_, [u8]> {
     match std::str::from_utf8(buf) {
         Ok(text) => {
@@ -461,16 +459,19 @@ impl io::Write for Tee {
         // closed console or a full stderr buffer could abort the line before it
         // reached the file, which is the exact failure this whole module exists
         // to prevent.
-        // The file path masks. The mirror must see that same mask, not the raw
-        // event. Return the caller's length, not the masked length: `write_all`
-        // treats a short result as "write the rest", and the rest would be the
-        // unmasked tail.
-        self.log.write_all_through(buf)?;
+        // The mask is computed once, here, and both sinks receive exactly those
+        // bytes. Masking twice (once per sink) would run the UTF-8 check, the
+        // JSON parse and every regex pass twice per event for no gain, and the
+        // mirror must see the same mask, never the raw event. Return the
+        // caller's length, not the masked length: `write_all` treats a short
+        // result as "write the rest", and the rest would be the unmasked tail.
+        let scrubbed = scrub_log_bytes(buf);
+        self.log.write_raw(&scrubbed)?;
         // The mirror is best-effort by construction: `StderrMirror` already
         // no-ops once bootstrap promotes, and a genuine stderr error must not
         // turn into a lost log line. There is nowhere to report such an error
         // to, by definition.
-        let _ = self.stderr.write_all(&scrub_log_bytes(buf));
+        let _ = self.stderr.write_all(&scrubbed);
         Ok(buf.len())
     }
 
@@ -671,7 +672,7 @@ mod tests {
 
         // An ordinary subscriber line through the same handle, which is how the
         // tracing layer reaches it.
-        log.write_all_through(b"an ordinary subscriber line\n")
+        log.write_raw(&scrub_log_bytes(b"an ordinary subscriber line\n"))
             .unwrap();
         log.flush_through().unwrap();
 
@@ -793,14 +794,14 @@ mod tests {
             thread_barrier.wait();
             for _ in 0..50 {
                 writer
-                    .write_all_through(b"Z-interloper\n")
+                    .write_raw(&scrub_log_bytes(b"Z-interloper\n"))
                     .expect("the racing writer must succeed");
             }
         });
 
         barrier.wait();
         for _ in 0..50 {
-            log.write_all_through(line.as_bytes())
+            log.write_raw(&scrub_log_bytes(line.as_bytes()))
                 .expect("the main writer must succeed");
         }
         racing.join().unwrap();
@@ -846,35 +847,70 @@ mod tests {
         );
     }
 
-    /// A subscriber line is one formatted event. The fmt layer writes that
-    /// event in a single `write_all`, and this writer is what puts those bytes
-    /// into `buildmesh.log`. A secret in the event must not survive that write.
+    /// A subscriber line is one formatted event, so the buffer the fmt layer hands
+    /// over is a whole line — which is what lets the masker see a whole secret.
+    /// `Tee` then writes these bytes; this is the masking half on its own.
     #[test]
-    fn subscriber_line_is_scrubbed_before_it_reaches_the_log_file() {
-        let dir = std::env::temp_dir().join(format!("bm-startup-scrub-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let log = SharedLog::new(crate::diagnostics::main_log_writer(&dir).unwrap());
-
+    fn scrub_log_bytes_masks_a_whole_subscriber_line() {
         let secret = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
         let line =
-            format!("2026-10-07T00:00:00Z ERROR frontend: provider rejected {secret} session=42\n");
-        log.write_all_through(line.as_bytes()).unwrap();
-        log.flush_through().unwrap();
+            format!("2026-10-07T00:00:00Z ERROR frontend: provider rejected {secret} s=42\n");
+        let scrubbed = scrub_log_bytes(line.as_bytes());
+        let text = std::str::from_utf8(&scrubbed).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("s=42"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
 
+        // A line with nothing to mask is borrowed, so an ordinary diagnostic
+        // costs no allocation on the logging thread.
+        let clean = b"spawn_timing: session=42 checkpoint=xterm_mount elapsed=17ms\n";
+        assert!(matches!(
+            scrub_log_bytes(clean),
+            Cow::Borrowed(bytes) if bytes == clean
+        ));
+
+        // Invalid UTF-8 has no text to mask, and dropping it would hide the
+        // failure this log exists to record.
+        let binary = [0xffu8, 0xfe, b'\n'];
+        assert_eq!(scrub_log_bytes(&binary).as_ref(), &binary[..]);
+    }
+
+    /// `Tee` is the writer the tracing layer actually hands events to, and the
+    /// only place both sinks are fed. Two invariants live here: the bytes on
+    /// disk are masked, and the call is accounted for the caller's length, not
+    /// the masked one.
+    #[test]
+    fn tee_write_masks_once_and_reports_the_callers_length() {
+        let dir = std::env::temp_dir().join(format!("bm-startup-tee-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = Arc::new(SharedLog::new(
+            crate::diagnostics::main_log_writer(&dir).unwrap(),
+        ));
+        let mut tee = Tee {
+            // A disabled mirror keeps the assertion on the file alone, which is
+            // the sink a user is ever asked to hand over.
+            stderr: StderrMirror::new(Arc::new(AtomicBool::new(false))),
+            log: Arc::clone(&log),
+        };
+
+        let secret = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        let line = format!("provider rejected {secret} session=42\n");
+        let reported = tee.write(line.as_bytes()).unwrap();
+        tee.flush().unwrap();
+
+        assert_eq!(
+            reported,
+            line.len(),
+            "the caller's length, or `write_all` replays the unmasked tail"
+        );
         let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
         assert!(
             !contents.contains(secret),
             "the log file must not keep the provider key: {contents}"
         );
-        assert!(
-            contents.contains("session=42"),
-            "non-secret diagnostic text must remain: {contents}"
-        );
-        assert!(
-            contents.contains("[REDACTED]"),
-            "the masked token must be visible so the line is still diagnosable: {contents}"
-        );
+        assert!(contents.contains("session=42"), "{contents}");
+        assert!(contents.contains("[REDACTED]"), "{contents}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

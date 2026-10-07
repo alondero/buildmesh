@@ -215,8 +215,8 @@ impl SecretScrubber {
     /// Recursively mask secrets inside a JSON value (used to scrub a tool call's
     /// raw `input` tree). Two rules, both preserving the JSON shape (object keys
     /// are never altered):
-    /// - a string value whose *key* names a secret (`{"password": "x"}`) is
-    ///   masked wholesale, even when the value carries no token-shaped marker;
+    /// - a leaf whose *key* names a secret (`{"password": "x"}`, `{"pin": 4815}`)
+    ///   is masked wholesale, even when the value carries no token-shaped marker;
     /// - every other string leaf is content-scrubbed (token shapes, `k=v`
     ///   secrets, private keys) via [`scrub`](Self::scrub).
     pub fn scrub_json(value: &mut serde_json::Value) {
@@ -228,6 +228,26 @@ impl SecretScrubber {
 /// nest `{"a":"{\"a\":…}"}` without bound; past this depth the leaf is masked
 /// as text only.
 const MAX_EMBED_DEPTH: u32 = 8;
+
+/// Spare JSON-parsing budget per pass, on top of the line's own length.
+///
+/// Bracket resolution is one linear pass, but each candidate that *balances*
+/// still costs a `serde_json` parse of its span, so a payload of balanced
+/// non-JSON braces would stay quadratic in the accepted 64 KiB. Legitimate
+/// fragments are disjoint, so they cost at most one line's worth; the slack
+/// absorbs the few non-JSON braces a real line carries. When the budget runs
+/// out the remaining text is prose, which the text pipeline still masks.
+const JSON_PROBE_SLACK: usize = 4096;
+
+/// Outcome of one JSON probe in [`scrub_log_line_at`].
+enum Probe {
+    /// The brackets balanced and held a JSON object or array.
+    Parsed(usize, serde_json::Value),
+    /// The braces do not balance, or their span is not a JSON container.
+    NotJson,
+    /// The span is larger than this pass can afford to parse.
+    OverBudget,
+}
 
 /// Mask a log line: JSON values through [`scrub_json_at`], and the prose
 /// between them through [`scrub_str`].
@@ -244,49 +264,60 @@ fn scrub_log_line_at(input: &str, depth: u32) -> String {
     if depth > MAX_EMBED_DEPTH {
         return scrub_str(input);
     }
+    // Resolved once for the whole line; see `BracketIndex`.
+    let brackets = BracketIndex::new(input);
     let mut out = String::with_capacity(input.len());
     let mut i = 0;
+    let mut probe_budget = input.len() + JSON_PROBE_SLACK;
     while i < input.len() {
         let mut search = i;
         let mut parsed = None;
         while let Some(start) = next_json_start(input, search) {
-            if let Some((end, value)) = parse_json_value(input, start) {
-                parsed = Some((start, end, value));
-                break;
+            match probe_json_value(input, start, &brackets, &mut probe_budget) {
+                Probe::Parsed(end, value) => {
+                    parsed = Some((start, end, value));
+                    break;
+                }
+                // A brace that is not JSON stays in the prose span. Splitting
+                // there would hide the tail of `password="correct {horse}"` from
+                // the quoted-value rule.
+                Probe::NotJson => search = start + 1,
+                Probe::OverBudget => break,
             }
-            // A brace that is not JSON stays in the prose span. Splitting
-            // there would hide the tail of `password="correct {horse}"` from
-            // the quoted-value rule.
-            search = start + 1;
         }
         let Some((start, end, mut value)) = parsed else {
             out.push_str(&scrub_str(&input[i..]));
             break;
         };
         let prose = &input[i..start];
-        if let Some(key_at) = secret_key_prefix(prose) {
-            let original = value.clone();
-            mask_all_strings(&mut value);
-            out.push_str(&scrub_str(&prose[..key_at]));
-            out.push_str(&prose[key_at..]);
-            if value == original {
-                out.push_str(&input[start..end]);
-            } else {
-                out.push_str(&value.to_string());
-            }
+        let changed = if prose_ends_with_secret_key(prose) {
+            // The key names a credential, so the whole JSON value is one.
+            mask_all_leaves(&mut value)
         } else {
-            let original = value.clone();
-            scrub_json_at(&mut value, depth);
-            out.push_str(&scrub_str(prose));
-            if value == original {
-                out.push_str(&input[start..end]);
-            } else {
-                out.push_str(&value.to_string());
-            }
-        }
+            scrub_json_at(&mut value, depth)
+        };
+        out.push_str(&scrub_str(prose));
+        push_value(&mut out, input, start, end, &value, changed);
         i = end;
     }
     out
+}
+
+/// Append a parsed JSON value, reusing the original text when nothing in it
+/// needed masking.
+fn push_value(
+    out: &mut String,
+    input: &str,
+    start: usize,
+    end: usize,
+    value: &serde_json::Value,
+    changed: bool,
+) {
+    if changed {
+        out.push_str(&value.to_string());
+    } else {
+        out.push_str(&input[start..end]);
+    }
 }
 
 /// Next `{` or `[` that is not inside a quoted span.
@@ -322,7 +353,7 @@ fn next_json_start(input: &str, from: usize) -> Option<usize> {
                 // (`token='["<hex>"]'`). Leaving the JSON visible would hide
                 // that key from the quoted-value rule. A non-secret key
                 // (`data='{"api_keys":[…]}'`) still has to be parsed.
-                let owned_by_secret = secret_key_prefix(&input[from..i]).is_some();
+                let owned_by_secret = prose_ends_with_secret_key(&input[from..i]);
                 if owned_by_secret || !json_container(body) {
                     i = end;
                     continue;
@@ -366,55 +397,138 @@ fn opens_single_quote(bytes: &[u8], at: usize) -> bool {
     true
 }
 
-fn parse_json_value(input: &str, start: usize) -> Option<(usize, serde_json::Value)> {
-    let end = json_value_end(input, start)?;
-    let value: serde_json::Value = serde_json::from_str(&input[start..end]).ok()?;
-    if value.is_array() || value.is_object() {
-        Some((end, value))
-    } else {
-        None
+/// Every balanced bracket pair in a line, resolved in one left-to-right pass.
+///
+/// The closing bracket used to be found by re-scanning from each candidate to
+/// the end of the line, so a line of braces that never balance — a template, a
+/// markdown table, a language error dump — paid one full tail scan per brace,
+/// quadratic in the accepted 64 KiB. One stack pass makes each lookup a binary
+/// search instead.
+struct BracketIndex {
+    /// `(open, one-past-close)` byte offsets, ascending by `open`.
+    pairs: Vec<(usize, usize)>,
+}
+
+impl BracketIndex {
+    fn new(input: &str) -> Self {
+        let bytes = input.as_bytes();
+        let mut stack: Vec<usize> = Vec::new();
+        let mut pairs: Vec<(usize, usize)> = Vec::new();
+        let mut in_string = false;
+        let mut escape = false;
+        for (i, &c) in bytes.iter().enumerate() {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == b'\\' {
+                    escape = true;
+                } else if c == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                b'"' => in_string = true,
+                b'{' | b'[' => stack.push(i),
+                // A stray closer opens nothing, so it is dropped: `start` only
+                // ever points at an opener.
+                b'}' | b']' => {
+                    if let Some(open) = stack.pop() {
+                        pairs.push((open, i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pairs.sort_unstable_by_key(|(open, _)| *open);
+        Self { pairs }
+    }
+
+    /// Byte index just past the value that opens at `start`, or `None` when
+    /// those brackets never close. `start` points at `{` or `[`.
+    fn value_end(&self, start: usize) -> Option<usize> {
+        self.pairs
+            .binary_search_by_key(&start, |(open, _)| *open)
+            .ok()
+            .map(|at| self.pairs[at].1)
     }
 }
 
-/// Byte offset of a secret-named key whose separator (`:` or `=`) is the last
-/// non-space before `prose` ends, which is where a JSON value is about to
-/// start. The key's value is then the whole JSON value, not a leaf inside it.
-fn secret_key_prefix(prose: &str) -> Option<usize> {
+/// Charge one JSON candidate against the pass's parse budget and, if it fits,
+/// parse it.
+fn probe_json_value(
+    input: &str,
+    start: usize,
+    brackets: &BracketIndex,
+    probe_budget: &mut usize,
+) -> Probe {
+    // Unbalanced braces cost nothing: the index already knows they have no
+    // partner, so no scan and no parse is spent on them.
+    let Some(end) = brackets.value_end(start) else {
+        return Probe::NotJson;
+    };
+    if end - start > *probe_budget {
+        return Probe::OverBudget;
+    }
+    *probe_budget -= end - start;
+    match serde_json::from_str::<serde_json::Value>(&input[start..end]) {
+        Ok(value) if value.is_array() || value.is_object() => Probe::Parsed(end, value),
+        _ => Probe::NotJson,
+    }
+}
+
+/// Whether `prose` ends with a secret-named key whose separator (`:` or `=`)
+/// is its last non-space, which is where a JSON value is about to start. The
+/// key's value is then the whole JSON value, not a leaf inside it.
+///
+/// A predicate, not an offset, on purpose. The prose used to be cut at the key
+/// so the key could be emitted verbatim, which put the cut *between* the two
+/// quotes of `"token":` — handing [`scrub_str`] an unterminated quote and
+/// leaving the other half without its opener. Nothing needs protecting: a bare
+/// key followed by its separator has no value for the key/value rules to mask,
+/// so the whole prose is scrubbed as text and no boundary exists to get wrong.
+fn prose_ends_with_secret_key(prose: &str) -> bool {
     let trimmed_end = prose.trim_end().len();
     if trimmed_end == 0 {
-        return None;
+        return false;
     }
     let head = &prose[..trimmed_end];
-    let last = *head.as_bytes().last()?;
+    let Some(last) = head.as_bytes().last().copied() else {
+        return false;
+    };
     if last != b':' && last != b'=' {
-        return None;
+        return false;
     }
+    // The key ends before the separator, allowing for a closing quote.
     let mut key_end = head[..head.len() - 1].trim_end().len();
     if key_end == 0 {
-        return None;
+        return false;
     }
-    let quote = head.as_bytes()[key_end - 1];
-    if quote == b'"' || quote == b'\'' {
+    if matches!(head.as_bytes()[key_end - 1], b'"' | b'\'') {
         key_end -= 1;
     }
     if key_end == 0 {
-        return None;
+        return false;
     }
+    // The key is the trailing run of identifier characters, quotes excluded.
     let key_region = &head[..key_end];
-    let rel = match key_region
+    let key_start = match key_region
         .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'))
     {
-        Some(at) => at + key_region[at..].chars().next()?.len_utf8(),
+        Some(at) => at + key_region[at..].chars().next().map_or(0, char::len_utf8),
         None => 0,
     };
-    let key = &key_region[rel..];
-    if key.is_empty() || !SECRET_KEY_RE.is_match(key) {
-        return None;
-    }
-    Some(rel)
+    let key = &key_region[key_start..];
+    !key.is_empty() && SECRET_KEY_RE.is_match(key)
 }
 
-fn scrub_json_at(value: &mut serde_json::Value, depth: u32) {
+/// Mask a JSON value in place, reporting whether anything changed.
+///
+/// The flag lets the log-line caller keep the original text of an untouched
+/// value byte-for-byte. Deciding that by comparing against a deep clone cost an
+/// extra allocation per logged payload; the alternative — re-serializing
+/// always — would reorder keys and rewrite formatting the reader is debugging.
+fn scrub_json_at(value: &mut serde_json::Value, depth: u32) -> bool {
     match value {
         serde_json::Value::String(s) => {
             let cleaned = if depth >= MAX_EMBED_DEPTH {
@@ -424,78 +538,69 @@ fn scrub_json_at(value: &mut serde_json::Value, depth: u32) {
             };
             if &cleaned != s {
                 *s = cleaned;
+                true
+            } else {
+                false
             }
         }
         serde_json::Value::Array(items) => {
+            let mut changed = false;
             for item in items {
-                scrub_json_at(item, depth);
+                changed |= scrub_json_at(item, depth);
             }
+            changed
         }
         serde_json::Value::Object(map) => {
+            let mut changed = false;
             for (key, v) in map.iter_mut() {
-                // Under a secret-named key, every string leaf is masked whole
-                // — the key already says it's a credential, and a secret can
-                // hide in an array/object value (`{"api_keys": ["k1","k2"]}`)
-                // that carries no token shape of its own.
+                // Under a secret-named key, every leaf is masked whole — the
+                // key already says it's a credential, and a secret can hide in
+                // an array/object value (`{"api_keys": ["k1","k2"]}`) or a
+                // scalar one (`{"pin": 481516}) that carries no token shape.
                 if SECRET_KEY_RE.is_match(key) {
-                    mask_all_strings(v);
+                    changed |= mask_all_leaves(v);
                     continue;
                 }
-                scrub_json_at(v, depth);
+                changed |= scrub_json_at(v, depth);
             }
+            changed
         }
-        _ => {}
+        _ => false,
     }
 }
 
-/// Byte index just past the JSON value that opens at `start`, or `None` when
-/// the brackets never close. `start` points at `{` or `[`.
-fn json_value_end(input: &str, start: usize) -> Option<usize> {
-    let bytes = input.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut i = start;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_string {
-            if escape {
-                escape = false;
-            } else if c == b'\\' {
-                escape = true;
-            } else if c == b'"' {
-                in_string = false;
-            }
-        } else {
-            match c {
-                b'"' => in_string = true,
-                b'{' | b'[' => depth += 1,
-                b'}' | b']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(i + 1);
-                    }
-                    if depth < 0 {
-                        return None;
-                    }
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Replace every string leaf in a JSON subtree with [`MASK`], preserving shape.
+/// Replace every leaf in a JSON subtree with [`MASK`], preserving shape.
 /// Used when a key already identifies the whole subtree as a credential, so its
 /// values must not survive even if they carry no token marker.
-fn mask_all_strings(value: &mut serde_json::Value) {
+///
+/// Scalars are leaves too: a numeric PIN under `{"pin": 481516}` or a numeric
+/// token under `{"token": 987654321}` is a credential, and leaving the number
+/// in `buildmesh.log` is exactly the leak the key-aware rule exists to stop.
+/// Returns whether anything changed, so an already-masked subtree stays a
+/// no-op and the caller can keep the original bytes.
+fn mask_all_leaves(value: &mut serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(s) => *s = MASK.to_string(),
-        serde_json::Value::Array(items) => items.iter_mut().for_each(mask_all_strings),
-        serde_json::Value::Object(map) => map.values_mut().for_each(mask_all_strings),
-        _ => {}
+        serde_json::Value::Array(items) => {
+            let mut changed = false;
+            for item in items {
+                changed |= mask_all_leaves(item);
+            }
+            changed
+        }
+        serde_json::Value::Object(map) => {
+            let mut changed = false;
+            for v in map.values_mut() {
+                changed |= mask_all_leaves(v);
+            }
+            changed
+        }
+        leaf => {
+            if leaf.as_str() == Some(MASK) {
+                return false;
+            }
+            *leaf = serde_json::Value::String(MASK.into());
+            true
+        }
     }
 }
 
@@ -919,5 +1024,171 @@ mod tests {
         let once = SecretScrubber::scrub(raw);
         assert_eq!(once, MASK);
         assert_eq!(SecretScrubber::scrub(&once), once);
+    }
+
+    // --- PR #2120 review: the persistence pass must stay cheap and whole --
+
+    #[test]
+    fn scrub_for_persistence_keeps_a_quoted_secret_key_intact() {
+        // The prose is no longer cut at the key, so a quoted key reaches the
+        // text pipeline whole. Cutting it used to hand `scrub_str` an
+        // unterminated quote and emit the other half without its opener.
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#""token": ["0123456789abcdef"]"#),
+            r#""token": ["[REDACTED]"]"#
+        );
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"'token': ["0123456789abcdef"]"#),
+            r#"'token': ["[REDACTED]"]"#
+        );
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_a_passphrase_before_a_quoted_key() {
+        // The quote before `token` is ambiguous — it closes the passphrase and
+        // could open the key. Moving it into the key's half would leave
+        // `PASSWORD="correct horse battery` unterminated, which the quoted-value
+        // rule cannot match, leaking everything after the first word.
+        let raw = r#"PASSWORD="correct horse battery staple""token": ["0123456789abcdef"]"#;
+        let scrubbed = SecretScrubber::scrub_for_persistence(raw);
+        assert!(!scrubbed.contains("horse"), "{scrubbed}");
+        assert!(!scrubbed.contains("0123456789abcdef"), "{scrubbed}");
+        assert!(scrubbed.contains(r#"PASSWORD="[REDACTED]""#), "{scrubbed}");
+        assert!(
+            scrubbed.contains(r#""token": ["[REDACTED]"]"#),
+            "{scrubbed}"
+        );
+    }
+
+    #[test]
+    fn scrub_for_persistence_bounds_the_work_a_brace_heavy_line_costs() {
+        // 64 KiB is the accepted input size, and every `{` is a JSON candidate.
+        // Resolving brackets in one pass plus a per-pass parse budget keeps this
+        // linear; the assertion is the outcome, not a stopwatch.
+        let hostile = "{".repeat(64 * 1024);
+        let scrubbed = SecretScrubber::scrub_for_persistence(&hostile);
+        assert_eq!(scrubbed, hostile, "unbalanced prose must survive as prose");
+        // Balanced but invalid JSON is the other quadratic shape: each
+        // candidate spans the rest of the line.
+        let balanced = format!("{}{}", "{".repeat(8 * 1024), "}".repeat(8 * 1024));
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(&balanced),
+            balanced,
+            "non-JSON braces must survive as prose"
+        );
+    }
+
+    #[test]
+    fn scrub_for_persistence_still_masks_json_after_a_budget_spent_on_prose() {
+        // The budget bounds parsing, not masking: once it is spent the rest of
+        // the line is prose, and the text pipeline still has to catch a
+        // credential that sits there.
+        let noise = format!("{} ", "{not json".repeat(4_000));
+        let raw = format!("{noise}token=sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB");
+        let scrubbed = SecretScrubber::scrub_for_persistence(&raw);
+        assert!(
+            !scrubbed.contains("sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB"),
+            "{scrubbed}"
+        );
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_scalar_leaves_under_a_secret_key() {
+        // A PIN or a numeric token under a secret-named key is a credential
+        // even though it is not a string, so it must not reach the log file.
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"{"password": 123456}"#),
+            r#"{"password":"[REDACTED]"}"#
+        );
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"{"token": 987654321}"#),
+            r#"{"token":"[REDACTED]"}"#
+        );
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"token=[987654321]"#),
+            r#"token=["[REDACTED]"]"#
+        );
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"{"api_keys":[1, true]}"#),
+            r#"{"api_keys":["[REDACTED]","[REDACTED]"]}"#
+        );
+        // A scalar under a *non*-secret key is diagnostic, not a credential.
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"{"count": 42, "author": "octocat"}"#),
+            r#"{"count": 42, "author": "octocat"}"#
+        );
+        // `tokens_used` carries a secret word, so the key rule masks it — the
+        // deliberate over-masking direction for this scrubber.
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(r#"{"tokens_used": 42}"#),
+            r#"{"tokens_used":"[REDACTED]"}"#
+        );
+    }
+
+    #[test]
+    fn scrub_json_masks_numeric_leaves_under_a_secret_key() {
+        let mut v = serde_json::json!({
+            "password": "swordfish",
+            "auth_token": 481516,
+            "api_keys": [1, 2, 3],
+            "author": "octocat",
+            "retries": 3
+        });
+        SecretScrubber::scrub_json(&mut v);
+        assert_eq!(v["password"].as_str().unwrap(), MASK);
+        assert_eq!(v["auth_token"].as_str().unwrap(), MASK);
+        assert_eq!(v["api_keys"][2].as_str().unwrap(), MASK);
+        // Non-secret keys keep their scalars.
+        assert_eq!(v["author"].as_str().unwrap(), "octocat");
+        assert_eq!(v["retries"].as_i64().unwrap(), 3);
+    }
+
+    #[test]
+    fn masking_a_scalar_leaves_is_idempotent() {
+        // An already-masked subtree must report "unchanged" so the log-line
+        // caller keeps the original bytes instead of re-serializing them.
+        let mut once = serde_json::json!({"token": 481516, "list": [1, "x"]});
+        assert!(mask_all_leaves(&mut once));
+        assert_eq!(
+            once,
+            serde_json::json!({"token": MASK, "list": [MASK, MASK]})
+        );
+        let mut twice = once.clone();
+        assert!(
+            !mask_all_leaves(&mut twice),
+            "a masked subtree is already done"
+        );
+        assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn scrub_json_at_reports_only_real_changes() {
+        let mut untouched = serde_json::json!({"author": "octocat", "count": 3});
+        assert!(!scrub_json_at(&mut untouched, 0));
+        let mut touched =
+            serde_json::json!({"command": "curl -H 'Authorization: Bearer abc123def456ghi789'"});
+        assert!(scrub_json_at(&mut touched, 0));
+    }
+
+    #[test]
+    fn prose_ends_with_secret_key_recognises_the_key_shapes() {
+        for raw in [
+            "token=",
+            " \"token\": ",
+            " 'token':",
+            "export DB_PASSWORD=",
+            "PASSWORD=\"correct horse\" \"api_token\":",
+        ] {
+            assert!(
+                prose_ends_with_secret_key(raw),
+                "expected a secret key in {raw:?}"
+            );
+        }
+        for raw in ["", "author=", "repair=", "payload=", "\"count\": "] {
+            assert!(
+                !prose_ends_with_secret_key(raw),
+                "expected no secret key in {raw:?}"
+            );
+        }
     }
 }

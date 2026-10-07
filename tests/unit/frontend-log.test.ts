@@ -159,6 +159,36 @@ describe('frontendLog bridge', () => {
     expect(message).not.toContain('plain-secret-no-shape');
   });
 
+  it('does not repeat the name and message a stack already carries', () => {
+    installFrontendLogBridge();
+    const err = new Error('kaboom');
+    // A V8 stack opens with `Name: message`, so printing the header and then
+    // the stack would print it twice and spend the stack cap on the repeat.
+    err.stack = 'Error: kaboom\n    at fn (file.ts:10)';
+
+    console.error(err);
+
+    const call = vi.mocked(invoke).mock.calls.find(c => c[0] === 'log_frontend');
+    const message = (call![1] as { message: string }).message;
+    expect(message.match(/Error: kaboom/g)).toHaveLength(1);
+    expect(message).toContain('at fn (file.ts:10)');
+  });
+
+  it('keeps a stack that does not repeat the header', () => {
+    installFrontendLogBridge();
+    const err = new TypeError('bad type');
+    // A non-V8 stack (or a browser that trims the header) must survive whole.
+    err.stack = 'frames only\n    at fn (file.ts:10)';
+
+    console.error(err);
+
+    const call = vi.mocked(invoke).mock.calls.find(c => c[0] === 'log_frontend');
+    const message = (call![1] as { message: string }).message;
+    expect(message).toContain('TypeError: bad type');
+    expect(message).toContain('frames only');
+    expect(message).toContain('at fn (file.ts:10)');
+  });
+
   it('does not json-stringify extra fields attached to an Error', () => {
     installFrontendLogBridge();
     const err = new Error('kaboom');

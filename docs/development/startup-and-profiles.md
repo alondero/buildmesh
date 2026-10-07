@@ -39,10 +39,13 @@ app uses, so a healthy startup still produces exactly one bounded log under the 
 **The file is scrubbed before it is written.** Frontend `console` lines enter through `log_frontend`, which
 masks the message and then caps it. The subscriber writer masks every line again on the way into
 `buildmesh.log`, and the bootstrap stderr mirror gets those same masked bytes. Masking covers provider
-key shapes, bearer and private-key material, `#pair=` invitations, `ticket=` handshake values, and JSON
-values whose key names a credential (including a nested array). A frontend payload larger than 64 KiB is
-omitted rather than cut through the middle of a secret. Ordinary diagnostic text is left in place.
-Prompts and local paths are not secrets and stay in the file.
+key shapes, bearer and private-key material, `#pair=` invitations, `ticket=` handshake values, and every
+leaf under a JSON key that names a credential — a nested array, or a bare number such as a numeric PIN.
+A frontend payload larger than 64 KiB is omitted rather than cut through the middle of a secret.
+Ordinary diagnostic text is left in place. Prompts and local paths are not secrets and stay in the file.
+The structured pass is bounded per line (brackets resolved once, then a JSON parse budget), so a payload
+of nothing but braces cannot stall a logging thread; whatever falls outside that budget is still masked
+by the text rules.
 
 **Failures are typed, and retry is gated on stage.** `StartupFailure` carries a `StartupStage` (whose `label()`
 is prose, because a modal dialog must not read `StartupStage::AppData`), a summary authored here rather than

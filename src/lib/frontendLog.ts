@@ -97,9 +97,14 @@ function isSecretKey(key: string): boolean {
  * rules as any other thrown value.
  */
 function formatError(err: Error, depth: number): string {
-  const message = cap(String(err.message ?? ''), STRING_CAP);
+  const rawMessage = String(err.message ?? '');
   const stack = cap(err.stack ?? '<no stack>', STACK_CAP);
-  let text = `${err.name}: ${message}\n${stack}`;
+  // A V8 `stack` already begins with `Name: message`. Printing the header and
+  // then the stack that repeats it duplicates the diagnostic and spends the
+  // stack cap on it, so drop the repeat when the stack carries one.
+  const header = `${err.name}: ${rawMessage}`;
+  const frames = stack.startsWith(header) ? stack.slice(header.length).replace(/^\n/, '') : stack;
+  let text = `${err.name}: ${cap(rawMessage, STRING_CAP)}\n${frames}`;
   // `lib` does not include ES2022 `Error.cause`. Read it only when present.
   const cause = (err as Error & { cause?: unknown }).cause;
   if (depth < MAX_DEPTH && cause !== undefined) {

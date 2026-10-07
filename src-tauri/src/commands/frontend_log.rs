@@ -53,7 +53,12 @@ fn truncate_log(message: &str, cap: usize) -> String {
     if message.len() <= cap {
         return message.to_string();
     }
-    let end = message.floor_char_boundary(cap);
+    // The marker is charged to the cap, so a persisted line stays inside the
+    // documented budget instead of overrunning it by the marker's length. The
+    // marker built from the whole length is an upper bound on the one built
+    // from the truncated remainder, so the reservation cannot come up short.
+    let reservation = format!("…<truncated {} bytes>", message.len());
+    let end = message.floor_char_boundary(cap.saturating_sub(reservation.len()));
     format!(
         "{}…<truncated {} bytes>",
         &message[..end],
@@ -136,6 +141,21 @@ mod tests {
         assert!(prepared.contains("[REDACTED]"), "{prepared}");
         assert!(prepared.contains("truncated"), "{prepared}");
         assert!(!prepared.contains("tail-marker"), "{prepared}");
+    }
+
+    #[test]
+    fn the_truncation_marker_counts_against_the_cap() {
+        // The marker used to be appended on top of the cap, so a persisted line
+        // could exceed the budget the doc states by the marker's length.
+        for len in [PERSISTED_CAP + 1, 9_000, 20_000] {
+            let prepared = prepare_frontend_message(&"x".repeat(len));
+            assert!(
+                prepared.len() <= PERSISTED_CAP,
+                "{len} bytes produced {} bytes, over the {PERSISTED_CAP}-byte cap",
+                prepared.len()
+            );
+            assert!(prepared.contains("truncated"), "{len}");
+        }
     }
 
     #[test]
