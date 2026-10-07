@@ -805,16 +805,18 @@ fn drain_classifier_stderr(
 mod tests {
     use super::*;
 
-    /// Outer hang guard for the one shell fixture below — not a behaviour
+    /// Outer hang guard for the two shell fixtures below — not a behaviour
     /// bound. The drain/diagnostic contract is pinned on injected streams
-    /// (no child, no clock); only `drains_output_larger_than_a_pipe_buffer`
-    /// still spawns a process, because outrunning a real pipe buffer is the
-    /// property it guards. Its child is `cmd.exe`/`sh`, whose start-up is
-    /// millisecond-scale, so CPU contention cannot false-fail it the way a
-    /// cold `powershell.exe` did (issue #2049). The 30s value matches the
-    /// budget production injects (`classify_with_prompt`); the verdict comes
-    /// from the content assertions, and only a genuinely wedged child ever
-    /// reaches the bound.
+    /// (no child, no clock). `drains_output_larger_than_a_pipe_buffer`
+    /// still spawns a process because outrunning a real pipe buffer is the
+    /// property it guards, and `timeout_does_not_wait_for_stdin_consumption`
+    /// needs a real child that outlives the deadline without reading stdin.
+    /// Both children (`cmd.exe`/`ping` on Windows, `sh`/`sleep` elsewhere)
+    /// start in milliseconds, so CPU contention cannot false-fail them the
+    /// way a cold `powershell.exe` did (issue #2049). The 30s value matches
+    /// the budget production injects (`classify_with_prompt`); the verdict
+    /// comes from the content assertions, and only a genuinely wedged child
+    /// ever reaches the bound.
     const FIXTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
     #[test]
@@ -920,23 +922,28 @@ mod tests {
         assert!(error.len() < 2200, "stderr diagnostics must remain bounded");
     }
 
+    /// A child that outlives the deadline without ever reading stdin —
+    /// the same shape as `process_util::tests::hang_cmd`. On Windows
+    /// `ping -n N` emits one echo per second (`-n 10` runs ~9s); `timeout`
+    /// was tried there and exits at once without a console. `ping` starts
+    /// in milliseconds, so unlike a cold `powershell.exe` it cannot eat
+    /// the hang guard below under CPU contention (issue #2049).
+    #[cfg(windows)]
+    fn hang_child_cmd(secs: u64) -> std::process::Command {
+        let mut cmd = crate::process_util::command_no_window("ping");
+        cmd.args(["-n", &secs.to_string(), "127.0.0.1"]);
+        cmd
+    }
+
     #[test]
     fn circuit_classifier_timeout_does_not_wait_for_stdin_consumption() {
-        let mut cmd = if cfg!(windows) {
-            crate::process_util::command_no_window("powershell.exe")
+        let cmd = if cfg!(windows) {
+            hang_child_cmd(10)
         } else {
-            crate::process_util::command_no_window("sh")
-        };
-        if cfg!(windows) {
-            cmd.args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "Start-Sleep -Seconds 10",
-            ]);
-        } else {
+            let mut cmd = crate::process_util::command_no_window("sh");
             cmd.args(["-c", "sleep 1"]);
-        }
+            cmd
+        };
         let started = std::time::Instant::now();
         let result = run_classifier_command(
             cmd,
