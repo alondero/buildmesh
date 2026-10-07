@@ -923,27 +923,33 @@ mod tests {
     }
 
     /// A child that outlives the deadline without ever reading stdin —
-    /// the same shape as `process_util::tests::hang_cmd`. On Windows
-    /// `ping -n N` emits one echo per second (`-n 10` runs ~9s); `timeout`
-    /// was tried there and exits at once without a console. `ping` starts
-    /// in milliseconds, so unlike a cold `powershell.exe` it cannot eat
-    /// the hang guard below under CPU contention (issue #2049).
-    #[cfg(windows)]
+    /// the same shape as `process_util::tests::hang_cmd`: `ping` on
+    /// Windows (`-n 10` runs ~9s; `timeout` was tried there and exits at
+    /// once without a console), `sleep` elsewhere. Both start in
+    /// milliseconds, so unlike a cold `powershell.exe` neither can eat the
+    /// hang guard below under CPU contention (issue #2049).
+    ///
+    /// One function with the platform split *inside* the body: `cfg!` at
+    /// the call site does not prune the dead arm, so a `#[cfg]`-gated
+    /// item named from `cfg!` fails to compile on the other target.
     fn hang_child_cmd(secs: u64) -> std::process::Command {
-        let mut cmd = crate::process_util::command_no_window("ping");
-        cmd.args(["-n", &secs.to_string(), "127.0.0.1"]);
-        cmd
+        #[cfg(target_os = "windows")]
+        {
+            let mut cmd = crate::process_util::command_no_window("ping");
+            cmd.args(["-n", &secs.to_string(), "127.0.0.1"]);
+            cmd
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut cmd = crate::process_util::command_no_window("sleep");
+            cmd.arg(secs.to_string());
+            cmd
+        }
     }
 
     #[test]
     fn circuit_classifier_timeout_does_not_wait_for_stdin_consumption() {
-        let cmd = if cfg!(windows) {
-            hang_child_cmd(10)
-        } else {
-            let mut cmd = crate::process_util::command_no_window("sh");
-            cmd.args(["-c", "sleep 1"]);
-            cmd
-        };
+        let cmd = hang_child_cmd(10);
         let started = std::time::Instant::now();
         let result = run_classifier_command(
             cmd,
