@@ -298,10 +298,7 @@ fn ensure_hook_file(path: &Path, content: &str) -> Result<(), String> {
 /// Every failure is logged; the first is returned so the spawn path can mark
 /// the node `SignalHealth::Unavailable` (which a later successful callback
 /// clears).
-fn provision_at(
-    hooks_root: Option<&Path>,
-    env_type: EnvType,
-) -> Result<(), String> {
+fn provision_at(hooks_root: Option<&Path>, env_type: EnvType) -> Result<(), String> {
     let Some(root) = hooks_root else {
         tracing::debug!(
             "cline provision_attention_hooks: hook config root unresolvable; \
@@ -614,7 +611,10 @@ mod tests {
     fn spawn_recipe_uses_cmd_on_windows_and_direct_elsewhere() {
         for platform in CLINE.available_on() {
             let recipe = CLINE.spawn_recipe(*platform, EnvType::Windows);
-            assert_eq!(recipe.binary, "cline", "binary must be exactly `cline` on {platform:?}");
+            assert_eq!(
+                recipe.binary, "cline",
+                "binary must be exactly `cline` on {platform:?}"
+            );
             assert_eq!(
                 recipe.base_args,
                 vec!["-i".to_string()],
@@ -685,7 +685,10 @@ mod tests {
         // `-i` is composed with this list by `default_prepare`. Pin both:
         // the lone token (so a future edit doesn't smuggle `-i` back in) and
         // its exact text.
-        assert_eq!(CLINE.prefill_args("fix the auth bug"), vec!["fix the auth bug"]);
+        assert_eq!(
+            CLINE.prefill_args("fix the auth bug"),
+            vec!["fix the auth bug"]
+        );
     }
 
     #[test]
@@ -706,7 +709,10 @@ mod tests {
 
     #[test]
     fn model_args_use_long_form() {
-        assert_eq!(CLINE.model_args("unbiased/pareto"), vec!["--model", "unbiased/pareto"]);
+        assert_eq!(
+            CLINE.model_args("unbiased/pareto"),
+            vec!["--model", "unbiased/pareto"]
+        );
     }
 
     #[test]
@@ -748,7 +754,11 @@ mod tests {
         );
         assert_eq!(
             caps.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
     }
 
@@ -829,7 +839,11 @@ mod tests {
         );
         assert_eq!(
             resumed.recipe.base_args,
-            vec!["-i".to_string(), "--id".to_string(), "1789757012702_7of3e".to_string()],
+            vec![
+                "-i".to_string(),
+                "--id".to_string(),
+                "1789757012702_7of3e".to_string()
+            ],
             "resume argv must be `cline -i --id <id>`"
         );
         assert!(
@@ -917,9 +931,8 @@ mod tests {
         );
 
         // Everything present → the override wins (resolver order).
-        let all = |p: &Path| {
-            p == shim || p == direct_x64 || p == direct_arm64 || p == override_path
-        };
+        let all =
+            |p: &Path| p == shim || p == direct_x64 || p == direct_arm64 || p == override_path;
         assert_eq!(
             resolve_install(Some("D:/override/cline.exe"), Some(appdata), &all).as_deref(),
             Some(override_path.as_path())
@@ -975,7 +988,8 @@ mod tests {
     #[test]
     fn recover_suspended_session_id_returns_none_for_unresolvable_path() {
         // No home resolvable in a bare test env: the helper returns None.
-        let no_home_result = CLINE.recover_suspended_session_id("/no/such/path", EnvType::Wsl, 0, false);
+        let no_home_result =
+            CLINE.recover_suspended_session_id("/no/such/path", EnvType::Wsl, 0, false);
         assert!(
             no_home_result.is_none(),
             "without a resolvable Cline home, the adapter must return None, not a synthesised id"
@@ -1017,7 +1031,10 @@ mod tests {
                     );
                 }
                 assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
-                assert!(trust.is_none(), "Cline needs no workspace-trust step: {trust:?}");
+                assert!(
+                    trust.is_none(),
+                    "Cline needs no workspace-trust step: {trust:?}"
+                );
                 assert_eq!(min_version.as_deref(), Some(CLINE_MIN_HOOK_VERSION));
             }
             _ => panic!("expected Hook, got {capability:?}"),
@@ -1043,7 +1060,11 @@ mod tests {
     /// `env_type` check would get wrong.
     #[test]
     fn hook_extension_matches_host_platform() {
-        let expected_win = if cfg!(target_os = "windows") { "ps1" } else { "sh" };
+        let expected_win = if cfg!(target_os = "windows") {
+            "ps1"
+        } else {
+            "sh"
+        };
         assert_eq!(hook_extension(EnvType::Windows), expected_win);
         // Any WSL/Interop runtime always uses the POSIX script.
         assert_eq!(hook_extension(EnvType::Wsl), "sh");
@@ -1180,7 +1201,10 @@ mod tests {
             },
             7,
         );
-        assert!(result.is_err(), "must refuse a user-authored hook: {result:?}");
+        assert!(
+            result.is_err(),
+            "must refuse a user-authored hook: {result:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(&occupied).unwrap(),
             "#!/bin/sh\necho mine\n",
@@ -1208,7 +1232,10 @@ mod tests {
         provision_test_home(home.path(), EnvType::Windows);
 
         let rewritten = std::fs::read_to_string(&target).unwrap();
-        assert_ne!(rewritten, stale, "drifted Buildmesh content must be replaced");
+        assert_ne!(
+            rewritten, stale,
+            "drifted Buildmesh content must be replaced"
+        );
         assert!(
             !rewritten.contains("localhost:1999"),
             "the stale callback must be gone: {rewritten}"
@@ -1228,9 +1255,15 @@ mod tests {
         let sandbox = tempfile::tempdir().unwrap();
         let before = std::fs::read_dir(sandbox.path()).unwrap().count();
         let result = provision_at(None, EnvType::Windows);
-        assert!(result.is_ok(), "unresolvable home must be Ok(()): {result:?}");
+        assert!(
+            result.is_ok(),
+            "unresolvable home must be Ok(()): {result:?}"
+        );
         let after = std::fs::read_dir(sandbox.path()).unwrap().count();
-        assert_eq!(before, after, "nothing may be created for an unresolvable root");
+        assert_eq!(
+            before, after,
+            "nothing may be created for an unresolvable root"
+        );
     }
 
     #[test]
@@ -1242,7 +1275,10 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(residue.is_empty(), "atomic write left .tmp residue: {residue:?}");
+        assert!(
+            residue.is_empty(),
+            "atomic write left .tmp residue: {residue:?}"
+        );
     }
 
     /// End-to-end delivery: run the provisioned hook script against a real
@@ -1258,7 +1294,20 @@ mod tests {
         use std::time::{Duration, Instant};
         // PATH-mutating tests hold ENV_LOCK. The hook is launched as
         // `powershell.exe`, which is looked up in that process-global PATH.
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Outer hang guard for the whole fixture — the verdict comes from
+        // the listener rendezvous below plus the content assertions, not
+        // from this clock. The subject really is a cold `powershell.exe`
+        // launching the provisioned hook, and that cold start once outran
+        // 20s under CPU contention (issue #2049), so the bound keeps a
+        // margin over the worst start-up seen; only a genuinely wedged
+        // child ever reaches it. The listener shares the same bound so a
+        // slow-but-healthy start is never mistaken for a hook that posts
+        // nothing.
+        const HOOK_BUDGET: Duration = Duration::from_secs(30);
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1267,7 +1316,7 @@ mod tests {
         // caller reports that alongside the hook's own stderr rather than
         // panicking inside this thread.
         let server = std::thread::spawn(move || -> Option<(String, Vec<u8>)> {
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + HOOK_BUDGET;
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -1295,16 +1344,17 @@ mod tests {
             let headers = String::from_utf8(headers).ok()?;
             // A compliant server answers the interim `Expect: 100-continue`
             // before the body arrives.
-            if headers.to_ascii_lowercase().contains("expect: 100-continue") {
+            if headers
+                .to_ascii_lowercase()
+                .contains("expect: 100-continue")
+            {
                 stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").ok()?;
             }
-            let length: usize = headers
-                .lines()
-                .find_map(|line| {
-                    line.to_ascii_lowercase()
-                        .strip_prefix("content-length:")
-                        .map(|value| value.trim().parse().unwrap())
-                })?;
+            let length: usize = headers.lines().find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|value| value.trim().parse().unwrap())
+            })?;
             let mut body = vec![0u8; length];
             stream.read_exact(&mut body).ok()?;
             stream
@@ -1354,7 +1404,7 @@ mod tests {
         let output = crate::process_util::run_command_with_timeout(
             invocation,
             "cline attention hook",
-            Duration::from_secs(20),
+            HOOK_BUDGET,
         )
         .unwrap();
         let request = server.join().unwrap();
@@ -1381,6 +1431,9 @@ mod tests {
             headers.starts_with("POST /api/attention/741 HTTP/1.1\r\n"),
             "{headers}"
         );
-        assert_eq!(body, payload, "the stdin payload must be forwarded verbatim");
+        assert_eq!(
+            body, payload,
+            "the stdin payload must be forwarded verbatim"
+        );
     }
 }

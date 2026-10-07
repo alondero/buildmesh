@@ -27,12 +27,18 @@ use std::thread::JoinHandle;
 /// joiner's stack; the watchdog outlives the timeout only when the reader
 /// is genuinely stuck.
 ///
+/// Returns `true` when the thread was joined before `timeout` elapsed and
+/// `false` when it had to be detached. A `false` means the caller handed a
+/// thread that was still running to its fallback path; only the caller
+/// knows whether that was expected (a genuinely wedged reader) or a
+/// symptom of teardown being ordered wrongly.
+///
 /// If the handle is already finished, the join runs inline — no watchdog
-/// spawned.
-pub fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
+/// spawned — and this returns `true`.
+pub fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) -> bool {
     if handle.is_finished() {
         let _ = handle.join();
-        return;
+        return true;
     }
     let watch_name = match handle.thread().name() {
         Some(name) => format!("join-watch-{name}"),
@@ -49,7 +55,9 @@ pub fn join_with_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) {
             let _ = tx.send(());
         })
         .expect("failed to spawn join watchdog");
-    let _ = rx.recv_timeout(timeout);
+    // `Ok` means the watchdog finished the join; `Err(Timeout)` means we
+    // gave up and the watchdog detaches the thread when it eventually ends.
+    rx.recv_timeout(timeout).is_ok()
 }
 
 #[cfg(test)]
@@ -70,7 +78,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// A finished `JoinHandle` must take the fast lane — no watchdog
-    /// spawned, the function returns immediately.
+    /// spawned, the function returns immediately, and it reports that the
+    /// thread really was joined (issue #2049: the boolean, not the elapsed
+    /// time, is the fact a caller can assert on under CPU contention).
     #[test]
     fn finished_handle_joins_inline_without_watchdog() {
         let started = Instant::now();
@@ -80,7 +90,8 @@ mod tests {
         });
         // Yield so the spawned thread has a chance to finish.
         thread::sleep(Duration::from_millis(10));
-        join_with_timeout(handle, Duration::from_secs(2));
+        let joined = join_with_timeout(handle, Duration::from_secs(2));
+        assert!(joined, "a finished handle must report that it was joined");
         assert!(
             started.elapsed() < Duration::from_millis(500),
             "finished handle must join inline (no watchdog spawn); \
@@ -112,8 +123,17 @@ mod tests {
         let started = Instant::now();
         // Bounded timeout: the watchdog must detach at 50 ms while
         // the worker is still blocked on release_rx.
-        join_with_timeout(handle, Duration::from_millis(50));
+        let joined = join_with_timeout(handle, Duration::from_millis(50));
         let elapsed = started.elapsed();
+
+        // The wedged worker must be reported as detached, not joined — this
+        // is the flag `teardown_incarnation` reads to tell "expected wedge"
+        // from "the sender was dropped after the join" (#2049).
+        assert!(
+            !joined,
+            "a worker still blocked at the timeout must report that it was \
+             detached, not joined"
+        );
 
         // join_with_timeout returned at >= timeout (it had to wait)
         // and << 2×timeout (the watchdog fired promptly).

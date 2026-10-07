@@ -191,6 +191,7 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -258,25 +259,37 @@ mod tests {
         );
     }
 
-    /// Different keys do NOT serialize: two threads with two distinct keys
-    /// sleep 100ms each, and the maximum simultaneous-thread count inside
-    /// the critical section must reach 2 at some point during the run.
-    /// If the per-key lock were secretly global, only one thread could
-    /// ever be inside at once, and the peak would stay at 1.
+    /// Different keys do NOT serialize: both threads must be inside their
+    /// (distinct) critical sections at the same moment, which the
+    /// simultaneous-holder count proves. If the per-key lock were secretly
+    /// global, only one thread could ever be inside at once and the peak
+    /// would stay at 1.
     ///
-    /// This replaces the prior wallclock-bound assertion (`elapsed <
-    /// 1.9 * SLEEP_MS`), which flaked on Windows whenever a busy CI box
-    /// co-scheduled both threads on the same core. The handshake is the
-    /// same pattern `same_key_serializes_concurrent_callers` already uses
-    /// (issue #652 / commit 771bc79), so the test is now deterministic —
-    /// no timing assumptions — while still catching the regression it's
-    /// targeted at: a per-Mesh map accidentally replaced by a single
-    /// global mutex. The wide 100ms sleep on each thread gives the OS
-    /// scheduler plenty of room to actually overlap them — the assertion
-    /// checks the overlap was *possible*, not how fast it happened.
+    /// The two closures **rendezvous** rather than relying on two sleeps
+    /// overlapping (issue #2049). A sleep only lets the other thread *try*
+    /// to run during the window: on a contended host the OS never scheduled
+    /// the second thread inside it, so the peak stayed at 1 and the test
+    /// failed on correct code. Here each thread announces that it is inside
+    /// and then blocks until it has heard the peer do the same, so
+    /// simultaneity is established by the test rather than by the
+    /// scheduler.
+    ///
+    /// The channels are unbounded, so the announcement never blocks, and
+    /// `recv_timeout` makes the wait deadlock-free: a global lock parks the
+    /// first thread waiting for a peer that is still blocked on the mutex,
+    /// so the wait times out and reports the regression instead of hanging
+    /// the runner. That still catches the regression this targets (a
+    /// per-Mesh map replaced by a single global mutex) — `Ok` is
+    /// unreachable when the two critical sections cannot overlap.
     #[test]
     fn different_keys_run_in_parallel() {
-        const SLEEP_MS: u64 = 100;
+        // Generous: the rendezvous ends when the peer arrives, not when the
+        // clock runs out, so this only ever expires on a genuine deadlock.
+        const RENDEZVOUS: Duration = Duration::from_secs(5);
+
+        // One-way announcement in each direction, named by data flow.
+        let (alpha_to_beta_tx, alpha_to_beta_rx) = mpsc::channel::<()>();
+        let (beta_to_alpha_tx, beta_to_alpha_rx) = mpsc::channel::<()>();
 
         // Threads INSIDE the critical section + the peak count seen
         // across the whole run. `fetch_add` returns the *previous* value,
@@ -291,9 +304,17 @@ mod tests {
             with_mesh_sync_lock("mesh://alpha", move || {
                 let new = i1.fetch_add(1, Ordering::SeqCst) + 1;
                 p1.fetch_max(new, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(SLEEP_MS));
+                let _ = alpha_to_beta_tx.send(());
+                let peer_arrived = beta_to_alpha_rx.recv_timeout(RENDEZVOUS);
                 i1.fetch_sub(1, Ordering::SeqCst);
-            });
+                assert!(
+                    peer_arrived.is_ok(),
+                    "mesh://alpha waited {RENDEZVOUS:?} inside its critical \
+                     section without hearing from mesh://beta; the per-Mesh \
+                     lock was unexpectedly serialized (issue #652 / \
+                     different-keys regression)",
+                );
+            })
         });
         let i2 = Arc::clone(&in_flight);
         let p2 = Arc::clone(&peak);
@@ -301,9 +322,17 @@ mod tests {
             with_mesh_sync_lock("mesh://beta", move || {
                 let new = i2.fetch_add(1, Ordering::SeqCst) + 1;
                 p2.fetch_max(new, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(SLEEP_MS));
+                let _ = beta_to_alpha_tx.send(());
+                let peer_arrived = alpha_to_beta_rx.recv_timeout(RENDEZVOUS);
                 i2.fetch_sub(1, Ordering::SeqCst);
-            });
+                assert!(
+                    peer_arrived.is_ok(),
+                    "mesh://beta waited {RENDEZVOUS:?} inside its critical \
+                     section without hearing from mesh://alpha; the per-Mesh \
+                     lock was unexpectedly serialized (issue #652 / \
+                     different-keys regression)",
+                );
+            })
         });
         h1.join().expect("alpha thread panicked");
         h2.join().expect("beta thread panicked");
@@ -379,11 +408,10 @@ mod tests {
     /// Uncontended: the closure runs and its value round-trips.
     #[test]
     fn timeout_variant_runs_when_lock_is_free() {
-        let result = try_with_mesh_sync_lock_timeout(
-            "mesh://timeout-free",
-            Duration::from_secs(1),
-            || 7_i32,
-        );
+        let result =
+            try_with_mesh_sync_lock_timeout("mesh://timeout-free", Duration::from_secs(1), || {
+                7_i32
+            });
         assert_eq!(result, Some(7));
     }
 
@@ -451,8 +479,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("holder never acquired the lock");
 
-        let result =
-            try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
+        let result = try_with_mesh_sync_lock_timeout(KEY, Duration::from_secs(5), || 99_i32);
         assert_eq!(
             result,
             Some(99),
