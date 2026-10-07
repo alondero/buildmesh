@@ -146,8 +146,10 @@ HEAD, worktree, paths, outcome, count, duration and log reference. Its content
 fingerprint includes tracked/untracked inputs, tests, harness configuration,
 lockfiles, HEAD, index content and tool versions. Staged paths must match the
 working content being tested. Source changes during verification invalidate
-the result. An unchanged retry reuses passing gates; changed inputs invalidate
-the entire receipt in this initial implementation.
+the result. Passing gates are reused across runs until the inputs they read change,
+keyed on each gate's input set, environment identity, and task ID. Gates with no
+explicit ignores read the whole tree. Completion continues to require that every planned
+gate has a PASS record in the receipt for the current tree.
 
 `finish` launches no tests. It requires all planned gates, current source,
 one current evidence entry per criterion, a current independent review entry,
