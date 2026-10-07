@@ -19,6 +19,10 @@ export default async function ({ page }) {
   await expect(page.getByTestId('queue-run-1002')).toHaveCount(0);
   await page.getByTestId('circuits-view-history').click();
   await expect(page.getByTestId('run-toggle-1001')).toHaveAttribute('aria-expanded', 'true');
+  // A failed run says what happened in plain words right away; the raw error is
+  // one disclosure away rather than the first thing on the card.
+  await expect(page.getByTestId('run-next-happened-1001')).toBeVisible();
+  await page.getByText('Technical detail').first().click();
   await expect(page.getByTestId('run-error-1001')).toBeVisible();
   await expect(page.getByTestId('run-step-1001-reviewer').locator('pre')).toBeVisible();
   // Wait / capacity / configuration / recovery history renders readably at the

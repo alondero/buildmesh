@@ -800,6 +800,9 @@ fn delete_branches_in_repo_treats_passed_in_set_literally() {
 
 #[test]
 fn remove_worktrees_removes_linked_worktree() {
+    // `remove_worktrees` classifies each path through `db::is_warm_pool_path`,
+    // so the test needs a database of its own.
+    let _db = crate::db::test_support::isolated();
     let dir = TempDir::new();
     let repo = init_repo(dir.path());
     branch_from_head(&repo, "wt-branch");
@@ -825,6 +828,7 @@ fn remove_worktrees_removes_linked_worktree() {
 
 #[test]
 fn remove_worktrees_cannot_remove_main() {
+    let _db = crate::db::test_support::isolated();
     let dir = TempDir::new();
     init_repo(dir.path());
 
@@ -1027,7 +1031,7 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
 
 // ── v22 / issue #611 — `delete_worktrees` rejects pool paths ────────────────
 
-// DB init routes through `db::test_support::ensure_db_for_tests`.
+// DB init routes through `db::test_support::isolated`.
 
 /// Pin the `delete_worktrees` → `remove_worktrees` pool-rejection
 /// contract (issue #611). A pool entry's directory is owned by the
@@ -1042,7 +1046,7 @@ fn remove_worktree_treats_missing_working_dir_as_success() {
 /// see exactly which entry was blocked when they bulk-select.
 #[test]
 fn delete_worktrees_rejects_pool_path() {
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated();
 
     // Set up a mesh + a single `warm_worktrees` row at a fake path.
     // `is_warm_pool_path` only checks the DB row — it doesn't touch
@@ -1098,7 +1102,7 @@ fn delete_worktrees_rejects_pool_path() {
 /// test.
 #[test]
 fn delete_worktrees_does_not_reject_non_pool_path() {
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated();
 
     // Insert a `warm_worktrees` row that is NOT the path we're
     // asking to delete. `is_warm_pool_path(other_path)` must read

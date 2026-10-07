@@ -13,6 +13,18 @@ mod tests {
     use super::*;
     use crate::http::router::{dispatch, DispatchResult};
 
+    /// Serialises this module's tests against the process-global database.
+    ///
+    /// These handlers reach the database from a Tauri-managed thread
+    /// (`commands::run_blocking` / `tauri::async_runtime::spawn`), where the
+    /// `thread_local!` install behind `test_support::isolated` is invisible and
+    /// `adopt` cannot bridge a runtime the test does not own. The lock itself
+    /// lives in `db::test_support` so this module and `http::server` cannot
+    /// drift into two locks guarding one shared database.
+    fn shared_db() -> crate::db::test_support::SharedGlobalDb {
+        crate::db::test_support::shared_global_db()
+    }
+
     async fn send(path: &str, headers: &str) -> Response {
         let mut req = ParsedRequest::test_post(path, b"");
         req.secure = true;
@@ -24,8 +36,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn pairing_refresh_and_revocation_cross_the_real_router() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let root = {
             let conn = crate::db::write_conn();
             crate::db::get_or_create_root_token_inner(&conn).unwrap()
@@ -119,8 +136,13 @@ mod tests {
     }
 
     #[tokio::test]
+    // The guard must span the whole test: it is what keeps these tests from
+    // sharing the process-global database concurrently, and the handlers
+    // below await while it is held. Holding a lock across an await is the
+    // intent here, not an oversight.
+    #[allow(clippy::await_holding_lock)]
     async fn cross_origin_pairing_is_rejected_before_consuming_the_invitation() {
-        crate::db::init(std::path::Path::new(":memory:")).unwrap();
+        let _serial = shared_db();
         let ticket = crate::http::pairing::mint();
         assert_eq!(
             send(

@@ -284,7 +284,14 @@ vi.mock('@xterm/xterm', () => {
   };
 
   class MockTerminal {
-    write = vi.fn();
+// xterm's `write(data, callback)` fires the callback when parsing finishes.
+// `TerminalWriter` budgets in-flight payloads on that signal, so a mock that
+// ignores it models a permanently stalled parser — tests would pass only
+// because they emit fewer frames than `MAX_INFLIGHT_WRITES`. Complete
+// synchronously: a mock terminal parses instantly.
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     onResize = vi.fn();
     onTitleChange = vi.fn();

@@ -6,25 +6,39 @@ use rusqlite::{params, Connection, OptionalExtension};
 const OBSERVATION_FRESHNESS_REJECTION_PREFIX: &str = "Observation freshness fence rejected:";
 
 pub(crate) fn restore_projection_conflicts(
-    run_id: i64, node_id: &str, attempt: i32,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
     evidence: &mut crate::circuit::observation::WorkEvidence,
 ) -> SqlResult<bool> {
     restore_projection_conflicts_inner(&crate::db::read_conn(), run_id, node_id, attempt, evidence)
 }
 
 fn restore_projection_conflicts_inner(
-    db: &Connection, run_id: i64, node_id: &str, attempt: i32,
+    db: &Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
     evidence: &mut crate::circuit::observation::WorkEvidence,
 ) -> SqlResult<bool> {
-    let mut query = db.prepare("SELECT detail FROM circuit_run_history
+    let mut query = db.prepare(
+        "SELECT detail FROM circuit_run_history
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='observation'
-          AND source='agent_status_projection' AND disposition='conflicting'")?;
-    let rows = query.query_map(params![run_id, node_id, attempt], |row| row.get::<_, String>(0))?;
+          AND source='agent_status_projection' AND disposition='conflicting'",
+    )?;
+    let rows = query.query_map(params![run_id, node_id, attempt], |row| {
+        row.get::<_, String>(0)
+    })?;
     let mut changed = false;
     for row in rows {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&row?) else { continue; };
-        if let Some(observation) = value.get("observation").cloned()
-            .and_then(|value| serde_json::from_value(value).ok()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&row?) else {
+            continue;
+        };
+        if let Some(observation) = value
+            .get("observation")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+        {
             changed |= evidence.restore_projection_conflict(&observation);
         }
     }
@@ -98,7 +112,11 @@ fn observation_disposition_str(
 /// `resolved` once it clears. Without this, a freed capacity/evidence window
 /// would be recorded as if the wait were still active (issue #1909).
 fn wait_disposition(binding: bool) -> &'static str {
-    if binding { DISPOSITION_WAITING } else { DISPOSITION_RESOLVED }
+    if binding {
+        DISPOSITION_WAITING
+    } else {
+        DISPOSITION_RESOLVED
+    }
 }
 
 pub(crate) fn is_observation_freshness_rejection(error: &rusqlite::Error) -> bool {
@@ -168,14 +186,95 @@ pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
     Ok(view)
 }
 
-fn recovery_view(db: &Connection, run: &crate::models::AutopilotCircuitRun) -> Result<crate::circuit::stepper::RunView, String> {
-    use crate::circuit::{context::CircuitContext, model::StepOutcome, stepper::{RunState, RunView, StepStatus, StepView}};
-    let steps = super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
-    Ok(RunView { run_id:run.id, graph:run_graph(db, run.id)?, state:RunState::from_db_str(&run.state),
-        context:CircuitContext::from_json(&run.context_json)?,
-        steps:steps.into_iter().map(|step| StepView { node_id:step.node_id, attempt:step.attempt,
-            status:StepStatus::from_db_str(&step.status), outcome:step.outcome.as_deref().and_then(StepOutcome::from_db_str),
-            error:step.error_message, agent_node_id:step.agent_node_id }).collect() })
+pub(super) fn recovery_view(
+    db: &Connection,
+    run: &crate::models::AutopilotCircuitRun,
+) -> Result<crate::circuit::stepper::RunView, String> {
+    use crate::circuit::{
+        context::CircuitContext,
+        model::StepOutcome,
+        stepper::{RunState, RunView, StepStatus, StepView},
+    };
+    let steps =
+        super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
+    Ok(RunView {
+        run_id: run.id,
+        graph: run_graph(db, run.id)?,
+        state: RunState::from_db_str(&run.state),
+        context: CircuitContext::from_json(&run.context_json)?,
+        steps: steps
+            .into_iter()
+            .map(|step| StepView {
+                node_id: step.node_id,
+                attempt: step.attempt,
+                status: StepStatus::from_db_str(&step.status),
+                outcome: step.outcome.as_deref().and_then(StepOutcome::from_db_str),
+                error: step.error_message,
+                agent_node_id: step.agent_node_id,
+            })
+            .collect(),
+    })
+}
+
+/// What a person may record against one Unverified step. Shared by the history
+/// view and the run card's attention query so both offer the same actions.
+fn checkpoint_actions(
+    db: &Connection,
+    run_id: i64,
+    graph: &crate::circuit::model::CircuitGraph,
+    view: &crate::circuit::stepper::RunView,
+    step: &crate::models::AutopilotCircuitRunStep,
+) -> Result<Vec<CheckpointAction>, String> {
+    use crate::circuit::model::CircuitNodeKind;
+    let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
+        Some(kind @ (CircuitNodeKind::GithubAction { .. } | CircuitNodeKind::InjectPty { .. })) => {
+            let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
+                params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
+            let mut actions = vec![CheckpointAction::NotPerformed];
+            if matches!(
+                kind,
+                CircuitNodeKind::GithubAction {
+                    action: crate::circuit::model::GithubActionKind::OpenPr,
+                    ..
+                }
+            ) {
+                let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
+                    .map_err(|error| error.to_string())?;
+                if has_target {
+                    actions.insert(0, CheckpointAction::Recheck);
+                }
+            } else {
+                actions.insert(0, CheckpointAction::Completed);
+            }
+            if not_performed {
+                actions.push(CheckpointAction::Retry);
+            }
+            actions
+        }
+        Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => {
+            let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='spawn' AND state='not_performed')",
+                params![run_id,step.node_id,step.attempt], |row| row.get(0)).map_err(|e| e.to_string())?;
+            let mut actions = vec![CheckpointAction::Recheck, CheckpointAction::NotPerformed];
+            if not_performed {
+                actions.push(CheckpointAction::Retry);
+            }
+            actions
+        }
+        Some(
+            CircuitNodeKind::LlmTurnClassifier { .. }
+            | CircuitNodeKind::ReviewVerdict { .. }
+            | CircuitNodeKind::AwaitAgentTurn { .. }
+            | CircuitNodeKind::SpawnAgentNode { .. },
+        ) => {
+            let mut actions = vec![CheckpointAction::Recheck];
+            if view.can_attest_completion(&step.node_id) {
+                actions.push(CheckpointAction::Completed);
+            }
+            actions
+        }
+        _ => vec![],
+    };
+    Ok(actions)
 }
 
 fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceView, String> {
@@ -188,78 +287,62 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
     {
         let graph = run_graph(db, run_id)?;
         let context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
-        let steps = super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
+        let steps =
+            super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
         let view = recovery_view(db, &run)?;
         for step in steps {
-            if let Some(agent_id) = step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) {
-                if let Some(agent) = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id).optional().map_err(|e| e.to_string())? {
+            if let Some(agent_id) = step
+                .agent_node_id
+                .or_else(|| view.resolve_target_agent(&step.node_id))
+            {
+                if let Some(agent) = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id)
+                    .optional()
+                    .map_err(|e| e.to_string())?
+                {
                     let deadline_ms = view.evidence_deadline_ms(&step.node_id);
                     coverage.push(CircuitStepObservationCoverage {
-                        node_id: step.node_id.clone(), attempt: step.attempt,
+                        node_id: step.node_id.clone(),
+                        attempt: step.attempt,
                         platform: format!("{} host / {} launch", std::env::consts::OS, agent.env),
-                        capabilities: crate::services::circuit_worker::observer_policy::for_agent(&agent), deadline_ms,
-                        observation_blocker: (step.status == "unverified").then(|| context.get(&format!("node.{}.observation_blocker", step.node_id))
-                            .and_then(|json| serde_json::from_str(json).ok())).flatten(),
-                        waits_active: run.state == "running" && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
-                        human_waits: context.get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-                            .and_then(|json| serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json).ok())
-                            .map(|evidence| evidence.human_waits.into_iter().filter(|wait| wait.source != "agent_status_projection").collect()).unwrap_or_default(),
+                        capabilities: crate::services::circuit_worker::observer_policy::for_agent(
+                            &agent,
+                        ),
+                        deadline_ms,
+                        observation_blocker: (step.status == "unverified")
+                            .then(|| {
+                                context
+                                    .get(&format!("node.{}.observation_blocker", step.node_id))
+                                    .and_then(|json| serde_json::from_str(json).ok())
+                            })
+                            .flatten(),
+                        waits_active: run.state == "running"
+                            && !matches!(
+                                step.status.as_str(),
+                                "completed" | "failed" | "cancelled"
+                            ),
+                        human_waits: context
+                            .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
+                            .and_then(|json| {
+                                serde_json::from_str::<crate::circuit::observation::WorkEvidence>(
+                                    json,
+                                )
+                                .ok()
+                            })
+                            .map(|evidence| {
+                                evidence
+                                    .human_waits
+                                    .into_iter()
+                                    .filter(|wait| wait.source != "agent_status_projection")
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     });
                 }
             }
             if run.state != "running" || step.status != "unverified" {
                 continue;
             }
-            use crate::circuit::model::CircuitNodeKind;
-            let actions = match graph.node(&step.node_id).map(|n| &n.kind) {
-                Some(
-                    kind @ (CircuitNodeKind::GithubAction { .. }
-                    | CircuitNodeKind::InjectPty { .. }),
-                ) => {
-                    let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND state='not_performed')",
-                        params![run_id,step.node_id,step.attempt], |r| r.get(0)).map_err(|e| e.to_string())?;
-                    let mut actions = vec![CheckpointAction::NotPerformed];
-                    if matches!(
-                        kind,
-                        CircuitNodeKind::GithubAction {
-                            action: crate::circuit::model::GithubActionKind::OpenPr,
-                            ..
-                        }
-                    ) {
-                        let has_target = has_effect_target(db, run_id, &step.node_id, step.attempt)
-                            .map_err(|error| error.to_string())?;
-                        if has_target {
-                            actions.insert(0, CheckpointAction::Recheck);
-                        }
-                    } else {
-                        actions.insert(0, CheckpointAction::Completed);
-                    }
-                    if not_performed {
-                        actions.push(CheckpointAction::Retry);
-                    }
-                    actions
-                }
-                Some(CircuitNodeKind::SpawnAgentNode { .. }) if step.agent_node_id.is_none() => {
-                    let not_performed: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='spawn' AND state='not_performed')",
-                        params![run_id,step.node_id,step.attempt], |row| row.get(0)).map_err(|e| e.to_string())?;
-                    let mut actions = vec![CheckpointAction::Recheck, CheckpointAction::NotPerformed];
-                    if not_performed { actions.push(CheckpointAction::Retry); }
-                    actions
-                }
-                Some(
-                    CircuitNodeKind::LlmTurnClassifier { .. }
-                    | CircuitNodeKind::ReviewVerdict { .. }
-                    | CircuitNodeKind::AwaitAgentTurn { .. }
-                    | CircuitNodeKind::SpawnAgentNode { .. },
-                ) => {
-                    let mut actions = vec![CheckpointAction::Recheck];
-                    if view.can_attest_completion(&step.node_id) {
-                        actions.push(CheckpointAction::Completed);
-                    }
-                    actions
-                },
-                _ => vec![],
-            };
+            let actions = checkpoint_actions(db, run_id, &graph, &view, &step)?;
             checkpoints.push(CircuitCheckpoint {
                 node_id: step.node_id,
                 attempt: step.attempt,
@@ -271,6 +354,53 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
         entries,
         checkpoints,
         coverage,
+    })
+}
+
+/// Everything the run card needs to tell a person what to do next, without the
+/// (potentially very long) history: the unverified steps with their allowed
+/// actions, how a failed run can be recovered, and the revision to act against.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export, export_to = "CircuitRunAttention.ts")]
+pub struct CircuitRunAttention {
+    #[ts(as = "i32")]
+    pub revision: i64,
+    pub checkpoints: Vec<CircuitCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub recovery: Option<super::step_recovery::RunRecovery>,
+}
+
+pub fn attention(run_id: i64) -> Result<CircuitRunAttention, String> {
+    let db = crate::db::read_conn();
+    let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let view = attention_inner(&tx, run_id)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(view)
+}
+
+pub(crate) fn attention_inner(db: &Connection, run_id: i64) -> Result<CircuitRunAttention, String> {
+    let run = super::ledger::get_circuit_run_inner(db, run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("Run no longer exists.")?;
+    let graph = run_graph(db, run_id)?;
+    let steps =
+        super::ledger::list_circuit_run_steps_inner(db, run_id).map_err(|e| e.to_string())?;
+    let mut checkpoints = Vec::new();
+    if run.state == "running" {
+        let view = recovery_view(db, &run)?;
+        for step in steps.iter().filter(|step| step.status == "unverified") {
+            checkpoints.push(CircuitCheckpoint {
+                node_id: step.node_id.clone(),
+                attempt: step.attempt,
+                actions: checkpoint_actions(db, run_id, &graph, &view, step)?,
+            });
+        }
+    }
+    Ok(CircuitRunAttention {
+        revision: revision_inner(db, run_id).map_err(|e| e.to_string())?,
+        checkpoints,
+        recovery: super::step_recovery::build_recovery(db, &run, &graph, &steps)?,
     })
 }
 
@@ -486,7 +616,9 @@ fn earn_turn_binding(
         .optional()
         .map_err(|e| e.to_string())?
         .and_then(|detail| serde_json::from_str(&detail).ok());
-    let Some(submission) = submission else { return Ok(None) };
+    let Some(submission) = submission else {
+        return Ok(None);
+    };
     // Rule 3.
     if submission.submission_seq != newest_submission_seq(db, receipt.agent_node_id)? {
         return Ok(None);
@@ -496,15 +628,17 @@ fn earn_turn_binding(
     // generation's claim cannot block a re-submission into a restarted
     // session, and a later submission starts with an empty claim set.
     let claimed: Vec<String> = {
-        let mut stmt = db.prepare(
-            "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
+        let mut stmt = db
+            .prepare(
+                "SELECT json_extract(detail,'$.hook.turn_id') FROM circuit_run_history
              WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='native_hook_received'
              AND json_extract(detail,'$.agent_node_id')=?4
              AND json_extract(detail,'$.session_incarnation') IS ?5
              AND json_extract(detail,'$.hook.event')='UserPromptSubmit'
              AND json_extract(detail,'$.submission_correlated')=1
              AND json_extract(detail,'$.submission_seq')=?6",
-        ).map_err(|e| e.to_string())?;
+            )
+            .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(
                 params![
@@ -518,7 +652,8 @@ fn earn_turn_binding(
                 |row| row.get::<_, String>(0),
             )
             .map_err(|e| e.to_string())?;
-        rows.collect::<SqlResult<Vec<_>>>().map_err(|e| e.to_string())?
+        rows.collect::<SqlResult<Vec<_>>>()
+            .map_err(|e| e.to_string())?
     };
     if !claimed.iter().any(|turn| turn == turn_id) && !claimed.is_empty() {
         return Ok(None);
@@ -587,12 +722,11 @@ pub(crate) fn receive_native_hook_locked(
         // (issue #1898). A `UserPromptSubmit` receipt is the only place a
         // turn token is ever earned, and only from the harness prompt echo
         // plus submission ordering — never from arrival order.
-        let binding: Option<SubmissionBinding> =
-            if receipt.hook.event == "UserPromptSubmit" {
-                earn_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
-            } else {
-                recorded_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
-            };
+        let binding: Option<SubmissionBinding> = if receipt.hook.event == "UserPromptSubmit" {
+            earn_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
+        } else {
+            recorded_turn_binding(&tx, run_id, &node_id, attempt, &receipt)?
+        };
         match binding {
             Some((stamp, seq)) => {
                 receipt.submission_correlated = stamp.is_some();
@@ -709,28 +843,60 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
     // An attestation cannot authorize tool use or supply a review verdict.
     use crate::circuit::model::CircuitNodeKind;
     if matches!(request.action, CheckpointAction::Completed)
-        && matches!(graph.node(&request.node_id).map(|n| &n.kind), Some(
-            CircuitNodeKind::SpawnAgentNode { .. } | CircuitNodeKind::AwaitAgentTurn { .. }
-            | CircuitNodeKind::LlmTurnClassifier { .. }))
-        && (step.agent_node_id.is_some() || !matches!(graph.node(&request.node_id).map(|n| &n.kind), Some(CircuitNodeKind::SpawnAgentNode { .. })))
+        && matches!(
+            graph.node(&request.node_id).map(|n| &n.kind),
+            Some(
+                CircuitNodeKind::SpawnAgentNode { .. }
+                    | CircuitNodeKind::AwaitAgentTurn { .. }
+                    | CircuitNodeKind::LlmTurnClassifier { .. }
+            )
+        )
+        && (step.agent_node_id.is_some()
+            || !matches!(
+                graph.node(&request.node_id).map(|n| &n.kind),
+                Some(CircuitNodeKind::SpawnAgentNode { .. })
+            ))
     {
         let mut view = recovery_view(&tx, &run)?;
         if !view.can_attest_completion(&request.node_id) {
             return Err("Resolve outstanding work, input requests and conflicting evidence before recording completion.".into());
         }
         let reason = format!("Operator-recorded completion: {}", request.reason.trim());
-        view.context.set(&format!("node.{}.status", step.node_id), "completed");
-        view.context.set(&format!("node.{}.wait.attempt", step.node_id), "");
-        view.context.set(&format!("node.{}.observation_blocker", step.node_id), "");
+        view.context
+            .set(&format!("node.{}.status", step.node_id), "completed");
+        view.context
+            .set(&format!("node.{}.wait.attempt", step.node_id), "");
+        view.context
+            .set(&format!("node.{}.observation_blocker", step.node_id), "");
         // Leave native evidence untouched. The next worker tick schedules
         // successors, retaining their independent approval and report gates.
-        super::ledger::commit_circuit_advance_inner(&tx, run.id, None, Some(&view.context.to_json()?), &[
-            super::CircuitStepOp { node_id:step.node_id.clone(), status:"completed".into(), attempt:step.attempt,
-                outcome:Some(Some("completed".into())), error:Some(None),
-                agent_node_id:None, fresh_attempt:false }
-        ]).map_err(|e| e.to_string())?;
-        append_history(&tx, run.id, Some(&step.node_id), Some(step.attempt), "operator_attestation",
-            &reason, Some(SOURCE_OPERATOR), Some("completed")).map_err(|e| e.to_string())?;
+        super::ledger::commit_circuit_advance_inner(
+            &tx,
+            run.id,
+            None,
+            Some(&view.context.to_json()?),
+            &[super::CircuitStepOp {
+                node_id: step.node_id.clone(),
+                status: "completed".into(),
+                attempt: step.attempt,
+                outcome: Some(Some("completed".into())),
+                error: Some(None),
+                agent_node_id: None,
+                fresh_attempt: false,
+            }],
+        )
+        .map_err(|e| e.to_string())?;
+        append_history(
+            &tx,
+            run.id,
+            Some(&step.node_id),
+            Some(step.attempt),
+            "operator_attestation",
+            &reason,
+            Some(SOURCE_OPERATOR),
+            Some("completed"),
+        )
+        .map_err(|e| e.to_string())?;
         return tx.commit().map_err(|e| e.to_string());
     }
     if matches!(request.action, CheckpointAction::Recheck) {
@@ -760,11 +926,13 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         if !(observed_recheck || (open_pr && has_open_pr_target)) {
             return Err("This action has no authoritative automatic evidence recheck. Inspect the external result.".into());
         }
-        let mut context =
-            crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
+        let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
         context.set(&format!("node.{}.wait.attempt", step.node_id), "");
         context.set(&format!("node.{}.evaluated_attempt", step.node_id), "");
-        context.set(&format!("node.{}.classifier_error.{}", step.node_id, step.attempt), "");
+        context.set(
+            &format!("node.{}.classifier_error.{}", step.node_id, step.attempt),
+            "",
+        );
         context.set(
             &format!("node.{}.classifier_failures.{}", step.node_id, step.attempt),
             "0",
@@ -807,8 +975,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         .map_err(|e| e.to_string())?;
         return tx.commit().map_err(|e| e.to_string());
     }
-    let mut context =
-        crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
+    let mut context = crate::circuit::context::CircuitContext::from_json(&run.context_json)?;
     context.set(&format!("node.{}.recheck_only", request.node_id), "0");
     let effect_kind = match graph.node(&request.node_id).map(|n| &n.kind) {
         Some(CircuitNodeKind::GithubAction { .. }) => "github",
@@ -908,7 +1075,7 @@ fn record_outcome_locked(db: &mut Connection, request: &CheckpointRequest) -> Re
         Some(&context.to_json()?),
         &[op],
     )
-        .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
     if !commit.applied {
         return Err("Circuit run became terminal before operator outcome commit".into());
     }
@@ -970,8 +1137,13 @@ pub struct ReconciledEffect {
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub(crate) enum QueueWaitReason {
     CircuitDisabled,
-    MeshCapacity { capacity: i64 },
-    AgentCapacity { required: i64, available: Option<i64> },
+    MeshCapacity {
+        capacity: i64,
+    },
+    AgentCapacity {
+        required: i64,
+        available: Option<i64>,
+    },
     ReservationUnavailable,
 }
 
@@ -979,14 +1151,33 @@ pub(crate) fn record_queue_wait(run_id: i64, reason: QueueWaitReason) -> SqlResu
     record_queue_wait_locked(&mut crate::db::write_conn(), run_id, reason)
 }
 
-fn record_queue_wait_locked(db: &mut Connection, run_id: i64, reason: QueueWaitReason) -> SqlResult<()> {
+fn record_queue_wait_locked(
+    db: &mut Connection,
+    run_id: i64,
+    reason: QueueWaitReason,
+) -> SqlResult<()> {
     let tx = db.transaction()?;
-    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs WHERE id=?1 AND state='pending')", [run_id], |row|row.get(0))?;
-    if !pending { return Ok(()); }
+    let pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM autopilot_circuit_runs WHERE id=?1 AND state='pending')",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
     let detail = serde_json::to_string(&reason).expect("queue wait fields");
     let previous: Option<String> = tx.query_row("SELECT detail FROM circuit_run_history WHERE run_id=?1 AND kind='queue_wait' ORDER BY id DESC LIMIT 1", [run_id], |row|row.get(0)).optional()?;
     if previous.as_deref() != Some(&detail) {
-        append_history(&tx,run_id,None,None,"queue_wait",&detail,Some(SOURCE_ADMISSION),Some(DISPOSITION_WAITING))?;
+        append_history(
+            &tx,
+            run_id,
+            None,
+            None,
+            "queue_wait",
+            &detail,
+            Some(SOURCE_ADMISSION),
+            Some(DISPOSITION_WAITING),
+        )?;
     }
     tx.commit()
 }
@@ -999,9 +1190,12 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
     // relies on. Redefining the revision scheme is a separate decision.
     let inserted = db.execute("INSERT OR IGNORE INTO circuit_run_snapshots (run_id,graph_json,behavior_revision)
         SELECT r.id,c.graph_json,1 FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id WHERE r.id=?1", [run_id])?;
-    if inserted == 0 { return Ok(()); }
+    if inserted == 0 {
+        return Ok(());
+    }
     let (graph, context): (String, String) = db.query_row("SELECT s.graph_json,r.context_json FROM circuit_run_snapshots s JOIN autopilot_circuit_runs r ON r.id=s.run_id WHERE r.id=?1", [run_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    let context: std::collections::BTreeMap<String,String> = serde_json::from_str(&context).unwrap_or_default();
+    let context: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&context).unwrap_or_default();
     let reviewers: Vec<serde_json::Value> = context.iter().filter_map(|(key, value)| {
         let node_id = key.strip_prefix("review.launch.")?;
         let plan: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(value).ok()?;
@@ -1012,56 +1206,131 @@ pub(super) fn pin_graph(db: &Connection, run_id: i64) -> SqlResult<()> {
             "provider_route_id":plan.provider_route_id,"model":plan.model,"effort":plan.effort,
             "extra_arguments_configured":plan.extra_args.as_ref().is_some_and(|args|!args.is_empty())}))
     }).collect();
-    append_history(db,run_id,None,None,"configuration_pinned", &serde_json::json!({
-        "behavior_revision":1,"graph_sha256":hex::encode(Sha256::digest(graph.as_bytes())),
-        "reviewers":reviewers
-    }).to_string(), Some(SOURCE_RUN_CONFIGURATION), Some(DISPOSITION_APPLIED))?;
+    append_history(
+        db,
+        run_id,
+        None,
+        None,
+        "configuration_pinned",
+        &serde_json::json!({
+            "behavior_revision":1,"graph_sha256":hex::encode(Sha256::digest(graph.as_bytes())),
+            "reviewers":reviewers
+        })
+        .to_string(),
+        Some(SOURCE_RUN_CONFIGURATION),
+        Some(DISPOSITION_APPLIED),
+    )?;
     Ok(())
 }
 
 /// Record changes to the persisted evidence window alongside its projection.
-pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &str) -> SqlResult<()> {
-    let previous: String = db.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id=?1", [run_id], |row| row.get(0))?;
-    let previous: std::collections::BTreeMap<String,String> = serde_json::from_str(&previous).unwrap_or_default();
-    let next: std::collections::BTreeMap<String,String> = serde_json::from_str(next_context).unwrap_or_default();
-    let continuation_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys()).filter(|key|key.starts_with("node.") && key.ends_with(".continuation.delivery")).collect();
+pub(super) fn record_wait_changes(
+    db: &Connection,
+    run_id: i64,
+    next_context: &str,
+) -> SqlResult<()> {
+    let previous: String = db.query_row(
+        "SELECT context_json FROM autopilot_circuit_runs WHERE id=?1",
+        [run_id],
+        |row| row.get(0),
+    )?;
+    let previous: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&previous).unwrap_or_default();
+    let next: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(next_context).unwrap_or_default();
+    let continuation_keys: std::collections::BTreeSet<&String> = previous
+        .keys()
+        .chain(next.keys())
+        .filter(|key| key.starts_with("node.") && key.ends_with(".continuation.delivery"))
+        .collect();
     for key in continuation_keys {
-        let node = key.strip_prefix("node.").and_then(|key|key.strip_suffix(".continuation.delivery")).expect("filtered continuation key");
-        let attempt = next.get(&format!("node.{node}.continuation.attempt")).and_then(|value|value.parse::<i32>().ok());
+        let node = key
+            .strip_prefix("node.")
+            .and_then(|key| key.strip_suffix(".continuation.delivery"))
+            .expect("filtered continuation key");
+        let attempt = next
+            .get(&format!("node.{node}.continuation.attempt"))
+            .and_then(|value| value.parse::<i32>().ok());
         let count_key = format!("node.{node}.continuations.{}", attempt.unwrap_or_default());
         if previous.get(key) != next.get(key) || previous.get(&count_key) != next.get(&count_key) {
             let state = match next.get(key).map(String::as_str) {
-                Some("pending") => "intent", Some("claimed") => "possible_dispatch",
-                Some("delivered") => "acknowledged", Some("obsolete") => "not_performed",
-                Some("uncertain") => "uncertain", _ => continue,
+                Some("pending") => "intent",
+                Some("claimed") => "possible_dispatch",
+                Some("delivered") => "acknowledged",
+                Some("obsolete") => "not_performed",
+                Some("uncertain") => "uncertain",
+                _ => continue,
             };
-            if state == "possible_dispatch" && previous.get(key).map(String::as_str) != Some("pending") {
+            if state == "possible_dispatch"
+                && previous.get(key).map(String::as_str) != Some("pending")
+            {
                 append_history(db,run_id,Some(node),attempt,"continuation_effect",&serde_json::json!({
                     "effect":"continuation_prompt","state":"intent","ordinal":next.get(&count_key)
                 }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(DISPOSITION_INTENT))?;
             }
-            append_history(db,run_id,Some(node),attempt,"continuation_effect",&serde_json::json!({
-                "effect":"continuation_prompt","state":state,"ordinal":next.get(&count_key)
-            }).to_string(),Some(SOURCE_CIRCUIT_WORKER),Some(state))?;
+            append_history(
+                db,
+                run_id,
+                Some(node),
+                attempt,
+                "continuation_effect",
+                &serde_json::json!({
+                    "effect":"continuation_prompt","state":state,"ordinal":next.get(&count_key)
+                })
+                .to_string(),
+                Some(SOURCE_CIRCUIT_WORKER),
+                Some(state),
+            )?;
         }
     }
-    let blocker_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys())
-        .filter(|key| key.starts_with("node.") && key.ends_with(".observation_blocker")).collect();
+    let blocker_keys: std::collections::BTreeSet<&String> = previous
+        .keys()
+        .chain(next.keys())
+        .filter(|key| key.starts_with("node.") && key.ends_with(".observation_blocker"))
+        .collect();
     for key in blocker_keys {
-        if previous.get(key) == next.get(key) { continue; }
-        let node = key.strip_prefix("node.").and_then(|key| key.strip_suffix(".observation_blocker"));
-        let Some(node) = node else { continue; };
-        let attempt = db.query_row("SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
-            params![run_id, node], |row| row.get::<_, i32>(0)).optional()?;
-        let blocker = next.get(key).and_then(|value| serde_json::from_str::<crate::circuit::observation::CircuitObservationBlocker>(value).ok());
+        if previous.get(key) == next.get(key) {
+            continue;
+        }
+        let node = key
+            .strip_prefix("node.")
+            .and_then(|key| key.strip_suffix(".observation_blocker"));
+        let Some(node) = node else {
+            continue;
+        };
+        let attempt = db
+            .query_row(
+                "SELECT attempt FROM autopilot_circuit_run_steps WHERE run_id=?1 AND node_id=?2",
+                params![run_id, node],
+                |row| row.get::<_, i32>(0),
+            )
+            .optional()?;
+        let blocker = next.get(key).and_then(|value| {
+            serde_json::from_str::<crate::circuit::observation::CircuitObservationBlocker>(value)
+                .ok()
+        });
         let detail = serde_json::json!({"blocker": blocker, "message": blocker.as_ref().map(|blocker| blocker.message())});
-        append_history(db, run_id, Some(node), attempt, "observation_readiness", &detail.to_string(),
-            Some(SOURCE_RECONCILIATION), Some(wait_disposition(blocker.is_some())))?;
+        append_history(
+            db,
+            run_id,
+            Some(node),
+            attempt,
+            "observation_readiness",
+            &detail.to_string(),
+            Some(SOURCE_RECONCILIATION),
+            Some(wait_disposition(blocker.is_some())),
+        )?;
     }
-    let capacity_keys: std::collections::BTreeSet<&String> = previous.keys().chain(next.keys()).filter(|key|key.starts_with("node.") && key.ends_with(".capacity_wait")).collect();
+    let capacity_keys: std::collections::BTreeSet<&String> = previous
+        .keys()
+        .chain(next.keys())
+        .filter(|key| key.starts_with("node.") && key.ends_with(".capacity_wait"))
+        .collect();
     for key in capacity_keys {
         if previous.get(key) != next.get(key) {
-            let node = key.strip_prefix("node.").and_then(|key|key.strip_suffix(".capacity_wait"));
+            let node = key
+                .strip_prefix("node.")
+                .and_then(|key| key.strip_suffix(".capacity_wait"));
             // Identity: the parked step's current attempt, so the operator
             // surface can name which execution is waiting (issue #1909).
             let attempt = match node {
@@ -1073,17 +1342,39 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
             };
             // A freed window (`circuit_limit`/`agent_limit` both false, or the
             // key gone) is a resolution, not an active wait (issue #1909).
-            let window = next.get(key).and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
-            let binding = window.as_ref().is_some_and(|value|
+            let window = next
+                .get(key)
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
+            let binding = window.as_ref().is_some_and(|value| {
                 value["circuit_limit"].as_bool().unwrap_or(false)
-                    || value["agent_limit"].as_bool().unwrap_or(false));
-            append_history(db,run_id,node,attempt,"step_capacity_wait",&serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),Some(SOURCE_CAPACITY),Some(wait_disposition(binding)))?;
+                    || value["agent_limit"].as_bool().unwrap_or(false)
+            });
+            append_history(
+                db,
+                run_id,
+                node,
+                attempt,
+                "step_capacity_wait",
+                &serde_json::json!({"before":previous.get(key),"after":next.get(key)}).to_string(),
+                Some(SOURCE_CAPACITY),
+                Some(wait_disposition(binding)),
+            )?;
         }
     }
-    let nodes: std::collections::BTreeSet<&str> = previous.keys().chain(next.keys()).filter_map(|key| key.strip_prefix("node.")?.strip_suffix(".wait.attempt")).collect();
+    let nodes: std::collections::BTreeSet<&str> = previous
+        .keys()
+        .chain(next.keys())
+        .filter_map(|key| key.strip_prefix("node.")?.strip_suffix(".wait.attempt"))
+        .collect();
     for node in nodes {
         let prefix = format!("node.{node}.wait.");
-        let fields = ["attempt","timeout_ms","since_ms","observed","explicit_budget"];
+        let fields = [
+            "attempt",
+            "timeout_ms",
+            "since_ms",
+            "observed",
+            "explicit_budget",
+        ];
         let project = |context: &std::collections::BTreeMap<String,String>| -> std::collections::BTreeMap<&str,Option<String>> {
             fields.iter().map(|field|(*field,context.get(&format!("{prefix}{field}")).cloned())).collect()
         };
@@ -1093,12 +1384,30 @@ pub(super) fn record_wait_changes(db: &Connection, run_id: i64, next_context: &s
             // Identity survives a resolution: a cleared window writes an empty
             // attempt, so fall back to the prior window's attempt rather than
             // dropping the identity the wait was parked on (issue #1909 review).
-            let attempt = next.get(&format!("{prefix}attempt")).and_then(|value| value.parse::<i32>().ok())
-                .or_else(|| previous.get(&format!("{prefix}attempt")).and_then(|value| value.parse::<i32>().ok()));
+            let attempt = next
+                .get(&format!("{prefix}attempt"))
+                .and_then(|value| value.parse::<i32>().ok())
+                .or_else(|| {
+                    previous
+                        .get(&format!("{prefix}attempt"))
+                        .and_then(|value| value.parse::<i32>().ok())
+                });
             // A window whose (possibly cleared) attempt is empty is a
             // resolution, not an active wait.
-            let binding = after.get("attempt").and_then(|value| value.as_deref()).is_some_and(|value| !value.is_empty());
-            append_history(db,run_id,Some(node),attempt,"evidence_window_changed",&serde_json::json!({"before":before,"after":after}).to_string(),Some(SOURCE_RECONCILIATION),Some(wait_disposition(binding)))?;
+            let binding = after
+                .get("attempt")
+                .and_then(|value| value.as_deref())
+                .is_some_and(|value| !value.is_empty());
+            append_history(
+                db,
+                run_id,
+                Some(node),
+                attempt,
+                "evidence_window_changed",
+                &serde_json::json!({"before":before,"after":after}).to_string(),
+                Some(SOURCE_RECONCILIATION),
+                Some(wait_disposition(binding)),
+            )?;
         }
     }
     Ok(())
@@ -1113,21 +1422,26 @@ pub(super) fn run_graph(
 }
 
 pub(super) fn run_graph_json(db: &Connection, run_id: i64) -> Result<String, String> {
-    db
-        .query_row(
-            "SELECT COALESCE(s.graph_json,c.graph_json)
+    db.query_row(
+        "SELECT COALESCE(s.graph_json,c.graph_json)
         FROM autopilot_circuit_runs r JOIN autopilot_circuits c ON c.id=r.circuit_id
         LEFT JOIN circuit_run_snapshots s ON s.run_id=r.id WHERE r.id=?1",
-            [run_id],
-            |r| r.get(0),
-        )
-        .map_err(|e| e.to_string())
+        [run_id],
+        |r| r.get(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Append one Circuit Run History event. `source` and `disposition` are the
 /// provenance vocabulary above; both are nullable for pre-v45 rows (issue
 /// #1909 / #1847). `observed_at` defaults to the append time, which for these
 /// synchronous events is the observed time.
+///
+/// The 7-arg signature covers run/node/attempt/kind/detail/source/disposition;
+/// the helper has a single, narrow INSERT and a 1-line body, so wrapping the
+/// arguments in a struct would just push the wiring to every call site. The
+/// allow is intentional and scoped to this function.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn append_history(
     db: &Connection,
     run_id: i64,
@@ -1171,40 +1485,50 @@ pub fn commit_transition(
 ) -> SqlResult<i64> {
     // Filesystem validation belongs before acquiring the DB writer. Retain the
     // original pull fingerprint so activity since observation invalidates it.
-    if evidence.input_guard.and_then(|guard|guard.transcript_guard.as_ref()).is_some_and(|snapshot|!snapshot.is_current()) {
+    if evidence
+        .input_guard
+        .and_then(|guard| guard.transcript_guard.as_ref())
+        .is_some_and(|snapshot| !snapshot.is_current())
+    {
         return Err(observation_freshness_rejection(
             "Native transcript changed before evidence commit; recheck required",
         ));
     }
-    if evidence.input_guard.and_then(|guard| guard.report_guard.as_ref()).is_some_and(|snapshot| !snapshot.is_current()) {
-        return Err(observation_freshness_rejection("Agent report changed before evidence commit; recheck required"));
+    if evidence
+        .input_guard
+        .and_then(|guard| guard.report_guard.as_ref())
+        .is_some_and(|snapshot| !snapshot.is_current())
+    {
+        return Err(observation_freshness_rejection(
+            "Agent report changed before evidence commit; recheck required",
+        ));
     }
     let mut db = crate::db::write_conn();
     let result = if let Some(guard) = evidence.input_guard {
         let mut revision = None;
         let mut commit_error = None;
         let accepted = crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(
-                guard.agent_node_id,
-                &guard.input_stamp,
-                guard.observed_at_ms,
-                || {
-                    match commit_transition_locked(&mut db, run_id, state, context, steps, evidence) {
-                        Ok(committed_revision) => {
-                            revision = Some(committed_revision);
-                            Ok(true)
-                        }
-                        Err(error) => {
-                            let message = error.to_string();
-                            commit_error = Some(error);
-                            Err(message)
-                        }
-                    }
-                },
-            );
+            guard.agent_node_id,
+            &guard.input_stamp,
+            guard.observed_at_ms,
+            || match commit_transition_locked(&mut db, run_id, state, context, steps, evidence) {
+                Ok(committed_revision) => {
+                    revision = Some(committed_revision);
+                    Ok(true)
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    commit_error = Some(error);
+                    Err(message)
+                }
+            },
+        );
         if let Some(error) = commit_error {
             Err(error)
         } else if !accepted.map_err(rusqlite::Error::InvalidParameterName)? {
-            Err(observation_freshness_rejection("agent input or session changed before evidence commit"))
+            Err(observation_freshness_rejection(
+                "agent input or session changed before evidence commit",
+            ))
         } else {
             revision.ok_or(rusqlite::Error::InvalidQuery)
         }
@@ -1212,8 +1536,7 @@ pub fn commit_transition(
         commit_transition_locked(&mut db, run_id, state, context, steps, evidence)
     };
     drop(db);
-    if result.is_ok()
-        && state.is_some_and(crate::circuit::vocabulary::RunState::is_terminal_db_str)
+    if result.is_ok() && state.is_some_and(crate::circuit::vocabulary::RunState::is_terminal_db_str)
     {
         crate::services::circuit_worker::wake_circuit_worker();
     }
@@ -1281,7 +1604,8 @@ pub(crate) fn commit_transition_locked(
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
-    let commit = super::ledger::commit_circuit_advance_inner(&tx, run_id, state, Some(context), steps)?;
+    let commit =
+        super::ledger::commit_circuit_advance_inner(&tx, run_id, state, Some(context), steps)?;
     if !commit.applied {
         return Err(rusqlite::Error::InvalidQuery);
     }
@@ -1301,21 +1625,24 @@ pub(crate) fn commit_transition_locked(
                 && step.attempt == effect.attempt
                 && step.status == "completed"
         });
-        let configured_status = match graph.as_ref().and_then(|graph| graph.node(&effect.node_id)).map(|node| &node.kind) {
-            Some(crate::circuit::model::CircuitNodeKind::SetNodeStatus {
-                status,
-                ..
-            }) => match status {
-                crate::circuit::model::SessionStatusKind::Running => {
-                    crate::models::SessionStatus::Running
+        let configured_status = match graph
+            .as_ref()
+            .and_then(|graph| graph.node(&effect.node_id))
+            .map(|node| &node.kind)
+        {
+            Some(crate::circuit::model::CircuitNodeKind::SetNodeStatus { status, .. }) => {
+                match status {
+                    crate::circuit::model::SessionStatusKind::Running => {
+                        crate::models::SessionStatus::Running
+                    }
+                    crate::circuit::model::SessionStatusKind::Idle => {
+                        crate::models::SessionStatus::Idle
+                    }
+                    crate::circuit::model::SessionStatusKind::Completed => {
+                        crate::models::SessionStatus::Completed
+                    }
                 }
-                crate::circuit::model::SessionStatusKind::Idle => {
-                    crate::models::SessionStatus::Idle
-                }
-                crate::circuit::model::SessionStatusKind::Completed => {
-                    crate::models::SessionStatus::Completed
-                }
-            },
+            }
             _ => return Err(rusqlite::Error::InvalidQuery),
         };
         if !completed || configured_status != effect.status {
@@ -1367,8 +1694,18 @@ pub(crate) fn commit_transition_locked(
         )?;
     }
     for classification in evidence.classifications {
-        let detail = serde_json::to_string(classification).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-        append_history(&tx, run_id, Some(&classification.step_id), Some(classification.attempt), "classification", &detail, Some(SOURCE_CLASSIFIER), Some(DISPOSITION_INTERPRETED))?;
+        let detail = serde_json::to_string(classification)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        append_history(
+            &tx,
+            run_id,
+            Some(&classification.step_id),
+            Some(classification.attempt),
+            "classification",
+            &detail,
+            Some(SOURCE_CLASSIFIER),
+            Some(DISPOSITION_INTERPRETED),
+        )?;
     }
     for effect in evidence.reconciled_effects {
         let completed = steps.iter().any(|step| {
@@ -1439,14 +1776,33 @@ pub(crate) fn commit_transition_locked(
 
 /// Must commit before any bytes are sent. A repeated claim never dispatches.
 pub(crate) fn acknowledge_spawn_attachment(
-    run_id: i64, node_id: &str, attempt: i32, agent_node_id: i64, parent_agent_node_id: Option<i64>, expected_agent_node_id: Option<i64>,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
+    expected_agent_node_id: Option<i64>,
 ) -> SqlResult<Option<i64>> {
     let mut db = crate::db::write_conn();
-    acknowledge_spawn_attachment_locked(&mut db, run_id, node_id, attempt, agent_node_id, parent_agent_node_id, expected_agent_node_id)
+    acknowledge_spawn_attachment_locked(
+        &mut db,
+        run_id,
+        node_id,
+        attempt,
+        agent_node_id,
+        parent_agent_node_id,
+        expected_agent_node_id,
+    )
 }
 
 fn acknowledge_spawn_attachment_locked(
-    db: &mut Connection, run_id: i64, node_id: &str, attempt: i32, agent_node_id: i64, parent_agent_node_id: Option<i64>, expected_agent_node_id: Option<i64>,
+    db: &mut Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+    agent_node_id: i64,
+    parent_agent_node_id: Option<i64>,
+    expected_agent_node_id: Option<i64>,
 ) -> SqlResult<Option<i64>> {
     let tx = db.transaction()?;
     let updated = tx.execute("UPDATE autopilot_circuit_run_steps SET agent_node_id=?4,parent_agent_node_id=?5
@@ -1456,7 +1812,9 @@ fn acknowledge_spawn_attachment_locked(
                 OR (e.state='acknowledged' AND agent_node_id=?4)))
         AND EXISTS(SELECT 1 FROM autopilot_circuit_runs WHERE id=?1 AND state='running')",
         params![run_id,node_id,attempt,agent_node_id,parent_agent_node_id,expected_agent_node_id])?;
-    if updated == 0 { return Ok(None); }
+    if updated == 0 {
+        return Ok(None);
+    }
     let acknowledged = tx.execute("INSERT INTO circuit_effects(run_id,node_id,attempt,kind,state) VALUES (?1,?2,?3,'spawn','acknowledged')
         ON CONFLICT(run_id,node_id,attempt,kind) DO UPDATE SET state='acknowledged' WHERE state='possible_dispatch'",
         params![run_id,node_id,attempt])?;
@@ -1477,31 +1835,57 @@ pub fn claim_effect(run_id: i64, intent: &EffectIntent) -> SqlResult<Option<i64>
     claim_effect_locked(&mut db, run_id, intent)
 }
 
-pub(crate) fn acknowledge_prompt_delivery(run_id: i64, node_id: &str, attempt: i32) -> SqlResult<Option<i64>> {
+pub(crate) fn acknowledge_prompt_delivery(
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> SqlResult<Option<i64>> {
     let mut db = crate::db::write_conn();
     acknowledge_prompt_delivery_locked(&mut db, run_id, node_id, attempt)
 }
 
-fn acknowledge_prompt_delivery_locked(db: &mut Connection, run_id: i64, node_id: &str, attempt: i32) -> SqlResult<Option<i64>> {
+fn acknowledge_prompt_delivery_locked(
+    db: &mut Connection,
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> SqlResult<Option<i64>> {
     let tx = db.transaction()?;
     let updated = tx.execute("UPDATE circuit_effects SET state='acknowledged'
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt' AND state='possible_dispatch'
         AND EXISTS(SELECT 1 FROM autopilot_circuit_runs r JOIN autopilot_circuit_run_steps s ON s.run_id=r.id
             WHERE r.id=?1 AND r.state IN ('running','paused') AND s.node_id=?2 AND s.attempt=?3 AND s.status='running')",
         params![run_id, node_id, attempt])?;
-    if updated == 0 { return Ok(None); }
-    append_history(&tx, run_id, Some(node_id), Some(attempt), "effect_result", "acknowledged",
-        Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_ACKNOWLEDGED))?;
+    if updated == 0 {
+        return Ok(None);
+    }
+    append_history(
+        &tx,
+        run_id,
+        Some(node_id),
+        Some(attempt),
+        "effect_result",
+        "acknowledged",
+        Some(SOURCE_CIRCUIT_WORKER),
+        Some(DISPOSITION_ACKNOWLEDGED),
+    )?;
     let revision = revision_inner(&tx, run_id)?;
     tx.commit()?;
     Ok(Some(revision))
 }
 
-pub(crate) fn prompt_delivery_acknowledged(run_id: i64, node_id: &str, attempt: i32) -> SqlResult<bool> {
+pub(crate) fn prompt_delivery_acknowledged(
+    run_id: i64,
+    node_id: &str,
+    attempt: i32,
+) -> SqlResult<bool> {
     let db = crate::db::read_conn();
-    db.query_row("SELECT EXISTS(SELECT 1 FROM circuit_effects
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM circuit_effects
         WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='prompt' AND state='acknowledged')",
-        params![run_id, node_id, attempt], |row| row.get(0))
+        params![run_id, node_id, attempt],
+        |row| row.get(0),
+    )
 }
 
 pub(crate) fn record_effect_target(
@@ -1588,12 +1972,7 @@ fn latest_effect_target_inner(
     .optional()
 }
 
-fn has_effect_target(
-    db: &Connection,
-    run_id: i64,
-    node_id: &str,
-    attempt: i32,
-) -> SqlResult<bool> {
+fn has_effect_target(db: &Connection, run_id: i64, node_id: &str, attempt: i32) -> SqlResult<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM circuit_run_history WHERE run_id=?1 AND node_id=?2 AND attempt=?3 AND kind='effect_target')",
         params![run_id, node_id, attempt],
@@ -1641,25 +2020,69 @@ mod tests {
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');").unwrap();
-        let identity = ObservationIdentity { run_id: 1, step_id: "gate".into(), attempt: 1,
-            agent_node_id: 9, session_incarnation: Some("old".into()), session_id: None,
-            turn_id: None, report_revision: None };
-        let current = ObservationIdentity { session_incarnation: Some("new".into()), ..identity.clone() };
-        let observation = CircuitObservation { identity: current.clone(), source: "agent_status_projection".into(),
-            source_id: Some("current".into()), observed_at_ms: 100, authoritative: false, fact: ObservedWorkFact::Working };
-        let mut evidence = WorkEvidence { identity: Some(identity), conflicted: true, ..Default::default() };
+        let identity = ObservationIdentity {
+            run_id: 1,
+            step_id: "gate".into(),
+            attempt: 1,
+            agent_node_id: 9,
+            session_incarnation: Some("old".into()),
+            session_id: None,
+            turn_id: None,
+            report_revision: None,
+        };
+        let current = ObservationIdentity {
+            session_incarnation: Some("new".into()),
+            ..identity.clone()
+        };
+        let observation = CircuitObservation {
+            identity: current.clone(),
+            source: "agent_status_projection".into(),
+            source_id: Some("current".into()),
+            observed_at_ms: 100,
+            authoritative: false,
+            fact: ObservedWorkFact::Working,
+        };
+        let mut evidence = WorkEvidence {
+            identity: Some(identity),
+            conflicted: true,
+            ..Default::default()
+        };
         evidence.observe(&current, &observation);
-        evidence.conflicts.retain(|conflict| conflict.kind == EvidenceConflictKind::Identity);
+        evidence
+            .conflicts
+            .retain(|conflict| conflict.kind == EvidenceConflictKind::Identity);
         evidence.conflicts[0].status_projection = None;
-        let detail = serde_json::json!({"observation":observation,"disposition":"conflicting"}).to_string();
-        append_history(&db, 1, Some("gate"), Some(2), "observation", &detail,
-            Some("agent_status_projection"), Some("conflicting")).unwrap();
+        let detail =
+            serde_json::json!({"observation":observation,"disposition":"conflicting"}).to_string();
+        append_history(
+            &db,
+            1,
+            Some("gate"),
+            Some(2),
+            "observation",
+            &detail,
+            Some("agent_status_projection"),
+            Some("conflicting"),
+        )
+        .unwrap();
         assert!(!restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
-        append_history(&db, 1, Some("gate"), Some(1), "observation", &detail,
-            Some("agent_status_projection"), Some("conflicting")).unwrap();
+        append_history(
+            &db,
+            1,
+            Some("gate"),
+            Some(1),
+            "observation",
+            &detail,
+            Some("agent_status_projection"),
+            Some("conflicting"),
+        )
+        .unwrap();
         assert!(restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap());
         assert_eq!(evidence.conflicts[0].status_projection, Some(true));
-        assert!(!restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap(), "idempotent");
+        assert!(
+            !restore_projection_conflicts_inner(&db, 1, "gate", 1, &mut evidence).unwrap(),
+            "idempotent"
+        );
     }
 
     /// The persisted native receipt carrying this exact `source_id`.
@@ -1679,7 +2102,11 @@ mod tests {
             .unwrap()
             .into_iter()
             .filter(|entry| entry.kind == "native_hook_received")
-            .filter(|entry| entry.detail.contains(&format!("\"source_id\":\"{source_id}\"")))
+            .filter(|entry| {
+                entry
+                    .detail
+                    .contains(&format!("\"source_id\":\"{source_id}\""))
+            })
             .collect();
         assert_eq!(
             found.len(),
@@ -1707,27 +2134,39 @@ mod tests {
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'source',1,'unverified');").unwrap();
-        let waiting = serde_json::json!({"node.source.observation_blocker":"{\"kind\":\"input_uncertain\"}"}).to_string();
+        let waiting =
+            serde_json::json!({"node.source.observation_blocker":"{\"kind\":\"input_uncertain\"}"})
+                .to_string();
         for _ in 0..3 {
-            super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&waiting),&[]).unwrap();
+            super::super::ledger::commit_circuit_advance_locked(
+                &mut db,
+                1,
+                None,
+                Some(&waiting),
+                &[],
+            )
+            .unwrap();
         }
-        let history = history_inner(&db,1).unwrap();
+        let history = history_inner(&db, 1).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].kind, "observation_readiness");
         assert_eq!(history[0].disposition.as_deref(), Some("waiting"));
-        assert!(history[0].detail.contains("Terminal input tracking is uncertain"));
+        assert!(history[0]
+            .detail
+            .contains("Terminal input tracking is uncertain"));
         let resolved = serde_json::json!({"node.source.observation_blocker":""}).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&resolved),&[]).unwrap();
-        let history = history_inner(&db,1).unwrap();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&resolved), &[])
+            .unwrap();
+        let history = history_inner(&db, 1).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[1].disposition.as_deref(), Some("resolved"));
     }
 
     #[test]
     fn input_freshness_rejections_are_distinct_from_transition_conflicts() {
-        assert!(is_observation_freshness_rejection(&observation_freshness_rejection(
-            "a newer input was submitted",
-        )));
+        assert!(is_observation_freshness_rejection(
+            &observation_freshness_rejection("a newer input was submitted",)
+        ));
         assert!(!is_observation_freshness_rejection(
             &rusqlite::Error::InvalidQuery,
         ));
@@ -1745,14 +2184,38 @@ mod tests {
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');").unwrap();
         let mut context = serde_json::json!({"node.verdict.continuation.attempt":"1","node.verdict.continuations.1":"1","node.verdict.continuation.delivery":"claimed"});
         for _ in 0..2 {
-            super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&context.to_string()),&[]).unwrap();
+            super::super::ledger::commit_circuit_advance_locked(
+                &mut db,
+                1,
+                None,
+                Some(&context.to_string()),
+                &[],
+            )
+            .unwrap();
         }
         context["node.verdict.continuation.delivery"] = "uncertain".into();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&context.to_string()),&[]).unwrap();
-        let history = history_inner(&db,1).unwrap();
-        let states: Vec<String> = history.iter().map(|entry|serde_json::from_str::<serde_json::Value>(&entry.detail).unwrap()["state"].as_str().unwrap().to_owned()).collect();
-        assert_eq!(states,vec!["intent","possible_dispatch","uncertain"]);
-        assert!(history.iter().all(|entry|entry.node_id.as_deref()==Some("verdict") && entry.attempt==Some(1)));
+        super::super::ledger::commit_circuit_advance_locked(
+            &mut db,
+            1,
+            None,
+            Some(&context.to_string()),
+            &[],
+        )
+        .unwrap();
+        let history = history_inner(&db, 1).unwrap();
+        let states: Vec<String> = history
+            .iter()
+            .map(|entry| {
+                serde_json::from_str::<serde_json::Value>(&entry.detail).unwrap()["state"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(states, vec!["intent", "possible_dispatch", "uncertain"]);
+        assert!(history
+            .iter()
+            .all(|entry| entry.node_id.as_deref() == Some("verdict") && entry.attempt == Some(1)));
     }
 
     #[test]
@@ -1763,22 +2226,39 @@ mod tests {
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'pending');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
-        record_queue_wait_locked(&mut db,1,QueueWaitReason::CircuitDisabled).unwrap();
-        record_queue_wait_locked(&mut db,1,QueueWaitReason::CircuitDisabled).unwrap();
-        record_queue_wait_locked(&mut db,1,QueueWaitReason::MeshCapacity { capacity: 3 }).unwrap();
-        assert_eq!(history_inner(&db,1).unwrap().len(),2);
-        assert!(history_inner(&db,1).unwrap()[1].detail.contains("mesh_capacity"));
-        db.execute("UPDATE autopilot_circuit_runs SET state='cancelled' WHERE id=1",[]).unwrap();
-        record_queue_wait_locked(&mut db,1,QueueWaitReason::ReservationUnavailable).unwrap();
-        assert_eq!(history_inner(&db,1).unwrap().len(),2,"late capacity reports cannot reopen cancelled queue waits");
-        db.execute("UPDATE autopilot_circuit_runs SET state='running' WHERE id=1",[]).unwrap();
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::CircuitDisabled).unwrap();
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::CircuitDisabled).unwrap();
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::MeshCapacity { capacity: 3 })
+            .unwrap();
+        assert_eq!(history_inner(&db, 1).unwrap().len(), 2);
+        assert!(history_inner(&db, 1).unwrap()[1]
+            .detail
+            .contains("mesh_capacity"));
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET state='cancelled' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::ReservationUnavailable).unwrap();
+        assert_eq!(
+            history_inner(&db, 1).unwrap().len(),
+            2,
+            "late capacity reports cannot reopen cancelled queue waits"
+        );
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET state='running' WHERE id=1",
+            [],
+        )
+        .unwrap();
         let context = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":true,\"agent_limit\":false}"}).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&context),&[]).unwrap();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&context),&[]).unwrap();
-        let history = history_inner(&db,1).unwrap();
-        assert_eq!(history.len(),3);
-        assert_eq!(history[2].kind,"step_capacity_wait");
-        assert_eq!(history[2].node_id.as_deref(),Some("spawn"));
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
+            .unwrap();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
+            .unwrap();
+        let history = history_inner(&db, 1).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[2].kind, "step_capacity_wait");
+        assert_eq!(history[2].node_id.as_deref(), Some("spawn"));
         // Provenance and identity (issue #1909): the run-level admission wait
         // names its source and disposition but has no step identity, while the
         // step capacity wait names the parked step's attempt.
@@ -1805,15 +2285,21 @@ mod tests {
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
         let parked = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":true,\"agent_limit\":true}"}).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&parked),&[]).unwrap();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&parked), &[])
+            .unwrap();
         let freed = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}"}).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&freed),&[]).unwrap();
-        let history = history_inner(&db,1).unwrap();
-        assert_eq!(history.len(),2);
-        assert_eq!(history[0].kind,"step_capacity_wait");
-        assert_eq!(history[0].disposition.as_deref(),Some(DISPOSITION_WAITING));
-        assert_eq!(history[1].kind,"step_capacity_wait");
-        assert_eq!(history[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED),"a freed capacity window is a resolution, not an active wait");
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&freed), &[])
+            .unwrap();
+        let history = history_inner(&db, 1).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].kind, "step_capacity_wait");
+        assert_eq!(history[0].disposition.as_deref(), Some(DISPOSITION_WAITING));
+        assert_eq!(history[1].kind, "step_capacity_wait");
+        assert_eq!(
+            history[1].disposition.as_deref(),
+            Some(DISPOSITION_RESOLVED),
+            "a freed capacity window is a resolution, not an active wait"
+        );
 
         // The same rule applies to an evidence wait window: opening binds,
         // clearing resolves. The real clear writes an empty attempt string
@@ -1822,19 +2308,32 @@ mod tests {
             "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
             "node.spawn.wait.attempt":"1","node.spawn.wait.timeout_ms":"60000","node.spawn.wait.since_ms":"1000"
         }).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&waiting),&[]).unwrap();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&waiting), &[])
+            .unwrap();
         let resolved = serde_json::json!({
             "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
             "node.spawn.wait.attempt":""
-        }).to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&resolved),&[]).unwrap();
-        let windows: Vec<CircuitHistoryEntry> = history_inner(&db,1).unwrap()
-            .into_iter().filter(|entry| entry.kind == "evidence_window_changed").collect();
-        assert_eq!(windows.len(),2);
-        assert_eq!(windows[0].disposition.as_deref(),Some(DISPOSITION_WAITING));
-        assert_eq!(windows[0].attempt,Some(1));
-        assert_eq!(windows[1].disposition.as_deref(),Some(DISPOSITION_RESOLVED));
-        assert_eq!(windows[1].attempt,Some(1),"a resolved evidence wait keeps the attempt it was parked on");
+        })
+        .to_string();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&resolved), &[])
+            .unwrap();
+        let windows: Vec<CircuitHistoryEntry> = history_inner(&db, 1)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.kind == "evidence_window_changed")
+            .collect();
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].disposition.as_deref(), Some(DISPOSITION_WAITING));
+        assert_eq!(windows[0].attempt, Some(1));
+        assert_eq!(
+            windows[1].disposition.as_deref(),
+            Some(DISPOSITION_RESOLVED)
+        );
+        assert_eq!(
+            windows[1].attempt,
+            Some(1),
+            "a resolved evidence wait keeps the attempt it was parked on"
+        );
     }
 
     #[test]
@@ -1846,47 +2345,78 @@ mod tests {
             INSERT INTO autopilot_circuits(id,mesh_id,name,graph_json) VALUES(1,1,'test','{}');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');").unwrap();
         let configuration = crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/reviewer".into(), spawn_option_id: "codex".into(), model: Some("gpt-6-luna".into()),
-            effort: Some("low".into()), extra_args: Some("--token private-secret".into()), ..Default::default()
+            id: "launch/reviewer".into(),
+            spawn_option_id: "codex".into(),
+            model: Some("gpt-6-luna".into()),
+            effort: Some("low".into()),
+            extra_args: Some("--token private-secret".into()),
+            ..Default::default()
         };
         let context = serde_json::json!({"review.launch.reviewer":serde_json::to_string(&configuration).unwrap()}).to_string();
-        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1",[&context]).unwrap();
-        { let tx = db.transaction().unwrap(); pin_graph(&tx,1).unwrap(); pin_graph(&tx,1).unwrap(); tx.commit().unwrap(); }
-        let history = history_inner(&db,1).unwrap();
-        assert_eq!(history.len(),1);
-        assert_eq!(history[0].kind,"configuration_pinned");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [&context],
+        )
+        .unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            pin_graph(&tx, 1).unwrap();
+            pin_graph(&tx, 1).unwrap();
+            tx.commit().unwrap();
+        }
+        let history = history_inner(&db, 1).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].kind, "configuration_pinned");
         assert!(history[0].detail.contains("gpt-6-luna"));
         assert!(!history[0].detail.contains("private-secret"));
         // Configuration revision provenance (issue #1909).
-        assert_eq!(history[0].source.as_deref(),Some(SOURCE_RUN_CONFIGURATION));
-        assert_eq!(history[0].disposition.as_deref(),Some(DISPOSITION_APPLIED));
+        assert_eq!(history[0].source.as_deref(), Some(SOURCE_RUN_CONFIGURATION));
+        assert_eq!(history[0].disposition.as_deref(), Some(DISPOSITION_APPLIED));
         let mut next: serde_json::Value = serde_json::from_str(&context).unwrap();
         next["node.spawn.wait.attempt"] = "1".into();
         next["node.spawn.wait.since_ms"] = "1000".into();
         next["node.spawn.wait.timeout_ms"] = "60000".into();
         let next = next.to_string();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&next),&[]).unwrap();
-        super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&next),&[]).unwrap();
-        assert_eq!(history_inner(&db,1).unwrap().len(),2);
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&next), &[])
+            .unwrap();
+        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&next), &[])
+            .unwrap();
+        assert_eq!(history_inner(&db, 1).unwrap().len(), 2);
         db.execute_batch("CREATE TRIGGER fail_wait_history BEFORE INSERT ON circuit_run_history BEGIN SELECT RAISE(ABORT,'injected history failure'); END;").unwrap();
-        let changed = next.replace("1000","2000");
-        assert!(super::super::ledger::commit_circuit_advance_locked(&mut db,1,None,Some(&changed),&[]).is_err());
-        assert_eq!(db.query_row("SELECT context_json FROM autopilot_circuit_runs WHERE id=1",[],|row|row.get::<_,String>(0)).unwrap(),next);
+        let changed = next.replace("1000", "2000");
+        assert!(super::super::ledger::commit_circuit_advance_locked(
+            &mut db,
+            1,
+            None,
+            Some(&changed),
+            &[]
+        )
+        .is_err());
+        assert_eq!(
+            db.query_row(
+                "SELECT context_json FROM autopilot_circuit_runs WHERE id=1",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            next
+        );
         drop(db);
         let db = Connection::open(file.path()).unwrap();
-        let history = history_inner(&db,1).unwrap();
-        assert_eq!(history.len(),2);
-        assert_eq!(history[1].kind,"evidence_window_changed");
-        assert_eq!(history[1].attempt,Some(1));
+        let history = history_inner(&db, 1).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[1].kind, "evidence_window_changed");
+        assert_eq!(history[1].attempt, Some(1));
         assert!(history[1].detail.contains("60000"));
-        assert_eq!(history[1].source.as_deref(),Some(SOURCE_RECONCILIATION));
-        assert_eq!(history[1].disposition.as_deref(),Some(DISPOSITION_WAITING));
+        assert_eq!(history[1].source.as_deref(), Some(SOURCE_RECONCILIATION));
+        assert_eq!(history[1].disposition.as_deref(), Some(DISPOSITION_WAITING));
     }
 
     /// Issue #1909 acceptance: the wait / capacity / configuration history
     /// survives an app restart and agrees with the materialized projection.
     #[test]
-    fn circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection() {
+    fn circuit_wait_capacity_and_configuration_history_survives_reopen_and_agrees_with_projection()
+    {
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut db = Connection::open(file.path()).unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -1895,56 +2425,111 @@ mod tests {
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'pending');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',2,'pending_slot');").unwrap();
         // A pending run parked on mesh admission, then admitted.
-        record_queue_wait_locked(&mut db, 1, QueueWaitReason::MeshCapacity { capacity: 2 }).unwrap();
+        record_queue_wait_locked(&mut db, 1, QueueWaitReason::MeshCapacity { capacity: 2 })
+            .unwrap();
         // The pinned configuration is written on run creation; pin it here and
         // assert the entry agrees with `circuit_run_snapshots` after reopen.
-        { let tx = db.transaction().unwrap(); pin_graph(&tx, 1).unwrap(); tx.commit().unwrap(); }
+        {
+            let tx = db.transaction().unwrap();
+            pin_graph(&tx, 1).unwrap();
+            tx.commit().unwrap();
+        }
         let context = serde_json::json!({
             "node.spawn.capacity_wait": "{\"circuit_limit\":true,\"agent_limit\":false}",
             "node.spawn.wait.attempt": "2",
             "node.spawn.wait.timeout_ms": "60000",
             "node.spawn.wait.since_ms": "1000"
-        }).to_string();
+        })
+        .to_string();
         // Queue exit: pending -> running commits the `run_transition` entry.
-        super::super::ledger::commit_circuit_advance_locked(&mut db, 1, Some("running"), Some(&context), &[]).unwrap();
+        super::super::ledger::commit_circuit_advance_locked(
+            &mut db,
+            1,
+            Some("running"),
+            Some(&context),
+            &[],
+        )
+        .unwrap();
         drop(db);
 
         // Restart: reopen the same file and read the history back.
         let db = Connection::open(file.path()).unwrap();
         let history = history_inner(&db, 1).unwrap();
-        let entry = |kind: &str| history.iter().find(|entry| entry.kind == kind)
-            .unwrap_or_else(|| panic!("{kind} history retained across reopen"));
+        let entry = |kind: &str| {
+            history
+                .iter()
+                .find(|entry| entry.kind == kind)
+                .unwrap_or_else(|| panic!("{kind} history retained across reopen"))
+        };
         // Identity, time, source and disposition on every retained event.
-        assert!(history.iter().all(|entry| entry.source.is_some() && entry.disposition.is_some() && !entry.observed_at.is_empty()));
+        assert!(history.iter().all(|entry| entry.source.is_some()
+            && entry.disposition.is_some()
+            && !entry.observed_at.is_empty()));
         assert_eq!(
-            (entry("queue_wait").source.as_deref(), entry("queue_wait").disposition.as_deref(), entry("queue_wait").attempt),
+            (
+                entry("queue_wait").source.as_deref(),
+                entry("queue_wait").disposition.as_deref(),
+                entry("queue_wait").attempt
+            ),
             (Some(SOURCE_ADMISSION), Some(DISPOSITION_WAITING), None),
         );
         assert_eq!(
-            (entry("step_capacity_wait").node_id.as_deref(), entry("step_capacity_wait").attempt),
+            (
+                entry("step_capacity_wait").node_id.as_deref(),
+                entry("step_capacity_wait").attempt
+            ),
             (Some("spawn"), Some(2)),
         );
         assert_eq!(
-            (entry("evidence_window_changed").node_id.as_deref(), entry("evidence_window_changed").attempt),
+            (
+                entry("evidence_window_changed").node_id.as_deref(),
+                entry("evidence_window_changed").attempt
+            ),
             (Some("spawn"), Some(2)),
         );
         let configuration = entry("configuration_pinned");
-        assert_eq!((configuration.source.as_deref(), configuration.disposition.as_deref()), (Some(SOURCE_RUN_CONFIGURATION), Some(DISPOSITION_APPLIED)));
+        assert_eq!(
+            (
+                configuration.source.as_deref(),
+                configuration.disposition.as_deref()
+            ),
+            (Some(SOURCE_RUN_CONFIGURATION), Some(DISPOSITION_APPLIED))
+        );
         let run_transition = entry("run_transition");
         assert_eq!(run_transition.detail, "running");
-        assert_eq!((run_transition.source.as_deref(), run_transition.disposition.as_deref()), (Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_APPLIED)));
+        assert_eq!(
+            (
+                run_transition.source.as_deref(),
+                run_transition.disposition.as_deref()
+            ),
+            (Some(SOURCE_CIRCUIT_WORKER), Some(DISPOSITION_APPLIED))
+        );
 
         // Agreement with the materialized projection: the parked step, the
         // admitted run state and the pinned snapshot all match their history.
-        let (state, step_attempt, step_status): (String, i32, String) = db.query_row(
-            "SELECT r.state, s.attempt, s.status FROM autopilot_circuit_runs r
+        let (state, step_attempt, step_status): (String, i32, String) = db
+            .query_row(
+                "SELECT r.state, s.attempt, s.status FROM autopilot_circuit_runs r
              JOIN autopilot_circuit_run_steps s ON s.run_id=r.id WHERE r.id=1",
-            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
-        assert_eq!((state.as_str(), step_attempt, step_status.as_str()), ("running", 2, "pending_slot"));
-        let snapshot_revision: i64 = db.query_row("SELECT behavior_revision FROM circuit_run_snapshots WHERE run_id=1", [], |row| row.get(0)).unwrap();
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&configuration.detail).unwrap()["behavior_revision"].as_i64(),
+            (state.as_str(), step_attempt, step_status.as_str()),
+            ("running", 2, "pending_slot")
+        );
+        let snapshot_revision: i64 = db
+            .query_row(
+                "SELECT behavior_revision FROM circuit_run_snapshots WHERE run_id=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&configuration.detail).unwrap()
+                ["behavior_revision"]
+                .as_i64(),
             Some(snapshot_revision),
         );
     }
@@ -2008,9 +2593,14 @@ mod tests {
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         assert_eq!(history_inner(&db, 1).unwrap().len(), 2);
         for state in ["running", "paused", "completed", "cancelled"] {
-            db.execute("UPDATE autopilot_circuit_runs SET state=?1", [state]).unwrap();
+            db.execute("UPDATE autopilot_circuit_runs SET state=?1", [state])
+                .unwrap();
             let view = evidence_view_inner(&db, 1).unwrap();
-            assert_eq!(view.coverage.len(), 2, "capabilities retained while {state}");
+            assert_eq!(
+                view.coverage.len(),
+                2,
+                "capabilities retained while {state}"
+            );
             assert!(view.coverage.iter().all(|item| item.deadline_ms.is_none()));
         }
     }
@@ -2026,7 +2616,15 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [
+                crate::circuit::model::CircuitGraph::walking_skeleton("work")
+                    .to_json()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
         // Two real submissions: input A then input B (issue #1898). B is
         // submitted before A's turn start hook lands, so A's start describes
         // a superseded turn.
@@ -2054,7 +2652,10 @@ mod tests {
         receipt.hook = NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"a","hook_event_name":"Stop","last_assistant_message":"Old approval"}"#).unwrap();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         let unbound_stop = receipt_for(&db, 1, "stop-a");
-        assert_eq!(unbound_stop.input_stamp, None, "a Stop with no bound turn start keeps no input stamp");
+        assert_eq!(
+            unbound_stop.input_stamp, None,
+            "a Stop with no bound turn start keeps no input stamp"
+        );
         assert!(!unbound_stop.submission_correlated);
         assert_eq!(unbound_stop.submission_seq, None);
         // B is observed in order, so it does bind, and its Stop inherits both
@@ -2065,8 +2666,16 @@ mod tests {
         let current_start = receipt_for(&db, 1, "start-b");
         assert!(current_start.submission_correlated);
         assert_eq!(current_start.input_stamp.as_deref(), Some("input-b"));
-        assert_eq!(current_start.submission_seq, Some(2), "B is the second recorded submission");
-        receipt.hook = NativeHook::parse("claude", br#"{"session_id":"session","prompt_id":"b","hook_event_name":"Stop"}"#).unwrap();
+        assert_eq!(
+            current_start.submission_seq,
+            Some(2),
+            "B is the second recorded submission"
+        );
+        receipt.hook = NativeHook::parse(
+            "claude",
+            br#"{"session_id":"session","prompt_id":"b","hook_event_name":"Stop"}"#,
+        )
+        .unwrap();
         receipt.source_id = "stop-b".into();
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         let bound_stop = receipt_for(&db, 1, "stop-b");
@@ -2097,7 +2706,15 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [
+                crate::circuit::model::CircuitGraph::walking_skeleton("work")
+                    .to_json()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
 
         // Buildmesh submits exactly this text.
         record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "run the tests").unwrap();
@@ -2110,7 +2727,8 @@ mod tests {
             turn_fenced: true,
             explicit_turn_mismatch: false,
             // Never trusted: correlation is decided from durable evidence.
-            submission_correlated: true, submission_seq: None,
+            submission_correlated: true,
+            submission_seq: None,
             hook: NativeHook::parse(
                 "claude",
                 serde_json::to_vec(&serde_json::json!({
@@ -2130,7 +2748,8 @@ mod tests {
             received_at_ms: 2000,
             turn_fenced: true,
             explicit_turn_mismatch: false,
-            submission_correlated: true, submission_seq: None,
+            submission_correlated: true,
+            submission_seq: None,
             hook: NativeHook::parse(
                 "claude",
                 serde_json::to_vec(&serde_json::json!({
@@ -2147,15 +2766,25 @@ mod tests {
         let start = submit("turn-1", "run the tests", "1:9");
         receive_native_hook_locked(&mut db, &start).unwrap();
         let start_receipt = receipt_for(&db, 1, "start-turn-1");
-        assert!(start_receipt.submission_correlated, "content match earns the binding");
+        assert!(
+            start_receipt.submission_correlated,
+            "content match earns the binding"
+        );
         assert_eq!(start_receipt.input_stamp.as_deref(), Some("1:9"));
-        assert_eq!(start_receipt.submission_seq, Some(1), "the first recorded submission");
+        assert_eq!(
+            start_receipt.submission_seq,
+            Some(1),
+            "the first recorded submission"
+        );
         receive_native_hook_locked(&mut db, &stop("turn-1")).unwrap();
         // Addressed by the Stop's own source_id. A lookup that also matched
         // the turn start would return that row instead and pass even if Stop
         // correlation had failed entirely.
         let stop_receipt = receipt_for(&db, 1, "stop-turn-1");
-        assert!(stop_receipt.submission_correlated, "Stop inherits the turn's binding");
+        assert!(
+            stop_receipt.submission_correlated,
+            "Stop inherits the turn's binding"
+        );
         assert_eq!(stop_receipt.input_stamp.as_deref(), Some("1:9"));
         assert_eq!(
             stop_receipt.submission_seq, start_receipt.submission_seq,
@@ -2163,18 +2792,26 @@ mod tests {
         );
         // Redelivery of the same start is idempotent, not a second claim.
         receive_native_hook_locked(&mut db, &start).unwrap();
-        assert_eq!(receipt_count(&db, 1), 2, "redelivery is deduplicated, not appended");
+        assert_eq!(
+            receipt_count(&db, 1),
+            2,
+            "redelivery is deduplicated, not appended"
+        );
 
         // A different turn reporting the same text must not take over a
         // submission another turn already acknowledged.
         receive_native_hook_locked(&mut db, &submit("turn-2", "run the tests", "1:9")).unwrap();
         let second = receipt_for(&db, 1, "start-turn-2");
-        assert!(!second.submission_correlated, "one submission, one acknowledged turn");
+        assert!(
+            !second.submission_correlated,
+            "one submission, one acknowledged turn"
+        );
         assert_eq!(second.input_stamp, None);
         assert_eq!(second.submission_seq, None);
 
         // Text Buildmesh never submitted cannot claim anything.
-        receive_native_hook_locked(&mut db, &submit("turn-3", "an operator prompt", "1:9")).unwrap();
+        receive_native_hook_locked(&mut db, &submit("turn-3", "an operator prompt", "1:9"))
+            .unwrap();
         let foreign = receipt_for(&db, 1, "start-turn-3");
         assert!(!foreign.submission_correlated);
         assert_eq!(foreign.input_stamp, None);
@@ -2190,7 +2827,10 @@ mod tests {
         };
         receive_native_hook_locked(&mut db, &untokened).unwrap();
         let anonymous = receipt_for(&db, 1, "start-no-token");
-        assert!(!anonymous.submission_correlated, "no prompt_id means no turn to bind");
+        assert!(
+            !anonymous.submission_correlated,
+            "no prompt_id means no turn to bind"
+        );
         assert_eq!(anonymous.input_stamp, None);
 
         // A start hook that arrives after Buildmesh submitted again describes
@@ -2198,7 +2838,10 @@ mod tests {
         record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "run the linter").unwrap();
         receive_native_hook_locked(&mut db, &submit("turn-late", "run the tests", "1:11")).unwrap();
         let late = receipt_for(&db, 1, "start-turn-late");
-        assert!(!late.submission_correlated, "a delayed start cannot claim a superseded submission");
+        assert!(
+            !late.submission_correlated,
+            "a delayed start cannot claim a superseded submission"
+        );
         assert_eq!(late.input_stamp, None);
         // ...and its Stop is equally uncorrelated.
         receive_native_hook_locked(&mut db, &stop("turn-late")).unwrap();
@@ -2219,7 +2862,10 @@ mod tests {
         record_prompt_submission_locked(&db, 1, "other-step", 1, 9, "cross-step text").unwrap();
         receive_native_hook_locked(&mut db, &submit("turn-5", "cross-step text", "1:12")).unwrap();
         let crossed = receipt_for(&db, 1, "start-turn-5");
-        assert!(!crossed.submission_correlated, "another step's submission cannot bind this step");
+        assert!(
+            !crossed.submission_correlated,
+            "another step's submission cannot bind this step"
+        );
         assert_eq!(crossed.input_stamp, None);
     }
 
@@ -2233,7 +2879,15 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [crate::circuit::model::CircuitGraph::walking_skeleton("work").to_json().unwrap()]).unwrap();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [
+                crate::circuit::model::CircuitGraph::walking_skeleton("work")
+                    .to_json()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
         // No submission was ever recorded, so nothing can be correlated even
         // though the receipt asserts it and carries a plausible turn token.
         let receipt = NativeReceipt {
@@ -2254,8 +2908,14 @@ mod tests {
         receive_native_hook_locked(&mut db, &receipt).unwrap();
         let history = history_inner(&db, 1).unwrap();
         let stored: NativeReceipt = serde_json::from_str(&history[0].detail).unwrap();
-        assert!(!stored.submission_correlated, "a receipt cannot vouch for itself");
-        assert_eq!(stored.input_stamp, None, "an uncorrelated receipt keeps no input authority");
+        assert!(
+            !stored.submission_correlated,
+            "a receipt cannot vouch for itself"
+        );
+        assert_eq!(
+            stored.input_stamp, None,
+            "an uncorrelated receipt keeps no input authority"
+        );
     }
 
     #[test]
@@ -2267,17 +2927,27 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
-        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "deploy with token hunter2").unwrap();
-        let detail: String = db
-            .query_row("SELECT detail FROM circuit_run_history WHERE kind='prompt_submitted'", [], |row| row.get(0))
+        record_prompt_submission_locked(&db, 1, "spawn", 1, 9, "deploy with token hunter2")
             .unwrap();
-        assert!(!detail.contains("hunter2"), "the ledger must keep only the digest");
+        let detail: String = db
+            .query_row(
+                "SELECT detail FROM circuit_run_history WHERE kind='prompt_submitted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !detail.contains("hunter2"),
+            "the ledger must keep only the digest"
+        );
         let submission: PromptSubmission = serde_json::from_str(&detail).unwrap();
         assert_eq!(submission.agent_node_id, 9);
         assert_eq!(submission.submission_seq, 1);
         assert_eq!(
             submission.prompt_digest,
-            crate::services::circuit_worker::native_hooks::submission_digest("deploy with token hunter2")
+            crate::services::circuit_worker::native_hooks::submission_digest(
+                "deploy with token hunter2"
+            )
         );
         // A second submission for the same agent advances the ordinal; a
         // different agent has its own sequence.
@@ -2290,7 +2960,11 @@ mod tests {
             .unwrap()
             .collect::<SqlResult<Vec<_>>>()
             .unwrap();
-        assert_eq!(seqs, vec![1, 2, 1], "ordinals are per agent node, not global");
+        assert_eq!(
+            seqs,
+            vec![1, 2, 1],
+            "ordinals are per agent node, not global"
+        );
     }
 
     #[test]
@@ -2372,7 +3046,8 @@ mod tests {
         };
         let transition = advance(
             &mut view,
-            &CircuitEvent::TurnClassified { binding: None,
+            &CircuitEvent::TurnClassified {
+                binding: None,
                 node_id: "spawn".into(),
                 classification: Some(crate::circuit::evaluator::Classification::Completed),
                 output: Some("Done".into()),
@@ -2410,10 +3085,20 @@ mod tests {
             ("unverified", 1)
         );
         let history = history_inner(&db, 1).unwrap();
-        let recorded: crate::circuit::observation::RecordedClassification = serde_json::from_str(&history.iter().find(|entry| entry.kind == "classification").expect("interpretation recorded atomically").detail).unwrap();
+        let recorded: crate::circuit::observation::RecordedClassification = serde_json::from_str(
+            &history
+                .iter()
+                .find(|entry| entry.kind == "classification")
+                .expect("interpretation recorded atomically")
+                .detail,
+        )
+        .unwrap();
         assert!(!recorded.lifecycle_verified);
         assert_eq!(recorded.report_revision, None);
-        assert_eq!(recorded.interpretation, crate::circuit::observation::ReportInterpretation::Completed);
+        assert_eq!(
+            recorded.interpretation,
+            crate::circuit::observation::ReportInterpretation::Completed
+        );
         assert!(record_outcome_locked(&mut db, &request).is_err());
         assert!(history_inner(&db, 1)
             .unwrap()
@@ -2431,7 +3116,8 @@ mod tests {
             INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
             INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');").unwrap();
         let guard = ObservationInputFence {
-                transcript_guard: None, report_guard: None,
+            transcript_guard: None,
+            report_guard: None,
             agent_node_id: 9,
             input_stamp: "1:2".into(),
             observed_at_ms: 2000,
@@ -2622,68 +3308,131 @@ mod tests {
             version: 1,
             blueprint: None,
             nodes: vec![
-                CircuitNode { id: "agent".into(), kind: CircuitNodeKind::SpawnAgentNode {
-                    prompt: "work".into(), name: None, provider: None, model: None,
-                    effort: None, extra_args: None, timeout_seconds: None,
-                } },
-                CircuitNode { id: "status".into(), kind: CircuitNodeKind::SetNodeStatus {
-                    status: SessionStatusKind::Running,
-                    target_node_id: Some("agent".into()),
-                } },
+                CircuitNode {
+                    id: "agent".into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "work".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                        timeout_seconds: None,
+                    },
+                },
+                CircuitNode {
+                    id: "status".into(),
+                    kind: CircuitNodeKind::SetNodeStatus {
+                        status: SessionStatusKind::Running,
+                        target_node_id: Some("agent".into()),
+                    },
+                },
             ],
-            edges: vec![CircuitEdge { from: "agent".into(), to: "status".into(), condition: EdgeCondition::Always }],
+            edges: vec![CircuitEdge {
+                from: "agent".into(),
+                to: "status".into(),
+                condition: EdgeCondition::Always,
+            }],
         };
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'agent','/repo','ready');").unwrap();
         crate::db::circuit::ledger::create_autopilot_circuit_inner(
-            &db, 1, "status recovery", "", 1, &graph.to_json().unwrap(),
-        ).unwrap();
+            &db,
+            1,
+            "status recovery",
+            "",
+            1,
+            &graph.to_json().unwrap(),
+        )
+        .unwrap();
         db.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
                 VALUES(1,'agent',1,'completed',9),(1,'status',1,'running',NULL);
             CREATE TRIGGER reject_status_ack BEFORE INSERT ON circuit_run_history
                 WHEN NEW.kind='effect_result'
                 BEGIN SELECT RAISE(ABORT,'injected status acknowledgement failure'); END;").unwrap();
-        let steps = [
-            super::super::CircuitStepOp {
-                node_id: "status".into(), status: "completed".into(), outcome: None,
-                error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
-            },
-        ];
+        let steps = [super::super::CircuitStepOp {
+            node_id: "status".into(),
+            status: "completed".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
+        }];
         let status_effects = [AgentStatusEffect {
-            node_id: "status".into(), attempt: 1, agent_node_id: 9,
+            node_id: "status".into(),
+            attempt: 1,
+            agent_node_id: 9,
             status: crate::models::SessionStatus::Running,
         }];
         assert!(commit_transition_locked(
-            &mut db, 1, None, "{}", &steps,
-            EvidenceWrite { agent_status_effects: &status_effects, ..Default::default() },
-        ).is_err());
-        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+            &mut db,
+            1,
+            None,
+            "{}",
+            &steps,
+            EvidenceWrite {
+                agent_status_effects: &status_effects,
+                ..Default::default()
+            },
+        )
+        .is_err());
+        let status: String = db
+            .query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         let step: String = db.query_row("SELECT status FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='status'", [], |row| row.get(0)).unwrap();
-        assert_eq!((status.as_str(), step.as_str()), ("ready", "running"), "a failed append rolls back both the local effect and step completion");
+        assert_eq!(
+            (status.as_str(), step.as_str()),
+            ("ready", "running"),
+            "a failed append rolls back both the local effect and step completion"
+        );
 
         db.execute_batch("DROP TRIGGER reject_status_ack").unwrap();
         commit_transition_locked(
-            &mut db, 1, None, "{}", &steps,
-            EvidenceWrite { agent_status_effects: &status_effects, ..Default::default() },
-        ).unwrap();
+            &mut db,
+            1,
+            None,
+            "{}",
+            &steps,
+            EvidenceWrite {
+                agent_status_effects: &status_effects,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         drop(db);
 
         let reopened = Connection::open(file.path()).unwrap();
-        let status: String = reopened.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        let status: String = reopened
+            .query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         let step: String = reopened.query_row("SELECT status FROM autopilot_circuit_run_steps WHERE run_id=1 AND node_id='status'", [], |row| row.get(0)).unwrap();
-        let effect: String = reopened.query_row(
-            "SELECT detail FROM circuit_run_history WHERE run_id=1 AND kind='effect_result'",
-            [], |row| row.get(0),
-        ).unwrap();
+        let effect: String = reopened
+            .query_row(
+                "SELECT detail FROM circuit_run_history WHERE run_id=1 AND kind='effect_result'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!((status.as_str(), step.as_str()), ("running", "completed"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(&effect).unwrap()["effect"], "set_node_status");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&effect).unwrap()["effect"],
+            "set_node_status"
+        );
     }
 
     #[test]
     fn set_node_status_does_not_apply_after_circuit_run_is_cancelled_or_deleted() {
         use crate::circuit::{
-            model::{CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, SessionStatusKind},
+            model::{
+                CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition,
+                SessionStatusKind,
+            },
             stepper::{RunState, StepStatus, StepView, TransitionFence},
         };
         let mut db = Connection::open_in_memory().unwrap();
@@ -2692,22 +3441,43 @@ mod tests {
             version: 1,
             blueprint: None,
             nodes: vec![
-                CircuitNode { id: "agent".into(), kind: CircuitNodeKind::SpawnAgentNode {
-                    prompt: "work".into(), name: None, provider: None, model: None,
-                    effort: None, extra_args: None, timeout_seconds: None,
-                } },
-                CircuitNode { id: "status".into(), kind: CircuitNodeKind::SetNodeStatus {
-                    status: SessionStatusKind::Running,
-                    target_node_id: Some("agent".into()),
-                } },
+                CircuitNode {
+                    id: "agent".into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "work".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                        timeout_seconds: None,
+                    },
+                },
+                CircuitNode {
+                    id: "status".into(),
+                    kind: CircuitNodeKind::SetNodeStatus {
+                        status: SessionStatusKind::Running,
+                        target_node_id: Some("agent".into()),
+                    },
+                },
             ],
-            edges: vec![CircuitEdge { from: "agent".into(), to: "status".into(), condition: EdgeCondition::Always }],
+            edges: vec![CircuitEdge {
+                from: "agent".into(),
+                to: "status".into(),
+                condition: EdgeCondition::Always,
+            }],
         };
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(9,1,'agent','/repo','ready');").unwrap();
         crate::db::circuit::ledger::create_autopilot_circuit_inner(
-            &db, 1, "cancelled status recovery", "", 1, &graph.to_json().unwrap(),
-        ).unwrap();
+            &db,
+            1,
+            "cancelled status recovery",
+            "",
+            1,
+            &graph.to_json().unwrap(),
+        )
+        .unwrap();
         db.execute_batch("INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'cancelled');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status)
                 VALUES(1,'status',1,'cancelled');").unwrap();
@@ -2724,50 +3494,72 @@ mod tests {
             revision: None,
         };
         let steps = [super::super::CircuitStepOp {
-            node_id: "status".into(), status: "completed".into(), outcome: None,
-            error: None, agent_node_id: None, attempt: 1, fresh_attempt: false,
+            node_id: "status".into(),
+            status: "completed".into(),
+            outcome: None,
+            error: None,
+            agent_node_id: None,
+            attempt: 1,
+            fresh_attempt: false,
         }];
         let status_effects = [AgentStatusEffect {
-            node_id: "status".into(), attempt: 1, agent_node_id: 9,
+            node_id: "status".into(),
+            attempt: 1,
+            agent_node_id: 9,
             status: crate::models::SessionStatus::Running,
         }];
 
-        assert!(commit_transition_locked(
-            &mut db,
-            1,
-            None,
-            "{}",
-            &steps,
-            EvidenceWrite {
-                agent_status_effects: &status_effects,
-                expected: Some(&expected),
-                ..Default::default()
-            },
-        ).is_err(), "a terminal run must reject its late local status effect");
-        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        assert!(
+            commit_transition_locked(
+                &mut db,
+                1,
+                None,
+                "{}",
+                &steps,
+                EvidenceWrite {
+                    agent_status_effects: &status_effects,
+                    expected: Some(&expected),
+                    ..Default::default()
+                },
+            )
+            .is_err(),
+            "a terminal run must reject its late local status effect"
+        );
+        let status: String = db
+            .query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(status, "ready");
 
-        db.execute("DELETE FROM autopilot_circuit_runs WHERE id=1", []).unwrap();
-        assert!(commit_transition_locked(
-            &mut db,
-            1,
-            None,
-            "{}",
-            &steps,
-            EvidenceWrite {
-                agent_status_effects: &status_effects,
-                ..Default::default()
-            },
-        ).is_err(), "a deleted run must also reject a late local status effect");
-        let status: String = db.query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| row.get(0)).unwrap();
+        db.execute("DELETE FROM autopilot_circuit_runs WHERE id=1", [])
+            .unwrap();
+        assert!(
+            commit_transition_locked(
+                &mut db,
+                1,
+                None,
+                "{}",
+                &steps,
+                EvidenceWrite {
+                    agent_status_effects: &status_effects,
+                    ..Default::default()
+                },
+            )
+            .is_err(),
+            "a deleted run must also reject a late local status effect"
+        );
+        let status: String = db
+            .query_row("SELECT status FROM agent_nodes WHERE id=9", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(status, "ready");
     }
 
     #[test]
     fn unknown_open_pr_checkpoint_offers_read_only_recheck_for_same_attempt() {
-        use crate::circuit::model::{
-            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
-        };
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -2819,10 +3611,8 @@ mod tests {
         let run = super::super::ledger::get_circuit_run_inner(&db, 1)
             .unwrap()
             .unwrap();
-        let context = crate::circuit::context::CircuitContext::from_json(
-            &run.context_json,
-        )
-        .unwrap();
+        let context =
+            crate::circuit::context::CircuitContext::from_json(&run.context_json).unwrap();
         assert_eq!(context.get("node.open_pr.recheck_only"), Some("1"));
         assert_eq!(
             db.query_row(
@@ -2874,23 +3664,33 @@ mod tests {
 
         // Commit the scheduled recheck before the worker performs its remote
         // lookup. The existing uncertain create attempt must stay unchanged.
-        let writes = transition.step_writes.iter().map(|write| super::super::CircuitStepOp {
-            node_id: write.node_id.clone(),
-            status: write.status.as_db_str().into(),
-            attempt: write.attempt,
-            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
-            error: write.error.clone(),
-            agent_node_id: None,
-            fresh_attempt: write.fresh_attempt,
-        }).collect::<Vec<_>>();
+        let writes = transition
+            .step_writes
+            .iter()
+            .map(|write| super::super::CircuitStepOp {
+                node_id: write.node_id.clone(),
+                status: write.status.as_db_str().into(),
+                attempt: write.attempt,
+                outcome: write
+                    .outcome
+                    .map(|outcome| outcome.map(|value| value.as_db_str().into())),
+                error: write.error.clone(),
+                agent_node_id: None,
+                fresh_attempt: write.fresh_attempt,
+            })
+            .collect::<Vec<_>>();
         commit_transition_locked(
             &mut db,
             1,
             None,
             &view.context.to_json().unwrap(),
             &writes,
-            EvidenceWrite { expected: transition.expected.as_ref(), ..Default::default() },
-        ).unwrap();
+            EvidenceWrite {
+                expected: transition.expected.as_ref(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         // A matching read-only lookup finishes after the operator cancels.
         // Its stepper result must not overwrite the terminal run or reconcile
@@ -2905,22 +3705,33 @@ mod tests {
             error: None,
         };
         view.context.set("node.open_pr.recheck_only", "0");
-        view.context.set("node.open_pr.effect_reconciled_attempt", "1");
+        view.context
+            .set("node.open_pr.effect_reconciled_attempt", "1");
         let result = advance(&mut view, &event);
         assert_eq!(view.steps[0].status, StepStatus::Completed);
         assert_eq!(view.context.get("pr.number"), Some("314"));
         super::super::ledger::cancel_circuit_run_locked(&mut db, 1).unwrap();
-        let completion = result.step_writes.iter().map(|write| super::super::CircuitStepOp {
-            node_id: write.node_id.clone(),
-            status: write.status.as_db_str().into(),
-            attempt: write.attempt,
-            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
-            error: write.error.clone(),
-            agent_node_id: None,
-            fresh_attempt: write.fresh_attempt,
-        }).collect::<Vec<_>>();
+        let completion = result
+            .step_writes
+            .iter()
+            .map(|write| super::super::CircuitStepOp {
+                node_id: write.node_id.clone(),
+                status: write.status.as_db_str().into(),
+                attempt: write.attempt,
+                outcome: write
+                    .outcome
+                    .map(|outcome| outcome.map(|value| value.as_db_str().into())),
+                error: write.error.clone(),
+                agent_node_id: None,
+                fresh_attempt: write.fresh_attempt,
+            })
+            .collect::<Vec<_>>();
         let reconciled = ReconciledEffect {
-            intent: EffectIntent { node_id: "open_pr".into(), attempt: 1, kind: EffectKind::Github },
+            intent: EffectIntent {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                kind: EffectKind::Github,
+            },
             detail: "Read-only GitHub lookup found open pull request #314.".into(),
         };
         assert!(commit_transition_locked(
@@ -2934,19 +3745,29 @@ mod tests {
                 reconciled_effects: std::slice::from_ref(&reconciled),
                 ..Default::default()
             },
-        ).is_err());
-        assert_eq!(super::super::ledger::get_circuit_run_inner(&db, 1).unwrap().unwrap().state, "cancelled");
-        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap().remove(0);
+        )
+        .is_err());
+        assert_eq!(
+            super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap()
+                .state,
+            "cancelled"
+        );
+        let step = super::super::ledger::list_circuit_run_steps_inner(&db, 1)
+            .unwrap()
+            .remove(0);
         assert_eq!((step.status.as_str(), step.attempt), ("cancelled", 1));
         assert_eq!(db.query_row("SELECT state FROM circuit_effects WHERE run_id=1 AND node_id='open_pr' AND attempt=1", [], |row| row.get::<_, String>(0)).unwrap(), "uncertain");
-        assert!(!history_inner(&db, 1).unwrap().iter().any(|entry| entry.kind == "effect_reconciled"));
+        assert!(!history_inner(&db, 1)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.kind == "effect_reconciled"));
         let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
             .unwrap()
             .unwrap();
-        let context = crate::circuit::context::CircuitContext::from_json(
-            &stored.context_json,
-        )
-        .unwrap();
+        let context =
+            crate::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
         assert_eq!(context.get("pr.number"), None);
     }
 
@@ -2955,89 +3776,233 @@ mod tests {
         use crate::circuit::{context::CircuitContext, model::CircuitGraph};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
-        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,outcome)
                 VALUES(1,'verdict',1,'completed','working'),(1,'feedback',1,'unverified',NULL);
-            INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','uncertain');").unwrap();
-        let graph = CircuitGraph::agent_review(None,None,3);
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
+            INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','uncertain');",
+        )
+        .unwrap();
+        let graph = CircuitGraph::agent_review(None, None, 3);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
         let mut context = CircuitContext::default();
-        context.set("source.agent_id","9");
-        context.set("node.feedback.human_wait","1");
-        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
-        let request = CheckpointRequest { run_id:1,node_id:"feedback".into(),attempt:1,expected_revision:0,
-            action:CheckpointAction::Completed,reason:"Submitted the staged feedback in the source terminal and confirmed acceptance".into() };
-        assert!(record_outcome_locked(&mut db,&request).is_err());
-        context.set("node.feedback.human_wait","0");
-        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
-        record_outcome_locked(&mut db,&request).unwrap();
-        let steps = super::super::ledger::list_circuit_run_steps_inner(&db,1).unwrap();
-        assert_eq!(steps.iter().find(|s| s.node_id == "feedback").unwrap().status,"completed");
-        assert_eq!(steps.iter().find(|s| s.node_id == "verdict").unwrap().outcome.as_deref(),Some("working"));
-        assert_eq!(history_inner(&db,1).unwrap().iter().filter(|e| e.kind == "operator_attestation").count(),1);
+        context.set("source.agent_id", "9");
+        context.set("node.feedback.human_wait", "1");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+        let request = CheckpointRequest {
+            run_id: 1,
+            node_id: "feedback".into(),
+            attempt: 1,
+            expected_revision: 0,
+            action: CheckpointAction::Completed,
+            reason: "Submitted the staged feedback in the source terminal and confirmed acceptance"
+                .into(),
+        };
+        assert!(record_outcome_locked(&mut db, &request).is_err());
+        context.set("node.feedback.human_wait", "0");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+        record_outcome_locked(&mut db, &request).unwrap();
+        let steps = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap();
+        assert_eq!(
+            steps
+                .iter()
+                .find(|s| s.node_id == "feedback")
+                .unwrap()
+                .status,
+            "completed"
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .find(|s| s.node_id == "verdict")
+                .unwrap()
+                .outcome
+                .as_deref(),
+            Some("working")
+        );
+        assert_eq!(
+            history_inner(&db, 1)
+                .unwrap()
+                .iter()
+                .filter(|e| e.kind == "operator_attestation")
+                .count(),
+            1
+        );
     }
 
     #[test]
     fn operator_completion_advances_evidence_checkpoint_without_forging_observations() {
-        use crate::circuit::{context::CircuitContext, model::{CircuitGraph, CircuitNodeKind},
-            observation::WorkEvidence, stepper::{advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView}};
+        use crate::circuit::{
+            context::CircuitContext,
+            model::{CircuitGraph, CircuitNodeKind},
+            observation::WorkEvidence,
+            stepper::{advance, Capacity, CircuitEvent, RunState, RunView, StepStatus, StepView},
+        };
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
-        db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
             INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'agent','/repo');
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
-            VALUES(1,'spawn',1,'unverified',9);").unwrap();
+            VALUES(1,'spawn',1,'unverified',9);",
+        )
+        .unwrap();
         let mut graph = CircuitGraph::walking_skeleton("");
         graph.blueprint = None;
         graph.nodes.retain(|node| node.id != "inject");
         graph.edges.retain(|edge| edge.from != "inject");
-        graph.edges.iter_mut().find(|edge| edge.to == "inject").unwrap().to = "notify".into();
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
-        let request = CheckpointRequest { run_id:1, node_id:"spawn".into(), attempt:1,
-            expected_revision:0, action:CheckpointAction::Completed,
-            reason:"Inspected the finished work and terminal; advance this handoff".into() };
-        for kind in [CircuitNodeKind::ReviewVerdict { target_node_id:None },
-            CircuitNodeKind::CollaboratorCheck { require_approval:true }] {
+        graph
+            .edges
+            .iter_mut()
+            .find(|edge| edge.to == "inject")
+            .unwrap()
+            .to = "notify".into();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let request = CheckpointRequest {
+            run_id: 1,
+            node_id: "spawn".into(),
+            attempt: 1,
+            expected_revision: 0,
+            action: CheckpointAction::Completed,
+            reason: "Inspected the finished work and terminal; advance this handoff".into(),
+        };
+        for kind in [
+            CircuitNodeKind::ReviewVerdict {
+                target_node_id: None,
+            },
+            CircuitNodeKind::CollaboratorCheck {
+                require_approval: true,
+            },
+        ] {
             let mut protected = graph.clone();
-            protected.nodes.iter_mut().find(|n| n.id == "spawn").unwrap().kind = kind;
-            db.execute("UPDATE autopilot_circuits SET graph_json=?1", [protected.to_json().unwrap()]).unwrap();
+            protected
+                .nodes
+                .iter_mut()
+                .find(|n| n.id == "spawn")
+                .unwrap()
+                .kind = kind;
+            db.execute(
+                "UPDATE autopilot_circuits SET graph_json=?1",
+                [protected.to_json().unwrap()],
+            )
+            .unwrap();
             assert!(record_outcome_locked(&mut db, &request).is_err());
         }
-        db.execute("UPDATE autopilot_circuits SET graph_json=?1", [graph.to_json().unwrap()]).unwrap();
-        for evidence in [WorkEvidence { children:[("child".into(),false)].into_iter().collect(), ..Default::default() },
-            WorkEvidence { conflicted:true, ..Default::default() }] {
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        for evidence in [
+            WorkEvidence {
+                children: [("child".into(), false)].into_iter().collect(),
+                ..Default::default()
+            },
+            WorkEvidence {
+                conflicted: true,
+                ..Default::default()
+            },
+        ] {
             let mut context = CircuitContext::default();
-            context.set("node.spawn.evidence.1", serde_json::to_string(&evidence).unwrap());
-            db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [context.to_json().unwrap()]).unwrap();
+            context.set(
+                "node.spawn.evidence.1",
+                serde_json::to_string(&evidence).unwrap(),
+            );
+            db.execute(
+                "UPDATE autopilot_circuit_runs SET context_json=?1",
+                [context.to_json().unwrap()],
+            )
+            .unwrap();
             assert!(record_outcome_locked(&mut db, &request).is_err());
         }
-        db.execute("UPDATE autopilot_circuit_runs SET context_json=?1", [r#"{"node.spawn.human_wait":"1"}"#]).unwrap();
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [r#"{"node.spawn.human_wait":"1"}"#],
+        )
+        .unwrap();
         assert!(record_outcome_locked(&mut db, &request).is_err());
-        db.execute("UPDATE autopilot_circuit_runs SET context_json='{}'", []).unwrap();
-        assert!(evidence_view_inner(&db,1).unwrap().checkpoints[0].actions.iter().any(|a| matches!(a,CheckpointAction::Completed)));
+        db.execute("UPDATE autopilot_circuit_runs SET context_json='{}'", [])
+            .unwrap();
+        assert!(evidence_view_inner(&db, 1).unwrap().checkpoints[0]
+            .actions
+            .iter()
+            .any(|a| matches!(a, CheckpointAction::Completed)));
         record_outcome_locked(&mut db, &request).unwrap();
-        assert!(record_outcome_locked(&mut db, &request).is_err(), "stale operator action must not be replayed");
-        let run = super::super::ledger::get_circuit_run_inner(&db,1).unwrap().unwrap();
-        let steps = super::super::ledger::list_circuit_run_steps_inner(&db,1).unwrap();
-        assert_eq!(steps[0].status,"completed");
-        assert_eq!(steps[0].error_message,None, "the attestation belongs in history, not a completed step's error");
-        assert_eq!(steps[0].attempt,1);
-        let entries = history_inner(&db,1).unwrap();
-        assert!(entries.iter().any(|e| e.kind == "operator_attestation" && e.source.as_deref() == Some("operator")));
-        assert!(!entries.iter().any(|e| matches!(e.kind.as_str(),"observation"|"classification"|"effect_intent")));
-        let mut view = RunView { run_id:1, graph, state:RunState::Running,
-            context:CircuitContext::from_json(&run.context_json).unwrap(),
-            steps: vec![StepView { node_id:"trigger".into(), status:StepStatus::Completed, attempt:1,
-                outcome:Some(crate::circuit::model::StepOutcome::Completed), error:None, agent_node_id:None },
-                StepView { node_id:"spawn".into(), status:StepStatus::Completed, attempt:1,
-                    outcome:Some(crate::circuit::model::StepOutcome::Completed), error:steps[0].error_message.clone(), agent_node_id:Some(9) }] };
-        advance(&mut view, &CircuitEvent::Tick(Capacity { circuit_free_slots:4,agent_free_slots:4 }));
-        assert_eq!(view.state,RunState::Completed);
+        assert!(
+            record_outcome_locked(&mut db, &request).is_err(),
+            "stale operator action must not be replayed"
+        );
+        let run = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let steps = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap();
+        assert_eq!(steps[0].status, "completed");
+        assert_eq!(
+            steps[0].error_message, None,
+            "the attestation belongs in history, not a completed step's error"
+        );
+        assert_eq!(steps[0].attempt, 1);
+        let entries = history_inner(&db, 1).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.kind == "operator_attestation" && e.source.as_deref() == Some("operator")));
+        assert!(!entries.iter().any(|e| matches!(
+            e.kind.as_str(),
+            "observation" | "classification" | "effect_intent"
+        )));
+        let mut view = RunView {
+            run_id: 1,
+            graph,
+            state: RunState::Running,
+            context: CircuitContext::from_json(&run.context_json).unwrap(),
+            steps: vec![
+                StepView {
+                    node_id: "trigger".into(),
+                    status: StepStatus::Completed,
+                    attempt: 1,
+                    outcome: Some(crate::circuit::model::StepOutcome::Completed),
+                    error: None,
+                    agent_node_id: None,
+                },
+                StepView {
+                    node_id: "spawn".into(),
+                    status: StepStatus::Completed,
+                    attempt: 1,
+                    outcome: Some(crate::circuit::model::StepOutcome::Completed),
+                    error: steps[0].error_message.clone(),
+                    agent_node_id: Some(9),
+                },
+            ],
+        };
+        advance(
+            &mut view,
+            &CircuitEvent::Tick(Capacity {
+                circuit_free_slots: 4,
+                agent_free_slots: 4,
+            }),
+        );
+        assert_eq!(view.state, RunState::Completed);
     }
 
     #[test]
@@ -3205,39 +4170,115 @@ mod tests {
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'running');
             INSERT INTO circuit_effects VALUES(1,'spawn',1,'spawn','intent');").unwrap();
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).unwrap(),None, "unclaimed intent cannot acknowledge a spawn");
-        let intent = EffectIntent { node_id:"spawn".into(),attempt:1,kind:EffectKind::Spawn };
-        assert!(claim_effect_locked(&mut db,1,&intent).unwrap().is_some());
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 9, None, None).unwrap(),
+            None,
+            "unclaimed intent cannot acknowledge a spawn"
+        );
+        let intent = EffectIntent {
+            node_id: "spawn".into(),
+            attempt: 1,
+            kind: EffectKind::Spawn,
+        };
+        assert!(claim_effect_locked(&mut db, 1, &intent).unwrap().is_some());
         db.execute_batch("CREATE TRIGGER reject_ack BEFORE INSERT ON circuit_run_history WHEN NEW.kind='effect_result'
             BEGIN SELECT RAISE(ABORT,'injected acknowledgement failure'); END;").unwrap();
-        assert!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).is_err());
+        assert!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 9, None, None).is_err()
+        );
         let (agent, state): (Option<i64>, String) = db.query_row("SELECT s.agent_node_id,e.state FROM autopilot_circuit_run_steps s JOIN circuit_effects e ON e.run_id=s.run_id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-        assert_eq!(agent,None);
-        assert_eq!(state,"possible_dispatch");
+        assert_eq!(agent, None);
+        assert_eq!(state, "possible_dispatch");
         db.execute_batch("DROP TRIGGER reject_ack").unwrap();
-        let revision = acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).unwrap().unwrap();
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).unwrap(),Some(revision));
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,10,None,None).unwrap(),None);
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",2,9,None,None).unwrap(),None);
-        db.execute("UPDATE autopilot_circuit_runs SET state='cancelled'",[]).unwrap();
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",1,9,None,None).unwrap(),None);
-        assert!(claim_effect_locked(&mut db,1,&intent).unwrap().is_none());
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_result'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        let revision = acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 9, None, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 9, None, None).unwrap(),
+            Some(revision)
+        );
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 10, None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 2, 9, None, None).unwrap(),
+            None
+        );
+        db.execute("UPDATE autopilot_circuit_runs SET state='cancelled'", [])
+            .unwrap();
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 1, 9, None, None).unwrap(),
+            None
+        );
+        assert!(claim_effect_locked(&mut db, 1, &intent).unwrap().is_none());
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_result'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
         // A new claimed retry may replace exactly the prior retained agent.
-        db.execute_batch("UPDATE autopilot_circuit_runs SET state='running';
+        db.execute_batch(
+            "UPDATE autopilot_circuit_runs SET state='running';
             UPDATE autopilot_circuit_run_steps SET attempt=2;
-            INSERT INTO circuit_effects VALUES(1,'spawn',2,'spawn','possible_dispatch');").unwrap();
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",2,10,None,None).unwrap(),None);
-        assert!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",2,10,None,Some(9)).unwrap().is_some());
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",2,9,None,Some(10)).unwrap(),None);
+            INSERT INTO circuit_effects VALUES(1,'spawn',2,'spawn','possible_dispatch');",
+        )
+        .unwrap();
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 2, 10, None, None).unwrap(),
+            None
+        );
+        assert!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 2, 10, None, Some(9))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 2, 9, None, Some(10)).unwrap(),
+            None
+        );
         // Delivery to a retained live agent is acknowledged as a prompt, not allocation.
-        db.execute_batch("UPDATE autopilot_circuit_run_steps SET attempt=3;
-            INSERT INTO circuit_effects VALUES(1,'spawn',3,'spawn','possible_dispatch');").unwrap();
-        assert!(claim_effect_locked(&mut db,1,&EffectIntent { attempt:3,..intent.clone() }).unwrap().is_none(), "a crash after delivery must never replay it");
-        assert!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",3,10,None,Some(10)).unwrap().is_some());
-        assert!(history_inner(&db,1).unwrap().last().unwrap().detail.contains("Prompt delivered to retained agent"));
-        db.execute_batch("UPDATE autopilot_circuit_run_steps SET attempt=4").unwrap();
-        assert_eq!(acknowledge_spawn_attachment_locked(&mut db,1,"spawn",4,10,None,Some(10)).unwrap(),None,"missing dispatch claim");
+        db.execute_batch(
+            "UPDATE autopilot_circuit_run_steps SET attempt=3;
+            INSERT INTO circuit_effects VALUES(1,'spawn',3,'spawn','possible_dispatch');",
+        )
+        .unwrap();
+        assert!(
+            claim_effect_locked(
+                &mut db,
+                1,
+                &EffectIntent {
+                    attempt: 3,
+                    ..intent.clone()
+                }
+            )
+            .unwrap()
+            .is_none(),
+            "a crash after delivery must never replay it"
+        );
+        assert!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 3, 10, None, Some(10))
+                .unwrap()
+                .is_some()
+        );
+        assert!(history_inner(&db, 1)
+            .unwrap()
+            .last()
+            .unwrap()
+            .detail
+            .contains("Prompt delivered to retained agent"));
+        db.execute_batch("UPDATE autopilot_circuit_run_steps SET attempt=4")
+            .unwrap();
+        assert_eq!(
+            acknowledge_spawn_attachment_locked(&mut db, 1, "spawn", 4, 10, None, Some(10))
+                .unwrap(),
+            None,
+            "missing dispatch claim"
+        );
     }
 
     #[test]
@@ -3250,30 +4291,87 @@ mod tests {
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'feedback',1,'running');
             INSERT INTO circuit_effects VALUES(1,'feedback',1,'prompt','possible_dispatch');").unwrap();
-        assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 2).unwrap(), None);
-        db.execute_batch("CREATE TRIGGER reject_prompt_ack BEFORE INSERT ON circuit_run_history
-            WHEN NEW.kind='effect_result' BEGIN SELECT RAISE(ABORT,'injected failure'); END;").unwrap();
+        assert_eq!(
+            acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 2).unwrap(),
+            None
+        );
+        db.execute_batch(
+            "CREATE TRIGGER reject_prompt_ack BEFORE INSERT ON circuit_run_history
+            WHEN NEW.kind='effect_result' BEGIN SELECT RAISE(ABORT,'injected failure'); END;",
+        )
+        .unwrap();
         assert!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).is_err());
-        assert_eq!(db.query_row("SELECT state FROM circuit_effects", [], |r| r.get::<_, String>(0)).unwrap(), "possible_dispatch");
+        assert_eq!(
+            db.query_row("SELECT state FROM circuit_effects", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "possible_dispatch"
+        );
         db.execute_batch("DROP TRIGGER reject_prompt_ack").unwrap();
         for state in ["cancelled", "failed", "completed"] {
-            db.execute("UPDATE autopilot_circuit_runs SET state=?1", [state]).unwrap();
-            assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(), None);
+            db.execute("UPDATE autopilot_circuit_runs SET state=?1", [state])
+                .unwrap();
+            assert_eq!(
+                acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(),
+                None
+            );
         }
-        db.execute("UPDATE autopilot_circuit_runs SET state='paused'", []).unwrap();
-        let revision = acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap().unwrap();
-        assert_eq!(acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(), None);
-        append_history(&db, 1, Some("feedback"), Some(1), "native_hook", "{}", None, None).unwrap();
-        assert!(revision_inner(&db, 1).unwrap() > revision, "later receipts may invalidate the projection commit");
+        db.execute("UPDATE autopilot_circuit_runs SET state='paused'", [])
+            .unwrap();
+        let revision = acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            acknowledge_prompt_delivery_locked(&mut db, 1, "feedback", 1).unwrap(),
+            None
+        );
+        append_history(
+            &db,
+            1,
+            Some("feedback"),
+            Some(1),
+            "native_hook",
+            "{}",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            revision_inner(&db, 1).unwrap() > revision,
+            "later receipts may invalidate the projection commit"
+        );
         drop(db);
         let mut db = Connection::open(file.path()).unwrap();
-        assert_eq!(db.query_row("SELECT state FROM circuit_effects", [], |r| r.get::<_, String>(0)).unwrap(), "acknowledged");
-        assert_eq!(db.query_row("SELECT status FROM autopilot_circuit_run_steps", [], |r| r.get::<_, String>(0)).unwrap(), "running",
-            "delivery receipt survives independently of step projection");
-        db.execute("UPDATE autopilot_circuit_runs SET state='running'", []).unwrap();
-        assert!(claim_effect_locked(&mut db, 1, &EffectIntent {
-            node_id: "feedback".into(), attempt: 1, kind: EffectKind::Prompt,
-        }).unwrap().is_none(), "recovery cannot dispatch the acknowledged prompt again");
+        assert_eq!(
+            db.query_row("SELECT state FROM circuit_effects", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            "acknowledged"
+        );
+        assert_eq!(
+            db.query_row("SELECT status FROM autopilot_circuit_run_steps", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap(),
+            "running",
+            "delivery receipt survives independently of step projection"
+        );
+        db.execute("UPDATE autopilot_circuit_runs SET state='running'", [])
+            .unwrap();
+        assert!(
+            claim_effect_locked(
+                &mut db,
+                1,
+                &EffectIntent {
+                    node_id: "feedback".into(),
+                    attempt: 1,
+                    kind: EffectKind::Prompt,
+                }
+            )
+            .unwrap()
+            .is_none(),
+            "recovery cannot dispatch the acknowledged prompt again"
+        );
     }
 
     #[test]
@@ -3313,8 +4411,12 @@ mod tests {
             .unwrap();
             drop(db);
             let mut reopened = Connection::open(file.path()).unwrap();
-            assert!(claim_effect_locked(&mut reopened, 1, &intent).unwrap().is_some(),
-                "an intent that crashed before dispatch remains claimable after restart");
+            assert!(
+                claim_effect_locked(&mut reopened, 1, &intent)
+                    .unwrap()
+                    .is_some(),
+                "an intent that crashed before dispatch remains claimable after restart"
+            );
             drop(reopened);
             let mut reopened = Connection::open(file.path()).unwrap();
             assert!(claim_effect_locked(&mut reopened, 1, &intent)
@@ -3333,9 +4435,7 @@ mod tests {
 
     #[test]
     fn open_pr_target_is_saved_only_after_claim_and_survives_reopen() {
-        use crate::circuit::model::{
-            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
-        };
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
         let file = tempfile::NamedTempFile::new().unwrap();
         let mut db = Connection::open(file.path()).unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -3372,22 +4472,36 @@ mod tests {
         .unwrap();
         let revision = record_effect_target_locked(&mut db, 1, "open_pr", 1, target).unwrap();
         assert_eq!(revision, history_inner(&db, 1).unwrap().last().unwrap().id);
-        assert_eq!(latest_effect_target_inner(&db, 1, "open_pr", 1).unwrap().as_deref(), Some(target));
+        assert_eq!(
+            latest_effect_target_inner(&db, 1, "open_pr", 1)
+                .unwrap()
+                .as_deref(),
+            Some(target)
+        );
         drop(db);
 
         let reopened = Connection::open(file.path()).unwrap();
-        assert_eq!(latest_effect_target_inner(&reopened, 1, "open_pr", 1).unwrap().as_deref(), Some(target));
         assert_eq!(
-            reopened.query_row("SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_target'", [], |row| row.get::<_, i64>(0)).unwrap(),
+            latest_effect_target_inner(&reopened, 1, "open_pr", 1)
+                .unwrap()
+                .as_deref(),
+            Some(target)
+        );
+        assert_eq!(
+            reopened
+                .query_row(
+                    "SELECT COUNT(*) FROM circuit_run_history WHERE kind='effect_target'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
             1
         );
     }
 
     #[test]
     fn open_pr_recheck_completion_reconciles_the_unknown_effect() {
-        use crate::circuit::model::{
-            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
-        };
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
         use crate::circuit::stepper::{
             advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
         };
@@ -3431,24 +4545,33 @@ mod tests {
                 agent_node_id: None,
             }],
         };
-        let result = advance(&mut view, &CircuitEvent::GithubActionResult {
-            node_id: "open_pr".into(),
-            success: true,
-            pr_number: Some(314),
-            pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
-            pr_head_ref: Some("feature/circuit".into()),
-            pr_title: Some("Implementation".into()),
-            error: None,
-        });
-        let writes = result.step_writes.iter().map(|write| super::super::CircuitStepOp {
-            node_id: write.node_id.clone(),
-            status: write.status.as_db_str().into(),
-            attempt: write.attempt,
-            outcome: write.outcome.map(|outcome| outcome.map(|value| value.as_db_str().into())),
-            error: write.error.clone(),
-            agent_node_id: None,
-            fresh_attempt: write.fresh_attempt,
-        }).collect::<Vec<_>>();
+        let result = advance(
+            &mut view,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(314),
+                pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
+                pr_head_ref: Some("feature/circuit".into()),
+                pr_title: Some("Implementation".into()),
+                error: None,
+            },
+        );
+        let writes = result
+            .step_writes
+            .iter()
+            .map(|write| super::super::CircuitStepOp {
+                node_id: write.node_id.clone(),
+                status: write.status.as_db_str().into(),
+                attempt: write.attempt,
+                outcome: write
+                    .outcome
+                    .map(|outcome| outcome.map(|value| value.as_db_str().into())),
+                error: write.error.clone(),
+                agent_node_id: None,
+                fresh_attempt: write.fresh_attempt,
+            })
+            .collect::<Vec<_>>();
         let reconciled = ReconciledEffect {
             intent: EffectIntent {
                 node_id: "open_pr".into(),
@@ -3470,14 +4593,22 @@ mod tests {
             },
         )
         .unwrap();
-        let stored = super::super::ledger::get_circuit_run_inner(&db, 1).unwrap().unwrap();
-        let context = crate::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
+        let stored = super::super::ledger::get_circuit_run_inner(&db, 1)
+            .unwrap()
+            .unwrap();
+        let context =
+            crate::circuit::context::CircuitContext::from_json(&stored.context_json).unwrap();
         assert_eq!(stored.state, "completed");
         assert_eq!(context.get("pr.number"), Some("314"));
         assert_eq!(context.get("pr.head_ref"), Some("feature/circuit"));
-        assert_eq!(super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap()[0].status, "completed");
         assert_eq!(
-            db.query_row("SELECT state FROM circuit_effects", [], |row| row.get::<_, String>(0)).unwrap(),
+            super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap()[0].status,
+            "completed"
+        );
+        assert_eq!(
+            db.query_row("SELECT state FROM circuit_effects", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
             "acknowledged",
             "a matching read-only PR observation reconciles the prior uncertain dispatch"
         );
@@ -3495,9 +4626,7 @@ mod tests {
 
     #[test]
     fn open_pr_recheck_after_not_performed_reconciles_without_losing_attestation() {
-        use crate::circuit::model::{
-            CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind,
-        };
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind, GithubActionKind};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
         db.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
@@ -3545,7 +4674,8 @@ mod tests {
             .any(|action| matches!(action, CheckpointAction::Recheck)));
         request.expected_revision = attested.entries.last().unwrap().id;
         request.action = CheckpointAction::Recheck;
-        request.reason = "Verify the saved repository branch without creating a pull request".into();
+        request.reason =
+            "Verify the saved repository branch without creating a pull request".into();
         record_outcome_locked(&mut db, &request).unwrap();
 
         let completion = super::super::CircuitStepOp {
@@ -3579,14 +4709,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            db.query_row("SELECT state FROM circuit_effects", [], |row| row.get::<_, String>(0)).unwrap(),
+            db.query_row("SELECT state FROM circuit_effects", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
             "acknowledged"
         );
         let history = history_inner(&db, 1).unwrap();
         assert!(history.iter().any(|entry| {
             entry.kind == "operator_attestation"
                 && entry.detail.contains("NotPerformed")
-                && entry.detail.contains("GitHub confirmed no matching pull request existed")
+                && entry
+                    .detail
+                    .contains("GitHub confirmed no matching pull request existed")
         }));
         assert_eq!(history.last().unwrap().kind, "effect_reconciled");
     }

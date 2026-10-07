@@ -32,11 +32,12 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { CircuitEvidenceHistory } from '../Circuits/CircuitEvidenceHistory';
+import { RunNextSteps, runNeedsNextSteps } from '../Circuits/RunNextStepsPanel';
 import type { CircuitRunDetail } from '../../lib/tauri';
 import {
   formatDurationMs,
   isTerminalRunState,
-  runDurationMs,
+  ledgerTimestampMs,
   statusTextClass,
   stepDurationMs,
 } from '../Circuits/circuitGraphModel';
@@ -54,10 +55,18 @@ import {
   type ReviewCircuitMetadata,
 } from '../Circuits/runDiagnostics';
 import {
+  formatWallClock,
+  runActiveDurationMs,
+  runFinishedMs,
+  runStartedMs,
+  runSubject,
+} from '../Circuits/runIdentity';
+import {
   linkedAgentNodeId,
   nodeRoleLabel,
   parseRunContext,
   reviewReport,
+  runFailureStep,
   stepPassLabel,
   stepVerdict,
   verdictTextClass,
@@ -65,30 +74,47 @@ import {
 } from '../Circuits/runStepPresentation';
 
 /**
- * Pure duration/stale headline spans for one run at one clock reading.
- * Split out so the ticking wrapper below re-renders only these spans,
- * never the whole card (issue #1751).
+ * Pure timing/stale spans for one run at one clock reading. Split out so the
+ * ticking wrapper below re-renders only these spans, never the whole card
+ * (issue #1751).
+ *
+ * The times are wall-clock and leave out the admission queue: a run "started"
+ * when Autopilot first worked on it, not when its trigger fired.
  */
 function RunTimingSpans({
   run,
+  steps,
   now,
 }: {
   run: CircuitRunDetail['run'];
+  steps: CircuitRunDetail['steps'];
   now: Date;
 }) {
-  const duration = runDurationMs(run, now);
+  const started = runStartedMs(steps);
+  const finished = runFinishedMs(run);
+  const duration = runActiveDurationMs(run, steps, now);
   const stale = isRunStale(run, now);
   const staleMs = runStaleMs(run, now);
   return (
     <>
-      {duration !== null && (
-        <span className="text-2xs text-text-muted shrink-0">
-          {formatDurationMs(duration)}
+      {started === null ? (
+        <span data-testid={`run-times-${run.id}`}>
+          {isTerminalRunState(run.state) ? 'Never started' : 'Starting…'}
+        </span>
+      ) : (
+        <span data-testid={`run-times-${run.id}`}>
+          <span title="When Autopilot began work on this run (queue time excluded)">
+            Started {formatWallClock(started, now)}
+          </span>
+          {finished !== null && <span> · finished {formatWallClock(finished, now)}</span>}
+          {duration !== null && (
+            <span> · {finished !== null ? 'took' : 'running'} {formatDurationMs(duration)}</span>
+          )}
         </span>
       )}
       {stale && staleMs !== null && (
         <span
-          className="text-2xs text-status-warning shrink-0"
+          className="text-status-warning"
           data-testid={`run-stale-${run.id}`}
           title="No state transition for a while — the worker watchdog also watches quiet turns. Cancel if this never moves."
         >
@@ -100,13 +126,12 @@ function RunTimingSpans({
 }
 
 /**
- * Self-ticking duration label for one run (issue #1751). Owns its 1s
- * interval so the parent tab never re-renders on the clock: only this
- * span updates. Terminal runs render a static reading with no interval
- * — their duration is fixed by `updated_at`. Cleared on unmount or when
- * the run reaches a terminal state.
+ * Self-ticking timing label for one run (issue #1751). Owns its 1s interval so
+ * the parent tab never re-renders on the clock: only this span updates.
+ * Terminal runs render a static reading with no interval. Cleared on unmount
+ * or when the run reaches a terminal state.
  */
-export function LiveRunDuration({ run }: { run: CircuitRunDetail['run'] }) {
+export function LiveRunDuration({ run, steps }: { run: CircuitRunDetail['run']; steps: CircuitRunDetail['steps'] }) {
   const terminal = isTerminalRunState(run.state);
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -114,7 +139,7 @@ export function LiveRunDuration({ run }: { run: CircuitRunDetail['run'] }) {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, [terminal]);
-  return <RunTimingSpans run={run} now={now} />;
+  return <RunTimingSpans run={run} steps={steps} now={now} />;
 }
 
 interface CircuitRunCardProps {
@@ -169,12 +194,21 @@ export function CircuitRunCard({
   const retried = steps.filter((s) => s.attempt > 1);
   // The run row carries no error column; the ledger's first errored step
   // is the run's failure reason.
-  const firstError = steps.find((s) => s.status !== 'blocked' && s.status !== 'unverified' && s.error_message !== null && s.error_message !== '') ?? null;
+  const firstError = runFailureStep(steps);
+  // When the "what to do next" box is shown it explains the problem in plain
+  // words, so the raw scheduler reason would only repeat it.
+  const showNextSteps = runNeedsNextSteps(run, steps);
   // Parsing a potentially large `context_json` (issue/PR bodies, prompts) is
   // memoised: the duration clock re-renders a live card every second and must
   // not re-parse the blob each tick.
   const context = useMemo(() => parseRunContext(run.context_json), [run.context_json]);
-  const linkedAgent = linkedAgentNodeId(run, steps);
+  // Name the run after its implementation node, not the reviewer that happens
+  // to be active, and link there; fall back to whichever agent the run drove.
+  const subject = useMemo(
+    () => runSubject(run, steps, context, nodeIndex, agentName),
+    [run, steps, context, nodeIndex, agentName],
+  );
+  const linkedAgent = subject.agentNodeId ?? linkedAgentNodeId(run, steps);
   const linkedAgentLabel = linkedAgent === null ? null : agentName(linkedAgent);
 
   const panelId = `run-detail-${run.id}`;
@@ -208,7 +242,12 @@ export function CircuitRunCard({
           >
             ▸
           </span>
-          <span className="text-2xs font-mono text-text-muted shrink-0">#{run.id}</span>
+          <span
+            className="text-xs font-semibold text-text-primary break-words min-w-0"
+            data-testid={`run-subject-${run.id}`}
+          >
+            {subject.label ?? `Run #${run.id}`}
+          </span>
           <span
             className={`text-xs ${statusTextClass(review?.needsAttention ? 'failed' : run.state)} ${
               run.state === 'running' ? 'animate-pulse' : ''
@@ -222,14 +261,23 @@ export function CircuitRunCard({
               Round {context['retry.attempt']} of {context['retry.max_retries']}
             </span>
           )}
+        </span>
+        {/* When it ran (queue time excluded) and which run it is. Wraps rather
+            than clips so it stays readable at the 240px Probe minimum. */}
+        <span className="mt-0.5 flex items-baseline gap-x-1.5 flex-wrap text-2xs text-text-muted">
           {now !== undefined ? (
-            <RunTimingSpans run={run} now={now} />
+            <RunTimingSpans run={run} steps={steps} now={now} />
           ) : (
-            <LiveRunDuration run={run} />
+            <LiveRunDuration run={run} steps={steps} />
           )}
+          <span className="font-mono shrink-0" data-testid={`run-id-${run.id}`}>
+            #{run.id}
+          </span>
         </span>
         {/* Activity line — the fact the old one-liner buried. Wraps
             rather than clips: a long node id is the whole point. */}
+        {/* Skipped when it would only repeat the headline state ("Failed" twice). */}
+        {(activity.nodeId !== null || review?.needsAttention || activity.label !== runStateLabel(run.state)) && (
         <span
           className="mt-0.5 flex items-baseline gap-1 flex-wrap text-2xs"
           data-testid={`run-activity-${run.id}`}
@@ -243,7 +291,8 @@ export function CircuitRunCard({
             </span>
           )}
         </span>
-        {activity.detail !== null && (
+        )}
+        {activity.detail !== null && !showNextSteps && (
           <span
             className="mt-0.5 block text-2xs text-text-muted break-words"
             data-testid={`run-reason-${run.id}`}
@@ -280,10 +329,13 @@ export function CircuitRunCard({
           className="px-2 pb-1.5 flex items-baseline gap-1.5 flex-wrap text-2xs"
           data-testid={`run-agent-${run.id}`}
         >
-          <span className="text-text-muted">Agent node:</span>
-          <span className="font-mono text-text-secondary break-words min-w-0">
-            {linkedAgentLabel ?? `#${linkedAgent}`}
-          </span>
+          <span className="text-text-muted">Agent node</span>
+          {/* The headline already names it; repeat only a different node. */}
+          {(linkedAgentLabel === null || linkedAgentLabel !== subject.label) && (
+            <span className="font-mono text-text-secondary break-words min-w-0">
+              {linkedAgentLabel ?? `#${linkedAgent}`}
+            </span>
+          )}
           {linkedAgentLabel !== null && (
             <button
               type="button"
@@ -359,20 +411,35 @@ export function CircuitRunCard({
         </div>
       )}
 
-      {/* Collapsed runs still surface the failure — an error you have to
-          expand to find is an error you miss. */}
-      {firstError !== null && (
-        <p
-          className="px-2 pb-1.5 text-2xs text-status-error break-words"
-          data-testid={`run-error-${run.id}`}
-        >
-          ⚠ {firstError.error_message}
-        </p>
+      {/* A run that needs a person says what happened and what to do right here,
+          with the actions that advance it. A collapsed card still surfaces it:
+          a failure you have to expand to find is a failure you miss. */}
+      {showNextSteps ? (
+        <RunNextSteps
+          run={run}
+          steps={steps}
+          roleLabel={(nodeId) => nodeRoleLabel(nodeId, nodeIndex.get(nodeId)?.type)}
+          busy={busy}
+        />
+      ) : (
+        firstError !== null && (
+          <p
+            className="px-2 pb-1.5 text-2xs text-status-error break-words"
+            data-testid={`run-error-${run.id}`}
+          >
+            ⚠ {firstError.error_message}
+          </p>
+        )
       )}
 
       {expanded && (
           <div id={panelId} className="px-2 pb-2 border-t border-border-subtle pt-1.5">
-            <CircuitEvidenceHistory key={run.id} runId={run.id} updatedAt={run.updated_at} />
+            <CircuitEvidenceHistory
+              key={run.id}
+              runId={run.id}
+              updatedAt={run.updated_at}
+              nodeLabel={(nodeId) => nodeRoleLabel(nodeId, nodeIndex.get(nodeId)?.type)}
+            />
           {/* Provenance behind the disclosure: trigger identity (dedupe key)
               and progress. Neither answers "what happened / why", so neither
               costs a headline line. */}
@@ -411,6 +478,9 @@ export function CircuitRunCard({
             <ol className="flex flex-col gap-1" data-testid={`run-steps-${run.id}`}>
               {steps.map((s) => {
                 const stepDuration = stepDurationMs(s);
+                const stepStarted = s.started_at === null ? Number.NaN : ledgerTimestampMs(s.started_at);
+                const stepFinished = s.completed_at === null ? Number.NaN : ledgerTimestampMs(s.completed_at);
+                const clock = new Date(now ?? Date.now());
                 const kind = nodeIndex.get(s.node_id)?.type;
                 const verdict = stepVerdict(s, kind, context);
                 const pass = stepPassLabel(s);
@@ -454,14 +524,23 @@ export function CircuitRunCard({
                           )}
                         </>
                       )}
-                    </div>
-                    <div className="mt-0.5 flex items-baseline gap-1.5 flex-wrap text-text-muted">
-                      <span className="font-mono break-words min-w-0">{s.node_id}</span>
+                      {/* Same line, wrapping when narrow: a step reads at a glance
+                          rather than as three stacked rows. The raw node id is
+                          shown only when the role label is not already it. */}
+                      {nodeRoleLabel(s.node_id, kind) !== s.node_id && (
+                        <span className="font-mono break-words min-w-0 text-text-muted">{s.node_id}</span>
+                      )}
+                      {Number.isFinite(stepStarted) && (
+                        <span className="shrink-0 text-text-muted" data-testid={`run-step-times-${run.id}-${s.node_id}`}>
+                          · {formatWallClock(stepStarted, clock)}
+                          {Number.isFinite(stepFinished) ? ` → ${formatWallClock(stepFinished, clock)}` : ''}
+                        </span>
+                      )}
                       {stepDuration !== null && (
-                        <span className="shrink-0">· {formatDurationMs(stepDuration)}</span>
+                        <span className="shrink-0 text-text-muted">· {formatDurationMs(stepDuration)}</span>
                       )}
                       {stepAgent !== null && (
-                        <span className="shrink-0">
+                        <span className="shrink-0 text-text-muted">
                           · agent{' '}
                           <span className="font-mono text-text-secondary">
                             {stepAgentLabel ?? `#${stepAgent}`}
@@ -493,12 +572,21 @@ export function CircuitRunCard({
                       </details>
                     )}
                     {s.error_message !== null && s.error_message !== '' && (
-                      // Per-step log surface. #1219 will widen this to
-                      // successful steps' captured output; the wrapping
-                      // and colour it needs are already here.
-                      <pre className={`mt-0.5 whitespace-pre-wrap break-words font-mono ${s.status === 'blocked' || s.status === 'unverified' ? 'text-status-warning' : 'text-status-error'}`}>
-                        {s.error_message}
-                      </pre>
+                      // Per-step log surface. A problem step shows its text up
+                      // front; a note left on a step that finished fine is
+                      // tucked away so it does not read as a failure.
+                      s.status === 'completed' ? (
+                        <details className="mt-0.5" data-testid={`run-step-note-${run.id}-${s.node_id}`}>
+                          <summary className="cursor-pointer text-text-muted">Note</summary>
+                          <pre className="mt-0.5 whitespace-pre-wrap break-words font-mono text-text-secondary">
+                            {s.error_message}
+                          </pre>
+                        </details>
+                      ) : (
+                        <pre className={`mt-0.5 whitespace-pre-wrap break-words font-mono ${s.status === 'blocked' || s.status === 'unverified' ? 'text-status-warning' : 'text-status-error'}`}>
+                          {s.error_message}
+                        </pre>
+                      )
                     )}
                   </li>
                 );

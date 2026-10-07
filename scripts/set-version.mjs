@@ -26,9 +26,23 @@ const targets = [
     file: path.join("src-tauri", "Cargo.lock"),
     apply: (t) => applyTomlNamedPackage(t, "buildmesh"),
   },
+  // The lockfile is a manifest too, not just build output: npm keeps the root
+  // version in it and rewrites it on the next install, so a bump that skips
+  // this file leaves the tree one install away from an unrelated diff — which
+  // is how a release commit once bumped four of the five files. See
+  // docs/development/releasing.md.
+  { file: "package-lock.json", apply: applyLockJson },
 ];
 
 const JSON_VERSION = /^(\s*"version"\s*:\s*")[^"]*(")/m;
+// Where the lockfile's dependency map begins, so the top-level mirror is only
+// ever searched in the head above it.
+const LOCK_PACKAGES_KEY = '"packages"';
+// The root package entry inside that map. Group 1 is the key's own
+// indentation, which is also the column its closing brace sits at — the two
+// together bound the entry so a search inside it cannot escape into the
+// dependency that follows.
+const LOCK_ROOT_ENTRY = /"packages"\s*:\s*\{\s*\n([ ]*)""\s*:\s*\{/;
 const TOML_VERSION = /^version\s*=\s*"[^"]*"\s*$/;
 
 const updates = [];
@@ -51,6 +65,38 @@ for (const { full, updated } of updates) {
 function applyJson(text) {
   if (!JSON_VERSION.test(text)) return null;
   return text.replace(JSON_VERSION, `$1${version}$2`);
+}
+
+// The lockfile carries the root version in two places: the top-level mirror
+// npm writes from package.json, and the `packages[""]` entry. Both move
+// together — patching only the top level leaves the next `npm install` to
+// rewrite the file and put the drift straight back.
+//
+// Both searches are *bounded* to the site they own: the mirror before the
+// `"packages"` key, the second site inside the `""` entry (delimited by that
+// entry's own closing brace). An unbounded search over the rest of the file
+// finds the first dependency's `"version"` instead and rewrites a pinned
+// dependency — silent corruption of the file that breaks `npm ci`, reported as
+// a successful bump. Every shape this cannot find a root version in (no
+// `packages` map, no `""` entry, no closing brace, no version key) returns null
+// so the caller exits non-zero before writing anything.
+function applyLockJson(text) {
+  const packagesAt = text.indexOf(LOCK_PACKAGES_KEY);
+  if (packagesAt === -1) return null;
+  const entry = LOCK_ROOT_ENTRY.exec(text);
+  if (!entry) return null;
+  const mirror = text.slice(0, packagesAt);
+  const start = entry.index + entry[0].length;
+  const end = text.indexOf(`\n${entry[1]}}`, start);
+  if (end === -1) return null;
+  const rootEntry = text.slice(start, end);
+  if (!JSON_VERSION.test(mirror) || !JSON_VERSION.test(rootEntry)) return null;
+  return (
+    mirror.replace(JSON_VERSION, `$1${version}$2`) +
+    text.slice(packagesAt, start) +
+    rootEntry.replace(JSON_VERSION, `$1${version}$2`) +
+    text.slice(end)
+  );
 }
 
 function applyTomlBlock(text, header) {

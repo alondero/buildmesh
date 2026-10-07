@@ -201,12 +201,22 @@ struct ReaderPool {
 
 impl ReaderPool {
     fn open(db_path: &Path) -> SqlResult<Self> {
+        Self::open_sized(db_path, READER_POOL_SIZE)
+    }
+
+    /// Open a pool of `size` read-only connections.
+    ///
+    /// Production always uses [`READER_POOL_SIZE`]. An isolated per-test
+    /// database (issue #2048) passes a smaller size: one test thread cannot
+    /// fan out as wide as the UI, HTTP and worker polling paths do, and a
+    /// narrower pool bounds the cost of the leaked test database.
+    fn open_sized(db_path: &Path, size: usize) -> SqlResult<Self> {
         let mut flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         if db_path.to_string_lossy().starts_with("file:") {
             flags |= OpenFlags::SQLITE_OPEN_URI;
         }
-        let mut connections = Vec::with_capacity(READER_POOL_SIZE);
-        for _ in 0..READER_POOL_SIZE {
+        let mut connections = Vec::with_capacity(size);
+        for _ in 0..size {
             let conn = Connection::open_with_flags(db_path, flags)?;
             apply_connection_pragmas(&conn, true)?;
             connections.push(conn);
@@ -995,6 +1005,14 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
 
 
 fn get() -> &'static Database {
+    // Per-test isolation (issue #2048): a test that called
+    // `test_support::isolated()` owns every `read_conn` / `write_conn` on
+    // its own thread, so parallel tests cannot read each other's rows. The
+    // `cfg(test)` gate keeps a release build on the single `OnceCell` path.
+    #[cfg(test)]
+    if let Some(db) = test_support::installed_db() {
+        return db;
+    }
     DB.get().expect("database not initialized")
 }
 
@@ -1076,5 +1094,11 @@ pub(crate) fn try_write_conn() -> Option<std::sync::MutexGuard<'static, Connecti
                     // boundary, so we have to opt out. Same pattern as
                     // `set_lan_exposure_enabled` above.
 pub fn is_initialized() -> bool {
+    // A test that installed an isolated database is initialized even though
+    // the process-global `OnceCell` is still empty (issue #2048).
+    #[cfg(test)]
+    if test_support::installed_db().is_some() {
+        return true;
+    }
     DB.get().is_some()
 }

@@ -7,8 +7,22 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
 use super::sync::{
-    graphql_repository_or_error, rest_failure, GitHubClient, GitHubError, HTTP_WRITE_REQUEST_TIMEOUT,
+    graphql_repository_or_error, rest_failure, GitHubClient, GitHubError,
+    HTTP_WRITE_REQUEST_TIMEOUT,
 };
+
+/// What GitHub says happened to one pull request.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PullRequestMergeState {
+    /// `true` only when the PR was merged (a PR closed unmerged is `false`).
+    #[serde(default)]
+    pub merged: bool,
+    /// `"open"` or `"closed"`.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub merged_at: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PullRequest {
@@ -492,6 +506,35 @@ impl GitHubClient {
 
         let detail: Detail = resp.json()?;
         Ok((detail.mergeable, detail.mergeable_state))
+    }
+
+    /// Whether a pull request has actually been merged
+    /// (`GET /repos/{o}/{r}/pulls/{n}`: `merged`, `state`, `merged_at`).
+    ///
+    /// Read-only, and deliberately strict: a PR that cannot be read is an
+    /// error, never "not merged", so a caller deciding whether to close work
+    /// down can tell "GitHub says no" apart from "GitHub did not answer".
+    pub fn pull_request_merge_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> Result<PullRequestMergeState, GitHubError> {
+        let url = self.rest_url(&format!("/repos/{}/{}/pulls/{}", owner, repo, pr_number));
+        let resp = self
+            .client
+            .get(&url)
+            .header(AUTHORIZATION, format!("Bearer {}", self.token))
+            .header(USER_AGENT, "buildmesh")
+            .header(ACCEPT, "application/vnd.github+json")
+            .send()?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(rest_failure(status, body));
+        }
+        Ok(resp.json()?)
     }
 
     /// List the files changed in a single pull request.
@@ -1735,6 +1778,14 @@ pub(crate) mod tests {
         /// GET `/repos/{o}/{r}/pulls/{n}` — 200 OK with a head-ref body.
         /// Serves the post-merge read that finds the branch to delete.
         PullHead,
+        /// GET `/repos/{o}/{r}/pulls/{n}` — the detail body GitHub returns for
+        /// a merged (`merged: true`, `state: closed`), open, or closed-unmerged PR.
+        PullMergeState {
+            state: &'static str,
+            merged: bool,
+        },
+        /// Any status with a plain body, for the failure paths.
+        Status(u16, &'static str),
     }
 
     /// Spin a fake GitHub server that counts requests and serves `script` in
@@ -1924,6 +1975,31 @@ pub(crate) mod tests {
                         });
                         let bytes = serde_json::to_vec(&body).expect("serialise");
                         ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::PullMergeState { state, merged } => {
+                        assert!(
+                            request_line.starts_with("GET /repos/")
+                                && request_line.contains("/pulls/"),
+                            "scripted a PullMergeState but client sent: {}",
+                            request_line.trim()
+                        );
+                        let body = serde_json::json!({
+                            "state": state,
+                            "merged": merged,
+                            "merged_at": if merged { Some("2026-10-05T20:00:00Z") } else { None },
+                        });
+                        let bytes = serde_json::to_vec(&body).expect("serialise");
+                        ("HTTP/1.1 200 OK\r\n".to_string(), bytes)
+                    }
+                    Scripted::Status(status, body) => {
+                        let reason = reqwest::StatusCode::from_u16(status)
+                            .ok()
+                            .and_then(|s| s.canonical_reason().map(str::to_string))
+                            .unwrap_or_else(|| "Error".to_string());
+                        (
+                            format!("HTTP/1.1 {status} {reason}\r\n"),
+                            body.as_bytes().to_vec(),
+                        )
                     }
                     Scripted::PullHead => {
                         assert!(
@@ -2239,6 +2315,63 @@ pub(crate) mod tests {
             .expect("merge must succeed");
 
         assert!(msg.contains("Merged (squash)"), "got: {msg}");
+        handle.join().expect("server");
+    }
+
+    #[test]
+    fn pull_request_merge_state_reports_a_merged_pr() {
+        let (base, count, handle) = fake_server(vec![Scripted::PullMergeState {
+            state: "closed",
+            merged: true,
+        }]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let state = client
+            .pull_request_merge_state("acme", "demo", 314)
+            .expect("merge state");
+
+        assert!(state.merged);
+        assert_eq!(state.state, "closed");
+        assert_eq!(state.merged_at.as_deref(), Some("2026-10-05T20:00:00Z"));
+        handle.join().expect("server");
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn pull_request_merge_state_distinguishes_open_from_closed_without_merging() {
+        let (base, _count, handle) = fake_server(vec![
+            Scripted::PullMergeState {
+                state: "open",
+                merged: false,
+            },
+            Scripted::PullMergeState {
+                state: "closed",
+                merged: false,
+            },
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let open = client.pull_request_merge_state("acme", "demo", 1).unwrap();
+        let closed = client.pull_request_merge_state("acme", "demo", 2).unwrap();
+
+        assert!(!open.merged && open.state == "open" && open.merged_at.is_none());
+        assert!(
+            !closed.merged && closed.state == "closed",
+            "a PR closed without merging is not a merge"
+        );
+        handle.join().expect("server");
+    }
+
+    #[test]
+    fn pull_request_merge_state_surfaces_a_missing_pr_as_an_error_not_as_unmerged() {
+        let (base, _count, handle) = fake_server(vec![Scripted::Status(404, "{}")]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let error = client
+            .pull_request_merge_state("acme", "demo", 404)
+            .expect_err("an unreadable PR must not read as a clean answer");
+
+        assert!(matches!(error, GitHubError::Api(404, _)), "{error:?}");
         handle.join().expect("server");
     }
 

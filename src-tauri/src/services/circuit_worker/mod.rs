@@ -506,9 +506,15 @@ fn run_pass(app: &AppHandle) {
             && !should_drive_circuit_run(
                 active.circuit_enabled,
                 &active.run.trigger_identity,
+                // A review extension or an operator's recovery is explicit work
+                // on a run that already started, so a disabled circuit must not
+                // park it as if it were new background work.
                 CircuitContext::from_json(&active.run.context_json)
                     .ok()
-                    .is_some_and(|context| context.get("review.extended") == Some("1")),
+                    .is_some_and(|context| {
+                        context.get("review.extended") == Some("1")
+                            || context.get("operator.recovered") == Some("1")
+                    }),
             )
         {
             record_queue_wait(
@@ -1039,6 +1045,32 @@ impl TransitionPersistFailure {
             Self::FreshnessRejected(message) | Self::Other(message) => message,
             Self::AgentStatusEffectRejected { message, .. } => message,
         }
+    }
+}
+
+/// Why a circuit close must leave a node open, when it must.
+///
+/// A helper (the reviewer) is always closed. The implementation agent is the
+/// user's work: even after a merge GitHub confirmed, a close must not delete a
+/// Why a circuit close must leave a node open, when it must.
+///
+/// A helper (the reviewer) is always closed. The implementation agent is the
+/// user's work: even after a merge GitHub confirmed, a close must not delete
+/// a worktree that still holds uncommitted changes. The caller resolves the
+/// safety lookup itself: helpers do not call the worktree helper at all, and
+/// an unreadable worktree is treated as "has changes" by the caller before
+/// reaching this function, so a DB error is never silently swallowed.
+pub(super) fn close_blocker(
+    is_helper: bool,
+    safety: &crate::git::worktree::WorktreeCloseSafety,
+) -> Option<String> {
+    if is_helper {
+        return None;
+    }
+    if safety.has_uncommitted {
+        Some("its worktree has uncommitted changes".to_string())
+    } else {
+        None
     }
 }
 
@@ -2132,8 +2164,67 @@ pub(super) fn execute_effects(
                 // close step but before the effect was retried.
                 match db::get_agent_node_by_id(target) {
                     Ok(_) => {
-                        crate::services::agent_node::delete(target, true)
-                            .map_err(|e| format!("agent node close failed: {}", e))?;
+                        // An agent no step identifies as a helper is treated as
+                        // the user's work, the safer reading. A failed DB read
+                        // here is the safer reading too: leave the agent open
+                        // and let the next sweep retry.
+                        let is_helper = match db::circuit::agent_is_circuit_helper(target) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::warn!(
+                                    "circuits: run {} could not read helper status for agent {}: {}; leaving the node open",
+                                    active.run.id,
+                                    target,
+                                    error
+                                );
+                                false
+                            }
+                        };
+                        // Helpers are always closed without inspecting their
+                        // worktree. For the implementation agent, a failed
+                        // worktree inspection is reported as having changes so
+                        // the node stays open until a person looks at it.
+                        let mut safety = crate::git::worktree::WorktreeCloseSafety {
+                            worktree_path: None,
+                            has_uncommitted: false,
+                            has_unpushed: false,
+                            is_detached: false,
+                        };
+                        if !is_helper {
+                            match crate::services::agent_node::get_worktree_close_safety(target) {
+                                Ok(s) => safety = s,
+                                Err(error) => {
+                                    tracing::warn!(
+                                        "circuits: run {} could not inspect the worktree of agent {}: {}; leaving the node open",
+                                        active.run.id,
+                                        target,
+                                        error
+                                    );
+                                    safety.has_uncommitted = true;
+                                }
+                            }
+                        }
+                        if let Some(reason) = close_blocker(is_helper, &safety) {
+                            tracing::warn!(
+                                "circuits: run {} left agent {} open instead of closing it: {}",
+                                active.run.id,
+                                target,
+                                reason
+                            );
+                            let _ = app.emit(
+                                "circuit-notification",
+                                CircuitNotificationPayload {
+                                    run_id: active.run.id,
+                                    message: format!(
+                                        "The implementation agent was left open instead of being closed: {reason}."
+                                    ),
+                                    severity: "warning".into(),
+                                },
+                            );
+                        } else {
+                            crate::services::agent_node::delete(target, true)
+                                .map_err(|e| format!("agent node close failed: {}", e))?;
+                        }
                     }
                     Err(rusqlite::Error::QueryReturnedNoRows) => {}
                     Err(e) => {

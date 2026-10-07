@@ -69,7 +69,11 @@ fn attention_hook_unix_command(url: &str) -> String {
     )
 }
 
-fn attention_hook_windows_shell_command(url: &str) -> String {
+/// A Windows host driving a *WSL* Codex runs a Linux binary, so `command`
+/// reaches `$SHELL -lc` — not cmd.exe. `curl.exe` leaves WSL to reach the
+/// Windows loopback listener the node's Buildmesh owns; a Linux curl would
+/// resolve `localhost` inside the distro and find nothing.
+fn attention_hook_wsl_shell_command(url: &str) -> String {
     format!(
         "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
     )
@@ -106,20 +110,45 @@ fn valid_loopback_relay_origin(value: &str) -> Option<&str> {
     Some(origin)
 }
 
-fn attention_hook_handler(node_id: i64) -> serde_json::Value {
+/// The callback a Windows Codex binary runs. Encoded PowerShell carries the
+/// URL, the stdin read and the `{}` stdout contract without shell-specific
+/// quoting, so it survives Codex's own `cmd.exe /C` and a PowerShell host
+/// alike.
+fn attention_hook_windows_command(url: &str) -> String {
+    crate::env::windows_attention_command_with_json_output(Some(url))
+        .unwrap_or_else(|| attention_hook_windows_fallback_command(url))
+}
+
+/// The `command` Codex runs when it does not prefer `commandWindows`.
+///
+/// Codex 0.131.0+ resolves a command hook with
+/// `command_windows.unwrap_or(command)` under `cfg!(windows)`
+/// (`codex-rs/hooks/src/engine/discovery.rs`), so only a Windows binary reads
+/// the override. An older binary ignores the unknown key and hands `command`
+/// to `cmd.exe /C`, which fails on a POSIX script with `-v was unexpected at
+/// this time.` — so `command` has to be written for the shell that will really
+/// parse it, which is the *target* Codex binary, not the Buildmesh host.
+fn attention_hook_default_command(url: &str, env_type: EnvType) -> String {
+    if env_type == EnvType::Wsl && cfg!(windows) {
+        return attention_hook_wsl_shell_command(url);
+    }
+    // Every other runtime whose Codex is a Windows binary — spawned natively,
+    // or reached through WSL interop — parses `command` with cmd.exe.
+    let native = cfg!(windows) && env_type == EnvType::Windows;
+    if native || env_type == EnvType::WindowsInterop {
+        return attention_hook_windows_command(url);
+    }
+    attention_hook_unix_command(url)
+}
+
+fn attention_hook_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
     let port = crate::http_server::current_http_port();
     let relay_url = std::env::var(CODEX_HOOK_RELAY_ENV).ok();
     let url = attention_hook_url(node_id, port, relay_url.as_deref());
     serde_json::json!({
         "type": "command",
-        "command": if cfg!(windows) {
-            attention_hook_windows_shell_command(&url)
-        } else {
-            attention_hook_unix_command(&url)
-        },
-        "commandWindows": crate::env::windows_attention_command_with_json_output(Some(&url)).unwrap_or_else(|| {
-            attention_hook_windows_fallback_command(&url)
-        }),
+        "command": attention_hook_default_command(&url, env_type),
+        "commandWindows": attention_hook_windows_command(&url),
         "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
     })
 }
@@ -180,7 +209,10 @@ impl CodexInstallCache {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             match entries.get(runtime) {
                 Some(slot)
-                    if slot.cell.get().is_none_or(|cached| is_entry_fresh(cached, now)) =>
+                    if slot
+                        .cell
+                        .get()
+                        .is_none_or(|cached| is_entry_fresh(cached, now)) =>
                 {
                     Arc::clone(&slot.cell)
                 }
@@ -258,11 +290,17 @@ impl CodexInstallCache {
     fn is_fresh_at(&self, env_type: EnvType, now: Instant) -> bool {
         let entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         entries.get(runtime_identity(env_type)).is_some_and(|slot| {
-            slot.cell.get().is_some_and(|cached| is_entry_fresh(cached, now))
+            slot.cell
+                .get()
+                .is_some_and(|cached| is_entry_fresh(cached, now))
         })
     }
 
-    fn discard_failed_entry(&self, runtime: &'static str, cell: &Arc<OnceLock<CachedCodexInstall>>) {
+    fn discard_failed_entry(
+        &self,
+        runtime: &'static str,
+        cell: &Arc<OnceLock<CachedCodexInstall>>,
+    ) {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if entries
             .get(runtime)
@@ -367,7 +405,11 @@ fn native_codex_home_from(
 }
 
 fn native_codex_home() -> Result<std::path::PathBuf, String> {
-    let user_home_key = if cfg!(target_os = "windows") { "USERPROFILE" } else { "HOME" };
+    let user_home_key = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
     native_codex_home_from(
         std::env::var_os("CODEX_HOME"),
         std::env::var_os(user_home_key),
@@ -384,7 +426,11 @@ fn is_owned_legacy_profile(path: &Path, content: &str) -> bool {
     let Some(hash) = profile_name.strip_prefix("bm") else {
         return false;
     };
-    if hash.len() != 16 || !hash.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) {
+    if hash.len() != 16
+        || !hash
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    {
         return false;
     }
 
@@ -416,7 +462,10 @@ fn cleanup_owned_legacy_profiles(home: &Path) {
         };
         if is_owned_legacy_profile(&path, &content) {
             if let Err(error) = std::fs::remove_file(&path) {
-                tracing::warn!("failed to remove owned legacy Codex profile {:?}: {error}", path);
+                tracing::warn!(
+                    "failed to remove owned legacy Codex profile {:?}: {error}",
+                    path
+                );
             }
         }
     }
@@ -448,8 +497,13 @@ fn materialize_native_profile_at(
             .set_permissions(std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("failed to restrict Codex profile permissions: {e}"))?;
     }
-    temp.persist(&target)
-        .map_err(|e| format!("failed to atomically replace {}: {}", target.display(), e.error))?;
+    temp.persist(&target).map_err(|e| {
+        format!(
+            "failed to atomically replace {}: {}",
+            target.display(),
+            e.error
+        )
+    })?;
     cleanup_owned_legacy_profiles(home);
     Ok(())
 }
@@ -483,7 +537,8 @@ for legacy in "$d"/bm*.config.toml; do
       exit !ok
     }' "$legacy"; then rm -f "$legacy"; fi
 done"#;
-const WSL_CODEX_HOME_SCRIPT: &str = "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"";
+const WSL_CODEX_HOME_SCRIPT: &str =
+    "printf '__BUILDMESH_WSL_CODEX_HOME__%s\\n' \"${CODEX_HOME:-$HOME/.codex}\"";
 
 fn materialize_wsl_profile(
     distro: &str,
@@ -520,7 +575,9 @@ fn materialize_wsl_profile(
     if status.success() {
         Ok(())
     } else {
-        Err(format!("WSL Codex profile materialization exited with {status}"))
+        Err(format!(
+            "WSL Codex profile materialization exited with {status}"
+        ))
     }
 }
 
@@ -586,10 +643,7 @@ fn wsl_read_files(distro: &str, paths: &[&Path]) -> Result<Vec<String>, String> 
         CODEX_LOOKUP_TIMEOUT,
     )?;
     if !output.status.success() {
-        return Err(format!(
-            "WSL Codex file read exited with {}",
-            output.status
-        ));
+        return Err(format!("WSL Codex file read exited with {}", output.status));
     }
     let stdout = String::from_utf8(output.stdout)
         .map_err(|e| format!("WSL Codex file read was not UTF-8: {e}"))?;
@@ -636,12 +690,8 @@ fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> 
         payload.push('\n');
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut command = wsl_command_with_values(
-        distro,
-        WSL_ATOMIC_WRITE_FILES_SCRIPT,
-        &[],
-        &arg_refs,
-    );
+    let mut command =
+        wsl_command_with_values(distro, WSL_ATOMIC_WRITE_FILES_SCRIPT, &[], &arg_refs);
     command.stdin(std::process::Stdio::piped());
     let mut child = command
         .spawn()
@@ -660,9 +710,7 @@ fn wsl_write_files(distro: &str, files: &[(&Path, &str)]) -> Result<(), String> 
     if status.success() {
         Ok(())
     } else {
-        Err(format!(
-            "WSL Codex file write exited with {status}"
-        ))
+        Err(format!("WSL Codex file write exited with {status}"))
     }
 }
 
@@ -674,7 +722,10 @@ fn read_runtime_files(paths: &[&Path], distro: Option<&str>) -> Result<Vec<Strin
             .map(|path| match std::fs::read_to_string(path) {
                 Ok(content) => Ok(content),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-                Err(error) => Err(format!("failed to read Codex file {}: {error}", path.display())),
+                Err(error) => Err(format!(
+                    "failed to read Codex file {}: {error}",
+                    path.display()
+                )),
             })
             .collect(),
     }
@@ -700,7 +751,10 @@ fn runtime_codex_home(
     runtime: &LaunchRuntime,
 ) -> Result<(PathBuf, Option<String>), String> {
     if env_type == EnvType::WindowsInterop {
-        let home = runtime.harness_home.as_deref().map(|home| PathBuf::from(crate::env::to_host_path(home)))
+        let home = runtime
+            .harness_home
+            .as_deref()
+            .map(|home| PathBuf::from(crate::env::to_host_path(home)))
             .or_else(|| crate::env::codex_dir_for_env(env_type, ""))
             .ok_or_else(|| "Windows Codex home is unavailable".to_string())?;
         return Ok((home, None));
@@ -730,14 +784,7 @@ fn runtime_codex_home(
     }
 
     let mut command = crate::process_util::command_no_window("wsl.exe");
-    command.args([
-        "-d",
-        &distro,
-        "--exec",
-        "sh",
-        "-lc",
-        WSL_CODEX_HOME_SCRIPT,
-    ]);
+    command.args(["-d", &distro, "--exec", "sh", "-lc", WSL_CODEX_HOME_SCRIPT]);
     let output = crate::process_util::run_command_with_timeout(
         command,
         "WSL Codex home resolution for trust",
@@ -806,7 +853,12 @@ fn ensure_codex_project_trusted(
     let (config_path, distro) = codex_trust_config_path(resolved.env_type, runtime)?;
     let project_path = trust_project_path(resolved);
     let existing = read_runtime_files(&[&config_path], distro.as_deref())
-        .map_err(|error| format!("failed to read Codex trust config {}: {error}", config_path.display()))?
+        .map_err(|error| {
+            format!(
+                "failed to read Codex trust config {}: {error}",
+                config_path.display()
+            )
+        })?
         .into_iter()
         .next()
         .expect("one Codex trust file was requested");
@@ -814,8 +866,12 @@ fn ensure_codex_project_trusted(
     if updated == existing {
         return Ok(());
     }
-    write_runtime_files(&[(&config_path, &updated)], distro.as_deref())
-        .map_err(|e| format!("failed to write Codex trust config {}: {e}", config_path.display()))
+    write_runtime_files(&[(&config_path, &updated)], distro.as_deref()).map_err(|e| {
+        format!(
+            "failed to write Codex trust config {}: {e}",
+            config_path.display()
+        )
+    })
 }
 
 /// Parse and edit Codex's TOML document with `toml_edit`. This keeps comments,
@@ -899,9 +955,11 @@ pub fn materialize_proxy_profile(
                 .ok_or_else(|| "verified WSL distribution identity is missing".to_string())?;
             materialize_wsl_profile(distro, &install.codex_home, profile_name, &content)
         }
-        EnvType::Windows | EnvType::WindowsInterop => {
-            materialize_native_profile_at(Path::new(&crate::env::to_host_path(&install.codex_home)), profile_name, &content)
-        }
+        EnvType::Windows | EnvType::WindowsInterop => materialize_native_profile_at(
+            Path::new(&crate::env::to_host_path(&install.codex_home)),
+            profile_name,
+            &content,
+        ),
     }
 }
 
@@ -958,9 +1016,18 @@ fn codex_output(
     args: &[&str],
 ) -> Result<std::process::Output, String> {
     let (mut command, op_name) = if env_type == EnvType::WindowsInterop {
-        let args = args.iter().map(|arg| crate::env::powershell_literal(arg)).collect::<Vec<_>>().join(" ");
-        let command = crate::env::powershell_command(&format!("& codex {args}; exit $LASTEXITCODE"));
-        return crate::process_util::run_command_with_timeout(command, "Windows Codex probe", CODEX_PROBE_TIMEOUT);
+        let args = args
+            .iter()
+            .map(|arg| crate::env::powershell_literal(arg))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command =
+            crate::env::powershell_command(&format!("& codex {args}; exit $LASTEXITCODE"));
+        return crate::process_util::run_command_with_timeout(
+            command,
+            "Windows Codex probe",
+            CODEX_PROBE_TIMEOUT,
+        );
     } else if env_type == EnvType::Wsl {
         let mut command = crate::process_util::command_no_window("wsl.exe");
         command.args([
@@ -978,7 +1045,10 @@ fn codex_output(
         command.args(["/d", "/c", "codex"]);
         (command, "Windows Codex probe")
     } else {
-        (crate::process_util::command_no_window("codex"), "Codex probe")
+        (
+            crate::process_util::command_no_window("codex"),
+            "Codex probe",
+        )
     };
     command.args(args);
     // `run_command_with_timeout` names the operation and the failure in its
@@ -1095,7 +1165,10 @@ fn probe_codex_identity_concurrently(
 }
 
 /// `codex --version`, parsed and range-checked against the proxied-CLI floor.
-fn probe_codex_version(env_type: EnvType, wsl_distro: Option<&str>) -> Result<CodexVersion, String> {
+fn probe_codex_version(
+    env_type: EnvType,
+    wsl_distro: Option<&str>,
+) -> Result<CodexVersion, String> {
     let output = codex_output(env_type, wsl_distro, &["--version"])?;
     if !output.status.success() {
         return Err("Codex version check failed".into());
@@ -1118,7 +1191,11 @@ fn probe_codex_executable(
 ) -> Result<CodexExecutable, String> {
     let executable = if env_type == EnvType::WindowsInterop {
         let command = crate::env::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -ErrorAction Stop).Source");
-        let output = crate::process_util::run_command_with_timeout(command, "Windows Codex location", CODEX_LOOKUP_TIMEOUT)?;
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "Windows Codex location",
+            CODEX_LOOKUP_TIMEOUT,
+        )?;
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else if env_type == EnvType::Wsl {
         let mut locate = crate::process_util::command_no_window("wsl.exe");
@@ -1151,8 +1228,11 @@ fn probe_codex_executable(
         };
         let mut locate = crate::process_util::command_no_window(locator);
         locate.arg("codex");
-        let out =
-            crate::process_util::run_command_with_timeout(locate, "Codex executable location", CODEX_LOOKUP_TIMEOUT)?;
+        let out = crate::process_util::run_command_with_timeout(
+            locate,
+            "Codex executable location",
+            CODEX_LOOKUP_TIMEOUT,
+        )?;
         let candidates = String::from_utf8_lossy(&out.stdout);
         if cfg!(target_os = "windows") {
             candidates
@@ -1166,7 +1246,12 @@ fn probe_codex_executable(
                 .unwrap_or_default()
                 .to_string()
         } else {
-            candidates.lines().next().unwrap_or_default().trim().to_string()
+            candidates
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim()
+                .to_string()
         }
     };
     if executable.is_empty() {
@@ -1178,19 +1263,15 @@ fn probe_codex_executable(
 /// Step 3: resolve this runtime's `CODEX_HOME`.
 fn probe_codex_home(env_type: EnvType, wsl_distro: Option<&str>) -> Result<CodexHome, String> {
     if env_type == EnvType::WindowsInterop {
-        let home = crate::env::codex_dir_for_env(env_type, "").ok_or_else(|| "Windows Codex home unavailable".to_string())?;
-        return Ok(CodexHome(crate::env::windows_path_from_wsl(&home.to_string_lossy())));
+        let home = crate::env::codex_dir_for_env(env_type, "")
+            .ok_or_else(|| "Windows Codex home unavailable".to_string())?;
+        return Ok(CodexHome(crate::env::windows_path_from_wsl(
+            &home.to_string_lossy(),
+        )));
     }
     if let Some(distro) = wsl_distro {
         let mut command = crate::process_util::command_no_window("wsl.exe");
-        command.args([
-            "-d",
-            distro,
-            "--exec",
-            "sh",
-            "-lc",
-            WSL_CODEX_HOME_SCRIPT,
-        ]);
+        command.args(["-d", distro, "--exec", "sh", "-lc", WSL_CODEX_HOME_SCRIPT]);
         let output = crate::process_util::run_command_with_timeout(
             command,
             "WSL Codex home resolution",
@@ -1204,7 +1285,9 @@ fn probe_codex_home(env_type: EnvType, wsl_distro: Option<&str>) -> Result<Codex
         }
         return Ok(CodexHome(home.to_string_lossy().into_owned()));
     }
-    Ok(CodexHome(native_codex_home()?.to_string_lossy().into_owned()))
+    Ok(CodexHome(
+        native_codex_home()?.to_string_lossy().into_owned(),
+    ))
 }
 
 /// Run the two proxy-capability `--help` probes concurrently.
@@ -1252,27 +1335,23 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
     } else {
         runtime_identity(env_type).to_string()
     };
-    let capability_key = format!(
-        "{}\0{}\0{}",
-        runtime, executable, version
-    );
+    let capability_key = format!("{}\0{}\0{}", runtime, executable, version);
     let capabilities_are_cached = CLI_CAPABILITY_CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .contains(&capability_key);
     if !capabilities_are_cached {
-        let (FreshHelp(fresh_help), ResumeHelp(resume_help)) =
-            probe_proxy_cli_help_concurrently(
-                env_type,
-                wsl_distro.as_deref(),
-                |env_type, wsl_distro| {
-                    successful_help(env_type, wsl_distro, &["--help"], "fresh").map(FreshHelp)
-                },
-                |env_type, wsl_distro| {
-                    successful_help(env_type, wsl_distro, &["resume", "--help"], "resume")
-                        .map(ResumeHelp)
-                },
-            )?;
+        let (FreshHelp(fresh_help), ResumeHelp(resume_help)) = probe_proxy_cli_help_concurrently(
+            env_type,
+            wsl_distro.as_deref(),
+            |env_type, wsl_distro| {
+                successful_help(env_type, wsl_distro, &["--help"], "fresh").map(FreshHelp)
+            },
+            |env_type, wsl_distro| {
+                successful_help(env_type, wsl_distro, &["resume", "--help"], "resume")
+                    .map(ResumeHelp)
+            },
+        )?;
         validate_proxy_cli_help(&fresh_help, &resume_help)?;
         // The cache-miss path stays idempotent: two runtimes discovering the
         // same `runtime\0executable\0version` concurrently may both probe and
@@ -1373,10 +1452,16 @@ fn ensure_hooks_json_content(
     };
 
     let mut changed = false;
-    for event in ["SessionStart", "Stop", "PermissionRequest", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Interrupt"] {
-        let groups = events
-            .entry(event)
-            .or_insert_with(|| serde_json::json!([]));
+    for event in [
+        "SessionStart",
+        "Stop",
+        "PermissionRequest",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "Interrupt",
+    ] {
+        let groups = events.entry(event).or_insert_with(|| serde_json::json!([]));
         let Some(groups) = groups.as_array_mut() else {
             return Err(format!("hooks.json event '{event}' must be an array"));
         };
@@ -1439,9 +1524,7 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content.as_bytes())?;
     temp.as_file().sync_all()?;
-    temp.persist(path)
-        .map(|_| ())
-        .map_err(|error| error.error)
+    temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 fn ensure_codex_project_files(
@@ -1477,7 +1560,10 @@ fn ensure_codex_project_files(
     let config_existing = &existing[0];
     let config_updated = ensure_hooks_feature_content(config_existing)?;
     let hooks_existing = &existing[1];
-    let hooks_updated = ensure_hooks_json_content(hooks_existing, &attention_hook_handler(node_id))?;
+    let hooks_updated = ensure_hooks_json_content(
+        hooks_existing,
+        &attention_hook_handler(node_id, resolved.env_type),
+    )?;
 
     let mut writes: Vec<(&Path, &str)> = Vec::new();
     if config_updated != *config_existing {
@@ -1511,21 +1597,54 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
-    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
-        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+    /// Issue #2061: a partial 79x57 Windows ConPTY frame from Codex 0.160.0
+    /// showed a ~600-character multiline paste drawn inline with no paste
+    /// marker, so Codex takes the same tail-anchor rule as Muse rather than
+    /// waiting out the readiness budget for a marker it never prints (the
+    /// run 343 stall). Marker-confirmed drafts are unaffected: a collapsed
+    /// paste carries no visible tail, so only its marker can confirm it.
+    fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
+        crate::agent::provider::PasteGatePolicy::RenderedWithTailAnchor
+    }
+
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
-        spawn.base_args = ["--ask-for-approval", "never", "exec", "--ignore-user-config", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "--color", "never", "-c", "features.shell_tool=false", "-c", "features.multi_agent=false"].map(str::to_owned).to_vec();
+        spawn.base_args = [
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--ignore-user-config",
+            "--ephemeral",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--color",
+            "never",
+            "-c",
+            "features.shell_tool=false",
+            "-c",
+            "features.multi_agent=false",
+        ]
+        .map(str::to_owned)
+        .to_vec();
         spawn.trailing_args = vec!["-".into()];
-        let mut recipe = BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::LastMessageFile);
+        let mut recipe = BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::Stdin,
+            BackgroundResultOutput::LastMessageFile,
+        );
         recipe.env_remove = vec!["OPENAI_API_KEY".into(), "OPENAI_BASE_URL".into()];
         Some(recipe)
     }
 
-    fn spawn_recipe_for_resume(
-        &self,
-        platform: Platform,
-        session_id: &str,
-    ) -> Option<SpawnRecipe> {
+    fn spawn_recipe_for_resume(&self, platform: Platform, session_id: &str) -> Option<SpawnRecipe> {
         // `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`. Options after the
         // UUID are the prompt, so a restart would "resume" into a garbage turn.
         // Keep the id in trailing_args; default_prepare and Codex proxy
@@ -1639,10 +1758,8 @@ impl AgentProvider for CodexAdapter {
         // "not loading") never matched and the initial prompt was dropped after
         // the 300s wait. Launch still passes `--dangerously-bypass-hook-trust`,
         // so no review dialog can hold the composer back.
-        const COMPOSER_PLACEHOLDERS: [&str; 2] = [
-            "Ask Codex to do anything",
-            "Ask a follow-up question",
-        ];
+        const COMPOSER_PLACEHOLDERS: [&str; 2] =
+            ["Ask Codex to do anything", "Ask a follow-up question"];
         COMPOSER_PLACEHOLDERS
             .iter()
             .any(|placeholder| tail.contains(placeholder))
@@ -1682,7 +1799,10 @@ impl AgentProvider for CodexAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::codex_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -1698,10 +1818,7 @@ impl AgentProvider for CodexAdapter {
         // Codex has no dedicated --effort flag, but exposes the same setting
         // as a stable per-invocation config override. Rust's debug string
         // representation supplies the quoted/escaped TOML string value.
-        vec![
-            "-c".into(),
-            format!("model_reasoning_effort={effort:?}"),
-        ]
+        vec!["-c".into(), format!("model_reasoning_effort={effort:?}")]
     }
 
     fn prefill_args(&self, text: &str) -> Vec<String> {
@@ -1762,7 +1879,9 @@ mod tests {
             .lines()
             .filter(|line| {
                 let trimmed = line.trim_start();
-                !trimmed.starts_with("//") && !trimmed.starts_with('*') && !trimmed.starts_with("/*")
+                !trimmed.starts_with("//")
+                    && !trimmed.starts_with('*')
+                    && !trimmed.starts_with("/*")
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1975,7 +2094,10 @@ mod tests {
         cache
             .discover(EnvType::Windows, || Ok(test_install("0.144.0")))
             .unwrap();
-        assert!(cache.is_fresh(EnvType::Windows), "a resolved install is warm");
+        assert!(
+            cache.is_fresh(EnvType::Windows),
+            "a resolved install is warm"
+        );
         assert!(!cache.is_fresh(EnvType::Wsl), "freshness is per-runtime");
 
         // The warm read must reuse the entry: a probe here would panic.
@@ -2007,8 +2129,13 @@ mod tests {
 
         // Failures are discarded, never served warm: the next read probes.
         let failures = CodexInstallCache::default();
-        let _ = failures.discover(EnvType::Windows, || Err::<CodexInstall, String>("Codex is unavailable".into()));
-        assert!(!failures.is_fresh(EnvType::Windows), "a failed probe leaves no warm entry");
+        let _ = failures.discover(EnvType::Windows, || {
+            Err::<CodexInstall, String>("Codex is unavailable".into())
+        });
+        assert!(
+            !failures.is_fresh(EnvType::Windows),
+            "a failed probe leaves no warm entry"
+        );
     }
 
     /// The probe bounds must stay generous enough for a cold WSL distro
@@ -2090,9 +2217,21 @@ mod tests {
         let (version, executable, home) = probe_codex_identity_concurrently(
             EnvType::Windows,
             None,
-            |_, _| rendezvous.wait().map(|_| CodexVersion("0.158.0".to_string())),
-            |_, _| rendezvous.wait().map(|_| CodexExecutable("/usr/bin/codex".to_string())),
-            |_, _| rendezvous.wait().map(|_| CodexHome("/home/dev/.codex".to_string())),
+            |_, _| {
+                rendezvous
+                    .wait()
+                    .map(|_| CodexVersion("0.158.0".to_string()))
+            },
+            |_, _| {
+                rendezvous
+                    .wait()
+                    .map(|_| CodexExecutable("/usr/bin/codex".to_string()))
+            },
+            |_, _| {
+                rendezvous
+                    .wait()
+                    .map(|_| CodexHome("/home/dev/.codex".to_string()))
+            },
         )
         .expect("all three probes must rendezvous and succeed");
         assert_eq!(version.0, "0.158.0");
@@ -2151,8 +2290,16 @@ mod tests {
         let (fresh, resume) = probe_proxy_cli_help_concurrently(
             EnvType::Windows,
             None,
-            |_, _| rendezvous.wait().map(|_| FreshHelp("fresh help".to_string())),
-            |_, _| rendezvous.wait().map(|_| ResumeHelp("resume help".to_string())),
+            |_, _| {
+                rendezvous
+                    .wait()
+                    .map(|_| FreshHelp("fresh help".to_string()))
+            },
+            |_, _| {
+                rendezvous
+                    .wait()
+                    .map(|_| ResumeHelp("resume help".to_string()))
+            },
         )
         .expect("both help probes must rendezvous and succeed");
         assert_eq!(fresh.0, "fresh help");
@@ -2203,7 +2350,8 @@ mod tests {
                 |_, _| Ok(CodexHome("/home/dev/.codex".to_string())),
             );
         });
-        let payload = boundary.expect_err("the panicking probe must re-raise on the joining thread");
+        let payload =
+            boundary.expect_err("the panicking probe must re-raise on the joining thread");
         let message = payload
             .downcast_ref::<String>()
             .cloned()
@@ -2262,11 +2410,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(explicit, std::path::PathBuf::from("/custom/codex"));
-        let default = native_codex_home_from(
-            None,
-            Some(std::ffi::OsString::from("/home/user")),
-        )
-        .unwrap();
+        let default =
+            native_codex_home_from(None, Some(std::ffi::OsString::from("/home/user"))).unwrap();
         assert_eq!(default, std::path::PathBuf::from("/home/user/.codex"));
         assert!(native_codex_home_from(None, None).is_err());
     }
@@ -2335,7 +2480,10 @@ mod tests {
         assert!(!default_home.is_empty());
         let explicit_home = format!("/tmp/buildmesh-codex-profile-test-{}", std::process::id());
 
-        for (index, home) in [default_home, explicit_home.clone()].into_iter().enumerate() {
+        for (index, home) in [default_home, explicit_home.clone()]
+            .into_iter()
+            .enumerate()
+        {
             let profile = format!("buildmesh_wsl_contract_{}_{}", std::process::id(), index);
             let install = CodexInstall {
                 executable: "/usr/bin/codex".into(),
@@ -2344,7 +2492,8 @@ mod tests {
                 codex_home: home.clone(),
                 wsl_distro: Some(distro.clone()),
             };
-            let expected = render_proxy_profile(&profile, "WSL contract", "https://example.invalid/v1");
+            let expected =
+                render_proxy_profile(&profile, "WSL contract", "https://example.invalid/v1");
             materialize_proxy_profile(
                 EnvType::Wsl,
                 &install,
@@ -2355,8 +2504,15 @@ mod tests {
             .unwrap();
             let output = crate::process_util::command_no_window("wsl.exe")
                 .args([
-                    "-d", &distro, "--exec", "sh", "-c", "cat \"$1/$2.config.toml\"",
-                    "buildmesh-test", &home, &profile,
+                    "-d",
+                    &distro,
+                    "--exec",
+                    "sh",
+                    "-c",
+                    "cat \"$1/$2.config.toml\"",
+                    "buildmesh-test",
+                    &home,
+                    &profile,
                 ])
                 .output()
                 .unwrap();
@@ -2364,8 +2520,15 @@ mod tests {
             assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
             let _ = crate::process_util::command_no_window("wsl.exe")
                 .args([
-                    "-d", &distro, "--exec", "sh", "-c",
-                    "rm -f \"$1/$2.config.toml\"", "buildmesh-test", &home, &profile,
+                    "-d",
+                    &distro,
+                    "--exec",
+                    "sh",
+                    "-c",
+                    "rm -f \"$1/$2.config.toml\"",
+                    "buildmesh-test",
+                    &home,
+                    &profile,
                 ])
                 .status();
         }
@@ -2432,17 +2595,30 @@ mod tests {
                     let read = stream.read(&mut chunk).unwrap();
                     request.extend_from_slice(&chunk[..read]);
                     let text = String::from_utf8_lossy(&request);
-                    let Some(header_end) = text.find("\r\n\r\n") else { continue };
+                    let Some(header_end) = text.find("\r\n\r\n") else {
+                        continue;
+                    };
                     let length = text[..header_end]
                         .lines()
-                        .find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_string))
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_string)
+                        })
                         .and_then(|value| value.trim().parse::<usize>().ok())
                         .unwrap_or(0);
-                    if request.len() >= header_end + 4 + length { break; }
+                    if request.len() >= header_end + 4 + length {
+                        break;
+                    }
                 }
                 let request = String::from_utf8(request).unwrap();
-                assert!(request.starts_with("POST /v1/responses HTTP/1.1"), "{request}");
-                assert!(request.to_ascii_lowercase().contains("authorization: bearer pinned-secret"));
+                assert!(
+                    request.starts_with("POST /v1/responses HTTP/1.1"),
+                    "{request}"
+                );
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer pinned-secret"));
                 assert!(request.contains("\"model\":\"MiniMax-M3\""));
                 let response_id = format!("resp_{}", index + 1);
                 let message_id = format!("msg_{}", index + 1);
@@ -2519,15 +2695,35 @@ mod tests {
                 .unwrap()
         };
         let fresh = run(&[
-            "--profile", profile, "--model", "MiniMax-M3", "exec",
-            "--skip-git-repo-check", "reply with verified",
+            "--profile",
+            profile,
+            "--model",
+            "MiniMax-M3",
+            "exec",
+            "--skip-git-repo-check",
+            "reply with verified",
         ]);
-        assert!(fresh.status.success(), "{}", String::from_utf8_lossy(&fresh.stderr));
+        assert!(
+            fresh.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fresh.stderr)
+        );
         let resume = run(&[
-            "--profile", profile, "--model", "MiniMax-M3", "exec", "resume",
-            "--last", "--skip-git-repo-check", "reply with verified again",
+            "--profile",
+            profile,
+            "--model",
+            "MiniMax-M3",
+            "exec",
+            "resume",
+            "--last",
+            "--skip-git-repo-check",
+            "reply with verified again",
         ]);
-        assert!(resume.status.success(), "{}", String::from_utf8_lossy(&resume.stderr));
+        assert!(
+            resume.status.success(),
+            "{}",
+            String::from_utf8_lossy(&resume.stderr)
+        );
         server.join().unwrap();
     }
 
@@ -2543,7 +2739,10 @@ mod tests {
 
         materialize_native_profile_at(home.path(), profile, &expected).unwrap();
         assert_eq!(std::fs::read_to_string(target).unwrap(), expected);
-        assert_eq!(std::fs::read_to_string(user_config).unwrap(), "model = \"user-choice\"\n");
+        assert_eq!(
+            std::fs::read_to_string(user_config).unwrap(),
+            "model = \"user-choice\"\n"
+        );
     }
 
     #[test]
@@ -2617,11 +2816,19 @@ mod tests {
     fn spawn_recipes_carry_the_hook_trust_bypass() {
         let bypass = "--dangerously-bypass-hook-trust".to_string();
         let fresh = CODEX.spawn_recipe(Platform::Windows, EnvType::Windows);
-        assert!(fresh.base_args.contains(&bypass), "fresh: {:?}", fresh.base_args);
+        assert!(
+            fresh.base_args.contains(&bypass),
+            "fresh: {:?}",
+            fresh.base_args
+        );
         let resume = CODEX
             .spawn_recipe_for_resume(Platform::Windows, "sid-123")
             .expect("codex has a resume recipe");
-        assert!(resume.base_args.contains(&bypass), "resume: {:?}", resume.base_args);
+        assert!(
+            resume.base_args.contains(&bypass),
+            "resume: {:?}",
+            resume.base_args
+        );
     }
 
     #[test]
@@ -2682,7 +2889,12 @@ mod tests {
     fn codex_declares_attention_hook_and_readable_transcript() {
         assert!(CODEX.requires_attention_hook());
         assert!(CODEX.produces_readable_transcript());
-        let crate::agent::capabilities::AttentionCapability::Hook { events, min_version, .. } = CODEX.attention_capability() else {
+        let crate::agent::capabilities::AttentionCapability::Hook {
+            events,
+            min_version,
+            ..
+        } = CODEX.attention_capability()
+        else {
             panic!("Codex must expose native hook capability");
         };
         assert!(events.contains(&crate::agent::session_lifecycle::LifecycleKind::QuestionRequested));
@@ -2693,6 +2905,22 @@ mod tests {
         let content = std::fs::read_to_string(project.join(".codex").join("hooks.json"))
             .expect("hooks.json not written");
         serde_json::from_str(&content).expect("hooks.json is not valid JSON")
+    }
+
+    /// Every provisioned command must POST the hook's stdin JSON as the
+    /// request body: curl reads it from `@-`, the WSL relay from a quoted
+    /// `'@-'`, and the PowerShell callbacks from the console.
+    fn forwards_hook_stdin(command: &str) -> bool {
+        command.contains("--data-binary @-")
+            || command.contains("--data-binary '@-'")
+            || (command.contains("[Console]::In.ReadToEnd()")
+                && command.contains("Invoke-WebRequest"))
+    }
+
+    /// A Windows callback is installed as encoded PowerShell, so decode it
+    /// before asserting on the script it carries.
+    fn decoded_hook_command(command: &str) -> String {
+        crate::env::decode_powershell_command(command).unwrap_or_else(|| command.to_string())
     }
 
     fn provision_codex(project: &Path) {
@@ -2736,17 +2964,21 @@ mod tests {
         ] {
             let command = hooks["hooks"][event][0]["hooks"][0]["command"]
                 .as_str()
+                .map(decoded_hook_command)
                 .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
             assert!(
                 command.contains("/api/attention/"),
                 "{event} must POST to the attention endpoint: {command}"
             );
             assert!(
-                command.contains("--data-binary @-"),
+                forwards_hook_stdin(&command),
                 "{event} must forward the hook stdin as the POST body: {command}"
             );
             if event == "PreToolUse" {
-                assert_eq!(hooks["hooks"][event][0]["matcher"].as_str(), Some("^request_user_input$"));
+                assert_eq!(
+                    hooks["hooks"][event][0]["matcher"].as_str(),
+                    Some("^request_user_input$")
+                );
             } else if event == "PostToolUse" {
                 assert!(
                     hooks["hooks"][event][0].get("matcher").is_none(),
@@ -2828,6 +3060,31 @@ mod tests {
         assert_eq!(output.stdout, b"{}");
     }
 
+    /// The `command` a WSL node runs: a POSIX script, not the cmd-runnable
+    /// PowerShell a Windows node gets. `sh` has no `curl.exe`, so the probe
+    /// takes its Linux branch; stubbing `curl` then fails the callback, which
+    /// must still emit `{}`.
+    #[cfg(unix)]
+    #[test]
+    fn wsl_shell_attention_hook_emits_json_after_callback_failure() {
+        use std::process::Command;
+
+        let command = attention_hook_wsl_shell_command("http://localhost:1992/api/attention/42");
+        let script = format!("set -e; curl() {{ return 22; }}; {command}");
+        let output = Command::new("sh")
+            .args(["-c", &script])
+            .output()
+            .expect("run the WSL attention hook in a POSIX shell");
+
+        assert!(
+            output.status.success(),
+            "hook failed with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"{}");
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_fallback_emits_json_after_callback_failure() {
@@ -2884,7 +3141,10 @@ mod tests {
         provision_codex(temp.path());
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
-        assert!(config.contains("model = \"gpt-5.2-codex\""), "config: {config}");
+        assert!(
+            config.contains("model = \"gpt-5.2-codex\""),
+            "config: {config}"
+        );
         assert!(config.contains("web_search = true"), "config: {config}");
         assert!(config.contains("hooks = true"), "config: {config}");
         assert_eq!(
@@ -2907,7 +3167,10 @@ mod tests {
 
         let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
         assert!(config.contains("model = \"gpt-5.2-codex\""));
-        assert!(config.contains("[features]\nhooks = true"), "config: {config}");
+        assert!(
+            config.contains("[features]\nhooks = true"),
+            "config: {config}"
+        );
     }
 
     /// Injection only owns the `hooks` key of hooks.json — unrelated keys the
@@ -2948,19 +3211,32 @@ mod tests {
         let hooks = read_hooks_json(temp.path());
         assert_eq!(hooks["description"], "user config");
         assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(hooks["hooks"]["PermissionRequest"].as_array().unwrap().len(), 2);
-        assert_eq!(hooks["hooks"]["Stop"][0]["hooks"][0]["command"], "user-stop");
+        assert_eq!(
+            hooks["hooks"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "user-stop"
+        );
         assert_eq!(
             hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
             "user-permission"
         );
-        assert!(hooks["hooks"]["Stop"].as_array().unwrap().iter().any(|group| {
-            group["hooks"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(is_buildmesh_hook_handler)
-        }));
+        assert!(hooks["hooks"]["Stop"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| {
+                group["hooks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(is_buildmesh_hook_handler)
+            }));
     }
 
     #[test]
@@ -2968,7 +3244,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let codex_dir = temp.path().join(".codex");
         std::fs::create_dir_all(&codex_dir).unwrap();
-        let old_hook = attention_hook_handler(42);
+        let old_hook = attention_hook_handler(42, EnvType::Windows);
         let old = serde_json::json!({
             "hooks": {
                 "PostToolUse": [{
@@ -2977,13 +3253,67 @@ mod tests {
                 }]
             }
         });
-        std::fs::write(codex_dir.join("hooks.json"), serde_json::to_string(&old).unwrap())
-            .unwrap();
+        std::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string(&old).unwrap(),
+        )
+        .unwrap();
 
         provision_codex(temp.path());
 
         let hooks = read_hooks_json(temp.path());
         assert!(hooks["hooks"]["PostToolUse"][0].get("matcher").is_none());
+    }
+
+    /// Issue #2036 upgrade path: a node provisioned by an older Buildmesh has
+    /// the bash-script `command` on disk. That handler still carries the
+    /// Buildmesh `statusMessage`, so re-provisioning has to replace it in
+    /// place — appending a second handler would leave cmd.exe parsing the
+    /// script forever.
+    #[test]
+    fn stale_windows_command_is_replaced_not_duplicated() {
+        let temp = TempDir::new().unwrap();
+        let codex_dir = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        let stale = serde_json::json!({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": attention_hook_wsl_shell_command("http://localhost:1992/api/attention/42"),
+                        "commandWindows": attention_hook_windows_command("http://localhost:1992/api/attention/42"),
+                        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            codex_dir.join("hooks.json"),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        provision_codex(temp.path());
+
+        let hooks = read_hooks_json(temp.path());
+        let handlers = hooks["hooks"]["Stop"][0]["hooks"]
+            .as_array()
+            .expect("Stop handlers");
+        assert_eq!(
+            handlers.len(),
+            1,
+            "a stale Buildmesh handler must be replaced, not duplicated: {hooks:#}"
+        );
+        let url = format!(
+            "http://localhost:{}/api/attention/42",
+            crate::http_server::current_http_port()
+        );
+        let expected = attention_hook_default_command(&url, EnvType::Windows);
+        assert_eq!(
+            handlers[0]["command"].as_str(),
+            Some(expected.as_str()),
+            "Stop must be re-provisioned with the cmd-runnable callback: {handlers:#?}"
+        );
     }
 
     #[test]
@@ -2996,7 +3326,7 @@ mod tests {
 
         let error = ensure_hooks_json_content(
             &std::fs::read_to_string(&path).unwrap(),
-            &attention_hook_handler(42),
+            &attention_hook_handler(42, EnvType::Windows),
         )
         .unwrap_err();
         assert!(error.contains("parse hooks.json"));
@@ -3005,7 +3335,8 @@ mod tests {
 
     #[test]
     fn config_feature_merge_replaces_false_without_duplicate_keys() {
-        let existing = "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
+        let existing =
+            "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
         let updated = ensure_hooks_feature_content(existing).unwrap();
         assert_eq!(updated.matches("hooks =").count(), 1);
         assert!(updated.contains("hooks = true"));
@@ -3063,7 +3394,11 @@ trust_level = "untrusted" # preserve this explanation
         let updated = ensure_project_trust_content(existing, project, EnvType::Windows).unwrap();
         let document = updated.parse::<DocumentMut>().unwrap();
         let projects = document["projects"].as_table_like().unwrap();
-        assert_eq!(projects.iter().count(), 1, "must not create a duplicate table");
+        assert_eq!(
+            projects.iter().count(),
+            1,
+            "must not create a duplicate table"
+        );
         let (_, project_table) = projects.iter().next().unwrap();
         assert_eq!(
             project_table["trust_level"].as_str(),
@@ -3152,77 +3487,82 @@ web_search = true
     }
 
     /// The native fallback is encoded PowerShell so Codex can invoke it through
-    /// either PowerShell or cmd.exe without shell-specific quoting.
+    /// either PowerShell or cmd.exe without shell-specific quoting. Both
+    /// `command` and `commandWindows` carry it on a native Windows node, so
+    /// exercise both: a pre-0.131.0 Codex ignores the override and runs
+    /// `command` through cmd.exe (issue #2036).
     #[cfg(windows)]
     #[test]
     fn windows_attention_hook_posts_stdin_through_powershell_and_cmd() {
         use std::os::windows::process::CommandExt;
         use std::process::{Command, Stdio};
-        for shell in ["powershell.exe", "cmd.exe"] {
-            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-            let endpoint = format!("http://{}/api/attention/42", server.server_addr());
-            let handler = attention_hook_handler(42);
-            let original_url = format!(
-                "http://localhost:{}/api/attention/42",
-                crate::http_server::current_http_port()
-            );
-            let encoded_command = handler["commandWindows"]
-                .as_str()
-                .expect("commandWindows hook missing");
-            let script = crate::env::decode_powershell_command(encoded_command)
-                .expect("Windows hook command must be encoded PowerShell")
-                .replace(&original_url, &endpoint);
-            let command = format!(
-                "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-                crate::env::encode_powershell(&script)
-            );
-            let receiver = std::thread::spawn(move || {
-                let mut request = server
-                    .recv_timeout(std::time::Duration::from_secs(15))
-                    .unwrap()?;
-                let mut body = String::new();
-                request.as_reader().read_to_string(&mut body).unwrap();
-                let path = request.url().to_owned();
-                request.respond(tiny_http::Response::empty(200)).unwrap();
-                Some((path, body))
-            });
-            let mut process = Command::new(shell);
-            if shell == "powershell.exe" {
-                process.args(["-NoProfile", "-NonInteractive", "-Command"]);
-                process.arg(&command);
-            } else {
-                process.args(["/D", "/C"]);
-                // `/C` consumes a shell command line. Passing it through
-                // `arg()` adds Windows quoting that changes cmd's parse.
-                process.raw_arg(format!(" {command}"));
+        for field in ["command", "commandWindows"] {
+            for shell in ["powershell.exe", "cmd.exe"] {
+                let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+                let endpoint = format!("http://{}/api/attention/42", server.server_addr());
+                let handler = attention_hook_handler(42, EnvType::Windows);
+                let original_url = format!(
+                    "http://localhost:{}/api/attention/42",
+                    crate::http_server::current_http_port()
+                );
+                let encoded_command = handler[field]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{field} hook missing"));
+                let script = crate::env::decode_powershell_command(encoded_command)
+                    .expect("Windows hook command must be encoded PowerShell")
+                    .replace(&original_url, &endpoint);
+                let command = format!(
+                    "powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+                    crate::env::encode_powershell(&script)
+                );
+                let receiver = std::thread::spawn(move || {
+                    let mut request = server
+                        .recv_timeout(std::time::Duration::from_secs(15))
+                        .unwrap()?;
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let path = request.url().to_owned();
+                    request.respond(tiny_http::Response::empty(200)).unwrap();
+                    Some((path, body))
+                });
+                let mut process = Command::new(shell);
+                if shell == "powershell.exe" {
+                    process.args(["-NoProfile", "-NonInteractive", "-Command"]);
+                    process.arg(&command);
+                } else {
+                    process.args(["/D", "/C"]);
+                    // `/C` consumes a shell command line. Passing it through
+                    // `arg()` adds Windows quoting that changes cmd's parse.
+                    process.raw_arg(format!(" {command}"));
+                }
+                let mut child = process
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .unwrap();
+                let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
+                child
+                    .stdin
+                    .take()
+                    .unwrap()
+                    .write_all(payload.as_bytes())
+                    .unwrap();
+                let output = child.wait_with_output().unwrap();
+                let received = receiver.join().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{field} through {shell} command {command:?}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    received,
+                    Some(("/api/attention/42".into(), payload.into())),
+                    "{field} through {shell}"
+                );
+                assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
             }
-            let mut child = process
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .creation_flags(0x08000000)
-                .spawn()
-                .unwrap();
-            let payload = r#"{"hook_event_name":"Stop","session_id":"controlled-session"}"#;
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(payload.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            let received = receiver.join().unwrap();
-            assert!(
-                output.status.success(),
-                "{shell} command {command:?}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(
-                received,
-                Some(("/api/attention/42".into(), payload.into())),
-                "{shell}"
-            );
-            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
         }
     }
 
@@ -3235,47 +3575,72 @@ web_search = true
             let handler = &hooks["hooks"][event][0]["hooks"][0];
             let command = handler["command"]
                 .as_str()
-                .unwrap_or_else(|| panic!("{event} unix command missing: {hooks:#}"));
+                .map(decoded_hook_command)
+                .unwrap_or_else(|| panic!("{event} command missing: {hooks:#}"));
             let windows = handler["commandWindows"]
                 .as_str()
+                .map(decoded_hook_command)
                 .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
-            let decoded_windows = crate::env::decode_powershell_command(windows);
-            let windows = decoded_windows.as_deref().unwrap_or(windows);
-            assert!(
-                !command.contains("cmd.exe") && !command.contains("sh -c"),
-                "{event} unix command must not nest a shell Codex already launches: {command}"
-            );
-            assert!(
-                !windows.contains("cmd.exe"),
-                "{event} commandWindows must not nest cmd.exe; the Codex hook runner owns shell execution: {windows}"
-            );
-            assert!(
-                !command.contains("BUILDMESH_PORT")
-                    && !command.contains("BUILDMESH_SESSION_ID")
-                    && !windows.contains("BUILDMESH_PORT")
-                    && !windows.contains("BUILDMESH_SESSION_ID"),
-                "{event} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {command} / {windows}"
-            );
-            assert!(
-                command.contains("/api/attention/42") && windows.contains("/api/attention/42"),
-                "{event} must bake the node id into the callback URL: {command} / {windows}"
-            );
-            assert!(
-                command.contains("http://localhost:") && windows.contains("http://localhost:"),
-                "{event} must use localhost (WSL loopback relay), not 127.0.0.1: {command} / {windows}"
-            );
-            assert!(
-                command.contains("-o /dev/null"),
-                "{event} must discard HTTP response bodies: {command}"
-            );
-            if crate::env::is_wsl_host() {
-                assert!(windows.contains("-o /dev/null"), "{event}: {windows}");
-            } else {
+            for (field, value) in [("command", &command), ("commandWindows", &windows)] {
                 assert!(
-                    windows.contains("Invoke-WebRequest") && windows.contains("Out-Null"),
-                    "{event}: {windows}"
+                    !value.contains("cmd.exe") && !value.contains("sh -c"),
+                    "{event} {field} must not nest a shell Codex already launches: {value}"
+                );
+                assert!(
+                    !value.contains("BUILDMESH_PORT") && !value.contains("BUILDMESH_SESSION_ID"),
+                    "{event} {field} must bake the callback URL; Codex hook env is a Core snapshot that drops BUILDMESH_*: {value}"
+                );
+                assert!(
+                    value.contains("/api/attention/42"),
+                    "{event} {field} must bake the node id into the callback URL: {value}"
+                );
+                assert!(
+                    value.contains("http://localhost:"),
+                    "{event} {field} must use localhost (WSL loopback relay), not 127.0.0.1: {value}"
+                );
+                assert!(
+                    forwards_hook_stdin(value),
+                    "{event} {field} must POST the hook stdin as the request body: {value}"
+                );
+                assert!(
+                    value.contains("-o /dev/null") || value.contains("Out-Null"),
+                    "{event} {field} must discard the HTTP response body: {value}"
                 );
             }
+        }
+    }
+
+    /// Issue #2036: `command` is the fallback a pre-0.131.0 Codex runs when it
+    /// does not know `commandWindows`, and it is also what a non-Windows Codex
+    /// always runs. It therefore has to be written for the shell that will
+    /// really parse it — the target Codex binary, not the Buildmesh host.
+    #[test]
+    fn command_is_written_for_the_target_codex_binary() {
+        let url = "http://localhost:1992/api/attention/42";
+
+        // A WSL node runs a Linux Codex on either host, so `command` reaches
+        // `$SHELL -lc` and must stay a POSIX script.
+        let wsl = attention_hook_default_command(url, EnvType::Wsl);
+        assert!(
+            crate::env::decode_powershell_command(&wsl).is_none(),
+            "a WSL Codex parses `command` with $SHELL -lc, never PowerShell: {wsl}"
+        );
+        assert!(wsl.contains("printf '{}'"), "{wsl}");
+
+        // Every runtime whose Codex is a Windows binary gets the cmd-runnable
+        // callback in both fields.
+        let windows_targets: &[EnvType] = if cfg!(windows) {
+            &[EnvType::Windows, EnvType::WindowsInterop]
+        } else {
+            &[EnvType::WindowsInterop]
+        };
+        for env_type in windows_targets {
+            assert_eq!(
+                attention_hook_default_command(url, *env_type),
+                attention_hook_windows_command(url),
+                "{env_type} Codex falls back to `command` on pre-0.131.0 binaries, so it must \
+                 be the same cmd-runnable callback as commandWindows"
+            );
         }
     }
 
@@ -3310,5 +3675,4 @@ web_search = true
             resume.trailing_args
         );
     }
-
 }

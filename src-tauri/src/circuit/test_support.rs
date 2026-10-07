@@ -199,11 +199,39 @@ fn close_reviewer_before(graph: &mut CircuitGraph, next: &str) {
     });
 }
 
+/// The issue-review topology shipped just before merge verification: the
+/// implementer was asked to merge and the run completed once that was delivered.
+pub(crate) fn publication_flow_issue_review() -> CircuitGraph {
+    let mut graph = CircuitGraph::publication_flow_template();
+    graph.replace_stock_text(
+        "merge",
+        &crate::review_contract::merge_approved_pr(
+            "PR #{{pr.number}} ({{pr.url}})",
+            " {{pr.number}}",
+        ),
+        &crate::review_contract::legacy_merge_approved_pr(
+            "PR #{{pr.number}} ({{pr.url}})",
+            " {{pr.number}}",
+        ),
+    );
+    graph.validate().unwrap();
+    graph
+}
+
 /// The issue-review topology shipped before the publication flow: a reviewer
 /// closed after every feedback round, re-entry at the wrap-up, no merge.
 pub(crate) fn pre_publication_issue_review() -> CircuitGraph {
     let mut graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
-    let added = ["review_round", "re_review", "merge"];
+    let added = [
+        "review_round",
+        "re_review",
+        "merge",
+        "merge_wait",
+        "merge_verify",
+        "close_implementer",
+        "merge_blocked",
+        "merge_unconfirmed",
+    ];
     graph
         .nodes
         .retain(|node| !added.contains(&node.id.as_str()));
@@ -222,10 +250,28 @@ pub(crate) fn pre_publication_issue_review() -> CircuitGraph {
     );
     graph.replace_stock_text(
         "complete",
-        CircuitGraph::PR_APPROVED_MESSAGE,
+        CircuitGraph::PR_MERGED_MESSAGE,
         CircuitGraph::LEGACY_PR_APPROVED_MESSAGE,
     );
     graph.validate().unwrap();
+    graph
+}
+
+/// A saved issue-review circuit as a user's database held it before the
+/// feedback route repair (the fixture is that row's graph): the verdict upgrade
+/// had left a `completed` route into `follow_feedback` beside the `working` one.
+pub(crate) fn stuck_issue_review() -> CircuitGraph {
+    CircuitGraph::from_json(include_str!(
+        "../../tests/fixtures/stuck-issue-review-circuit.json"
+    ))
+    .unwrap()
+}
+
+/// [`stuck_issue_review`] after the repair and the upgrades it unblocks.
+pub(crate) fn repaired_stuck_issue_review() -> CircuitGraph {
+    let mut graph = stuck_issue_review();
+    assert!(graph.repair_issue_review_feedback_route());
+    assert!(graph.upgrade_issue_review_publication_flow());
     graph
 }
 

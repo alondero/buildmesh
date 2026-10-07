@@ -17,8 +17,13 @@ beforeEach(() => {
 });
 
 const entry: CircuitHistoryEntry = { id: 7, node_id: 'comment', attempt: 1,
-  kind: 'effect_possible_dispatch', detail: 'github', source: 'circuit_worker', disposition: 'possible_dispatch',
+  kind: 'checkpoint_reason', detail: 'github', source: 'circuit_worker', disposition: 'waiting',
   observed_at: '2026-09-24T12:00:00Z' };
+
+/** The default view leaves bookkeeping out; reveal it. */
+async function showTechnical() {
+  fireEvent.click(await screen.findByTestId('history-technical-toggle'));
+}
 
 const historyEntry = (overrides: Partial<CircuitHistoryEntry>): CircuitHistoryEntry => ({
   id: 1, node_id: null, attempt: null, kind: 'run_transition', detail: 'running',
@@ -42,6 +47,9 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
   expect(await screen.findByText(/all 3 circuit-run slot/)).toBeTruthy();
+  // Capacity and configuration are bookkeeping: hidden until asked for.
+  expect(screen.queryByText(/Step capacity wait/)).toBeNull();
+  await showTechnical();
   expect(screen.getByText(/Step capacity wait — step slots busy · agent slot free/)).toBeTruthy();
   expect(screen.getByText(/behavior revision 1/)).toBeTruthy();
   expect(screen.getByText(/graph abcdef012345…/)).toBeTruthy();
@@ -58,7 +66,7 @@ it('renders wait, capacity, configuration and recovery history with source, disp
   expect(continuation.querySelector('.truncate')).toBeNull();
   const capacity = screen.getByTestId('history-entry-2');
   expect(capacity.textContent).toContain('spawn');
-  expect(capacity.textContent).toContain('attempt 2');
+  expect(capacity.textContent).toContain('pass 2');
 });
 
 it('renders a freed capacity window as cleared with a resolved disposition, not an active wait', async () => {
@@ -70,6 +78,7 @@ it('renders a freed capacity window as cleared with a resolved disposition, not 
   ], coverage: [], checkpoints: [] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
   expect(await screen.findByText(/Step capacity wait cleared/)).toBeTruthy();
   expect(screen.queryByText(/step slots busy/)).toBeNull();
   const entry = screen.getByTestId('history-entry-1');
@@ -79,7 +88,7 @@ it('renders a freed capacity window as cleared with a resolved disposition, not 
 
 it('renders a resolved evidence wait as cleared, keeping its attempt identity', async () => {
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
-    historyEntry({ id: 1, node_id: 'reviewer', attempt: 1, kind: 'evidence_window_changed',
+    historyEntry({ id: 1, node_id: 'reviewer', attempt: 2, kind: 'evidence_window_changed',
       source: 'circuit_worker.reconciliation', disposition: 'resolved',
       // The real clear writes an empty attempt string, not a removed key.
       detail: JSON.stringify({
@@ -89,12 +98,14 @@ it('renders a resolved evidence wait as cleared, keeping its attempt identity', 
   ], coverage: [], checkpoints: [] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
   expect(await screen.findByText(/Evidence wait cleared/)).toBeTruthy();
   expect(screen.queryByText(/Evidence wait — attempt/)).toBeNull();
   const entry = screen.getByTestId('history-entry-1');
   expect(entry.dataset.disposition).toBe('resolved');
-  // Identity survives the resolution: the entry still names attempt 1.
-  expect(entry.textContent).toContain('attempt 1');
+  // Identity survives the resolution: the entry still names its step and pass.
+  expect(entry.textContent).toContain('reviewer');
+  expect(entry.textContent).toContain('pass 2');
 });
 
 it('renders provenance and the entire final response without a JSON wrapper or clipping', async () => {
@@ -107,6 +118,7 @@ it('renders provenance and the entire final response without a JSON wrapper or c
   }) }],coverage: [], checkpoints:[] });
   const {container}=render(<CircuitEvidenceHistory runId={3} updatedAt="one"/>);
   fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
   expect(await screen.findByText('Complete final assistant response')).toBeTruthy();
   expect(screen.getByText(/Authoritative source/)).toBeTruthy();
   expect(screen.getByText(/Source: codex_rollout_task_complete/)).toBeTruthy();
@@ -120,7 +132,7 @@ it('refreshes external operator updates even when the run timestamp is unchanged
   vi.mocked(circuitRunHistory).mockResolvedValue({entries:[entry], coverage: [], checkpoints:[]});
   const {container} = render(<CircuitEvidenceHistory runId={3} updatedAt="unchanged" />);
   fireEvent.click(container.querySelector('summary')!);
-  await screen.findByText('Action may have been sent');
+  await screen.findByText('Checkpoint explanation');
   vi.mocked(circuitRunHistory).mockResolvedValue({entries:[entry, {...entry,id:8,kind:'operator_attestation',detail:'Recorded in another window'}],coverage: [], checkpoints:[]});
   await act(async () => { await emit('circuit-run-updated',{run_id:4,state:'running'}); });
   expect(circuitRunHistory).toHaveBeenCalledTimes(1);
@@ -133,8 +145,9 @@ it('shows ordered evidence and sends a reasoned outcome against the displayed re
   vi.mocked(recordCircuitOutcome).mockResolvedValue(undefined);
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
-  expect(await screen.findByText('Action may have been sent')).toBeTruthy();
-  expect(screen.getByText(/2026-09-24T12:00:00Z/)).toBeTruthy();
+  expect(await screen.findByText('Checkpoint explanation')).toBeTruthy();
+  // Wall-clock time on the row; the exact recorded stamp is its tooltip.
+  expect(container.querySelector('time')?.getAttribute('title')).toBe('2026-09-24T12:00:00Z');
   fireEvent.change(screen.getByLabelText('Reason and supporting evidence'), { target: { value: 'The remote comment exists.' } });
   fireEvent.click(screen.getByRole('button', { name: 'Record completed' }));
   await waitFor(() => expect(recordCircuitOutcome).toHaveBeenCalledWith({
@@ -152,6 +165,7 @@ it('offers read-only evidence recheck for a recorded OpenPr target', async () =>
   vi.mocked(recordCircuitOutcome).mockResolvedValue(undefined);
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
   expect(await screen.findByText('Action target recorded')).toBeTruthy();
   fireEvent.change(screen.getByLabelText('Reason and supporting evidence'), {
     target: { value: 'Check only the saved repository branch; do not create a pull request.' },
@@ -288,7 +302,58 @@ it('explains an observation blocker and its resolution without showing raw JSON'
   ], coverage: [], checkpoints: [] });
   const { container } = render(<CircuitEvidenceHistory runId={239} updatedAt="ready" />);
   fireEvent.click(container.querySelector('summary')!);
+  await showTechnical();
   expect(await screen.findByText(message)).toBeTruthy();
   expect(screen.getByText('Observation blocker cleared; the current report can be checked.')).toBeTruthy();
   expect(screen.getByTestId('history-entry-101').querySelector('pre')).toBeNull();
+});
+
+
+it('leads with the events that matter and says how much bookkeeping is behind the toggle', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, kind: 'run_transition', detail: 'running', observed_at: '2026-10-05T14:48:45.032Z' }),
+    historyEntry({ id: 2, kind: 'observation_readiness', node_id: 'reviewer', attempt: 1,
+      detail: JSON.stringify({ blocker: null, message: null }), disposition: 'resolved' }),
+    historyEntry({ id: 3, kind: 'step_transition', node_id: 'reviewer', attempt: 1, detail: 'completed' }),
+    historyEntry({ id: 4, kind: 'step_transition', node_id: 'review_classifier', attempt: 2, detail: 'failed',
+      observed_at: '2026-10-05T19:30:52.975Z' }),
+    historyEntry({ id: 5, kind: 'run_transition', detail: 'failed', observed_at: '2026-10-05T19:30:52.975Z' }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(
+    <CircuitEvidenceHistory runId={3} updatedAt="one" nodeLabel={(id) => (id === 'review_classifier' ? 'Review' : id)} />,
+  );
+  fireEvent.click(container.querySelector('summary')!);
+
+  const toggle = await screen.findByTestId('history-technical-toggle');
+  expect(toggle.textContent).toBe('Show technical detail (2 more)');
+  expect(screen.getByTestId('history-entry-1').textContent).toContain('Run: Running');
+  // A routine completed step and a resolved observation are not shown.
+  expect(screen.queryByTestId('history-entry-2')).toBeNull();
+  expect(screen.queryByTestId('history-entry-3')).toBeNull();
+  // A failed step names its role and pass, not the raw node id.
+  const failed = screen.getByTestId('history-entry-4');
+  expect(failed.textContent).toContain('Failed');
+  expect(failed.textContent).toContain('Review · pass 2');
+  expect(failed.textContent).not.toContain('review_classifier');
+  // No raw `failed` payload is repeated under a transition's title.
+  expect(failed.querySelector('pre')).toBeNull();
+
+  fireEvent.click(toggle);
+  expect(screen.getByTestId('history-technical-toggle').textContent).toBe('Hide technical detail');
+  expect(screen.getByTestId('history-entry-2')).toBeTruthy();
+  expect(screen.getByTestId('history-entry-3')).toBeTruthy();
+});
+
+it('shows each entry as a wall-clock time and keeps the exact stamp as its tooltip', async () => {
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [
+    historyEntry({ id: 1, kind: 'run_transition', detail: 'failed', observed_at: '2026-10-05T19:30:52.975Z' }),
+  ], coverage: [], checkpoints: [] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  await screen.findByTestId('history-entry-1');
+  const time = container.querySelector('time')!;
+  expect(time.getAttribute('title')).toBe('2026-10-05T19:30:52.975Z');
+  expect(time.getAttribute('datetime')).toBe('2026-10-05T19:30:52.975Z');
+  // `HH:MM:SS` (today) or `D Mon HH:MM:SS` — never the raw ISO string.
+  expect(time.textContent).toMatch(/^(\d{1,2} [A-Z][a-z]{2} )?\d{2}:\d{2}:\d{2}$/);
 });

@@ -112,7 +112,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     // removes the information entirely.
     seedAgentNodes([{ ...NODE, signal_health: 'unverified' }], NODE.id);
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const dot = screen.getByRole('status');
+    const dot = screen.getByRole('img', { name: 'Running' });
     expect(dot.getAttribute('title')).toContain('not confirmed yet');
     expect(screen.queryByRole('img', { name: /Signal/ })).toBeNull();
   });
@@ -121,7 +121,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     seedAgentNodes([{ ...NODE, signal_health: 'unavailable' }], NODE.id);
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     expect(screen.getByRole('img', { name: 'Attention signal unavailable' })).toBeTruthy();
-    expect(screen.getByRole('status').getAttribute('title')).toContain('No status signal is reaching Buildmesh');
+    expect(screen.getByRole('img', { name: 'Running' }).getAttribute('title')).toContain('No status signal is reaching Buildmesh');
   });
   it('keeps metadata available on demand without repeating it in the title', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
@@ -232,7 +232,7 @@ describe('GridNodeHeader contextual information and actions', () => {
     const onReveal = vi.fn();
     render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }}
       attentionOutcome={attentionOutcome} onReveal={onReveal} onBuildRun={() => {}} />);
-    expect(screen.getByRole('status', { name: 'Needs input' })).toBeTruthy();
+    expect(screen.getByRole('img', { name: 'Needs input' })).toBeTruthy();
     const chip = screen.getByTestId('circuit-outcome-chip');
     expect(chip.dataset.outcome).toBe('needs_input');
     expect(chip.getAttribute('title')).toBe('Circuit is waiting for you: approve the deploy.');
@@ -281,28 +281,64 @@ describe('GridNodeHeader contextual information and actions', () => {
     expect(screen.queryByTestId('circuit-outcome-chip')).toBeNull();
   });
 
-  it('reserves the ownership cell without rendering an unpiloted indicator', () => {
+  it('draws one glyph for the node and no orbit while it is unpiloted', () => {
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    const cell = screen.getByTestId('circuit-indicator-cell');
-    expect(cell.className).toContain('w-3.5');
-    expect(cell.querySelector('[data-testid="circuit-indicator"]')).toBeNull();
+    expect(screen.getAllByTestId('node-status-glyph')).toHaveLength(1);
+    expect(screen.getByTestId('node-status-glyph').querySelector('[data-orbit]')).toBeNull();
   });
 
+  it('lets the card activity tone recolour the glyph and keeps the title-node shape unless the activity label would disagree', () => {
+    // The override exists to keep the card's visible label consistent with
+    // its shape: only a tone whose label would lie under the title-node shape
+    // (needs attention, needs input) is allowed to replace the shape. 'active'
+    // tones (Running, Starting, Waiting for background work, etc.) and the
+    // idle tone keep the title-node shape so a pending member on a grouped
+    // card still draws the dashed pulsing circle that DESIGN.md documents.
+    seedAgentNodes([{ ...NODE, status: 'pending' }], NODE.id);
+    const { rerender } = render(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs attention', tone: 'error' }} onBuildRun={() => {}} />);
+    // 'Needs attention' overrides the title-node's dashed circle to solid;
+    // otherwise the card label would say "Needs attention" while the circle
+    // looked like it was still starting.
+    expect(screen.getByRole('img', { name: 'Needs attention' }).getAttribute('data-shape')).toBe('solid');
+    expect(screen.getByRole('img', { name: 'Needs attention' }).querySelector('.text-status-error')).toBeTruthy();
 
-  it('renders Circuit terminal ownership as Done', () => {
+    seedAgentNodes([{ ...NODE, status: 'idle' }], NODE.id);
+    rerender(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs attention', tone: 'error' }} onBuildRun={() => {}} />);
+    // 'idle' ring under a 'Needs attention' label would contradict itself.
+    expect(screen.getByRole('img', { name: 'Needs attention' }).getAttribute('data-shape')).toBe('solid');
+
+    rerender(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Needs input', tone: 'warning' }} onBuildRun={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Needs input' }).querySelector('.text-status-warning')).toBeTruthy();
+
+    rerender(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Implementing', tone: 'active' }} onBuildRun={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Implementing' }).querySelector('.text-accent-cyan')).toBeTruthy();
+
+    // An idle activity adds no tone, so the circle is the node's own status.
+    rerender(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Waiting', tone: 'idle' }} onBuildRun={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Waiting' }).getAttribute('data-shape')).toBe('ring');
+
+    // A grouped card with a pending member keeps the dashed pulsing circle under 'Starting'.
+    seedAgentNodes([{ ...NODE, status: 'pending' }], NODE.id);
+    rerender(<GridNodeHeader nodeId={NODE.id} activity={{ label: 'Starting', tone: 'active' }} onBuildRun={() => {}} />);
+    expect(screen.getByRole('img', { name: 'Starting' }).getAttribute('data-shape')).toBe('dashed');
+  });
+
+  it('renders Circuit terminal ownership as the closed Done ring', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'completed', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Circuit done/ })).toBeTruthy();
+    const glyph = screen.getByRole('button', { name: /Circuit done/ });
+    expect(glyph.querySelector('[data-orbit="closed"]')).toBeTruthy();
   });
 
-  it('opens the run in the Circuits Probe from the title-bar Pilot light', () => {
+  it('opens the run in the Circuits Probe from the title-bar glyph', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'running', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
     const indicator = screen.getByRole('button', { name: /Circuit active/ });
     expect(indicator.getAttribute('aria-label'))
-      .toBe('Circuit active. Open this Circuit run in the Circuits Probe.');
+      .toBe('Running. Circuit active. Open this Circuit run in the Circuits Probe.');
+    expect(indicator.querySelector('[data-orbit="comet"]')).toBeTruthy();
     fireEvent.click(indicator);
     expect(useUIStore.getState().probeTab).toBe('circuits');
     expect(useUIStore.getState().probeOpen).toBe(true);
@@ -310,22 +346,23 @@ describe('GridNodeHeader contextual information and actions', () => {
   });
 
 
-  it('renders waiting and failure tones without changing the ownership cell', () => {
+  it('draws waiting as a half ring and a Circuit failure as a dashed ring', () => {
     seedAgentNodes([{ ...NODE, status: 'awaiting_input' }], NODE.id);
     useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'running', parent_node_id: null }} });
     const { rerender } = render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Circuit waiting/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit waiting/ }).querySelector('[data-orbit="half"]')).toBeTruthy();
 
     useAgentNodeStore.setState({ circuitOwnerships: {1: { node_id: 1, run_id: 2, circuit_id: 3, circuit_name: 'Review', state: 'failed', parent_node_id: null }} });
     rerender(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByRole('button', { name: /Circuit needs attention/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Circuit needs attention/ }).querySelector('[data-orbit="dashed"]')).toBeTruthy();
   });
 
-  it('keeps cancelled Circuit history out of the compact indicator', () => {
+  it('keeps cancelled Circuit history out of the glyph', () => {
     useAgentNodeStore.setState({ circuitOwnerships: { 1: { node_id: 1, run_id: 2, circuit_id: 9,
       circuit_name: 'Review workflow', state: 'cancelled', parent_node_id: null } } });
     render(<GridNodeHeader nodeId={NODE.id} onBuildRun={() => {}} />);
-    expect(screen.getByTestId('circuit-indicator-cell').querySelector('[data-testid="circuit-indicator"]')).toBeNull();
+    expect(screen.getByTestId('node-status-glyph').querySelector('[data-orbit]')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Circuit/ })).toBeNull();
   });
 });
 describe('GridNodeHeader solo view (#65; View Modes wayfinder #982)', () => {

@@ -1495,7 +1495,11 @@ mod tests {
     }
 
     fn with_user_home_redirect() -> HomeRedirect {
-        let lock = USER_HOME_LOCK
+        // The crate-wide env lock, not a module-local one: a local lock
+        // cannot exclude the other tests that mutate the process
+        // environment, so two of them racing on `set_var` can still leave
+        // USERPROFILE pointing at the *other* test's temp dir (issue #2048).
+        let lock = crate::env::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp = TempDir::new().unwrap();
@@ -1504,11 +1508,4 @@ mod tests {
         std::env::set_var(key, temp.path());
         HomeRedirect { temp, key, previous, _lock: lock }
     }
-
-    /// Process-wide lock for tests that mutate USERPROFILE / HOME.
-    /// Without this, two tests in parallel racing on `set_var` can
-    /// leave the value pointing at the *other* test's temp dir when
-    /// either side calls `grok_home()`, which then writes to the
-    /// wrong location and fails the assertion.
-    static USER_HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

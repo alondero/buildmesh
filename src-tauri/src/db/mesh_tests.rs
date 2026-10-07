@@ -3,21 +3,14 @@
 //! Tests that verify create_mesh handles duplicate paths gracefully,
 //! returning the existing mesh instead of crashing with UNIQUE constraint.
 //!
-//! Each test acquires [`MESH_TESTS_LOCK`] at the top of its body to
-//! serialise against the other tests in this module. The process-wide
-//! `db::DB` is a `OnceCell<Mutex<Connection>>` — once any test in the
-//! binary calls `db::init`, every later `init` silently no-ops and
-//! writes go to the winner's connection (issue #1334). Tests outside
-//! this module are unaffected.
+//! Tests that need the process-wide database install a private one
+//! for their own thread with [`crate::db::test_support::isolated`], so a
+//! parallel run gives every test its own rows and this module no longer
+//! needs a serialisation lock (issue #2048). The tests that only need raw
+//! SQL own a `Connection` directly and stay independent of the seam.
 
 #[cfg(test)]
 mod tests {
-    static MESH_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn serial() -> std::sync::MutexGuard<'static, ()> {
-        MESH_TESTS_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 
     /// The GitHub clone flow creates its mesh with the cloned repo's resolved
     /// default branch rather than the `origin/main` literal, so the new mesh
@@ -25,9 +18,7 @@ mod tests {
     /// `origin/main`, and the explicit overload persists what it's given.
     #[test]
     fn create_mesh_with_base_ref_persists_supplied_ref() {
-        let _serial = serial();
-        let temp = tempfile::tempdir().unwrap();
-        crate::db::init(&temp.path().join("db.sqlite")).unwrap();
+        let _db = crate::db::test_support::isolated();
 
         let default_path = format!("C:/buildmesh-base-default-{}", uuid::Uuid::new_v4());
         let default_mesh = crate::db::create_mesh("Default", &default_path).unwrap();
@@ -45,10 +36,9 @@ mod tests {
 
     #[test]
     fn harness_runtime_persists_and_legacy_switch_restores_mesh_runtime() {
-        let _serial = serial();
-        let temp = tempfile::tempdir().unwrap();
-        crate::db::init(&temp.path().join("db.sqlite")).unwrap();
-        crate::preferences::init_for_tests(temp.path().to_path_buf());
+        // `isolated` also wires this thread's preferences directory, which is
+        // the other half of this test's setup.
+        let _db = crate::db::test_support::isolated();
         crate::preferences::merge_detected_profiles(vec![crate::preferences::HarnessProfile {
             id: "muse-wsl-test".into(), name: "Muse (WSL)".into(), harness: "muse".into(),
             runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Ubuntu".into()), executable: None,
@@ -72,15 +62,7 @@ mod tests {
     /// Expected behavior: return the existing project (idempotent upsert).
     #[test]
     fn test_create_project_with_duplicate_path_returns_existing() {
-        let _serial = serial();
-        // Use a unique temp file per test so each test is fully isolated
-        let test_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let temp_path = std::env::temp_dir().join(format!("buildmesh_dup_test_{}.db", test_id));
-
-        crate::db::init(&temp_path).unwrap();
+        let _db = crate::db::test_support::isolated();
 
         // Create first mesh
         let first = crate::db::create_mesh("First Project", "/tmp/dup-test").unwrap();
@@ -89,10 +71,6 @@ mod tests {
 
         // Act: create another mesh with the same path but different name
         let second_result = crate::db::create_mesh("Second Project", "/tmp/dup-test");
-
-        // Cleanup
-        drop(crate::db::write_conn());
-        std::fs::remove_file(&temp_path).ok();
 
         // Assert: should return Ok(existing_mesh), NOT Err(UNIQUE constraint)
         match second_result {
@@ -111,15 +89,9 @@ mod tests {
     /// returns to the palette-fallback (`None`).
     #[test]
     fn test_mesh_color_round_trips() {
-        let _serial = serial();
-        let test_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let temp_path = std::env::temp_dir().join(format!("buildmesh_color_test_{}.db", test_id));
-        // First-init-wins: a no-op if another test file already set the global DB.
-        crate::db::init(&temp_path).unwrap();
+        let _db = crate::db::test_support::isolated();
 
+        let test_id = uuid::Uuid::new_v4();
         let path = format!("/tmp/color-test-{}", test_id);
         let mesh = crate::db::create_mesh("Color Mesh", &path).unwrap();
         assert_eq!(mesh.color, None, "new meshes start with no colour");
@@ -132,8 +104,6 @@ mod tests {
         crate::db::set_mesh_color(mesh.id, None).unwrap();
         let cleared = crate::db::get_mesh_by_id(mesh.id).unwrap();
         assert_eq!(cleared.color, None, "clearing returns to palette fallback");
-
-        std::fs::remove_file(&temp_path).ok();
     }
 
     use rusqlite::Connection;
@@ -303,11 +273,10 @@ mod tests {
     #[test]
     #[ignore = "issue #1746 bench; run with --ignored --nocapture to print before/after numbers"]
     fn update_mesh_positions_batch_bench_500_rows() {
-        // Use the global DB so commits pay real WAL fsyncs (the cost the
-        // issue targets) — an in-memory conn would skip fsyncs and make
-        // the two paths look equivalent.
-        crate::db::test_support::ensure_db_for_tests();
-        let _serial = serial();
+        // A file-backed database so commits pay real WAL fsyncs (the cost
+        // the issue targets) — an in-memory database would skip fsyncs and
+        // make the two paths look equivalent.
+        let _db = crate::db::test_support::isolated_file();
 
         // Unique paths per run — multiple benches in the same DB never
         // collide on the `meshes.path` UNIQUE constraint.

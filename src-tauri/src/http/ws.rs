@@ -3,15 +3,26 @@
 //! Each agent node has a `NodeChannel` holding (a) a `tokio::sync::broadcast`
 //! sender that fans live PTY output to connected mobile clients, and (b) a
 //! capped history buffer so a newly-connected client gets recent context.
+//!
+//! Two lifecycle events touch that map and they are not the same event
+//! (issue #2019):
+//! - **Process exit / restart** clears the retained bytes but *keeps* the
+//!   channel ([`clear_scrollback`]). A restarted agent reuses the same node
+//!   id, and the terminal context a phone reconnects to is intentional.
+//! - **Permanent node deletion** retires the whole entry
+//!   ([`retire_pty_channel`]), releasing the sender, the history and the
+//!   slot allocation. Only [`crate::agent::node_teardown`]'s deletion variant
+//!   may do that; a retired id is fenced so a reconnecting client cannot
+//!   resurrect the entry it was meant to reclaim.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use futures_util::{SinkExt, StreamExt};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
-use tokio_tungstenite::{tungstenite, WebSocketStream};
+use tokio_tungstenite::{tungstenite, tungstenite::Bytes, WebSocketStream};
 
 use crate::http::MaybeTls;
 
@@ -110,6 +121,28 @@ pub(crate) async fn handle_ws_connection(
     // `recv()` in the loop, rather than silently lost while we're busy sending.
     let mut revocations = super::revocation::subscribe();
 
+    // Refuse a node that no longer exists, *before* creating anything (issue
+    // #2019). Channel creation is otherwise unconditional, so a phone
+    // auto-reconnecting to a node deleted while the app was closed — when the
+    // in-memory fence is still empty — would conjure a fresh channel per
+    // reconnect and no deletion would ever reclaim it. The row is the
+    // authority; the fence only closes the in-process window where the delete
+    // commits between this check and the create.
+    //
+    // A failed lookup is treated as "gone": a phone should reconnect, not hold
+    // a socket open against a node this process cannot confirm.
+    match crate::db::agent_node_exists(node_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::info!("/ws/terminal refused for deleted node {}", node_id);
+            return;
+        }
+        Err(error) => {
+            tracing::warn!("/ws/terminal could not confirm node {}: {}", node_id, error);
+            return;
+        }
+    }
+
     // Subscribe before sending initial state to avoid missing output in the gap.
     // IMPORTANT: call ensure_pty_channel first so we don't accidentally create a new
     // empty channel and lose the history that send_pty_output has been accumulating.
@@ -158,8 +191,12 @@ pub(crate) async fn handle_ws_connection(
         loop {
             match rx.recv().await {
                 Ok(data) => {
+                    // `data` is a `Bytes` chunk: cloning it out of the
+                    // broadcast is a refcount bump, and handing it to the
+                    // frame is a move — no copy on the socket path, and no
+                    // per-subscriber clone of the payload (issue #2019).
                     if write
-                        .send(tungstenite::Message::Binary(data.into()))
+                        .send(tungstenite::Message::Binary(data))
                         .await
                         .is_err()
                     {
@@ -473,43 +510,157 @@ fn handle_mobile_resize(node_id: i64, cols: u16, rows: u16) {
 }
 
 // --- PTY Broadcast ---
+//
+// One process-global map of per-node fanouts (issue #2019). The ring payload is
+// `Bytes`, so a chunk is allocated once and shared by the ring and every
+// receiver: a slow client no longer costs a private copy of each batch, and the
+// socket path moves the chunk into the frame without copying it.
+//
+// The history buffer is deliberately *not* one of those sharers — it is a byte
+// `VecDeque`, and `record_history` copies into it. Sharing it with the ring
+// would mean storing chunk segments and trimming at segment granularity, which
+// trades an exact `HISTORY_BUFFER_CAP` for one 128 KiB-bounded memcpy per
+// batch. Only the ring-to-receiver sharing is claimed here because only that one
+// scales with the number of subscribers.
 
+/// Retained bytes a newly-connected client replays, and the tail re-sent after
+/// a slow client lags. Unchanged by issue #2019: this is the intentional
+/// terminal context, so *retain it on process exit*.
 const HISTORY_BUFFER_CAP: usize = 128 * 1024;
 
+/// Largest payload a single fanout slot may carry. One PTY write is split at
+/// this boundary, so the ring's worst-case retention is a byte budget rather
+/// than "slots × however big a batch happened to be".
+const PTY_MAX_CHUNK_BYTES: usize = 32 * 1024;
+
+/// Bytes of undrained live output one node may hold for its slowest
+/// subscriber. The `PTY_FANOUT_SLOTS` below turn this into an exact bound.
+///
+/// Pre-#2019 the ring was 1024 slots of *variable-size* batches that every
+/// receiver cloned: up to 1024 × 32 KiB = 32 MiB per node, and the clone
+/// landed again for every reconnecting socket. The budget plus `Bytes` sharing
+/// makes retention independent of subscriber count and caps it at 2 MiB.
+const PTY_FANOUT_BYTE_BUDGET: usize = 2 * 1024 * 1024;
+
+/// Slot count derived from the budget: `slots × PTY_MAX_CHUNK_BYTES` is the
+/// worst case a subscriber that never drains can pin.
+const PTY_FANOUT_SLOTS: usize = PTY_FANOUT_BYTE_BUDGET / PTY_MAX_CHUNK_BYTES;
+
+/// How many retired node ids are remembered as a resurrection fence.
+///
+/// `agent_nodes.id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so a deleted id is
+/// never handed to a different node and the fence cannot block a live one.
+/// Bounded FIFO keeps the fence itself from becoming the next leak: the cost of
+/// evicting the oldest tombstone is at most one empty channel for a node
+/// deleted longer ago than every other deletion.
+const RETIRED_NODE_MEMORY: usize = 4096;
+
 struct NodeChannel {
-    sender: broadcast::Sender<Vec<u8>>,
+    sender: broadcast::Sender<Bytes>,
     history: VecDeque<u8>,
 }
 
 static KNOWN_NODES: OnceLock<Arc<RwLock<HashMap<i64, NodeChannel>>>> = OnceLock::new();
 
+/// Ids whose channel has been retired by permanent node deletion.
+///
+/// `ids` answers membership in O(1) and `order` supplies FIFO eviction, so the
+/// lookup stays cheap even though it runs while the caller holds the
+/// `KNOWN_NODES` write lock — the same lock every live PTY write needs. A linear
+/// scan here would stall output for every node for the duration of a connect.
+struct RetiredFence {
+    ids: HashSet<i64>,
+    order: VecDeque<i64>,
+}
+
+impl RetiredFence {
+    fn contains(&self, node_id: i64) -> bool {
+        self.ids.contains(&node_id)
+    }
+
+    /// Remember a deletion, evicting the oldest tombstone past the cap.
+    fn record(&mut self, node_id: i64) {
+        if self.ids.insert(node_id) {
+            self.order.push_back(node_id);
+        }
+        while self.order.len() > RETIRED_NODE_MEMORY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.ids.remove(&oldest);
+            }
+        }
+    }
+}
+
+static RETIRED_NODES: OnceLock<Mutex<RetiredFence>> = OnceLock::new();
+
 fn get_known_nodes() -> &'static Arc<RwLock<HashMap<i64, NodeChannel>>> {
     KNOWN_NODES.get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
+}
+
+fn get_retired_nodes() -> &'static Mutex<RetiredFence> {
+    RETIRED_NODES.get_or_init(|| {
+        Mutex::new(RetiredFence {
+            ids: HashSet::new(),
+            order: VecDeque::new(),
+        })
+    })
+}
+
+/// Has this node's channel been retired?
+///
+/// Only the two creation paths ([`ensure_pty_channel`] and [`subscribe_pty`])
+/// consult this, and both hold the `KNOWN_NODES` write lock while they do.
+/// [`send_pty_output`] needs no check: it never creates an entry, and a delete
+/// that already committed removed the entry it would have found.
+///
+/// A tombstone is a *belt*, not the authority. [`db::agent_node_exists`](crate::db::agent_node_exists)
+/// is what refuses a deleted id across process restarts and fence eviction;
+/// this only closes the window where a delete commits between that check and
+/// the create. That is why it may be bounded and lossy without reopening the
+/// leak.
+fn is_retired(node_id: i64) -> bool {
+    get_retired_nodes().lock().contains(node_id)
+}
+
+fn new_node_channel() -> NodeChannel {
+    let (sender, _) = broadcast::channel(PTY_FANOUT_SLOTS);
+    NodeChannel {
+        sender,
+        history: VecDeque::new(),
+    }
 }
 
 pub fn ensure_pty_channel(node_id: i64) {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
-    locked.entry(node_id).or_insert_with(|| {
-        let (tx, _) = broadcast::channel(1024);
-        NodeChannel {
-            sender: tx,
-            history: VecDeque::new(),
-        }
-    });
+    // Checked under the map lock, and `retire_pty_channel` takes these two
+    // locks in the same order while holding both, so a create either happens
+    // entirely before a delete (and is then removed) or entirely after it (and
+    // sees the tombstone). There is no interleaving that leaves a channel
+    // behind for a retired id.
+    if is_retired(node_id) {
+        return;
+    }
+    locked.entry(node_id).or_insert_with(new_node_channel);
 }
 
-pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Vec<u8>> {
+pub fn subscribe_pty(node_id: i64) -> broadcast::Receiver<Bytes> {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
-    let channel = locked.entry(node_id).or_insert_with(|| {
-        let (tx, _) = broadcast::channel(1024);
-        NodeChannel {
-            sender: tx,
-            history: VecDeque::new(),
-        }
-    });
-    channel.sender.subscribe()
+    if is_retired(node_id) {
+        // A retired node gets a closed receiver rather than a fresh entry, so
+        // the socket's write loop ends on `RecvError::Closed` and the phone
+        // sees a clean close instead of an immortal empty terminal (and the
+        // entry the retirement just reclaimed does not come back).
+        let (sender, receiver) = broadcast::channel(1);
+        drop(sender);
+        return receiver;
+    }
+    locked
+        .entry(node_id)
+        .or_insert_with(new_node_channel)
+        .sender
+        .subscribe()
 }
 
 pub fn get_pty_history(node_id: i64) -> Vec<u8> {
@@ -527,34 +678,123 @@ pub fn get_pty_history(node_id: i64) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-pub fn send_pty_output(node_id: i64, data: impl AsRef<[u8]>) {
-    let data = data.as_ref();
-    let nodes = get_known_nodes();
-    let sender = {
-        let mut locked = nodes.write();
-        if let Some(channel) = locked.get_mut(&node_id) {
-            channel.history.extend(data.iter());
-            let excess = channel.history.len().saturating_sub(HISTORY_BUFFER_CAP);
-            if excess > 0 {
-                channel.history.drain(..excess);
-            }
-            Some(channel.sender.clone())
-        } else {
-            None
-        }
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(data.to_vec());
+/// Append one PTY write to the retained history, keeping the most recent
+/// [`HISTORY_BUFFER_CAP`] bytes.
+///
+/// An oversized write is trimmed *before* it is copied in: extending first and
+/// draining after spiked the buffer to the size of the whole write, so a single
+/// multi-megabyte batch briefly held twice the cap (issue #2019).
+fn record_history(channel: &mut NodeChannel, data: &[u8]) {
+    if data.len() >= HISTORY_BUFFER_CAP {
+        let tail = &data[data.len() - HISTORY_BUFFER_CAP..];
+        channel.history.clear();
+        channel.history.extend(tail.iter().copied());
+        return;
+    }
+    channel.history.extend(data.iter().copied());
+    let excess = channel.history.len().saturating_sub(HISTORY_BUFFER_CAP);
+    if excess > 0 {
+        channel.history.drain(..excess);
     }
 }
 
-/// Clear the history buffer for a node. Called on agent kill.
+/// Split one PTY write into slot-sized [`Bytes`] chunks, allocating once per
+/// chunk. The PTY batcher already coalesces to 32 KiB, so ordinary traffic
+/// yields exactly one chunk; the split is what keeps the byte budget a hard
+/// bound when some future producer hands us a whole build log in one call.
+/// Byte boundaries are preserved verbatim, so a subscriber concatenating the
+/// chunks sees the original stream.
+fn fanout_chunks(data: &[u8]) -> Vec<Bytes> {
+    data.chunks(PTY_MAX_CHUNK_BYTES)
+        .map(Bytes::copy_from_slice)
+        .collect()
+}
+
+pub fn send_pty_output(node_id: i64, data: impl AsRef<[u8]>) {
+    let data = data.as_ref();
+    let chunks = fanout_chunks(data);
+    if chunks.is_empty() {
+        return;
+    }
+    // One write-lock acquisition for the whole batch: history order and fanout
+    // order agree, and the send happens after the lock is dropped.
+    let sender = {
+        let mut locked = get_known_nodes().write();
+        match locked.get_mut(&node_id) {
+            Some(channel) => {
+                record_history(channel, data);
+                Some(channel.sender.clone())
+            }
+            // Never create here. Output for an unknown node is dropped, and a
+            // retired node stays retired — the entry retirement reclaimed must
+            // not reappear because a producer's last write raced the delete.
+            None => None,
+        }
+    };
+    if let Some(sender) = sender {
+        for chunk in chunks {
+            // No subscriber is the normal case (the phone may be asleep); the
+            // history copy above is what survives until it connects.
+            let _ = sender.send(chunk);
+        }
+    }
+}
+
+/// Drop the retained bytes for a node whose *process* ended or was killed,
+/// keeping its channel so a restart reuses the same fanout and a reconnecting
+/// client still gets live output. Permanent node deletion uses
+/// [`retire_pty_channel`] instead — clearing the map on process exit would
+/// throw away the retained terminal context that is intentional (issue #2019).
 pub fn clear_scrollback(node_id: i64) {
     let nodes = get_known_nodes();
     let mut locked = nodes.write();
     if let Some(channel) = locked.get_mut(&node_id) {
-        channel.history.clear();
+        // A fresh deque, not `clear()`: the cap-sized ring buffer is released
+        // with the bytes it held rather than kept as a dormant allocation for
+        // a process that has already gone.
+        channel.history = VecDeque::new();
     }
+}
+
+/// Retire a permanently deleted node's channel: drop the entry, which releases
+/// the sender, its ring slots and the retained history in one move, then fence
+/// the id so nothing recreates it (issue #2019).
+///
+/// Call this only from permanent deletion — a process exit or restart must
+/// keep its channel (see [`clear_scrollback`]).
+pub fn retire_pty_channel(node_id: i64) {
+    // Both locks are held across the removal and the tombstone, in the same
+    // order the creation paths use (map, then fence). Releasing the map guard
+    // first would reopen the leak: a create landing between the two would
+    // insert a fresh channel for an id the fence is about to mark deleted, and
+    // nothing would ever retire that entry. `drop(nodes)` happens on scope
+    // exit — no early return may skip it.
+    let mut nodes = get_known_nodes().write();
+    let retired = nodes.remove(&node_id);
+    get_retired_nodes().lock().record(node_id);
+    drop(nodes);
+
+    if retired.is_some() {
+        tracing::debug!(node_id, "retired PTY broadcast channel for deleted node");
+    }
+}
+
+/// Live state of `node_id`'s channel: retained history length and the capacity
+/// of the ring that buffer owns. `None` when the node has no entry at all.
+///
+/// Test seam for the reclamation assertions in the #2019 tests — it reads the
+/// real map and the real history buffer, so a test cannot pass against
+/// structures the production path stopped using. The fanout's slot count is
+/// not reported because `broadcast::Sender` exposes no capacity accessor; the
+/// budget tests compare measured retention against [`PTY_FANOUT_SLOTS`]
+/// instead, which still fails if the ring is ever built with another count.
+#[cfg(test)]
+fn pty_channel_state(node_id: i64) -> Option<(usize, usize)> {
+    let nodes = get_known_nodes();
+    let locked = nodes.read();
+    locked
+        .get(&node_id)
+        .map(|channel| (channel.history.len(), channel.history.capacity()))
 }
 
 #[cfg(test)]
@@ -563,6 +803,126 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
     use tokio::net::TcpListener;
     use tokio_tungstenite::{accept_async, connect_async};
+
+    /// Every test in this module mutates process-global fanout state:
+    /// `KNOWN_NODES` and the shared tombstone fence, whose budget any sibling
+    /// test can exhaust. So they cannot run concurrently with each other — a
+    /// fence-stress test that fills the 4096-entry budget would evict another
+    /// test's tombstone and make its assertion lie. This is the same reasoning
+    /// the database tests serialise on (issue #2048), for the same reason: the
+    /// state under test is per-process, not per-test.
+    ///
+    /// One lock for both accessors below — a second `static` would be a second
+    /// mutex and would not serialise anything against the first.
+    static FANOUT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Cheap: the whole module is a few seconds even run one at a time.
+    ///
+    /// The lock is a `tokio` mutex, not a `std` one: the async tests hold it
+    /// across `.await`, and a `std::sync::MutexGuard` held across an await point
+    /// is unsound if the future ever migrates threads — which a test that
+    /// changes its runtime flavour would do.
+    fn fanout_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        // `blocking_lock` is what serialises here; `try_lock` would merely fail
+        // whenever a sibling test already holds it. It panics inside a runtime,
+        // which is the guard against a sync test growing an `.await`.
+        FANOUT_LOCK.blocking_lock()
+    }
+
+    /// The async half of [`fanout_lock`], for the tests that hold it across
+    /// `.await`.
+    async fn fanout_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
+        FANOUT_LOCK.lock().await
+    }
+
+    /// Install a private database holding one `agent_nodes` row with the id the
+    /// test was given, for a test that drives the real connection handler
+    /// (which refuses ids with no row — issue #2019).
+    ///
+    /// The id is written explicitly rather than let the database choose it.
+    /// Every isolated database numbers its rows from 1, while `KNOWN_NODES` and
+    /// the tombstone fence are process-global and keyed by node id — so a
+    /// database-assigned id would collide with every other test that created
+    /// node 1. That is not a theoretical collision either: `agent_node::delete`
+    /// now records a tombstone for the id it deletes, so one unrelated test
+    /// deleting node 1 is enough to fence another test's channel. A high,
+    /// test-local id is in no other test's reach.
+    ///
+    /// The caller must already hold the module lock — this fixture is sync and
+    /// the lock is not. The handler thread adopts the same database through
+    /// [`serve_terminal_ws`].
+    fn terminal_ws_node(
+        node_id: i64,
+        name: &str,
+    ) -> (crate::db::test_support::IsolatedDbGuard, i64) {
+        let db = crate::db::test_support::isolated();
+        let mesh = crate::db::create_mesh(
+            &format!("ws-{name}"),
+            &format!("/tmp/buildmesh_ws_test_{name}"),
+        )
+        .expect("terminal_ws_node: create_mesh should succeed");
+        let row = crate::db::write_conn();
+        row.execute(
+            "INSERT INTO agent_nodes (id, mesh_id, name, path, status) \
+             VALUES (?1, ?2, ?3, ?4, 'idle')",
+            (
+                node_id,
+                mesh.id,
+                format!("ws-{name}"),
+                format!("/tmp/ws/{name}"),
+            ),
+        )
+        .expect("terminal_ws_node: insert node with an explicit id should succeed");
+        drop(row);
+        (db, node_id)
+    }
+
+    /// Serve `connections` terminal sockets on an ephemeral loopback port and
+    /// hand back the URL to dial plus the server thread's join handle.
+    ///
+    /// The server runs on a **dedicated thread** with a current-thread runtime
+    /// because two things are thread-local: the isolated-database install
+    /// (issue #2048) and the tokio worker that runs the handler. A
+    /// `tokio::spawn`ed task could be polled on a worker that resolves the
+    /// process-global database instead of this test's, which would make the
+    /// handler's node-existence check read the wrong rows.
+    ///
+    /// Every connection a test needs comes from this one thread, so the
+    /// database is adopted once and a reconnect test does not stand up a
+    /// second adopter for the same database.
+    fn serve_terminal_ws(
+        node_id: i64,
+        device_id: Option<i64>,
+        db: &crate::db::test_support::IsolatedDbHandle,
+        connections: usize,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind terminal ws listener");
+        listener
+            .set_nonblocking(true)
+            .expect("terminal ws listener nonblocking");
+        let addr = listener.local_addr().expect("terminal ws local addr");
+        let owned = db.clone();
+        let server = std::thread::spawn(move || {
+            let _adopted = crate::db::test_support::adopt(&owned);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("terminal ws runtime");
+            runtime.block_on(async move {
+                let listener = TcpListener::from_std(listener).expect("adopt terminal ws listener");
+                for _ in 0..connections {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        return;
+                    };
+                    if let Ok(ws) = accept_async(MaybeTls::Plain(stream)).await {
+                        handle_ws_connection(ws, node_id, device_id).await;
+                    }
+                }
+            });
+        });
+        (format!("ws://{}/n/{}", addr, node_id), server)
+    }
 
     #[test]
     fn revocation_terminates_only_the_matching_device() {
@@ -584,19 +944,12 @@ mod tests {
         // The hard AC: a revoke must drop an already-open socket, not just the
         // next request. A node with no history sends nothing on connect, so the
         // only thing that ends the stream is the revocation signal.
-        let node_id = 20055_i64;
         let device_id = 7777_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_001, "revocation");
         ensure_pty_channel(node_id);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, Some(device_id)).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, Some(device_id), &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         // Let the handler reach its `revocation::subscribe()` before we fire —
@@ -620,20 +973,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_replays_history_on_connect() {
-        let node_id = 20001_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_002, "replay-history");
         ensure_pty_channel(node_id);
-        send_pty_output(node_id, b"hello from history\r\n".to_vec());
+        send_pty_output(node_id, b"hello from history\r\n");
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, None).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
         let msg = ws.next().await.unwrap().unwrap();
         assert!(msg.is_binary());
@@ -642,23 +987,15 @@ mod tests {
 
     #[tokio::test]
     async fn ws_receives_live_pty_output() {
-        let node_id = 20002_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_003, "live-output");
         ensure_pty_channel(node_id);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, None).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        send_pty_output(node_id, b"live data\r\n".to_vec());
+        send_pty_output(node_id, b"live data\r\n");
 
         let msg = ws.next().await.unwrap().unwrap();
         assert!(msg.is_binary());
@@ -673,26 +1010,20 @@ mod tests {
     // the gap, re-sends the history tail, and keeps forwarding.
     #[tokio::test]
     async fn ws_write_task_survives_broadcast_lag() {
-        let node_id = 20006_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_004, "broadcast-lag");
         ensure_pty_channel(node_id);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, None).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         // Let the handler subscribe to the broadcast + finish initial-state
         // negotiation before we start flooding.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Overflow the 1024-slot broadcast buffer. The handler's write_task
+        // Overflow the broadcast buffer (issue #2019 shrank it to
+        // `PTY_FANOUT_SLOTS` slots derived from the byte budget, so this
+        // floods roughly 17× past capacity). The handler's write_task
         // interleaves `rx.recv()` (advances the receiver position) with
         // `write.send()` (blocks once the TCP/WS sink fills). Because the
         // client never calls `ws.next()` the sink fills, `write.send()`
@@ -713,7 +1044,7 @@ mod tests {
         // if it died (the pre-fix bug), the marker never reaches the client
         // and the loop below runs out the deadline.
         let marker = b"MARKER_AFTER_LAG";
-        send_pty_output(node_id, marker.to_vec());
+        send_pty_output(node_id, marker);
 
         // Drain the client. Per-iteration timeouts so we keep reading past
         // the history-tail re-send frame(s) without bailing on the first
@@ -745,20 +1076,12 @@ mod tests {
 
     #[tokio::test]
     async fn ws_history_then_live_output() {
-        let node_id = 20003_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_005, "history-then-live");
         ensure_pty_channel(node_id);
-        send_pty_output(node_id, b"old output\r\n".to_vec());
+        send_pty_output(node_id, b"old output\r\n");
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, None).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         let msg1 = ws.next().await.unwrap().unwrap();
@@ -766,7 +1089,7 @@ mod tests {
         assert_eq!(msg1.into_data(), b"old output\r\n".to_vec());
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        send_pty_output(node_id, b"new output\r\n".to_vec());
+        send_pty_output(node_id, b"new output\r\n");
 
         let msg2 = ws.next().await.unwrap().unwrap();
         assert!(msg2.is_binary());
@@ -775,19 +1098,11 @@ mod tests {
 
     #[tokio::test]
     async fn ws_input_reaches_write_to_pty() {
-        let node_id = 20004_i64;
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_006, "input-forwarding");
         ensure_pty_channel(node_id);
 
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let ws = accept_async(MaybeTls::Plain(stream)).await.unwrap();
-            handle_ws_connection(ws, node_id, None).await;
-        });
-
-        let url = format!("ws://{}/ws/terminal/{}", addr, node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
         let (mut ws, _) = connect_async(&url).await.unwrap();
 
         ws.send(tungstenite::Message::Text("ls -la\n".into()))
@@ -894,6 +1209,557 @@ mod tests {
         clear_scrollback(20022);
         let history = get_pty_history(20022);
         assert!(history.is_empty());
+        assert!(
+            pty_channel_state(20022).is_some(),
+            "a kill drops the retained bytes but keeps the channel — the node id \
+             comes back on restart (issue #2019)"
+        );
+    }
+
+    // --- Channel retirement vs. process exit (issue #2019) ------------------
+    //
+    // Before #2019 a deleted node's `NodeChannel` could only ever have its
+    // bytes cleared, so every create/delete cycle left a 1024-slot sender and
+    // its 128 KiB history in the process-global map. These tests pin the two
+    // halves of the split: permanent deletion retires the entry, process exit
+    // keeps it.
+
+    #[test]
+    fn retiring_a_deleted_node_releases_its_channel_and_its_allocations() {
+        let _serial = fanout_lock();
+        let node_id = 21_001;
+        ensure_pty_channel(node_id);
+        let _rx = subscribe_pty(node_id);
+        send_pty_output(node_id, vec![0x41; HISTORY_BUFFER_CAP]);
+
+        let (history_len, history_capacity) =
+            pty_channel_state(node_id).expect("a live channel before retirement");
+        assert_eq!(history_len, HISTORY_BUFFER_CAP);
+        assert!(
+            history_capacity >= HISTORY_BUFFER_CAP,
+            "the retained ring must really be allocated for this test to mean \
+             anything, got capacity {history_capacity}"
+        );
+
+        retire_pty_channel(node_id);
+
+        assert!(
+            pty_channel_state(node_id).is_none(),
+            "retirement must drop the whole entry — sender, ring slots and history — \
+             not just its bytes"
+        );
+        assert!(get_pty_history(node_id).is_empty());
+
+        // Nothing that runs after the delete may bring the entry back: a late
+        // ensure, a producer's last write, or a reconnecting client.
+        ensure_pty_channel(node_id);
+        send_pty_output(node_id, b"late producer");
+        assert!(
+            pty_channel_state(node_id).is_none(),
+            "a late ensure or output write must not resurrect a retired channel"
+        );
+        assert!(
+            matches!(
+                subscribe_pty(node_id).try_recv(),
+                Err(broadcast::error::TryRecvError::Closed)
+            ),
+            "a retired node hands back a closed receiver, not a fresh channel"
+        );
+        assert!(pty_channel_state(node_id).is_none());
+    }
+
+    #[test]
+    fn a_process_exit_keeps_the_channel_so_a_restart_reuses_it() {
+        let _serial = fanout_lock();
+        let node_id = 21_002;
+        ensure_pty_channel(node_id);
+        send_pty_output(node_id, b"before the kill");
+
+        clear_scrollback(node_id);
+
+        assert!(
+            pty_channel_state(node_id).is_some(),
+            "process exit must NOT retire the channel: a restarted agent reuses the \
+             same node id, and clearing the map here would discard the retained \
+             terminal context on purpose (issue #2019)"
+        );
+        assert!(
+            get_pty_history(node_id).is_empty(),
+            "the kill does drop the bytes"
+        );
+        let (history_len, history_capacity) =
+            pty_channel_state(node_id).expect("channel survives the kill");
+        assert_eq!(history_len, 0);
+        assert_eq!(
+            history_capacity, 0,
+            "clearing must release the cap-sized ring, not leave a dormant allocation"
+        );
+
+        // The restart reuses the id, so the live fanout must still work.
+        let mut rx = subscribe_pty(node_id);
+        send_pty_output(node_id, b"after the restart");
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"after the restart");
+    }
+
+    #[test]
+    fn deleting_one_node_leaves_its_sibling_streaming() {
+        let _serial = fanout_lock();
+        let (deleted, survivor) = (21_003_i64, 21_004_i64);
+        ensure_pty_channel(deleted);
+        ensure_pty_channel(survivor);
+        send_pty_output(deleted, b"retired node");
+        send_pty_output(survivor, b"kept node");
+        let mut rx = subscribe_pty(survivor);
+
+        retire_pty_channel(deleted);
+
+        assert_eq!(
+            get_pty_history(survivor),
+            b"kept node",
+            "a sibling's history survives"
+        );
+        assert!(pty_channel_state(survivor).is_some());
+        send_pty_output(survivor, b"still live");
+        assert_eq!(rx.try_recv().unwrap().as_ref(), b"still live");
+        assert!(pty_channel_state(survivor).is_some());
+    }
+
+    #[test]
+    fn repeated_node_lifetimes_reclaim_every_entry() {
+        let _serial = fanout_lock();
+        // Thousands of create/delete cycles is what a churny workspace does over
+        // a week of opening and closing agent nodes.
+        const CYCLES: i64 = 2000;
+        const BASE: i64 = 9_000_000;
+        let survivor = BASE - 1;
+        ensure_pty_channel(survivor);
+        send_pty_output(survivor, b"still here");
+
+        for cycle in 0..CYCLES {
+            let node_id = BASE + cycle;
+            ensure_pty_channel(node_id);
+            let _rx = subscribe_pty(node_id);
+            send_pty_output(node_id, vec![b'y'; 4096]);
+            send_pty_output(node_id, b"more");
+            retire_pty_channel(node_id);
+            assert!(
+                pty_channel_state(node_id).is_none(),
+                "create/delete cycle {cycle} left its entry in the map"
+            );
+        }
+
+        let leaked = {
+            let nodes = get_known_nodes();
+            let locked = nodes.read();
+            // Only this test's own id range. Sibling tests' channels are real
+            // and are meant to still be in the map.
+            locked
+                .keys()
+                .copied()
+                .filter(|id| *id >= BASE && *id < BASE + CYCLES)
+                .count()
+        };
+        assert_eq!(leaked, 0, "create/delete churn must not accumulate entries");
+        assert!(
+            get_retired_nodes().lock().ids.len() <= RETIRED_NODE_MEMORY,
+            "the resurrection fence must stay bounded too — otherwise it becomes \
+             the next leak"
+        );
+        assert_eq!(
+            get_pty_history(survivor),
+            b"still here",
+            "a node that was never deleted keeps its channel and history"
+        );
+    }
+
+    #[test]
+    fn one_chunk_allocation_is_shared_by_every_subscriber() {
+        let _serial = fanout_lock();
+        let node_id = 21_005;
+        ensure_pty_channel(node_id);
+        let mut first = subscribe_pty(node_id);
+        let mut second = subscribe_pty(node_id);
+
+        send_pty_output(node_id, b"shared bytes\r\n");
+
+        let a = first.try_recv().unwrap();
+        let b = second.try_recv().unwrap();
+        assert_eq!(a, b, "every subscriber sees the same bytes");
+        assert_eq!(
+            a.as_ptr(),
+            b.as_ptr(),
+            "the payload must be one shared allocation, not a per-subscriber clone: \
+             pre-#2019 every receiver got its own Vec and a slow client's memory \
+             scaled with the number of subscribers"
+        );
+    }
+
+    #[test]
+    fn a_slow_subscriber_pins_at_most_the_byte_budget() {
+        let _serial = fanout_lock();
+        let node_id = 21_006;
+        ensure_pty_channel(node_id);
+        // The slow client: subscribed, then deliberately never read during the
+        // flood, exactly like a phone on a stalled link.
+        let mut slow = subscribe_pty(node_id);
+
+        for _ in 0..256 {
+            send_pty_output(node_id, vec![b'x'; PTY_MAX_CHUNK_BYTES]);
+        }
+
+        let (history_len, _) = pty_channel_state(node_id).expect("live channel");
+        assert!(
+            history_len <= HISTORY_BUFFER_CAP,
+            "retained history must stay capped after 8 MiB of output, got {history_len}"
+        );
+
+        // Measure what the never-drained subscriber actually pinned rather than
+        // trusting the constants. `Lagged` advances the cursor instead of
+        // returning a message, so the drain keeps going across the report.
+        let mut lag_reports = 0u64;
+        let mut retained_chunks = 0usize;
+        let mut retained_bytes = 0usize;
+        loop {
+            match slow.try_recv() {
+                Ok(chunk) => {
+                    assert!(
+                        chunk.len() <= PTY_MAX_CHUNK_BYTES,
+                        "a slot may never carry more than its chunk cap, got {}",
+                        chunk.len()
+                    );
+                    retained_chunks += 1;
+                    retained_bytes += chunk.len();
+                }
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => lag_reports += skipped,
+                Err(broadcast::error::TryRecvError::Closed)
+                | Err(broadcast::error::TryRecvError::Empty) => break,
+            }
+        }
+
+        assert!(
+            lag_reports > 0,
+            "256 chunks must overrun a {PTY_FANOUT_SLOTS}-slot ring"
+        );
+        assert!(
+            retained_chunks > 0,
+            "the ring still holds the tail, so lag recovery has something to deliver"
+        );
+        assert!(
+            retained_chunks <= PTY_FANOUT_SLOTS,
+            "a drained-nowhere subscriber must not pin more slots than the budget has"
+        );
+        assert!(
+            retained_bytes <= PTY_FANOUT_BYTE_BUDGET,
+            "a slow subscriber pinned {retained_bytes} bytes, over the {PTY_FANOUT_BYTE_BUDGET} budget"
+        );
+    }
+
+    #[test]
+    fn an_oversized_pty_write_is_split_without_losing_or_reordering_bytes() {
+        let _serial = fanout_lock();
+        let node_id = 21_007;
+        ensure_pty_channel(node_id);
+        let mut rx = subscribe_pty(node_id);
+        let payload: Vec<u8> = (0..(PTY_MAX_CHUNK_BYTES * 3 + 17))
+            .map(|i| (i % 251) as u8)
+            .collect();
+
+        send_pty_output(node_id, &payload);
+
+        let mut streamed = Vec::new();
+        let mut chunks = 0usize;
+        while let Ok(chunk) = rx.try_recv() {
+            assert!(chunk.len() <= PTY_MAX_CHUNK_BYTES);
+            streamed.extend_from_slice(&chunk);
+            chunks += 1;
+        }
+        assert_eq!(chunks, 4, "three whole slots plus the 17-byte remainder");
+        assert_eq!(
+            streamed, payload,
+            "the split must be byte-exact and in order — xterm.js reassembles frames"
+        );
+        assert_eq!(get_pty_history(node_id), payload);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_node_closes_its_live_terminal_socket() {
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_007, "delete-live-socket");
+        ensure_pty_channel(node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+        // Let the handler subscribe before the delete lands.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        retire_pty_channel(node_id);
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break true,
+                    Some(Ok(m)) if m.is_close() => break true,
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(
+            closed,
+            "retiring a deleted node must close the socket its phone is watching, \
+             not leave an orphaned stream nobody can write to"
+        );
+        assert!(pty_channel_state(node_id).is_none());
+    }
+
+    #[tokio::test]
+    async fn reconnecting_to_a_deleted_node_closes_instead_of_resurrecting_it() {
+        // A phone whose node was deleted while it was offline reconnects
+        // automatically; that reconnect must not re-create the channel the
+        // retirement just reclaimed.
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_008, "reconnect-deleted");
+        retire_pty_channel(node_id);
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
+
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break "closed",
+                    Some(Ok(m)) if m.is_close() => break "closed",
+                    Some(Ok(m)) if m.is_binary() => break "sent-bytes",
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or("hung");
+        assert_eq!(
+            outcome, "closed",
+            "a deleted node must not stream to a phone"
+        );
+        assert!(
+            pty_channel_state(node_id).is_none(),
+            "the reconnect must not have recreated the retired entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconnecting_client_replays_history_then_receives_live_output() {
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_009, "reconnect-history");
+        ensure_pty_channel(node_id);
+
+        let (first, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 2);
+        let (mut ws, _) = connect_async(&first).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        send_pty_output(node_id, b"first session\r\n");
+        assert_eq!(
+            ws.next().await.unwrap().unwrap().into_data(),
+            b"first session\r\n".to_vec()
+        );
+        drop(ws);
+
+        // Output produced while no client is attached must still be replayed to
+        // the next one.
+        send_pty_output(node_id, b"while offline\r\n");
+
+        let (mut ws, _) = connect_async(&first).await.unwrap();
+        let replayed = ws.next().await.unwrap().unwrap().into_data();
+        assert_eq!(
+            replayed,
+            b"first session\r\nwhile offline\r\n".to_vec(),
+            "a reconnecting client gets the retained history of a surviving node"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        send_pty_output(node_id, b"second session\r\n");
+        assert_eq!(
+            ws.next().await.unwrap().unwrap().into_data(),
+            b"second session\r\n".to_vec()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restarted_node_replays_nothing_and_then_streams_live_output() {
+        let _serial = fanout_lock_async().await;
+        let (_db, node_id) = terminal_ws_node(9_500_010, "restart-streams");
+        ensure_pty_channel(node_id);
+        send_pty_output(node_id, b"stale pre-kill bytes");
+        // The kill path: retained bytes go, channel stays.
+        clear_scrollback(node_id);
+
+        let (url, _server) = serve_terminal_ws(node_id, None, &_db.handle(), 1);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        send_pty_output(node_id, b"post-restart output");
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("the restarted node must stream")
+            .unwrap()
+            .unwrap()
+            .into_data();
+        assert_eq!(
+            frame,
+            b"post-restart output".to_vec(),
+            "the first frame after a restart must be live output, not the pre-kill \
+             bytes the kill already dropped"
+        );
+        assert!(pty_channel_state(node_id).is_some());
+    }
+
+    /// A phone reconnecting to a node deleted *before this process started* has
+    /// no tombstone to consult — the fence is process memory, and it is also
+    /// bounded, so the same is true once eviction has dropped a tombstone. The
+    /// `agent_nodes` row is what refuses that reconnect, which is why this is
+    /// the case the in-memory deny list alone could never fix.
+    #[tokio::test]
+    async fn a_node_deleted_before_startup_is_refused_and_creates_no_channel() {
+        let _serial = fanout_lock_async().await;
+        // An isolated database with no node row at all: exactly what a restart
+        // looks like to the socket handler.
+        let db = crate::db::test_support::isolated();
+        let node_id = 7_000_001_i64;
+        let (url, server) = serve_terminal_ws(node_id, None, &db.handle(), 1);
+
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break "closed",
+                    Some(Ok(m)) if m.is_close() => break "closed",
+                    Some(Ok(m)) if m.is_binary() => break "sent-bytes",
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or("hung");
+        let _ = server.join();
+
+        assert_eq!(
+            outcome, "closed",
+            "a node with no row must not get a terminal socket"
+        );
+        assert!(
+            pty_channel_state(node_id).is_none(),
+            "the refused connect must not leave a channel behind — that entry is \
+             what a reconnect loop would pile up (issue #2019)"
+        );
+    }
+
+    /// The fence and the creation paths must be one atomic step, not two
+    /// interleaved ones.
+    ///
+    /// Before the fix, `retire_pty_channel` released the map lock before
+    /// recording the tombstone, so a create landing in that window inserted a
+    /// fresh channel for an id that was about to be marked deleted — and nothing
+    /// ever retired it. Hammer both sides from several threads and assert the
+    /// invariant that holds when they are atomic: a retired id has no entry.
+    #[test]
+    fn a_create_racing_a_retire_never_leaves_a_channel_behind() {
+        let _serial = fanout_lock();
+        let node_id = 30_001_i64;
+        let creators = 6;
+        let rounds = 400;
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handles: Vec<_> = (0..creators)
+            .map(|_| {
+                let stop = std::sync::Arc::clone(&stop);
+                std::thread::spawn(move || {
+                    while !stop.load(AtomicOrdering::SeqCst) {
+                        ensure_pty_channel(node_id);
+                        let _ = subscribe_pty(node_id);
+                    }
+                })
+            })
+            .collect();
+
+        for _ in 0..rounds {
+            retire_pty_channel(node_id);
+        }
+        stop.store(true, AtomicOrdering::SeqCst);
+        for handle in handles {
+            handle.join().expect("creator thread should not panic");
+        }
+
+        // Deliberately no final retire: that would clean up exactly the entry
+        // this test is looking for. Every create after the first retirement was
+        // refused, so the only way an entry can exist here is the race.
+        assert!(
+            pty_channel_state(node_id).is_none(),
+            "a create that raced a retirement left a channel for a retired id"
+        );
+        assert!(is_retired(node_id), "the tombstone must still be recorded");
+    }
+
+    /// The tombstone set is bounded, so it is allowed to forget. What must not
+    /// move is the *refusal*: once the fence has evicted this id, a
+    /// reconnection still may not conjure a channel, because the node row is
+    /// gone.
+    #[tokio::test]
+    async fn an_evicted_tombstone_does_not_reopen_the_channel() {
+        let _serial = fanout_lock_async().await;
+        let db = crate::db::test_support::isolated();
+        let node_id = 7_100_001_i64;
+        retire_pty_channel(node_id);
+        assert!(is_retired(node_id));
+        // Push this id out of the bounded fence.
+        for offset in 1..=(RETIRED_NODE_MEMORY as i64) {
+            retire_pty_channel(7_200_000 + offset);
+        }
+        assert!(
+            !is_retired(node_id),
+            "the fence is bounded, so the oldest tombstone must have been evicted"
+        );
+
+        let (url, server) = serve_terminal_ws(node_id, None, &db.handle(), 1);
+        let (mut ws, _) = connect_async(&url).await.unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) => break "closed",
+                    Some(Ok(m)) if m.is_close() => break "closed",
+                    Some(Ok(m)) if m.is_binary() => break "sent-bytes",
+                    Some(Ok(_)) => continue,
+                }
+            }
+        })
+        .await
+        .unwrap_or("hung");
+        let _ = server.join();
+
+        assert_eq!(
+            outcome, "closed",
+            "an evicted tombstone must not reopen a terminal"
+        );
+        assert!(pty_channel_state(node_id).is_none());
+    }
+
+    /// A fenced id is refused by both creation paths, and the refusal is a
+    /// closed receiver rather than a silent empty channel.
+    #[test]
+    fn a_fence_lookups_stay_cheap_enough_to_hold_under_the_map_lock() {
+        let _serial = fanout_lock();
+        // The lookup runs while `KNOWN_NODES.write()` is held, which is the
+        // lock every PTY write needs. Fill the fence to its cap and assert the
+        // membership answer is still exact at the bound — the HashSet keeps
+        // this O(1); a linear scan over the cap is what this pins against.
+        let target = 8_000_001_i64;
+        retire_pty_channel(target);
+        for offset in 1..=(RETIRED_NODE_MEMORY as i64) {
+            retire_pty_channel(8_100_000 + offset);
+        }
+        assert!(!is_retired(target), "evicted at the cap");
+        retire_pty_channel(target);
+        assert!(is_retired(target), "re-recorded after eviction");
+        assert!(is_retired(8_100_000 + RETIRED_NODE_MEMORY as i64 - 1));
+        assert!(!is_retired(8_100_001), "the oldest of that batch is gone");
     }
 
     // --- ProcessRegistryApi mock tests ---
@@ -919,7 +1785,10 @@ mod tests {
                 last_write_data: std::sync::Mutex::new(vec![]),
                 last_resize: std::sync::Mutex::new((0, 0)),
                 should_fail: false,
-                activity: crate::agent::process::InputActivity { user_input: true, submitted: false },
+                activity: crate::agent::process::InputActivity {
+                    user_input: true,
+                    submitted: false,
+                },
                 disposition: crate::agent::process::InputDisposition::Accepted,
                 queue_depth: (0, 0),
             }
@@ -932,7 +1801,10 @@ mod tests {
         }
         fn submitted() -> Self {
             Self {
-                activity: crate::agent::process::InputActivity { user_input: true, submitted: true },
+                activity: crate::agent::process::InputActivity {
+                    user_input: true,
+                    submitted: true,
+                },
                 ..Self::new()
             }
         }
@@ -953,14 +1825,22 @@ mod tests {
     }
 
     impl ProcessRegistryApi for MockRegistry {
-        fn write_input(&self, session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputOutcome, String> {
+        fn write_input(
+            &self,
+            session_id: i64,
+            data: &[u8],
+        ) -> Result<crate::agent::process::InputOutcome, String> {
             self.write_bytes(session_id, data)?;
             Ok(crate::agent::process::InputOutcome {
                 disposition: self.disposition,
                 activity: self.activity,
             })
         }
-        fn write_bytes(&self, _session_id: i64, data: &[u8]) -> Result<crate::agent::process::InputOutcome, String> {
+        fn write_bytes(
+            &self,
+            _session_id: i64,
+            data: &[u8],
+        ) -> Result<crate::agent::process::InputOutcome, String> {
             if self.should_fail {
                 return Err("mock error".into());
             }
@@ -1014,10 +1894,15 @@ mod tests {
         let sink = crate::agent::session_lifecycle::testing::RecordingSink::new();
         // `\r` is a submit, so the accepted path below is the one that would
         // clear attention.
-        let outcome =
-            write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
-        assert_eq!(outcome.disposition, crate::agent::process::InputDisposition::Backpressured);
-        assert!(mock.write_called.load(AtomicOrdering::SeqCst), "the write was attempted");
+        let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
+        assert_eq!(
+            outcome.disposition,
+            crate::agent::process::InputDisposition::Backpressured
+        );
+        assert!(
+            mock.write_called.load(AtomicOrdering::SeqCst),
+            "the write was attempted"
+        );
         assert!(
             sink.attention_cleared().is_empty(),
             "a prompt that was never queued must not clear attention, got {:?}",
@@ -1032,8 +1917,7 @@ mod tests {
     fn an_accepted_mobile_write_still_clears_attention() {
         let mock = MockRegistry::submitted();
         let sink = crate::agent::session_lifecycle::testing::RecordingSink::new();
-        let outcome =
-            write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
+        let outcome = write_mobile_input_with_sink(&mock, &sink, 1, "build it\r").unwrap();
         assert!(outcome.is_accepted());
         assert_eq!(
             sink.attention_cleared(),
@@ -1058,21 +1942,32 @@ mod tests {
 
         forward_mobile_input_with(&mock, 42, "hello");
 
-        let emitted = events.try_recv().expect("a stalled-input event");
-        match emitted {
-            super::super::events::EventMsg::TerminalInputStalled {
+        // The event broadcast is process-global, so a concurrent sibling test
+        // can put its own event on this receiver before ours. Look for *our*
+        // node's stall rather than demanding that the next event happen to be
+        // ours; `EventMsg` deliberately has no `Debug`, so an unexpected
+        // variant is skipped and a missing stall is reported by shape.
+        let mut ours = None;
+        while let Ok(event) = events.try_recv() {
+            if let super::super::events::EventMsg::TerminalInputStalled {
                 session_id,
                 queued_messages,
                 queued_bytes,
-            } => {
-                assert_eq!(session_id, 42);
-                assert_eq!(queued_messages, 3, "the event must carry the registry's own depth");
-                assert_eq!(queued_bytes, 96);
+            } = event
+            {
+                if session_id == 42 {
+                    ours = Some((queued_messages, queued_bytes));
+                    break;
+                }
             }
-            // `EventMsg` deliberately has no `Debug`, so the "wrong variant"
-            // case is reported by shape rather than by printing the value.
-            _ => panic!("expected a terminal-input-stalled event on the broadcast"),
         }
+        let (queued_messages, queued_bytes) =
+            ours.expect("a terminal-input-stalled event for node 42");
+        assert_eq!(
+            queued_messages, 3,
+            "the event must carry the registry's own depth"
+        );
+        assert_eq!(queued_bytes, 96);
     }
 
     /// A refused write must still reach the phone, and an accepted one must not
@@ -1082,12 +1977,20 @@ mod tests {
         let mock = MockRegistry::new();
         let mut events = super::super::events::subscribe();
 
-        forward_mobile_input_with(&mock, 42, "hello");
+        // Node 43 is this test's alone: its backpressured sibling announces
+        // stalls for node 42, and asserting on the whole process-global
+        // broadcast instead made this test fail whenever that sibling ran
+        // concurrently (reproducible on the base commit, 3 of 5 module runs).
+        forward_mobile_input_with(&mock, 43, "hello");
 
-        assert!(
-            events.try_recv().is_err(),
-            "a delivered keystroke must not raise a stall"
-        );
+        while let Ok(event) = events.try_recv() {
+            if let super::super::events::EventMsg::TerminalInputStalled { session_id, .. } = event {
+                assert_ne!(
+                    session_id, 43,
+                    "a delivered keystroke must not raise a stall for its own node"
+                );
+            }
+        }
     }
 
     /// The production wrapper resolves its sink and delegates to the same
@@ -1241,7 +2144,10 @@ mod tests {
 
     #[test]
     fn mobile_input_does_not_infer_submission_from_rejected_bytes() {
-        let mock = MockRegistry { activity: crate::agent::process::InputActivity::default(), ..MockRegistry::new() };
+        let mock = MockRegistry {
+            activity: crate::agent::process::InputActivity::default(),
+            ..MockRegistry::new()
+        };
         let sink = RecordingSink::new();
         write_mobile_input_with_sink(&mock, &sink, 1, "ignored\r\n").unwrap();
         assert_eq!(*mock.last_write_data.lock().unwrap(), b"ignored\r\n");

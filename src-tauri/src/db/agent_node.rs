@@ -3,32 +3,53 @@
 
 use std::fmt::Write as _;
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 use crate::models::*;
 
-use super::{read_conn, write_conn, SqlResult};
+use super::{read_conn, try_read_conn, write_conn, SqlResult};
 
 /// Preferences are prepared by the caller before acquiring the database writer.
-pub fn migrate_launch_selections(mappings: &std::collections::HashMap<String, String>) -> SqlResult<()> {
+pub fn migrate_launch_selections(
+    mappings: &std::collections::HashMap<String, String>,
+) -> SqlResult<()> {
     let mut db = write_conn();
     migrate_launch_selections_inner(&mut db, mappings)
 }
 
-fn migrate_launch_selections_inner(db: &mut Connection, mappings: &std::collections::HashMap<String, String>) -> SqlResult<()> {
+fn migrate_launch_selections_inner(
+    db: &mut Connection,
+    mappings: &std::collections::HashMap<String, String>,
+) -> SqlResult<()> {
     let tx = db.transaction()?;
     for (old, new) in mappings {
-        tx.execute("UPDATE meshes SET default_provider = ?2 WHERE default_provider = ?1", params![old, new])?;
-        tx.execute("UPDATE meshes SET autopilot_provider = ?2 WHERE autopilot_provider = ?1", params![old, new])?;
+        tx.execute(
+            "UPDATE meshes SET default_provider = ?2 WHERE default_provider = ?1",
+            params![old, new],
+        )?;
+        tx.execute(
+            "UPDATE meshes SET autopilot_provider = ?2 WHERE autopilot_provider = ?1",
+            params![old, new],
+        )?;
     }
     for (select, update) in [
-        ("SELECT id, graph_json FROM autopilot_circuits", "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1"),
-        ("SELECT id, context_json FROM autopilot_circuit_runs", "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1"),
+        (
+            "SELECT id, graph_json FROM autopilot_circuits",
+            "UPDATE autopilot_circuits SET graph_json = ?2 WHERE id = ?1",
+        ),
+        (
+            "SELECT id, context_json FROM autopilot_circuit_runs",
+            "UPDATE autopilot_circuit_runs SET context_json = ?2 WHERE id = ?1",
+        ),
     ] {
-        let rows = tx.prepare(select)?.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
+        let rows = tx
+            .prepare(select)?
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
             .collect::<SqlResult<Vec<_>>>()?;
         for (id, raw) in rows {
-            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue; };
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                continue;
+            };
             if migrate_launch_json(&mut value, mappings) {
                 tx.execute(update, params![id, value.to_string()])?;
             }
@@ -37,18 +58,29 @@ fn migrate_launch_selections_inner(db: &mut Connection, mappings: &std::collecti
     tx.commit()
 }
 
-fn migrate_launch_json(value: &mut serde_json::Value, mappings: &std::collections::HashMap<String, String>) -> bool {
+fn migrate_launch_json(
+    value: &mut serde_json::Value,
+    mappings: &std::collections::HashMap<String, String>,
+) -> bool {
     let mut changed = false;
     match value {
-        serde_json::Value::Object(fields) => for (key, value) in fields {
-            if key == "provider" || key.ends_with(".provider") {
-                if let Some(next) = value.as_str().and_then(|old| mappings.get(old)) {
-                    *value = serde_json::Value::String(next.clone());
-                    changed = true;
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if key == "provider" || key.ends_with(".provider") {
+                    if let Some(next) = value.as_str().and_then(|old| mappings.get(old)) {
+                        *value = serde_json::Value::String(next.clone());
+                        changed = true;
+                    }
+                } else {
+                    changed |= migrate_launch_json(value, mappings);
                 }
-            } else { changed |= migrate_launch_json(value, mappings); }
-        },
-        serde_json::Value::Array(values) => for value in values { changed |= migrate_launch_json(value, mappings); },
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                changed |= migrate_launch_json(value, mappings);
+            }
+        }
         _ => (),
     }
     changed
@@ -70,23 +102,59 @@ mod launch_migration_tests {
             [r#"{"source.provider":"claude:minimax","review.provider":"personal","prompt":"claude:minimax"}"#]).unwrap();
         let history = r#"{"id":"historical","name":"Saved recipe","spawn_option_id":"claude:minimax","model":"old-model","effort":null,"extra_args":null}"#;
         db.execute("INSERT INTO agent_nodes(mesh_id,name,path,provider,spawn_configuration) VALUES (1,'Historical','/launch-test','claude:minimax',?1)", [history]).unwrap();
-        let mappings = std::collections::HashMap::from([("claude:minimax".into(), "launch/claude:minimax".into())]);
-        for _ in 0..2 { migrate_launch_selections_inner(&mut db, &mappings).unwrap(); }
-        let selection: (String, String) = db.query_row("SELECT default_provider,autopilot_provider FROM meshes", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-        assert_eq!(selection, ("launch/claude:minimax".into(), "personal".into()));
-        let raw: String = db.query_row("SELECT graph_json FROM autopilot_circuits WHERE name='Review'", [], |r| r.get(0)).unwrap();
+        let mappings = std::collections::HashMap::from([(
+            "claude:minimax".into(),
+            "launch/claude:minimax".into(),
+        )]);
+        for _ in 0..2 {
+            migrate_launch_selections_inner(&mut db, &mappings).unwrap();
+        }
+        let selection: (String, String) = db
+            .query_row(
+                "SELECT default_provider,autopilot_provider FROM meshes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            selection,
+            ("launch/claude:minimax".into(), "personal".into())
+        );
+        let raw: String = db
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE name='Review'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(value["nodes"][0]["provider"], "launch/claude:minimax");
         assert_eq!(value["nodes"][0]["prompt"], "claude:minimax");
         assert_eq!(value["nodes"][1]["provider"], "personal");
-        let raw: String = db.query_row("SELECT graph_json FROM autopilot_circuits WHERE name='Malformed'", [], |r| r.get(0)).unwrap();
+        let raw: String = db
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE name='Malformed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(raw, "{invalid");
-        let raw: String = db.query_row("SELECT context_json FROM autopilot_circuit_runs", [], |r| r.get(0)).unwrap();
+        let raw: String = db
+            .query_row("SELECT context_json FROM autopilot_circuit_runs", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         let context: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(context["source.provider"], "launch/claude:minimax");
         assert_eq!(context["review.provider"], "personal");
         assert_eq!(context["prompt"], "claude:minimax");
-        let node: (String, String) = db.query_row("SELECT provider,spawn_configuration FROM agent_nodes", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+        let node: (String, String) = db
+            .query_row(
+                "SELECT provider,spawn_configuration FROM agent_nodes",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(node, ("claude:minimax".into(), history.into()));
     }
 }
@@ -97,44 +165,86 @@ const AGENT_NODE_COLUMNS: &str =
 #[cfg(test)]
 mod lifecycle_snapshot_tests {
     use super::*;
-    use crate::agent::session_lifecycle::{HookSignalDetail, LifecycleChangedPayload, LifecycleKind, SignalHealth};
+    use crate::agent::session_lifecycle::{
+        HookSignalDetail, LifecycleChangedPayload, LifecycleKind, SignalHealth,
+    };
 
     #[test]
     fn observation_round_trips_and_process_transition_invalidates_it() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
-        let detail = HookSignalDetail { provider_event: Some("Stop".into()), ..Default::default() };
-        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::BackgroundRunning, SessionStatus::Running, &detail, "waiting for child agents");
+        let detail = HookSignalDetail {
+            provider_event: Some("Stop".into()),
+            ..Default::default()
+        };
+        let mut payload = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::BackgroundRunning,
+            SessionStatus::Running,
+            &detail,
+            "waiting for child agents",
+        );
         assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[SessionStatus::Lost]).unwrap());
         let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
         assert_eq!(node.signal_health, Some(SignalHealth::Ok));
         let snapshot = node.lifecycle.unwrap();
         assert_eq!(snapshot.kind, LifecycleKind::BackgroundRunning);
         assert_eq!(snapshot.timestamp, payload.timestamp);
-        assert_eq!(snapshot.message.as_deref(), Some("waiting for child agents"));
+        assert_eq!(
+            snapshot.message.as_deref(),
+            Some("waiting for child agents")
+        );
         // Exercise the joined coordinator projection too: adding snapshot columns
         // must not silently shift the mesh name or activity timestamp.
         let rows = list_coordinator_node_rows_inner(&conn).unwrap();
         assert_eq!(rows[0].1, "mesh");
         update_agent_node_status_inner(&conn, 1, SessionStatus::Lost).unwrap();
-        assert!(get_agent_node_by_id_inner(&conn, 1).unwrap().lifecycle.is_none());
-        assert!(!commit_agent_lifecycle_inner(&conn, &mut payload, &[SessionStatus::Lost]).unwrap());
-        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().status, SessionStatus::Lost);
+        assert!(get_agent_node_by_id_inner(&conn, 1)
+            .unwrap()
+            .lifecycle
+            .is_none());
+        assert!(
+            !commit_agent_lifecycle_inner(&conn, &mut payload, &[SessionStatus::Lost]).unwrap()
+        );
+        assert_eq!(
+            get_agent_node_by_id_inner(&conn, 1).unwrap().status,
+            SessionStatus::Lost
+        );
     }
 
     #[test]
     fn local_process_observation_preserves_unavailable_delivery_health() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
-        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
-            VALUES (1,1,'node','C:/mesh','running','unavailable')", []).unwrap();
-        for (kind, status) in [(LifecycleKind::WorkResumed, SessionStatus::Running),
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
+            VALUES (1,1,'node','C:/mesh','running','unavailable')",
+            [],
+        )
+        .unwrap();
+        for (kind, status) in [
+            (LifecycleKind::WorkResumed, SessionStatus::Running),
             (LifecycleKind::SessionExited, SessionStatus::Idle),
-            (LifecycleKind::TurnCompleted, SessionStatus::Completed)] {
-            let mut payload = LifecycleChangedPayload::new(1, kind, status, &HookSignalDetail::default(), "local event");
+            (LifecycleKind::TurnCompleted, SessionStatus::Completed),
+        ] {
+            let mut payload = LifecycleChangedPayload::new(
+                1,
+                kind,
+                status,
+                &HookSignalDetail::default(),
+                "local event",
+            );
             assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
             assert_eq!(payload.signal_health, SignalHealth::Unavailable);
             let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
@@ -152,16 +262,29 @@ mod lifecycle_snapshot_tests {
     fn local_process_observation_does_not_manufacture_unverified_health() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
 
-        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::ProcessIdle, SessionStatus::Idle, &HookSignalDetail::default(), "no live agent process");
+        let mut payload = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::ProcessIdle,
+            SessionStatus::Idle,
+            &HookSignalDetail::default(),
+            "no live agent process",
+        );
         assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
 
         // The snapshot still reports the honest "nothing observed yet"…
         assert_eq!(payload.signal_health, SignalHealth::Unverified);
         // …but an unprovisioned node keeps an unknown health, not a sticky warning.
-        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health, None);
+        assert_eq!(
+            get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            None
+        );
     }
 
     /// The early-exit promotion is one write: `running` plus the snapshot the
@@ -171,15 +294,30 @@ mod lifecycle_snapshot_tests {
     fn spawn_promotion_stores_running_and_keeps_the_health_column() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
-        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
-            VALUES (1,1,'node','C:/mesh','spawning','unverified')", []).unwrap();
-        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status)
-            VALUES (2,1,'other','C:/mesh','error')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,signal_health)
+            VALUES (1,1,'node','C:/mesh','spawning','unverified')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status)
+            VALUES (2,1,'other','C:/mesh','error')",
+            [],
+        )
+        .unwrap();
 
         let mut payload = LifecycleChangedPayload::new(
-            1, LifecycleKind::ProcessRunning, SessionStatus::Running,
-            &HookSignalDetail::default(), "agent process is running",
+            1,
+            LifecycleKind::ProcessRunning,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "agent process is running",
         );
         assert!(commit_spawn_promotion_inner(&conn, &mut payload).unwrap());
         assert_eq!(payload.signal_health, SignalHealth::Unverified);
@@ -187,24 +325,38 @@ mod lifecycle_snapshot_tests {
         let node = get_agent_node_by_id_inner(&conn, 1).unwrap();
         assert_eq!(node.status, SessionStatus::Running);
         assert_eq!(node.signal_health, Some(SignalHealth::Unverified));
-        let snapshot = node.lifecycle.expect("the promotion snapshot must round-trip");
+        let snapshot = node
+            .lifecycle
+            .expect("the promotion snapshot must round-trip");
         assert_eq!(snapshot.kind, LifecycleKind::ProcessRunning);
         assert_eq!(snapshot.status, SessionStatus::Running);
         assert_eq!(snapshot.timestamp, payload.timestamp);
         assert_eq!(snapshot.signal_health, SignalHealth::Unverified);
 
         let mut again = LifecycleChangedPayload::new(
-            1, LifecycleKind::ProcessRunning, SessionStatus::Running,
-            &HookSignalDetail::default(), "again",
+            1,
+            LifecycleKind::ProcessRunning,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "again",
         );
-        assert!(!commit_spawn_promotion_inner(&conn, &mut again).unwrap(), "a running row is no longer spawning");
+        assert!(
+            !commit_spawn_promotion_inner(&conn, &mut again).unwrap(),
+            "a running row is no longer spawning"
+        );
 
         let mut errored = LifecycleChangedPayload::new(
-            2, LifecycleKind::ProcessRunning, SessionStatus::Running,
-            &HookSignalDetail::default(), "must not revive",
+            2,
+            LifecycleKind::ProcessRunning,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "must not revive",
         );
         assert!(!commit_spawn_promotion_inner(&conn, &mut errored).unwrap());
-        assert_eq!(get_agent_node_by_id_inner(&conn, 2).unwrap().status, SessionStatus::Error);
+        assert_eq!(
+            get_agent_node_by_id_inner(&conn, 2).unwrap().status,
+            SessionStatus::Error
+        );
     }
 
     /// An uninterpretable callback (a garbage body reaches the route with no
@@ -215,13 +367,29 @@ mod lifecycle_snapshot_tests {
     fn uninterpretable_callback_still_records_degraded_health() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
 
-        let detail = HookSignalDetail { signal_health: SignalHealth::Degraded, ..Default::default() };
-        let mut payload = LifecycleChangedPayload::new(1, LifecycleKind::ProcessIdle, SessionStatus::Idle, &detail, "unparseable hook payload");
+        let detail = HookSignalDetail {
+            signal_health: SignalHealth::Degraded,
+            ..Default::default()
+        };
+        let mut payload = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::ProcessIdle,
+            SessionStatus::Idle,
+            &detail,
+            "unparseable hook payload",
+        );
         assert!(commit_agent_lifecycle_inner(&conn, &mut payload, &[]).unwrap());
-        assert_eq!(get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health, Some(SignalHealth::Degraded));
+        assert_eq!(
+            get_agent_node_by_id_inner(&conn, 1).unwrap().signal_health,
+            Some(SignalHealth::Degraded)
+        );
     }
 
     /// Re-provisioning a resumed session is an expectation, not evidence. It may
@@ -232,7 +400,11 @@ mod lifecycle_snapshot_tests {
     fn provisioning_never_downgrades_proven_delivery_health() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','running')", []).unwrap();
         let health = |conn: &Connection| get_agent_node_by_id_inner(conn, 1).unwrap().signal_health;
 
@@ -251,8 +423,10 @@ mod lifecycle_snapshot_tests {
         // `ok` and `degraded` both mean a callback actually arrived — evidence.
         for proven in [SignalHealth::Ok, SignalHealth::Degraded] {
             update_agent_node_signal_health_inner(&conn, 1, Some(proven)).unwrap();
-            assert!(!mark_agent_node_signal_unverified_inner(&conn, 1).unwrap(),
-                "{proven:?} delivery evidence must survive re-provisioning");
+            assert!(
+                !mark_agent_node_signal_unverified_inner(&conn, 1).unwrap(),
+                "{proven:?} delivery evidence must survive re-provisioning"
+            );
             assert_eq!(health(&conn), Some(proven));
         }
     }
@@ -270,14 +444,32 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // an opaque String; resolution to a concrete executor happens at the
         // spawn seam via `preferences::resolve_harness_provider`.
         provider: row.get::<_, String>(6)?,
-        launch_configuration: row.get::<_, Option<String>>(21)?.map(|raw| serde_json::from_str(&raw)
-            .map_err(|error| rusqlite::Error::FromSqlConversionFailure(21, rusqlite::types::Type::Text, Box::new(error))))
+        launch_configuration: row
+            .get::<_, Option<String>>(21)?
+            .map(|raw| {
+                serde_json::from_str(&raw).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        21,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
             .transpose()?,
         status: SessionStatus::from_db_str(&row.get::<_, String>(7)?),
-        lifecycle: row.get::<_, Option<String>>(22)?
-            .and_then(|raw| serde_json::from_str::<crate::agent::session_lifecycle::LifecycleChangedPayload>(&raw).ok())
-            .filter(|snapshot| row.get::<_, Option<String>>(23).ok().flatten().as_deref() == Some(snapshot.timestamp.as_str())
-                && row.get::<_, String>(7).ok().as_deref() == Some(snapshot.status.to_db_str())),
+        lifecycle: row
+            .get::<_, Option<String>>(22)?
+            .and_then(|raw| {
+                serde_json::from_str::<crate::agent::session_lifecycle::LifecycleChangedPayload>(
+                    &raw,
+                )
+                .ok()
+            })
+            .filter(|snapshot| {
+                row.get::<_, Option<String>>(23).ok().flatten().as_deref()
+                    == Some(snapshot.timestamp.as_str())
+                    && row.get::<_, String>(7).ok().as_deref() == Some(snapshot.status.to_db_str())
+            }),
         cli_session_id: row.get(8)?,
         worktree_name: row.get(9)?,
         use_worktree: row.get::<_, i32>(12)? != 0,
@@ -312,12 +504,14 @@ fn map_agent_node_row(row: &rusqlite::Row) -> rusqlite::Result<AgentNode> {
         // means legacy `<mesh>/.claude/worktrees/<name>` fallback
         // (pre-#1519 rows + Root Nodes). Empty string degrades to `None`
         // so a hand-edited blank doesn't resolve to a bare empty dir.
-        worktree_path: row
-            .get::<_, Option<String>>(20)?
-            .and_then(|s| {
-                let t = s.trim();
-                if t.is_empty() { None } else { Some(t.to_string()) }
-            }),
+        worktree_path: row.get::<_, Option<String>>(20)?.and_then(|s| {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }),
         created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(10)?)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now()),
@@ -345,8 +539,8 @@ fn parse_db_timestamp(s: &str) -> chrono::DateTime<chrono::Utc> {
 /// order the grid renders. The two extra fields aren't on `AgentNode`, so we
 /// return them alongside it; `coordinator::node_digest::spine` turns each tuple
 /// into a Node Digest. Spine-only — no transcript enrichment in this slice.
-pub fn list_coordinator_node_rows()
--> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
+pub fn list_coordinator_node_rows(
+) -> SqlResult<Vec<(AgentNode, String, chrono::DateTime<chrono::Utc>)>> {
     let db = read_conn();
     list_coordinator_node_rows_inner(&db)
 }
@@ -391,9 +585,10 @@ pub fn list_coordinator_node_rows_inner(
 }
 
 pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResult<AgentNode> {
-    let mut stmt = conn.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE id = ?1", AGENT_NODE_COLUMNS)
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE id = ?1",
+        AGENT_NODE_COLUMNS
+    ))?;
     stmt.query_row(params![id], map_agent_node_row)
 }
 // --- Agent Node operations ---
@@ -416,9 +611,21 @@ pub fn create_agent_node(
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
     create_agent_node_configured(
-        mesh_id, name, path, branch, env, provider, worktree_name, source_issue,
-        source_pr, source_pr_pinned_sha, use_worktree, head_repo_owner,
-        head_repo_clone_url, worktree_path, None,
+        mesh_id,
+        name,
+        path,
+        branch,
+        env,
+        provider,
+        worktree_name,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        use_worktree,
+        head_repo_owner,
+        head_repo_clone_url,
+        worktree_path,
+        None,
     )
 }
 
@@ -441,14 +648,28 @@ pub fn create_agent_node_configured(
     configuration: Option<&crate::preferences::spawn_configurations::SpawnConfiguration>,
 ) -> SqlResult<AgentNode> {
     let env = resolve_spawn_env(provider, worktree_path, use_worktree, env);
-    let snapshot = configuration.map(serde_json::to_string).transpose()
+    let snapshot = configuration
+        .map(serde_json::to_string)
+        .transpose()
         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let mut db = write_conn();
     let tx = db.transaction()?;
     let node = create_agent_node_configured_inner(
-        &tx, mesh_id, name, path, branch, env, provider,
-        worktree_name, source_issue, source_pr, source_pr_pinned_sha,
-        use_worktree, head_repo_owner, head_repo_clone_url, worktree_path,
+        &tx,
+        mesh_id,
+        name,
+        path,
+        branch,
+        env,
+        provider,
+        worktree_name,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        use_worktree,
+        head_repo_owner,
+        head_repo_clone_url,
+        worktree_path,
         snapshot.as_deref(),
     )?;
     tx.commit()?;
@@ -503,9 +724,22 @@ pub(crate) fn create_agent_node_inner(
     worktree_path: Option<&str>,
 ) -> SqlResult<AgentNode> {
     create_agent_node_configured_inner(
-        db, mesh_id, name, path, branch, env, provider, worktree_name,
-        source_issue, source_pr, source_pr_pinned_sha, use_worktree,
-        head_repo_owner, head_repo_clone_url, worktree_path, None,
+        db,
+        mesh_id,
+        name,
+        path,
+        branch,
+        env,
+        provider,
+        worktree_name,
+        source_issue,
+        source_pr,
+        source_pr_pinned_sha,
+        use_worktree,
+        head_repo_owner,
+        head_repo_clone_url,
+        worktree_path,
+        None,
     )
 }
 
@@ -546,9 +780,7 @@ pub(crate) fn create_agent_node_configured_inner(
     // Normalize blank worktree_path to NULL — a hand-edited empty string
     // must read back as `None` (legacy fallback), not as a bare empty dir
     // (issue #1519).
-    let worktree_path = worktree_path
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let worktree_path = worktree_path.map(str::trim).filter(|s| !s.is_empty());
     db.execute(
         "INSERT INTO agent_nodes (mesh_id, name, path, branch, env, provider, status, worktree_name, source_issue, source_pr, source_pr_pinned_sha, use_worktree, position, status_changed_at, head_repo_owner, head_repo_clone_url, worktree_path, spawn_configuration)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'idle', ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
@@ -580,7 +812,9 @@ pub(crate) fn create_agent_node_configured_inner(
 /// Callers send the full new ordering for the affected mesh so the DB stays in
 /// sync with the frontend's optimistic update. Mirrors `update_mesh_positions_batch`.
 pub fn update_agent_node_positions_batch(updates: &[(i64, i64)]) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     let db = write_conn();
     update_agent_node_positions_batch_inner(&db, updates)
 }
@@ -593,23 +827,22 @@ pub(crate) fn update_agent_node_positions_batch_inner(
     conn: &Connection,
     updates: &[(i64, i64)],
 ) -> SqlResult<()> {
-    if updates.is_empty() { return Ok(()); }
+    if updates.is_empty() {
+        return Ok(());
+    }
     const CHUNK_SIZE: usize = 300;
     let tx = conn.unchecked_transaction()?;
     for chunk in updates.chunks(CHUNK_SIZE) {
         let mut case_sql = String::with_capacity(64 + chunk.len() * 24);
         case_sql.push_str("UPDATE agent_nodes SET position = CASE id ");
         for i in 0..chunk.len() {
-            let _ = write!(
-                case_sql,
-                "WHEN ?{} THEN ?{} ",
-                2 * i + 1,
-                2 * i + 2,
-            );
+            let _ = write!(case_sql, "WHEN ?{} THEN ?{} ", 2 * i + 1, 2 * i + 2,);
         }
         case_sql.push_str("END WHERE id IN (");
         for i in 0..chunk.len() {
-            if i > 0 { case_sql.push(','); }
+            if i > 0 {
+                case_sql.push(',');
+            }
             let _ = write!(case_sql, "?{}", 2 * i + 1);
         }
         case_sql.push(')');
@@ -644,7 +877,11 @@ pub fn update_agent_node_name(id: i64, name: &str) -> SqlResult<()> {
 /// [`adopt_manual_pool_slug_with_path`], which adds the third half
 /// (`worktree_path`, issue #1519). Test-only, like the pins that call it.
 #[cfg(test)]
-pub(crate) fn adopt_manual_pool_slug_inner(conn: &Connection, id: i64, slug: &str) -> SqlResult<()> {
+pub(crate) fn adopt_manual_pool_slug_inner(
+    conn: &Connection,
+    id: i64,
+    slug: &str,
+) -> SqlResult<()> {
     conn.execute(
         "UPDATE agent_nodes SET name = ?1, worktree_name = ?1 WHERE id = ?2",
         params![slug, id],
@@ -675,9 +912,7 @@ pub(crate) fn adopt_manual_pool_slug_with_path_inner(
     slug: &str,
     worktree_path: Option<&str>,
 ) -> SqlResult<()> {
-    let worktree_path = worktree_path
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let worktree_path = worktree_path.map(str::trim).filter(|s| !s.is_empty());
     conn.execute(
         "UPDATE agent_nodes SET name = ?1, worktree_name = ?1, worktree_path = ?2 WHERE id = ?3",
         params![slug, worktree_path, id],
@@ -702,11 +937,15 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     let runtime = match crate::preferences::harness_runtime(provider) {
         Some(runtime) => runtime,
         None => match get_agent_node_by_id(id) {
-            Ok(node) => crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path).env_type,
+            Ok(node) => {
+                crate::env::resolve_raw_path(&crate::env::node_working_path(&node).raw_path)
+                    .env_type
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
             Err(error) => return Err(error),
         },
-    }.to_string();
+    }
+    .to_string();
     let db = write_conn();
     db.execute(
         "UPDATE agent_nodes SET provider = ?1, env = ?3, spawn_configuration = NULL WHERE id = ?2",
@@ -715,12 +954,18 @@ pub fn set_agent_node_provider(id: i64, provider: &str) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn replace_node_launch(id: i64, value: &crate::preferences::spawn_configurations::SpawnConfiguration, runtime: EnvType) -> Result<(), String> {
+pub fn replace_node_launch(
+    id: i64,
+    value: &crate::preferences::spawn_configurations::SpawnConfiguration,
+    runtime: EnvType,
+) -> Result<(), String> {
     let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
     let db = write_conn();
     let changed = db.execute("UPDATE agent_nodes SET provider = ?1, env = ?2, spawn_configuration = ?3 WHERE id = ?4",
         params![value.spawn_option_id, runtime.to_string(), json, id]).map_err(|e| e.to_string())?;
-    if changed == 0 { return Err("Agent Node no longer exists".into()); }
+    if changed == 0 {
+        return Err("Agent Node no longer exists".into());
+    }
     Ok(())
 }
 
@@ -810,9 +1055,10 @@ pub fn list_agent_nodes() -> SqlResult<Vec<AgentNode>> {
 
 pub fn list_agent_nodes_by_mesh(mesh_id: i64) -> SqlResult<Vec<AgentNode>> {
     let db = read_conn();
-    let mut stmt = db.prepare(
-        &format!("SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC", AGENT_NODE_COLUMNS)
-    )?;
+    let mut stmt = db.prepare(&format!(
+        "SELECT {} FROM agent_nodes WHERE mesh_id = ?1 ORDER BY position ASC, created_at ASC",
+        AGENT_NODE_COLUMNS
+    ))?;
     let rows = stmt.query_map(params![mesh_id], map_agent_node_row)?;
     rows.collect()
 }
@@ -823,7 +1069,8 @@ pub fn list_agent_history() -> SqlResult<Vec<AgentNode>> {
 
 pub(crate) fn list_agent_history_inner(conn: &Connection) -> SqlResult<Vec<AgentNode>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {} FROM agent_nodes ORDER BY created_at DESC, id DESC", AGENT_NODE_COLUMNS
+        "SELECT {} FROM agent_nodes ORDER BY created_at DESC, id DESC",
+        AGENT_NODE_COLUMNS
     ))?;
     let rows = stmt.query_map([], map_agent_node_row)?;
     rows.collect()
@@ -877,16 +1124,29 @@ pub(crate) fn commit_agent_lifecycle_inner(
     // pinning a warning no callback ever earned.
     let harness_reported_health = payload.provider_event.is_some()
         || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok;
-    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
-    let forbidden_json = serde_json::to_string(&forbidden.iter().map(SessionStatus::to_db_str).collect::<Vec<_>>())
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+        return Ok(false);
+    };
+    let forbidden_json = serde_json::to_string(
+        &forbidden
+            .iter()
+            .map(SessionStatus::to_db_str)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let changed = conn.execute(
         "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3,
             signal_health=CASE WHEN ?4 THEN ?5 ELSE signal_health END
          WHERE id=?6 AND status NOT IN (SELECT value FROM json_each(?7))",
-        params![payload.status.to_db_str(), payload.timestamp, snapshot,
+        params![
+            payload.status.to_db_str(),
+            payload.timestamp,
+            snapshot,
             harness_reported_health,
-            payload.signal_health.to_db_str(), payload.session_id, forbidden_json],
+            payload.signal_health.to_db_str(),
+            payload.session_id,
+            forbidden_json
+        ],
     )?;
     Ok(changed > 0)
 }
@@ -901,11 +1161,18 @@ pub(crate) fn commit_spawn_promotion_inner(
     conn: &Connection,
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
-    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+        return Ok(false);
+    };
     let changed = conn.execute(
         "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3 \
          WHERE id=?4 AND status='spawning'",
-        params![payload.status.to_db_str(), payload.timestamp, snapshot, payload.session_id],
+        params![
+            payload.status.to_db_str(),
+            payload.timestamp,
+            snapshot,
+            payload.session_id
+        ],
     )?;
     Ok(changed > 0)
 }
@@ -917,13 +1184,23 @@ fn lifecycle_snapshot_inner(
     conn: &Connection,
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<Option<String>> {
-    use rusqlite::OptionalExtension;
     use crate::agent::session_lifecycle::SignalHealth;
+    use rusqlite::OptionalExtension;
     if payload.provider_event.is_none() && payload.signal_health == SignalHealth::Ok {
-        let health = conn.query_row("SELECT signal_health FROM agent_nodes WHERE id=?1", [payload.session_id],
-            |row| row.get::<_, Option<String>>(0)).optional()?;
-        let Some(health) = health else { return Ok(None); };
-        payload.signal_health = health.as_deref().and_then(SignalHealth::from_db_str).unwrap_or(SignalHealth::Unverified);
+        let health = conn
+            .query_row(
+                "SELECT signal_health FROM agent_nodes WHERE id=?1",
+                [payload.session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        let Some(health) = health else {
+            return Ok(None);
+        };
+        payload.signal_health = health
+            .as_deref()
+            .and_then(SignalHealth::from_db_str)
+            .unwrap_or(SignalHealth::Unverified);
     }
     serde_json::to_string(payload)
         .map(Some)
@@ -1081,7 +1358,10 @@ pub(crate) fn mark_agent_node_signal_unverified_inner(
 /// variant used by attention-hook fallback, see `set_cli_session_id_if_missing`.
 pub fn update_cli_session_id(id: i64, cli_id: &str) -> SqlResult<()> {
     let db = write_conn();
-    db.execute("UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2", params![cli_id, id])?;
+    db.execute(
+        "UPDATE agent_nodes SET cli_session_id = ?1 WHERE id = ?2",
+        params![cli_id, id],
+    )?;
     Ok(())
 }
 
@@ -1103,9 +1383,12 @@ pub(crate) fn clear_cli_session_id_inner(conn: &Connection, id: i64) -> SqlResul
 pub fn session_started_at_ms(id: i64) -> SqlResult<Option<i64>> {
     use rusqlite::OptionalExtension;
     let conn = read_conn();
-    conn.query_row("SELECT session_started_at FROM agent_nodes WHERE id = ?1",
-        params![id], |row| row.get(0))
-        .optional()
+    conn.query_row(
+        "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+        params![id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// Persist a provider-assigned session id without overwriting an id captured
@@ -1142,20 +1425,29 @@ pub(crate) fn agent_status_observation(id: i64) -> SqlResult<AgentStatusObservat
 /// Identity of the process and its last lifecycle transition. Continuations
 /// observed before user input/regeneration must not write into the new turn.
 pub(crate) fn agent_turn_stamp(id: i64) -> SqlResult<Option<String>> {
-    read_conn().query_row("SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
-        params![id], |row| {
+    read_conn().query_row(
+        "SELECT session_started_at, status_changed_at FROM agent_nodes WHERE id = ?1",
+        params![id],
+        |row| {
             let generation: Option<i64> = row.get(0)?;
             let changed: Option<String> = row.get(1)?;
             Ok(generation.map(|g| format!("{g}:{}", changed.unwrap_or_default())))
-        })
+        },
+    )
 }
 
 #[cfg(test)]
-pub(crate) fn complete_agent_turn_if_current_inner(conn: &Connection, id: i64, stamp: &str) -> SqlResult<bool> {
-    Ok(conn.execute("UPDATE agent_nodes SET status='ready', status_changed_at=?3
+pub(crate) fn complete_agent_turn_if_current_inner(
+    conn: &Connection,
+    id: i64,
+    stamp: &str,
+) -> SqlResult<bool> {
+    Ok(conn.execute(
+        "UPDATE agent_nodes SET status='ready', status_changed_at=?3
         WHERE id=?1 AND status='running'
         AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at, '') = ?2",
-        params![id, stamp, chrono::Utc::now().to_rfc3339()])? == 1)
+        params![id, stamp, chrono::Utc::now().to_rfc3339()],
+    )? == 1)
 }
 
 /// Immutable ownership of a Circuit recovery request. Validate it under the
@@ -1174,39 +1466,90 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     stamp: &str,
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
+    use crate::circuit::{
+        context::CircuitContext,
+        stepper::{RunState, RunView, StepStatus, StepView},
+    };
     use rusqlite::OptionalExtension;
-    use crate::circuit::{context::CircuitContext, stepper::{RunState, RunView, StepStatus, StepView}};
-    if payload.session_id != fence.agent_node_id { return Ok(false); }
-    if !matches!(payload.status, SessionStatus::Ready | SessionStatus::AwaitingInput) { return Ok(false); }
-    let Some((state, context)) = conn.query_row(
-        "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1", [fence.run_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-    ).optional()? else { return Ok(false); };
-    if state != "running" { return Ok(false); }
-    let Ok(context) = CircuitContext::from_json(&context) else { return Ok(false); };
+    if payload.session_id != fence.agent_node_id {
+        return Ok(false);
+    }
+    if !matches!(
+        payload.status,
+        SessionStatus::Ready | SessionStatus::AwaitingInput
+    ) {
+        return Ok(false);
+    }
+    let Some((state, context)) = conn
+        .query_row(
+            "SELECT state,context_json FROM autopilot_circuit_runs WHERE id=?1",
+            [fence.run_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if state != "running" {
+        return Ok(false);
+    }
+    let Ok(context) = CircuitContext::from_json(&context) else {
+        return Ok(false);
+    };
     let mut statement = conn.prepare("SELECT node_id,status,attempt,agent_node_id FROM autopilot_circuit_run_steps WHERE run_id=?1")?;
-    let steps = statement.query_map([fence.run_id], |row| Ok(StepView {
-        node_id: row.get(0)?, status: StepStatus::from_db_str(&row.get::<_, String>(1)?),
-        attempt: row.get(2)?, agent_node_id: row.get(3)?, outcome: None, error: None,
-    }))?.collect::<SqlResult<Vec<_>>>()?;
-    let view = RunView { run_id: fence.run_id, state: RunState::Running, context, steps, graph: fence.graph.clone() };
-    let Some(step) = view.step(&fence.step_id) else { return Ok(false); };
-    if step.attempt != fence.attempt || !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
-        || step.agent_node_id.or_else(|| view.resolve_target_agent(&step.node_id)) != Some(fence.agent_node_id) {
+    let steps = statement
+        .query_map([fence.run_id], |row| {
+            Ok(StepView {
+                node_id: row.get(0)?,
+                status: StepStatus::from_db_str(&row.get::<_, String>(1)?),
+                attempt: row.get(2)?,
+                agent_node_id: row.get(3)?,
+                outcome: None,
+                error: None,
+            })
+        })?
+        .collect::<SqlResult<Vec<_>>>()?;
+    let view = RunView {
+        run_id: fence.run_id,
+        state: RunState::Running,
+        context,
+        steps,
+        graph: fence.graph.clone(),
+    };
+    let Some(step) = view.step(&fence.step_id) else {
+        return Ok(false);
+    };
+    if step.attempt != fence.attempt
+        || !matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+        || step
+            .agent_node_id
+            .or_else(|| view.resolve_target_agent(&step.node_id))
+            != Some(fence.agent_node_id)
+    {
         return Ok(false);
     }
     // Same rule as `commit_agent_lifecycle_inner`: a local process observation
     // must not persist a normalised health the harness never reported.
     let harness_reported_health = payload.provider_event.is_some()
         || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok;
-    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else { return Ok(false); };
-    Ok(conn.execute("UPDATE agent_nodes SET status=?3,status_changed_at=?4,lifecycle_snapshot=?5,
+    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+        return Ok(false);
+    };
+    Ok(conn.execute(
+        "UPDATE agent_nodes SET status=?3,status_changed_at=?4,lifecycle_snapshot=?5,
             signal_health=CASE WHEN ?6 THEN ?7 ELSE signal_health END
         WHERE id=?1 AND status='running'
         AND CAST(session_started_at AS TEXT) || ':' || COALESCE(status_changed_at,'')=?2",
-        params![fence.agent_node_id, stamp, payload.status.to_db_str(), payload.timestamp, snapshot,
+        params![
+            fence.agent_node_id,
+            stamp,
+            payload.status.to_db_str(),
+            payload.timestamp,
+            snapshot,
             harness_reported_health,
-            payload.signal_health.to_db_str()])? == 1)
+            payload.signal_health.to_db_str()
+        ],
+    )? == 1)
 }
 
 /// Parse an `agent_nodes.status_changed_at` value to epoch milliseconds.
@@ -1227,8 +1570,12 @@ pub(crate) fn parse_status_changed_ms(value: &str) -> Option<i64> {
 }
 
 pub(crate) fn agent_turn_stamp_precedes(stamp: &str, completed_at_ms: i64) -> bool {
-    let Some((generation, changed)) = stamp.split_once(':') else { return false; };
-    let Ok(generation) = generation.parse::<i64>() else { return false; };
+    let Some((generation, changed)) = stamp.split_once(':') else {
+        return false;
+    };
+    let Ok(generation) = generation.parse::<i64>() else {
+        return false;
+    };
     let changed_ms = parse_status_changed_ms(changed);
     changed_ms.is_some_and(|changed| completed_at_ms >= generation && completed_at_ms >= changed)
 }
@@ -1285,13 +1632,20 @@ pub(crate) fn list_suspended_nodes_inner(db: &Connection) -> SqlResult<Vec<Agent
     rows.collect()
 }
 
-pub fn recover_suspended_cli_session_id(node: &AgentNode, cli_id: &str, generation: Option<i64>) -> SqlResult<bool> {
+pub fn recover_suspended_cli_session_id(
+    node: &AgentNode,
+    cli_id: &str,
+    generation: Option<i64>,
+) -> SqlResult<bool> {
     let conn = write_conn();
     recover_suspended_cli_session_id_inner(&conn, node, cli_id, generation)
 }
 
 pub(crate) fn recover_suspended_cli_session_id_inner(
-    conn: &Connection, node: &AgentNode, cli_id: &str, generation: Option<i64>,
+    conn: &Connection,
+    node: &AgentNode,
+    cli_id: &str,
+    generation: Option<i64>,
 ) -> SqlResult<bool> {
     // The disk scan runs without a DB lock. A user may have launched,
     // regenerated, or deleted the node meanwhile; never write into that run.
@@ -1308,12 +1662,19 @@ pub(crate) fn recover_suspended_cli_session_id_inner(
 
 /// Live discovery uses the durable process generation, not the time of the
 /// recovery probe. A delayed disk scan must never claim a replacement session.
-pub(crate) fn recover_live_cli_session_id(node: &AgentNode, cli_id: &str, generation: i64) -> SqlResult<bool> {
+pub(crate) fn recover_live_cli_session_id(
+    node: &AgentNode,
+    cli_id: &str,
+    generation: i64,
+) -> SqlResult<bool> {
     recover_live_cli_session_id_inner(&write_conn(), node, cli_id, generation)
 }
 
 pub(crate) fn recover_live_cli_session_id_inner(
-    conn: &Connection, node: &AgentNode, cli_id: &str, generation: i64,
+    conn: &Connection,
+    node: &AgentNode,
+    cli_id: &str,
+    generation: i64,
 ) -> SqlResult<bool> {
     let changed = conn.execute("UPDATE agent_nodes SET cli_session_id = ?1
         WHERE id = ?2 AND status IN ('running', 'ready', 'awaiting_input', 'completed', 'spawning')
@@ -1341,6 +1702,32 @@ pub(crate) fn cli_session_id_present_inner(conn: &Connection, id: i64) -> SqlRes
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id = ?1 \
          AND cli_session_id IS NOT NULL AND cli_session_id != '')",
+        params![id],
+        |row| row.get(0),
+    )
+}
+
+/// Does an `agent_nodes` row for `id` exist?
+///
+/// The mobile terminal socket calls this before it creates a fanout channel
+/// (issue #2019). Channel creation is otherwise unconditional, so a phone that
+/// keeps reconnecting to a node deleted *before the app started* — when the
+/// in-memory retirement fence is still empty — would conjure one immortal
+/// channel per reconnect. The row is the authority that outlives the process;
+/// the fence only covers the window inside one process where a delete commits
+/// between the check and the create.
+///
+/// `try_read_conn` because the only caller is the async socket path: a bounded
+/// checkout surfaces pool exhaustion to that caller instead of blocking a
+/// runtime worker (see `try_read_conn`).
+pub fn agent_node_exists(id: i64) -> SqlResult<bool> {
+    let db = try_read_conn()?;
+    agent_node_exists_inner(&db, id)
+}
+
+pub(crate) fn agent_node_exists_inner(conn: &Connection, id: i64) -> SqlResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM agent_nodes WHERE id = ?1)",
         params![id],
         |row| row.get(0),
     )
@@ -1437,7 +1824,11 @@ pub(crate) fn reap_zombie_agents_inner(conn: &mut Connection, ids: &[i64]) -> Sq
 // launch — can finish the removal. `worktree_path` is UNIQUE so re-enqueuing the
 // same path is a no-op rather than a duplicate.
 
-pub(crate) fn enqueue_worktree_removal_inner(conn: &Connection, path: &str, node_name: &str) -> SqlResult<()> {
+pub(crate) fn enqueue_worktree_removal_inner(
+    conn: &Connection,
+    path: &str,
+    node_name: &str,
+) -> SqlResult<()> {
     conn.execute(
         "INSERT OR IGNORE INTO pending_worktree_removals (worktree_path, node_name) VALUES (?1, ?2)",
         params![path, node_name],
@@ -1445,10 +1836,11 @@ pub(crate) fn enqueue_worktree_removal_inner(conn: &Connection, path: &str, node
     Ok(())
 }
 
-pub(crate) fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let mut stmt = conn.prepare(
-        "SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id",
-    )?;
+pub(crate) fn list_pending_worktree_removals_inner(
+    conn: &Connection,
+) -> SqlResult<Vec<PendingWorktreeRemoval>> {
+    let mut stmt =
+        conn.prepare("SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id")?;
     let rows = stmt.query_map([], |row| {
         Ok(PendingWorktreeRemoval {
             worktree_path: row.get(0)?,
@@ -1458,7 +1850,10 @@ pub(crate) fn list_pending_worktree_removals_inner(conn: &Connection) -> SqlResu
     rows.collect()
 }
 
-pub(crate) fn delete_pending_worktree_removal_inner(conn: &Connection, path: &str) -> SqlResult<()> {
+pub(crate) fn delete_pending_worktree_removal_inner(
+    conn: &Connection,
+    path: &str,
+) -> SqlResult<()> {
     conn.execute(
         "DELETE FROM pending_worktree_removals WHERE worktree_path = ?1",
         params![path],
@@ -1474,7 +1869,10 @@ pub(crate) fn delete_agent_node_enqueueing_removal_inner(
     conn.execute("DELETE FROM agent_nodes WHERE id = ?1", params![id])?;
     conn.execute(
         "DELETE FROM app_settings WHERE key = ?1",
-        params![format!("{}{id}", crate::db::semantic_turns::SEMANTIC_TURN_KEY_PREFIX)],
+        params![format!(
+            "{}{id}",
+            crate::db::semantic_turns::SEMANTIC_TURN_KEY_PREFIX
+        )],
     )?;
     if let Some((path, node_name)) = removal {
         enqueue_worktree_removal_inner(conn, path, node_name)?;
@@ -1575,12 +1973,7 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
     // string-interpolated.
     let custom_ids: Vec<String> = accounts
         .iter()
-        .filter(|a| {
-            a.claude_compatible
-                && a.enabled
-                && !a.id.is_empty()
-                && !a.id.contains(':')
-        })
+        .filter(|a| a.claude_compatible && a.enabled && !a.id.is_empty() && !a.id.contains(':'))
         .map(|a| a.id.clone())
         .collect();
     if !custom_ids.is_empty() {
@@ -1622,11 +2015,17 @@ pub(crate) fn migrate_agent_node_provider_id_custom_accounts(
 }
 
 /// Read the immutable launch snapshot separately from the node wire projection.
-pub fn set_node_launch_snapshot(node_id: i64, value: &crate::preferences::spawn_configurations::SpawnConfiguration) -> Result<(), String> {
+pub fn set_node_launch_snapshot(
+    node_id: i64,
+    value: &crate::preferences::spawn_configurations::SpawnConfiguration,
+) -> Result<(), String> {
     let raw = serde_json::to_string(value).map_err(|e| e.to_string())?;
     let db = write_conn();
-    db.execute("UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2 AND provider = ?3",
-        params![raw, node_id, value.spawn_option_id]).map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE agent_nodes SET spawn_configuration = ?1 WHERE id = ?2 AND provider = ?3",
+        params![raw, node_id, value.spawn_option_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1652,7 +2051,9 @@ pub fn node_spawn_configuration(
         Err(error) => return Err(error.to_string()),
     };
     let value = raw
-        .map(|s| serde_json::from_str::<crate::preferences::spawn_configurations::SpawnConfiguration>(&s))
+        .map(|s| {
+            serde_json::from_str::<crate::preferences::spawn_configurations::SpawnConfiguration>(&s)
+        })
         .transpose()
         .map_err(|e| e.to_string())?;
     Ok(value.filter(|c| c.spawn_option_id == provider))
@@ -1666,7 +2067,9 @@ mod configured_tests {
     fn configured_inner_persists_snapshot_in_initial_insert() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        let mesh = crate::db::create_mesh_inner(&conn, "configured-node-mesh", "/tmp/configured-node").unwrap();
+        let mesh =
+            crate::db::create_mesh_inner(&conn, "configured-node-mesh", "/tmp/configured-node")
+                .unwrap();
         let snapshot = r#"{"id":"sol","name":"Sol Max","spawn_option_id":"codex","model":"gpt-5.6-sol","effort":"max","extra_args":null}"#;
         let node = create_agent_node_configured_inner(
             &conn,

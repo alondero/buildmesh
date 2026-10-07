@@ -61,6 +61,12 @@ requires recording them again.
 
 ## Verify and finish
 
+Run verification in the background, not as a foreground tool call: a full run can
+exceed the ten-minute cap of a single tool invocation, and a killed run leaves
+`.harness/lock` behind. Each gate writes `.harness/logs/<timestamp>-<gate>.log`
+as it runs, so a backgrounded attempt can be read while it is still going, and
+the receipt reports the outcome, gate list and log paths.
+
 ```powershell
 npm run verify
 npm run harness -- update --spec .tmp/progress.json
@@ -82,14 +88,16 @@ keeps infrastructure scope; dependency/build/rule changes retain product gates.
 | Every change | Whitespace, staged/working consistency, shared agent rules, docs impact against base, README drift, process-spawn discipline, agent/docs/README/lint contract tests, ESLint, lint violation fixtures |
 | Frontend | TypeScript + desktop/mobile builds, bundle budget, all Vitest unit/integration tests, Playwright verify-smoke |
 | Android | APK and instrumentation compilation, executed JVM tests, strict Android lint through `scripts/check-android.mjs`; device instrumentation runs separately |
-| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent single-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
+| Rust | Fresh mobile build (or frontend build), Rust formatting, all-targets Clippy, locked Rust tests (the CI shards as concurrent multi-threaded processes, `scripts/rust-test-shards.mjs`), generated-binding drift |
 
 Cargo runs inside `src-tauri` so its binding-export configuration applies.
 The Rust test gate compiles once, then runs the CI shards, integration
-binaries and doctests up to four processes at a time; each process keeps
-`--test-threads=1` and its own database. Some tests assert wall-clock budgets
-and can fail under CPU contention (#2049), so set `BUILDMESH_RUST_TEST_JOBS=1`
-to run one process at a time before attributing such a failure.
+binaries and doctests up to four processes at a time; each process runs its
+own tests multi-threaded, which is safe because every DB-backed test installs
+a private database for its own thread (issue #2048). Some tests assert
+wall-clock budgets and can fail under CPU contention (#2049), so set
+`BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before attributing
+such a failure.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
@@ -103,9 +111,13 @@ Rust formatting follows the same rule: `cargo fmt --all --check` runs over
 the crate, a diff in a touched file fails, and the crate's existing
 formatting backlog (#2022) is reported as `formatDiffCount` instead of
 blocking every Rust change. Format touched files with
-`rustfmt --edition 2021 <file>`; `cargo fmt` rewrites the whole crate, and
-rustfmt on a module root (`lib.rs`, `mod.rs`) also formats its child modules,
-so revert hunks outside your change. A
+`node scripts/rustfmt-touched.mjs <file.rs>...`. Do not run `cargo fmt` (it
+rewrites the whole crate) or bare `rustfmt <file>`: on a module root
+(`lib.rs`, `mod.rs`) rustfmt also formats the child modules. The script
+restores every other Rust file (tracked, or untracked and not ignored) byte
+for byte. The `guard-rustfmt.mjs` hook is an early warning: it denies a
+`rustfmt` or `cargo fmt` command that is not `--check`, but cannot see a
+command built at run time. A
 rustfmt failure that reports no diff (for example a parse error) stays red.
 Any other existing failure stays red too: reproduce at the recorded base
 before attributing it to baseline debt.
@@ -150,9 +162,15 @@ rules; unchanged fast evidence is reused. Existing edit/commit guards remain.
 PreToolUse protects direct edits of `.harness` state; use the CLI instead.
 Stop checks the current receipt and evidence rather than rerunning expensive
 suites at every turn. A first nonpassing stop presents the diagnostic. A
-recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. For a failed
-implementation that cannot be repaired, record `phase: blocked` and nonempty
-blockers to permit that handoff. None of these paths marks the task complete.
+recursive BLOCKED/TIMEOUT stop permits an incomplete handoff. Once recorded
+blockers exist, the very first stop of every later turn is released, so the
+diagnostic is not repeated once per turn. A FAIL is never
+released by a written report, however many times it is repeated. For a failed
+implementation that cannot be repaired, write
+`{"phase": "blocked", "blockers": ["<why>"]}` to a JSON file and run
+`npm run harness -- update --spec <file>`; the FAIL stop message repeats this
+command. Never edit `.harness/active-task.json` by hand. None of these paths
+marks the task complete.
 
 These hooks apply to Claude; other agents use the portable CLI and existing CI
 gates. Tasks must be started explicitly for this completion guard to apply;
@@ -162,9 +180,12 @@ Do not disable hooks or edit a receipt to obtain green. CI independently tests
 the harness through `test:agent`; it does not trust local receipts.
 
 Task operations serialize with `.harness/lock`; advisory fast checks use
-`.harness/fast-lock` and publish only if the tested tree stayed current.
-After an interrupted process,
-inspect the PID recorded there before removing a stale lock. Otherwise resume
+`.harness/fast-lock` and publish only if the tested tree stayed current. An
+operation reclaims a lock whose recorded PID is no longer alive, so a killed
+run (a `verify` past the tool cap, for example) does not need manual cleanup;
+the reclaim is recorded as a `lock-reclaimed` event. A lock that cannot be
+read, or whose owner is still running, is left in place: inspect the PID
+recorded there before removing it by hand. Otherwise resume
 the existing task and rerun verification. State survives context resets and
 process restarts, but deleting the worktree deletes its local continuity data.
 

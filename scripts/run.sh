@@ -99,14 +99,14 @@ done
 if [ -f "$LOG_PATH" ]; then
   NEW_LINES=$(tail -n +$((BEFORE_LINES + 1)) "$LOG_PATH")
   if echo "$NEW_LINES" | grep -qi "started\|ready"; then
-    echo "OK — Buildmesh running"
+    echo "OK - Buildmesh running"
     exit 0
   fi
 fi
 
 # Fallback: check process is alive
 if kill -0 "$PID" 2>/dev/null; then
-  echo "OK — Process alive (no log confirmation)"
+  echo "OK - Process alive (no log confirmation)"
   exit 0
 fi
 

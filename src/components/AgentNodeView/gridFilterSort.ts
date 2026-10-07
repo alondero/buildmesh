@@ -1,6 +1,6 @@
 import type { AgentNode } from '../../stores/agentNodeStore';
-import type { GridControls, ViewMode } from '../../stores/uiStore';
-import { scopeNodesForMode } from '../../lib/viewModes';
+import type { GridControls } from '../../stores/uiStore';
+import type { DerivedScope } from '../../lib/viewModes';
 import { groupActivityNodes, indexAgentNodes, type NodeOwnerships, type NodeGroups } from '../../lib/nodeActivities';
 
 type GridControlValues = Pick<
@@ -32,31 +32,30 @@ function compareStableOrder(a: AgentNode, b: AgentNode): number {
 }
 
 /**
- * Derive the ordered grid sequence from the active view scope and the
+ * Derive the ordered grid sequence from the derived scope and the
  * persisted Grid Controls state.
  *
- * This function has exactly one job: ORDERING. Which nodes are candidates —
- * including the Grid Controls narrowing that applies only inside the
- * 'filtered' View Mode — is owned entirely by `scopeNodesForMode`
- * (src/lib/viewModes.ts), which receives the controls verbatim. There must
- * be no filter logic and no control-dependent early return here: the search
- * text persists in the store across mode switches (#1609), so any guard on
+ * This function has exactly one job: ORDERING. Which nodes are candidates
+ * — including the Mesh scope, and the Grid Controls narrowing that applies
+ * only inside the 'filtered' View Mode — is owned entirely by
+ * `deriveScope` (src/lib/viewModes.ts), which this function receives as
+ * an argument rather than re-deriving (#2071). There must be no filter
+ * logic and no control-dependent early return here: the search text
+ * persists in the store across mode switches (#1609), so any guard on
  * it would run on every Mesh/Pinned/All render and, by skipping the sort
  * below, silently serve store-insertion order. Sorting runs
- * unconditionally on whatever the upstream scope returns.
+ * unconditionally on whatever the scope contains.
  */
 export function deriveVisibleNodes(
-  viewMode: ViewMode,
-  agentNodes: AgentNode[],
-  selectedMeshId: number | null,
-  activeNodeId: number | null,
+  scope: DerivedScope,
+  agentNodes: readonly AgentNode[],
   controls: GridControlValues,
   ownerships: NodeOwnerships = {},
   groups: NodeGroups = [],
 ): AgentNode[] {
-  if (viewMode === 'single') return [];
+  if (scope.viewMode === 'single') return [];
 
-  const nodes = groupActivityNodes(scopeNodesForMode(viewMode, agentNodes, selectedMeshId, activeNodeId, controls), indexAgentNodes(agentNodes), ownerships, groups);
+  const nodes = groupActivityNodes(scope.visibleNodes, indexAgentNodes(agentNodes), ownerships, groups);
 
   if (controls.gridSortBy === 'custom') return nodes;
 

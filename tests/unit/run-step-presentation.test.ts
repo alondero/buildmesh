@@ -13,6 +13,7 @@ import {
   parseRunContext,
   reviewPassCount,
   reviewReport,
+  runFailureStep,
   stepPassLabel,
   stepSummary,
   stepVerdict,
@@ -264,5 +265,28 @@ describe('stepSummary and verdictTextClass', () => {
     ]);
     expect(index.get('a')?.type).toEqual({ type: 'manual' });
     expect(index.get('missing')).toBeUndefined();
+  });
+});
+
+
+describe('runFailureStep - which step explains a failed run', () => {
+  const row = (status: string, error_message: string | null, node_id = 'x') => ({ node_id, status, error_message });
+
+  it('picks the first failed step that carries a reason', () => {
+    const steps = [row('completed', 'a note'), row('failed', null, 'a'), row('failed', 'boom', 'b')];
+    expect(runFailureStep(steps)?.node_id).toBe('b');
+  });
+
+  it('never promotes a note on a finished step, or a wait explanation, to the failure reason', () => {
+    expect(runFailureStep([row('completed', 'Waiting for your approval.')])).toBeNull();
+    expect(runFailureStep([row('blocked', 'Needs approval'), row('unverified', 'Waiting for a report')])).toBeNull();
+  });
+
+  it('ignores the generic text written on siblings cancelled by a failure', () => {
+    const swept = row('cancelled', 'Cancelled because the circuit run failed.', 'sibling');
+    expect(runFailureStep([swept])).toBeNull();
+    // ...but a step cancelled with its own reason still explains the run.
+    const real = row('cancelled', 'Prompt delivery is unverified: the harness did not confirm it.', 'publish');
+    expect(runFailureStep([swept, real])?.node_id).toBe('publish');
   });
 });

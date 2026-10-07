@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,14 +146,6 @@ test('task start cannot replace an unfinished task or update its immutable base'
   assert.equal(fixture.cli('finish').status, 2);
   assert.match(fixture.cli('status').stdout, /Preserve owner state/);
 });
-test('exclusive operation lock prevents task state corruption', t => {
-  const fixture = repo(t);
-  fixture.start();
-  fixture.put('.harness/lock', JSON.stringify({ pid: process.pid }));
-  const result = fixture.cli('finish');
-  assert.equal(result.status, 2);
-  assert.match(result.stderr, /another harness operation/);
-});
 test('progress transitions persist phase timing and continuity', t => {
   const fixture = repo(t);
   const task = fixture.start();
@@ -238,6 +230,12 @@ test('the format gate passes baseline rustfmt debt and fails touched or unexplai
   const touched = await gate('Diff in /r/src-tauri/src/new.rs:3:', ['src-tauri/src/new.rs']);
   assert.equal(touched.outcome, 'FAIL');
   assert.match(touched.reason, /src-tauri\/src\/new\.rs/);
+  // Bare `rustfmt <file>` also rewrites child modules, so the gate must not recommend it.
+  assert.match(touched.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new\.rs"/);
+  assert.doesNotMatch(touched.reason, /rustfmt --edition 2021/);
+  // A worktree path can contain spaces; the suggested command must stay copy-pasteable.
+  const spaced = await gate('Diff in /r/src-tauri/src/new module.rs:3:', ['src-tauri/src/new module.rs']);
+  assert.match(spaced.reason, /node scripts\/rustfmt-touched\.mjs "src-tauri\/src\/new module\.rs"/);
   assert.equal((await gate('error: unexpected token', ['src-tauri/src/new.rs'])).outcome, 'FAIL');
 });
 test('behavior gates reject zero tests and preserve executed counts', async t => {
@@ -304,6 +302,54 @@ test('hook stdin restores context, guards state writes and rejects stale complet
   assert.equal(JSON.parse(stop.stdout).decision, 'block');
   assert.equal(fixture.hook({ hook_event_name: 'Stop', stop_hook_active: true }).stdout, '');
   assert.equal(JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json'))).phase, 'understand');
+});
+test('a failed gate keeps blocking Stop, names the way out, and releases once update records a blocked handoff', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+  fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: [], outcome: 'FAIL', reason: 'Command failed. See the gate log; failure attribution is unverified.' }));
+  // A written report alone must not release a FAIL; only recorded blockers do.
+  for (const payload of [{ hook_event_name: 'Stop' }, { hook_event_name: 'Stop', stop_hook_active: true }]) {
+    const stop = JSON.parse(fixture.hook(payload).stdout);
+    assert.equal(stop.decision, 'block');
+    assert.match(stop.reason, /npm run harness -- update --spec/);
+    assert.match(stop.reason, /"phase":\s*"blocked"/);
+    assert.match(stop.reason, /blockers/);
+  }
+  fixture.put('.task.json', JSON.stringify({ phase: 'blocked', blockers: ['rust-tests fails on a pre-existing host-dependent test'] }));
+  const update = fixture.cli('update', '--spec', '.task.json');
+  assert.equal(update.status, 0, update.stderr);
+  // The recorded handoff is released on the first stop of every later turn, not
+  // only on a recursive one, and it still never marks the task complete.
+  for (const payload of [{ hook_event_name: 'Stop' }, { hook_event_name: 'Stop', stop_hook_active: true }]) {
+    assert.equal(fixture.hook(payload).stdout, '', JSON.stringify(payload));
+  }
+  const recorded = JSON.parse(readFileSync(join(fixture.cwd, '.harness/active-task.json')));
+  assert.equal(recorded.phase, 'blocked');
+  assert.equal(fixture.cli('finish').status, 1, 'a blocked handoff still fails finish on the failing receipt');
+  // Clearing the blockers restores the guard instead of leaving a silent pass.
+  fixture.put('.task.json', JSON.stringify({ phase: 'verify', blockers: [] }));
+  assert.equal(fixture.cli('update', '--spec', '.task.json').status, 0);
+  assert.equal(JSON.parse(fixture.hook({ hook_event_name: 'Stop' }).stdout).decision, 'block');
+});
+test('the operation lock blocks a live owner, and a lock left by a dead process is reclaimed', t => {
+  const fixture = repo(t);
+  fixture.start();
+  fixture.put('.harness/lock', JSON.stringify({ pid: process.pid }));
+  const held = fixture.cli('finish');
+  assert.equal(held.status, 2);
+  assert.match(held.stderr, /another harness operation/);
+  // An interrupted process leaves the lock behind; the next operation takes it.
+  const dead = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' }).pid;
+  fixture.put('.harness/lock', JSON.stringify({ pid: dead, startedAt: '2026-01-01T00:00:00.000Z' }));
+  const reclaimed = fixture.cli('finish');
+  assert.equal(reclaimed.status, 2);
+  assert.doesNotMatch(reclaimed.stderr, /another harness operation/);
+  assert.equal(existsSync(join(fixture.cwd, '.harness/lock')), false, 'the reclaiming run must leave no lock behind');
+  assert.match(readFileSync(join(fixture.cwd, '.harness/events.jsonl'), 'utf8'), new RegExp(`"type":"lock-reclaimed","lock":"lock","pid":${dead}`));
+  // A lock that cannot be attributed to a dead owner stays put for the operator.
+  fixture.put('.harness/lock', 'not json');
+  assert.match(fixture.cli('finish').stderr, /another harness operation/);
 });
 test('read-only sessions and unrelated hook events do not require a task', t => {
   const fixture = repo(t);

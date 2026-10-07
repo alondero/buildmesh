@@ -16,8 +16,9 @@ function mockBackend(
   lanEnabled = false,
   tlsActive = false,
   exposedInterfaces: { address: string; tls: boolean }[] = [],
+  devices: { id: number; label: string; last_ip: string | null; last_active_at: string }[] = [],
 ) {
-  const state = { lanEnabled, tlsActive, exposedInterfaces };
+  const state = { lanEnabled, tlsActive, exposedInterfaces, devices };
   const calls: Record<string, unknown[]> = {};
   vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, unknown>) => {
     calls[cmd] = [...(calls[cmd] ?? []), args];
@@ -43,7 +44,12 @@ function mockBackend(
       case 'get_provider_meters':
         return Promise.resolve([]);
       case 'list_device_sessions':
-        return Promise.resolve([]);
+        // A NEW array each call, mirroring the real loader — that fresh
+        // identity is what makes the adoption guard fire again.
+        return Promise.resolve([...state.devices]);
+      case 'revoke_device_session':
+        state.devices = state.devices.filter((d) => d.id !== args?.id);
+        return Promise.resolve(undefined);
       default:
         return Promise.resolve({});
     }
@@ -216,5 +222,42 @@ describe('Realized LAN exposure status (issue #586)', () => {
     expect(screen.queryByTestId('lan-realized-status')).toBeNull();
     expect(screen.queryByTestId('lan-exposure-warning')).toBeNull();
     expect(screen.queryByTestId('lan-exposed-interface')).toBeNull();
+  });
+
+  // Regression test for #1880 review finding 1. The three Remote Access
+  // payloads (devices / coordinator / network) originally shared ONE adoption
+  // guard, so any one of them arriving re-ran all three adoptions. A devices
+  // refresh would therefore re-seed `lanEnabled` from the network payload,
+  // clobbering the optimistic value a just-issued LAN toggle owns — the
+  // toggle visibly snaps back without the user having touched it.
+  //
+  // The trigger here is a real user action on a sibling control (confirming a
+  // device revoke re-reads devices) rather than a direct `invoke` call,
+  // because only the loader path publishes a new payload.
+  it('keeps a LAN toggle optimistic when a sibling control re-reads devices', async () => {
+    const phone = { id: 7, label: 'Pixel', last_ip: '192.168.1.5', last_active_at: 'a minute ago' };
+    mockBackend(false, false, [], [phone]);
+    render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane(/remote access/i);
+
+    const toggle = (await screen.findByRole('checkbox', { name: /expose to lan/i })) as HTMLInputElement;
+
+    // Enable exposure. `set_lan_exposure_enabled` is optimistic, but no
+    // network payload has been re-read yet, so `lanEnabled` is owned by the
+    // toggle.
+    await userEvent.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(true));
+
+    // Drive an unrelated payload: revoking the paired device calls
+    // `loadDevices()`, publishing a NEW devices array. Under the combined
+    // guard that re-ran the network adoption and reset `lanEnabled` back to
+    // the last-read `false`.
+    await userEvent.click(await screen.findByRole('button', { name: 'Revoke' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Confirm revoke' }));
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('revoke_device_session', { id: phone.id }),
+    );
+
+    expect(toggle.checked).toBe(true);
   });
 });

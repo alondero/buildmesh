@@ -10,15 +10,15 @@ ownership render no indicator.
 
 ## Presentation contract
 
-| Presentation | Meaning | Suggested accessible label |
-|---|---|---|
-| Active | A running Circuit is driving a running or spawning node. | `Circuit active` |
-| Waiting | Circuit ownership is live, but the node is waiting, paused, queued, or needs recovery. | `Circuit waiting` |
-| Done | The Circuit run completed; the Agent Node remains available for inspection. | `Circuit done` |
-| Needs attention | The Circuit failed or its state is unknown. | `Circuit needs attention` |
-| None | No live or retained Circuit ownership applies, or the Circuit was cancelled. | Render nothing |
+| Presentation | Meaning | Orbit ring | Accessible label |
+|---|---|---|---|
+| Active | A running Circuit is driving a running or spawning node. | Violet comet circling the status circle | `Circuit active` |
+| Waiting | Circuit ownership is live, but the node is waiting, paused, queued, or needs recovery. | Amber half ring, held still | `Circuit waiting` |
+| Done | The Circuit run completed; the Agent Node remains available for inspection. | Green closed ring | `Circuit done` |
+| Needs attention | The Circuit failed or its state is unknown. | Red dashed ring | `Circuit needs attention` |
+| None | No live or retained Circuit ownership applies, or the Circuit was cancelled. | No ring | None |
 
-The lifecycle dot remains authoritative for the Agent Node itself. `ready`
+The status circle remains authoritative for the Agent Node itself. `ready`
 means the agent yielded cleanly; it does not mean a person is needed. An error
 or lost node under live Circuit ownership needs attention. A failure after a
 Circuit has completed belongs to the agent and should use agent-facing copy.
@@ -33,15 +33,37 @@ and reveal action in sync.
 
 ## Layout and interaction
 
-Use the Pilot-light glyph in a fixed 14px ownership cell in the canvas header
-and sidebar. Keep the cell empty for unowned nodes so adjacent lifecycle,
-provider, and name columns remain aligned. The indicator includes an accessible
-name and tooltip; its optional action opens the owning Circuit run in the
-Circuits Probe.
+A node is one 20px glyph in the canvas header and the sidebar: the status
+circle with, while Circuit owns the node, the orbit ring around it
+(`NodeStatusGlyph`). There is no separate ownership cell, so an unowned node
+is just the circle. The circle is the node's lifecycle status; its fill style
+(solid, hollow, dashed, slashed, half-filled, ringed dot, thin, cross) is part
+of the status vocabulary in `src/lib/status.ts`.
 
-The card-level attention chip remains separate from the Pilot light. A solo
-focused failure is already visible in the light and does not get a duplicate
-chip. Multi-member cards retain the chip so users can reach every failing or
+The shape+colour collision set is exactly two pairs, both deliberate:
+`pending` and `spawning` (the same "starting" state mirrored from two
+code paths) and `completed` and `ready` (pre-existing ✓/green grouping).
+`idle` and `running` are not a collision: they share cyan but differ in
+shape (hollow ring vs solid circle). A test in
+`tests/unit/node-status-glyph.test.tsx` guards that a future change does
+not introduce a third such pair.
+
+The orbit shapes are chosen so every Circuit state differs in outline, not
+just colour. The comet silhouette (tapering tail and star head) belongs to
+Active alone. The comet turns once every 3.2 seconds and every comet shares one
+page-wide clock, so a grid of piloted nodes moves in step. With
+`prefers-reduced-motion` the comet parks at 12 o'clock over a stronger track,
+which still differs from every parked ring.
+
+The glyph has one accessible name that joins the node status and the Circuit
+state (`Running. Circuit active`) and a tooltip that adds the Circuit detail.
+Its optional action opens the owning Circuit run in the Circuits Probe; when it
+has one, the glyph is a button with a 24px target that does not change the
+row's layout.
+
+The card-level attention chip remains separate from the glyph and keeps its own
+Pilot-light icon. A solo focused failure is already visible as the dashed red
+ring and does not get a duplicate chip. Multi-member cards retain the chip so users can reach every failing or
 waiting member.
 
 ## Refresh behavior
@@ -57,6 +79,8 @@ event or remount.
 - Rust tests cover Circuit ownership retention, terminal history, and cleanup.
 - Unit tests cover lifecycle-to-presentation mapping, failure attribution,
   cancellation, and unknown ownership.
-- Component tests cover accessible labels, tooltips, fixed ownership cells,
-  and shared header/sidebar behavior.
+- Component tests cover the orbit shape for each presentation, the combined
+  accessible name and tooltip, the single fixed-size glyph box, the click seal
+  on the action button, the shared comet clock, the reduced-motion stylesheet
+  rule, and shared header/sidebar behavior.
 - Listener and cache tests cover Circuit state refresh and PR cache invalidation.

@@ -27,14 +27,18 @@ output.)
 
 ### Steps
 
-1. **Strip the suffix and set the release version in all three manifests** (they
-   must agree exactly with the git tag — the release workflow enforces string
-   equality):
+1. **Strip the suffix and set the release version in every file that stores it**
+   (they must agree exactly with the git tag — the release workflow enforces
+   string equality):
    ```
    npm run version:set -- 1.2.0
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`,
-   `src-tauri/Cargo.toml`, and the `buildmesh` entry in `src-tauri/Cargo.lock`.
+   `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and
+   `package-lock.json` — commit all five. `package-lock.json` is easy to
+   forget because it looks like build output rather than a manifest, but npm
+   stores the root version in it twice (the top-level mirror and the
+   `packages[""]` entry) and rewrites both on the next install.
 2. Draft the release note:
    ```
    npm run release:notes
@@ -79,6 +83,46 @@ output.)
    npm run version:set -- 1.3.0-0
    ```
    Commit and merge so subsequent local builds stay newer than the release.
+   Commit `package-lock.json` with the rest: a bump that leaves the lockfile on
+   the released version is the exact drift the `Manifest versions` job and the
+   release tag gate now reject.
+
+One version, five files. `npm run version:set` is the fanout that keeps them
+in step, and `npm run check:versions`
+(`scripts/check-manifest-versions.mjs`) is the read-only check that all six
+version sites still agree. Run it after any hand edit to a version, and let
+CI run it for you: the `Manifest versions` job in
+`.github/workflows/verify.yml` reads the same script on every pull request, and
+`release.yml` runs it with the tag as the expected version. It needs no
+`npm ci` and no build, so it is the cheapest gate in the graph.
+
+### Where the version check does and does not block a merge
+
+The `Manifest versions` job is **not** in the required-check ruleset, so
+understand what still stands behind it:
+
+- A bump made with `npm run version:set` always writes `package.json`, which
+  change-scope classifies as a frontend change, so the **required**
+  `Quality (Linux)` job runs the vitest suite and its version assertion fails
+  the pull request. This is the normal path and it is merge-blocking.
+- A hand edit that touches **only** Rust-side manifests (`src-tauri/Cargo.toml`,
+  `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`) classifies as `rust`, not
+  `frontend`. The vitest suite is then skipped, and nothing in the Rust graph
+  compares a version, so that pull request merges unless a human reads the red
+  `Manifest versions` job.
+- A release can never ship drift either way: the tag gate in `release.yml`
+  compares all five files against the tag before anything is built.
+
+Closing the middle case means promoting `Manifest versions` to a required
+check — one ruleset edit, with the command in
+[Required checks and branch protection](#required-checks-and-branch-protection).
+Until then, read that job's result on any pull request that edits a version.
+
+The workspace also holds `src-tauri/proc-macros/Cargo.toml`
+(`buildmesh_macros`), which is deliberately *not* one of the five: it is an
+unpublished path dependency with its own version line, and it is not part of
+the shipped app version. `npm run version:set` does not touch it, and
+`check:versions` does not read it.
 
 Versioning is manual/ad-hoc for now (no fixed cadence). Use semver.
 
@@ -105,34 +149,67 @@ same ground:
 
 | Check | Required | What it proves |
 |---|---|---|
-| `Verification / Quality (Linux)` | yes | Agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, and bundle budget always; the vitest unit + integration suites as well whenever the change-scope job (`Detect changes`) reports frontend changes. The fast frontend gate — it no longer compiles Rust. |
+| `Verification / Manifest versions` | no — see the gap below | Every file that stores the app version agrees on it: `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the `buildmesh` entry in `src-tauri/Cargo.lock`, and both version sites in `package-lock.json`. A pure read of six strings, so it runs on every event with no `npm ci`, no change-scope classification, and no upstream job. |
+| `Verification / Quality (Linux)` | yes | The aggregate frontend gate. It runs no check of its own, and it never skips: a required check that GitHub reports as *skipped* counts as satisfied, so the decision lives in `scripts/ci/quality-gate.mjs` where the reason an upstream branch is absent is visible. It passes only when the change-scope job succeeded, `Quality gates (Linux)` passed (agent-infrastructure, docs, README-drift, ESLint (+ fixture verifier), frontend build, bundle budget, process-spawn discipline — this is what stops a docs-only pull request), and the three `Quality vitest (<leg>)` legs passed. The one absence it tolerates: the vitest legs skipping themselves when the classification says no frontend changed. |
 | `Verification / Rust tests + TS bindings` | yes | The aggregate Rust gate. It passes only when the change-scope job succeeded and the compile job, every test shard, `Quality (Linux)`, and the non-shard `Rust export, doc, and integration tests` job (export, doctest, and integration targets run serially, with ts-rs regenerating `src/types/generated/` so binding drift fails the build) all passed. The one check that legitimately skips: a pull request whose diff touched no Rust (a skipped required check counts as satisfied, which is why every other absence is made to fail instead). |
 | `Verification / Verify-smoke (Linux)` | yes | The real browser renders the app with a mock backend (`verify-smoke` Playwright project), whenever the change-scope job reports frontend changes; a Rust-only pull request skips it. |
-| `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. |
-| `Verification / Platform smoke (macos-latest)` | no — post-merge signal | The Tauri app compiles and links on macOS. Same triggers as the Windows leg. |
+| `Verification / Platform smoke (windows-latest)` | no — post-merge signal | The Tauri app compiles and links on Windows; ConPTY frame ordering and background inference behavior tests pass, including Claude install fallbacks with a stale PATH. Runs on pushes to `main`, release tags, and manual dispatches — not on pull requests. Caches its Cargo target directory; macOS deliberately does not. |
+| `Verification / Platform smoke (macos-latest)` | no — post-merge signal | The Tauri app compiles and links on macOS. Same triggers as the Windows leg, cold apart from the Cargo download cache. |
 
 The jobs fan out rather than chain. `Detect changes` classifies the pull
 request's diff (everything else — pushes, the schedule, dispatches, release
-tags — is classified as full scope), and `Quality (Linux)` (frontend) starts
-immediately after it. The Rust branch — the **non-required** `Rust build
-(compile)` job, the seven `Rust tests (<group>)` shards, and the required
-`Rust tests + TS bindings` aggregate — only starts when that classification
-says Rust moved, and `Quality (Linux)`'s browser/vitest steps and
-`Verify-smoke (Linux)` only run when it says frontend moved, so a Rust-only
-pull request never boots Chromium and a frontend-only pull request never
-compiles Rust. The two `Platform smoke` jobs are outside all of this: they
-are not required checks (see the table above) and run on pushes, release
-tags, and manual dispatches rather than on pull requests. The shards and the non-shard `Rust export, doc, and integration tests` job
-start together once `Rust build (compile)` has populated the shared Cargo
-cache; the non-shard pass is the longest Rust leg, so it no longer waits behind
-the slowest shard. The `Rust tests + TS bindings` aggregate then only checks
-that `Quality (Linux)`, `Rust build (compile)`, every shard, the non-shard
-pass, and `Detect changes` all succeeded, so it certifies a fully green tree
-without adding a serial stage of its own. The old shape queued
+tags — is classified as full scope), and the frontend branch — the **required**
+`Quality (Linux)` aggregate over `Quality gates (Linux)` and three
+`Quality vitest (<leg>)` legs — starts immediately after it. The Rust branch —
+the **non-required** `Rust build (compile)` job, the seven `Rust tests (<group>)`
+shards, and the required `Rust tests + TS bindings` aggregate — only starts when
+that classification says Rust moved, and the vitest legs and `Verify-smoke
+(Linux)` only run when it says frontend moved, so a Rust-only pull request never
+boots Chromium and a frontend-only pull request never compiles Rust. The two
+`Platform smoke` jobs are outside all of this: they are not required checks (see
+the table above) and run on pushes, release tags, and manual dispatches rather
+than on pull requests. The shards and the non-shard `Rust export, doc, and
+integration tests` job start together once `Rust build (compile)` has populated
+the shared Cargo cache; the non-shard pass is the longest Rust leg, so it no
+longer waits behind the slowest shard. The `Rust tests + TS bindings` aggregate
+then only checks that `Quality (Linux)`, `Rust build (compile)`, every shard, the
+non-shard pass, and `Detect changes` all succeeded, so it certifies a fully
+green tree without adding a serial stage of its own. The old shape queued
 everything behind one ~10-minute frontend job; this one does not. `Rust build
 (compile)` compiles every Rust test binary once — with `lld` and a runner
 swapfile in place of the old single-threaded `CARGO_BUILD_JOBS=1` — and the
 shards restore that cache instead of rebuilding.
+
+`Quality (Linux)` keeps its name and does no work: the static gates and the
+vitest suites run as parallel jobs, because one `vitest run tests/unit
+tests/integration` measured 220s inside a ~310s job and was the whole critical
+path for a frontend-only pull request. The unit suite is split by vitest's own
+`--shard` (which gives every file to exactly one shard) and the ten-file
+integration suite — 88s of serial test time, 80s of it the browser-bound
+`ui-shot.test.ts` — stays whole in a third leg. That third leg is also the only
+one that installs Chromium, because `ui-shot.test.ts` is the only test that
+calls `launchChromium`; the unit files that mention Playwright read a
+`ui-shot-*.steps.mjs` file as text or quote Chromium in a comment.
+`tests/agent-infra/vitest-legs.test.mjs`
+(`npm run test:agent`) gates that matrix: the shard indices must be 1..N over a
+single N and the suite directories must cover exactly the two the single
+combined invocation named, so a renumbered shard or an unclaimed suite directory
+fails the build instead of silently skipping tests.
+
+Two required checks — `Quality (Linux)` and `Rust tests + TS bindings` — are
+aggregates that keep `if: always()` and an explicit result check rather than
+relying on the implicit skip, because a required status check GitHub reports as
+*skipped* counts as satisfied. Each fails with a reason instead, including when
+the change-scope job itself failed. `Quality (Linux)` must not carry a skip
+condition of its own, for a reason worth stating because it is easy to
+reintroduce: `Rust tests + TS bindings` requires `Quality (Linux)` to equal
+`success`, so a skip on one class turns that required check red, and any skip
+also leaves a docs-only pull request mergeable over a red `Quality gates
+(Linux)`. An earlier revision of this split skipped on
+`needs.changes.outputs.frontend == 'false'` and broke both. The rules live in
+`scripts/ci/quality-gate.mjs` and are tested per classification class in
+`tests/agent-infra/quality-gate.test.mjs`; the wall-clock win came from running
+`Quality gates (Linux)` and the vitest legs in parallel, not from skipping.
 
 A caller-supplied `profile` input narrows the graph for pushes to `main`:
 `build.yml` passes `light`, which skips the Rust branch entirely (the merge
@@ -178,6 +255,44 @@ is claimed, which `npm run check:rust-shards`
 (`scripts/check-rust-shard-coverage.mjs`, also a CI step) prevents: it lists
 the unit tests from the test binary and fails if any is unclaimed or claimed
 twice. Run it after adding a module, not only in CI.
+
+Seven shards were re-measured after #2048 and deliberately kept: the seven
+shards now run 13-39s of tests each, so per-shard setup is back on the critical
+path instead of the tests, and consolidating into fewer, larger shards would
+*lengthen* it (~40s + 173/k) rather than shorten it. Revisit if the slowest
+shard grows past the setup cost again.
+
+### Caching, and the 10 GB budget
+
+GitHub caps a repository's caches at 10 GB in total and evicts the
+least-recently-used entries past that. This repository sat at 9.98 GB before the
+following changes, so **a new cache can silently evict the Cargo target cache
+that turns `rust-build`'s compile into 54 seconds instead of minutes.** Two
+changes keep the budget sustainable:
+
+- The Linux Rust jobs share one rust-cache entry (`shared-key:
+  linux-rust-target`) instead of one per job id. They were saving nine
+  near-identical ~590 MB copies of the same dependency artifacts — rust-cache
+  never stores the workspace crate, so the duplication bought nothing.
+- The apt `.deb` set (`.github/actions/install-linux-build-deps`) and the
+  Playwright browser build are cached. apt keeps them in
+  `Dir::Cache::archives`, which the composite action redirects into the
+  workspace, so this uses apt's own supported mechanism: on a hit apt still
+  resolves and verifies every package and runs its maintainer scripts, and only
+  the transfer is skipped. A stale or partial entry costs a download, not a
+  broken job.
+
+Check the budget before adding another cache:
+
+```
+gh api "repos/alondero/buildmesh/actions/caches?per_page=100"
+```
+
+Two caches are deliberately *not* kept: the macOS platform smoke's target
+directory (the cache action documents macOS target directories as its
+corruption workaround, and that leg is 245s) and the weekly `Weekly package
+smoke` targets (a one-off check does not justify three persistent target
+caches).
 
 Those names are owned by `.github/workflows/verify.yml`. A job that calls a
 reusable workflow is reported as `<calling job> / <called job>`, so the
@@ -232,8 +347,12 @@ assuming the packages are fine.
    first. `tauri-action` is downstream of that job, so a failing typecheck,
    test, lint, docs, or platform compile produces no draft release and no
    uploaded installer.
-2. Tag/version agreement — `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`,
-   and `package.json` must all match the tag.
+2. Tag/version agreement — all five version-bearing files must match the tag:
+   `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, the
+   `buildmesh` entry in `src-tauri/Cargo.lock`, and `package-lock.json`. The
+   step runs `scripts/check-manifest-versions.mjs --expect <tag>`, the same
+   check the `Manifest versions` job runs on every pull request, so a release
+   cannot be cut from a tree the merge gate would have rejected.
 3. Mainline — the tagged commit must be reachable from `main`. A tag cut from a
    side branch, or from a commit that never went through the ruleset, fails
    before the build.

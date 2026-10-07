@@ -20,6 +20,7 @@ The user workflow for uncertain actions is in
 | `CallGithub(PostComment)` | Same `github` claim; GitHub receives a comment POST. | A successful response acknowledges the action. An unknown result may have created a comment. | No automatic replay or read-only Circuit Recheck. Operator outcome is required before retry. |
 | `CallGithub(CloseIssue)` | Same `github` claim; GitHub receives a PATCH setting the issue state to closed. | Closing an already-closed issue is idempotent, but an unknown response remains uncertain. | No automatic replay or read-only Circuit Recheck. Operator outcome is required before retry. |
 | `CallGithub(OpenPr)` | Same `github` claim. Before lookup or create, the worker stores the exact owner, repository, and head branch. | A matching read-only lookup acknowledges the original attempt. Missing, mismatched, or unavailable lookup stays uncertain. | Recovery performs only the saved-target lookup; it never creates a PR. A matching result commits PR identity and effect reconciliation together. Absence stays uncertain. Operator retry still requires `not_performed`. |
+| `CallGithub(ConfirmPrMerged)` | Same `github` claim. Read-only: it reads the run's pull request (`GET /pulls/{n}`) and mutates nothing. | Merged is success. An open or closed-unmerged PR, an unreadable PR and a missing PR number are all a routed `Failed` outcome that records `merge.unconfirmed_reason`; none of them fails the run or closes anything. | A crash between the claim and the result leaves an Unverified checkpoint like any GitHub action. The lookup is safe to repeat, but the claim is not replayed automatically, and recording it completed is an operator attestation of the merge. |
 | `SetNodeStatus` | The target status write, completed step, and `effect_result` history commit in one SQLite transaction. It has no remote dispatch window. | The transaction either commits all three or rolls them all back. If the target is missing or archived, the worker records the effect step and run as failed in a second transition. | Restart observes the status and completed step together; no replay is needed. The failure transition uses the original run/step fence, so cancellation or deletion that wins before it prevents the failure write too. |
 | `CloseAgentNode` | The step completes before resource retirement. Agent deletion records its lifecycle cleanup lease; the target spawn association remains until retirement succeeds. | Deletion is idempotent. A missing agent row is treated as an already-finished close, then the association is cleared. | While the completed close still resolves to its original agent, worker observation emits `CloseAgentRetry`. Once the association clears, retry stops. Cancellation and circuit deletion use the durable retirement path. |
 | `Notify` | Emits the `circuit-notification` Tauri event after the run transition commits. There is no notification outbox or delivery acknowledgement. | Notification delivery is transient and best effort. The run transition and history remain durable. | Notifications are not replayed after restart, avoiding duplicate transient toasts. The UI refreshes from durable run state. |
@@ -44,16 +45,26 @@ generation.
 ## Operator and test fences
 
 Multiline Codex and Muse prompt delivery waits for a complete matching paste
-echo (a marker, or full visible text for short drafts) and one second of quiet
+echo (a marker, full visible text for short drafts, or the draft's tail for
+mid-size pastes drawn inline) and one second of quiet
 output before sending Enter. Marker matching ignores terminal padding and line
 breaks while retaining the exact character
-count and closing bracket.
+count and closing bracket. Which confirmation applies is declared per harness
+by its adapter (`paste_gate_policy`), not by harness-name checks in delivery.
 
 Muse Code 1.3.0 draws a mid-size paste in full in its input box and only
 collapses larger ones to the marker. Probing a real Windows ConPTY on 2026-10-05
 showed 600 and 839 raw characters drawn in full and 1,509 collapsed to
 `[Pasted Content 1509 chars]`; the exact collapse point (characters or lines)
-is unmeasured. For Muse, a draft past the full-text limit (measured after
+is unmeasured, so the gate deliberately encodes none — marker or tail confirms
+at any size. Codex 0.160.0 showed the same shape in a partial 79x57 frame (a
+~600-character paste drawn inline with no marker), so Codex takes the same
+tail rule; a collapsed draft carries no visible tail, so only its marker can
+confirm it. The Codex frame in the regression is synthetic (full draft text in
+redraw chrome, no marker) because a clean live capture was blocked by a
+hooks-review dialog — it pins the rendering shape the rule relies on, and a
+byte-exact live capture is still outstanding. For either harness, a draft past
+the full-text limit (measured after
 normalization, like the matcher) is therefore also confirmed by its last 64
 letters and digits appearing in output received after the write. The paste is
 read in order, so the tail appearing means the text before it was accepted, and
@@ -62,12 +73,15 @@ prompt was visibly staged but waited the full budget for a marker Muse never
 prints, so the step ended Unverified with no Enter sent. Known limit: a stale
 redraw that repaints an earlier prompt with an identical ending could satisfy the
 tail match; the one-second quiet requirement narrows this but does not remove
-it. Codex keeps its stricter rule (marker, or full text up to the limit) until
-its mid-size rendering is captured.
+it (pinned as a regression test so a future token or composer-region hardening
+visibly flips it).
 
 A captured Codex 0.160.0 Windows ConPTY redraw at
 22 columns inserted extra spaces inside `[Pasted Content 9407 chars]`; the
-previous literal matcher rejected it. Run 320's ledger retained prompt intent
+previous literal matcher rejected it. The tail anchor survives the same
+fragmentation: normalization drops whitespace, so ConPTY padding and line
+breaks inside the tail region cannot hide it (covered by a narrow-width
+regression). Run 320's ledger retained prompt intent
 and timed out after 30 seconds; its Codex transcript later contained the full
 9,407-character feedback prompt. The historical paste screen was not retained,
 so that record alone cannot establish its exact rendering.
@@ -90,7 +104,10 @@ records an Unverified checkpoint; restart never repeats the uncertain prompt.
 
 The delivery regressions replay the captured ANSI fragment through the real
 evaluator, reject stale, incomplete and wrong-count markers, admit a late echo,
-and verify that readiness retries write no input. These are module-boundary
+and verify that readiness retries write no input; they additionally cover the
+Codex mid-size tail confirmation (full, partial and wrong-ending frames), the
+per-adapter policy declaration, the stale-redraw limit, narrow-width tail
+fragmentation, and size-independent tail anchoring. These are module-boundary
 checks with a capturing process registry. The live ConPTY capture establishes
 the provider rendering; it does not establish a rebuilt Circuit run end to end.
 

@@ -31,7 +31,7 @@ function clampResizeAdjacentPair(baseline: number[], i: number, deltaPct: number
 }
 
 interface GridSplitterProps {
-  nodes: AgentNode[];
+  nodes: readonly AgentNode[];
   activityMembersByRoot: Readonly<Record<number, readonly number[]>>;
   // Pinned Grid mode disables card drag-reorder (wayfinder #982 / #986 —
   // custom pinned ordering is map fog). Defaults to draggable so Mesh/All

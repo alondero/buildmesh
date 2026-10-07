@@ -84,11 +84,34 @@ recovery; cleanup stops its live process and is retryable rather than deleting
 the review evidence.
 
 Approval closes the reviewer, then `merge` asks the source to squash-merge the
-pull request (marking a draft ready and waiting for required checks first). The
-run completes once that prompt is delivered: it does not wait for the merge.
+pull request: it marks a draft ready, brings a behind-base branch up to date
+with `gh pr update-branch` (never a rebase, which would rewrite the approved
+commits), waits for the pushed commit's own workflow run, and only then
+squash-merges. The run completes once that prompt is delivered: it does
+not wait for the merge.
+
+The issue-driven blueprint then verifies the merge instead of trusting the
+report: `merge_wait` classifies the implementer's turn and `merge_verify`
+(`GithubAction::ConfirmPrMerged`) reads the pull request from GitHub. Only a PR
+GitHub reports as merged reaches `close_implementer`, the one place the
+implementation agent is closed, and even then a worktree with uncommitted changes
+keeps it open with a warning. A blocked report, an unmerged or closed PR, or an
+unreadable PR ends the run with a notification, records why in
+`merge.unconfirmed_reason` and leaves the agent open. Blueprints saved before this
+are upgraded at startup only when they still have the exact stock topology and
+prompts. The title-bar review preset keeps the merge hand-off without
+verification, because its source agent is the user's own node and is never
+closed by the circuit.
+
 A completed run retires only the agents its graph closed, so the implementation
-agent stays open, and the circuit stops observing every agent it referenced.
-Failed and cancelled runs still retire their owned agents.
+agent stays open otherwise, and the circuit stops observing every agent it
+referenced.
+A failed or cancelled run retires only its helper agents (the reviewer, which
+was launched for another agent). The implementation agent is never retired by
+the circuit: it stays open so its work, terminal and worktree are not lost. The
+helper/implementation line is the step's recorded parent: an agent with a
+parent was launched to assist another and is Autopilot's to retire; one with no
+parent is the implementation agent. Circuit deletion follows the same rule.
 
 By default, reviewers inherit the reviewed agent's harness. The app-wide
 **Reviewer provider** setting in Settings can override that fallback for
@@ -113,9 +136,13 @@ review/diff text, avoiding CLI argument parsing of diff lines such as `+ ...`.
 For a multiline Codex prompt, including one using a proxied Codex provider,
 Buildmesh waits until Codex renders the pasted content in its input box and the
 redraw settles before sending Enter. The wait captures an output position before
-the PTY write, accepts Codex's normalized line-ending count, and uses the completed
-paste marker for long prompts. Muse also accepts the end of a long prompt drawn
-in full, because it collapses only the largest pastes into a marker. A startup
+the PTY write, accepts Codex's normalized line-ending count, and confirms a
+long prompt by its completed paste marker or — like Muse — by the end of the
+prompt drawn in full, because both harnesses draw mid-size pastes inline and
+collapse only the largest into a marker (issue #2061; Codex per a partial
+0.160.0 frame, a clean live capture still outstanding). Which confirmation a
+harness uses is declared by its adapter (`paste_gate_policy`), not by name
+checks in delivery. A startup
 redraw alone cannot acknowledge the
 paste; if Codex never renders it, the node is marked for attention instead of
 leaving an apparently submitted review idle. A dead process ends the wait early.
@@ -132,7 +159,8 @@ upgrade is reconsidered on a later startup after they finish.
 The publication flow (publish, one reviewer, merge hand-off) reaches stored
 graphs through a one-time startup upgrade of the built-in preset and of
 issue-review circuits whose topology is exactly the previous stock shape.
-Edited prompts and reviewer settings are kept; stock feedback and approval texts
+Edited prompts and reviewer settings are kept; stock feedback, approval, and
+merge texts
 move to their new wording. Each existing run is pinned to the graph it started
 with first, so active runs and failed-run recovery are unaffected. Review-derived
 copies are user-owned and keep their shape; the previous shape still satisfies
@@ -186,6 +214,31 @@ history. Unknown GitHub effects are never automatically replayed.
 
 The complete action-by-action journal, provider contract, cancellation, and
 restart inventory is in the [Circuit effect recovery contract](circuit-effect-recovery.md).
+
+A run that needs a person says so on its card, outside the history. The card
+names the run after its implementation agent (falling back to the issue or PR
+title once that node is closed), shows when Autopilot started, finished and how
+long it ran (queue time excluded, wall-clock times), and a **What to do next** box
+explains what happened in plain words with the raw error behind a disclosure. Its
+data comes from the lightweight `circuit_run_attention` command, which carries the
+unverified steps with their allowed actions and, for a failed run, the recovery
+options below.
+
+A failed run can be reopened at its failed step with `recover_failed_circuit_run`:
+**Retry this step** runs it again as a new attempt, and **I've done this —
+continue** records an operator attestation (a note is required) and moves on. One
+eligibility decision (`db::circuit::step_recovery::build_recovery`) feeds both the
+buttons and the command, so a button is shown only when the command accepts it. A
+review verdict, a pull-request lookup, a merge check or a spawn can never be
+attested; a closed agent blocks retry until it is resumed from Archive. The run
+re-enters the admission queue (flagged `operator.recovered`, so a disabled circuit
+does not park it), steps cancelled by the failure sweep are recreated, and earlier
+history is kept. A review that simply did not approve keeps its own **Review
+again**.
+
+Circuit Run History opens on the key events only (run state, steps that failed or
+need a person, operator actions, waits); observations, wait windows and effect
+bookkeeping are behind **Show technical detail (N more)**.
 
 Agent checkpoints offer **Recheck evidence** for the same attempt. This restarts
 the observation window without sending the original prompt or requesting an

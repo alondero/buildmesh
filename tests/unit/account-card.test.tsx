@@ -19,7 +19,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { AccountCard } from '../../src/components/AppSettings/AppSettingsModal';
+import { AccountCard } from '../../src/components/AppSettings/AccountCard';
 import type { ProviderAccount } from '../../src/lib/tauri';
 import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
 

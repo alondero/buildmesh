@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 // Run the whole Rust suite locally as concurrent processes, one per CI shard.
 //
-// The unit tests share one process-global SQLite database, so each process
-// must run its tests one at a time (`--test-threads=1`). A single serial
-// `cargo test` therefore uses one core for the whole suite. Separate processes
-// each get their own global database, so the CI shard split
-// (`.github/workflows/verify.yml`, read through scripts/ci/rust-shards.mjs)
-// can run side by side on one machine with the same isolation as CI's
-// separate runners.
+// The CI shard split (`.github/workflows/verify.yml`, read through
+// scripts/ci/rust-shards.mjs) exists to localise runner loss (#1520): a job
+// that dies takes exactly one group with it, and every sibling keeps its log
+// and its conclusion. Running one process per shard here reproduces that
+// isolation on one machine, and a hang in one group cannot take the rest of
+// the suite's evidence with it.
+//
+// The processes do not serialise their tests (issue #2048). Every DB-backed
+// test installs its own database for its own thread, so each test binary is
+// internally multi-threaded and the default thread count is the correct
+// setting; `--test-threads=1` here would only throw away cores.
 //
 // Cargo holds the build-directory lock for the whole of `cargo test`, test
 // execution included, so concurrent `cargo test` calls on one target directory
@@ -101,13 +105,14 @@ if (!lib) {
   process.exit(1);
 }
 
-const serial = ['--test-threads=1'];
+// Every process runs its tests at libtest's default (multi-threaded) count:
+// the per-test database seam makes that safe (issue #2048).
 const jobs = [
-  ...readShards().map(({ label, args }) => ({ label, command: lib.executable, args: [...serial, ...args.split(/\s+/).filter(Boolean)], env: testEnv })),
+  ...readShards().map(({ label, args }) => ({ label, command: lib.executable, args: args.split(/\s+/).filter(Boolean), env: testEnv })),
   ...executables
     .filter((target) => target !== lib)
-    .map((target) => ({ label: `${target.kinds.join('+')}:${target.name}`, command: target.executable, args: serial, env: testEnv })),
-  { label: 'doc', command: 'cargo', args: ['test', '--locked', '--doc', '--', ...serial] },
+    .map((target) => ({ label: `${target.kinds.join('+')}:${target.name}`, command: target.executable, args: [], env: testEnv })),
+  { label: 'doc', command: 'cargo', args: ['test', '--locked', '--doc'] },
 ];
 
 // Several suites assert wall-clock budgets (process kills, classifier

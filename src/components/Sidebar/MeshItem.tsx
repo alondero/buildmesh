@@ -152,7 +152,7 @@ function areMeshItemPropsEqual(previous: MeshItemProps, next: MeshItemProps): bo
 export const MeshItem = memo(MeshItemView, areMeshItemPropsEqual);
 
 /// A mesh counts as hot when any member needs the user or errored.
-function isHotMesh(nodes: AgentNode[]): boolean {
+function isHotMesh(nodes: readonly AgentNode[]): boolean {
   return nodes.some((node) => needsAgentAttention(node.status) || node.status === 'error');
 }
 

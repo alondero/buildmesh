@@ -104,24 +104,41 @@ token — never hardcode the dark hex into a component.
 ### Status
 
 Agent-node status is one vocabulary shared by desktop and mobile:
-`STATUS_CONFIG` in `src/lib/status.ts` carries the Tailwind classes, the dot
-glyph, the label, and the literal `hex` (mobile renders inline styles).
+`STATUS_CONFIG` in `src/lib/status.ts` carries the Tailwind classes (`color`,
+`bgColor`), the SVG circle shape (`glyph`), the text dot (`dot`), the label
+and the literal `hex`. Desktop draws the SVG circle via `NodeStatusGlyph`;
+the mobile SPA reads `hex`/`label` for its inline-styled rows. A few
+desktop rows (the mesh summary dots in the sidebar) still consume the
+`bgColor` class for a small coloured circle; the Agent History rows paint
+the label as text, not a dot.
 
-| Status | Colour | Dot | Label |
-|---|---|---|---|
-| `pending`, `spawning` | muted (pulsing) | ◌ | Starting… |
-| `running` | cyan | ● | Running |
-| `idle` | cyan | ○ | Idle |
-| `awaiting_input` | amber (pulsing) | ● | Needs attention |
-| `error` | red | ✗ | Error |
-| `suspended` | violet | ⏸ | Suspended |
-| `completed` | green | ✓ | PR opened |
-| `ready` | green | ✓ | Ready |
-| `archived` | muted | ◌ | Archived |
+| Status | Colour | Circle (desktop) | Dot | Label |
+|---|---|---|---|---|
+| `pending`, `spawning` | muted (pulsing) | dashed ring | ◌ | Starting… |
+| `running` | cyan | solid circle | ● | Running |
+| `idle` | cyan | hollow ring | ○ | Idle |
+| `awaiting_input` | amber (pulsing) | ring with a dot (pulsing) | ● | Needs attention |
+| `error` | red | cross | ✗ | Error |
+| `lost` | red | ring with a slash | ⊘ | Lost |
+| `suspended` | violet | half-filled | ⏸ | Suspended |
+| `completed` | green | ring with a dot | ✓ | PR opened |
+| `ready` | green | ring with a dot | ✓ | Ready |
+| `archived` | muted | thin ring | ◌ | Archived |
 
-Idle and running intentionally share cyan; the dot glyph and label
+Idle and running intentionally share cyan; the circle's fill style and label
 disambiguate. Every status colour also has a `status-*-bg` 10%-alpha token
 for chip/badge fills.
+
+**Node glyph.** On desktop a node is one 20px `NodeStatusGlyph`: the status
+circle above, plus an orbit ring while Circuit owns the node. The ring's shape,
+not just its colour, names the Circuit state: violet comet = piloting, amber
+half ring = waiting, red dashed ring = needs attention, green closed ring =
+done, no ring = not piloted. Rules that keep it accessible: the comet silhouette
+belongs to *piloting* alone; the circle (not the ring) pulses; every comet
+shares one clock; with `prefers-reduced-motion` the comet parks at 12 o'clock
+over a stronger track; the glyph has one combined accessible name; and when it
+is a button its target is 24px without changing layout. Behaviour and rationale:
+`docs/specs/circuit-node-indicators.md`.
 
 File-diff status letters (A/M/D/R/?) map to green/amber/red/violet/muted via
 `fileDiffStatusMeta` in the same file — the same mapping applies on mobile.
@@ -295,8 +312,26 @@ Font: JetBrains Mono at 500 weight; desktop size is user-adjustable 8–18px
   components.
 - Keyboard focus is always visible: 1.5px accent-cyan outline on button-like
   elements, focus border on inputs.
-- Colour is never the only signal — statuses pair colour with a dot glyph
-  and a text label.
+- Colour is never the only signal — statuses always carry a text label on the
+  card title bar, and the circle's shape (solid, hollow, dashed, slashed,
+  half-filled, ringed dot, thin, cross) carries its own meaning so a reader
+  who cannot rely on colour can still tell them apart.
+
+  The actual shape+colour collision set in `STATUS_CONFIG` is exactly two
+  pairs, both deliberate:
+  - `pending` and `spawning` — the same "starting" state mirrored from
+    two code paths; same dashed ring, same muted colour. The card title bar
+    always paints "Starting…" as a label, so the sidebar reads them
+    identically and that is by design.
+  - `completed` and `ready` — pre-existing ✓/green grouping; both render
+    the green ringed dot. The card title bar always paints the label as
+    text, so the sidebar collision is bounded to this one pair.
+
+  Every other pair must differ in either shape or colour. A test in
+  `tests/unit/node-status-glyph.test.tsx` guards that a future change
+  does not introduce a third such pair. `idle` and `running` are not a
+  collision: they share cyan but differ in shape (hollow ring vs solid
+  circle), so they are told apart by shape alone.
 
 ## Mobile token mapping
 

@@ -58,7 +58,12 @@ vi.mock('@xterm/xterm', () => {
   };
 
   class MockTerminal {
-    write = vi.fn();
+// Honours xterm's parse-completion callback: `TerminalWriter` budgets
+    // in-flight payloads on it, so a mock that ignores it would model a
+    // stalled parser instead of a fast one.
+    write = vi.fn((_data?: unknown, callback?: () => void) => {
+      callback?.();
+    });
     onData = vi.fn();
     onTitleChange = vi.fn();
     onResize = vi.fn();
@@ -193,7 +198,13 @@ describe('Event Listener Integration', () => {
     // Flush the requestAnimationFrame that scheduleFlush uses
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith('Hello\n');
+    // Small single payloads take the interactive fast path, which is
+    // deliberately unbudgeted: a keystroke echo must neither be deferred by a
+    // parse backlog nor consume a slot of `MAX_INFLIGHT_WRITES`, so the
+    // registry forwards no completion callback here. Assert the payload rather
+    // than the argument count; the budgeted bulk path and its callback are
+    // pinned in `terminal-writer-budgets.test.ts`.
+    expect(writeSpy.mock.calls[0][0]).toBe('Hello\n');
   });
 
   it('binary Channel chunks are written to the terminal without Base64', async () => {
@@ -213,7 +224,7 @@ describe('Event Listener Integration', () => {
     onChunk.onmessage(new Uint8Array([0xe2, 0x96, 0x88]));
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+    expect(writeSpy.mock.calls[0][0]).toEqual(new Uint8Array([0xe2, 0x96, 0x88]));
   });
 
   it('agent-output byte payloads are decoded and written to terminal as bytes', async () => {
@@ -228,7 +239,7 @@ describe('Event Listener Integration', () => {
 
     vi.runAllTimers();
 
-    expect(writeSpy).toHaveBeenCalledWith(new Uint8Array([0xe2, 0x96, 0x88]));
+    expect(writeSpy.mock.calls[0][0]).toEqual(new Uint8Array([0xe2, 0x96, 0x88]));
   });
 
   it('events for different sessions are not cross-written', async () => {
@@ -247,7 +258,7 @@ describe('Event Listener Integration', () => {
 
     vi.runAllTimers();
 
-    expect(write1Spy).toHaveBeenCalledWith('From session 1\n');
+    expect(write1Spy.mock.calls[0][0]).toBe('From session 1\n');
     expect(write2Spy).not.toHaveBeenCalled();
   });
 

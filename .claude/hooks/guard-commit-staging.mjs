@@ -20,6 +20,8 @@
 
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 function readStdin() {
   try {
@@ -30,7 +32,7 @@ function readStdin() {
 }
 
 // Shell separators that break a command line into independently-running segments.
-const SEGMENT_SEP = /&&|\|\||[;&|\n]/;
+export const SEGMENT_SEP = /&&|\|\||[;&|\n]/;
 // `git [global-opts] commit` as a REAL subcommand, anchored to the START of a segment
 // (a git invocation is the command leader, not a "git commit" substring inside a quoted
 // arg or heredoc body). Only dash-options and the two arg-taking global opts
@@ -138,5 +140,5 @@ function main() {
   process.exit(0);
 }
 
-// Run as a hook in production; skip when imported by the Vitest test runner.
-if (!process.env.VITEST) main();
+// Run as a hook in production; skip when imported (by Vitest or by guard-rustfmt.mjs).
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) main();

@@ -17,7 +17,7 @@ pub mod sync;
 mod label_tests;
 
 pub use issues::{parse_blocked_by, Issue};
-pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest};
+pub use prs::{CollaboratorPermission, CreatePrRequest, PullRequest, PullRequestMergeState};
 pub use sync::{parse_clone_input, parse_owner_repo, CloneTarget, GitHubClient, GitHubError};
 
 /// Fake GitHub server used by command-layer tests. The implementation lives

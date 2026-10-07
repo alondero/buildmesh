@@ -125,6 +125,11 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
             "re_review",
             "close_approved",
             "merge",
+            "merge_wait",
+            "merge_verify",
+            "close_implementer",
+            "merge_blocked",
+            "merge_unconfirmed",
             "review_exhausted",
             "review_blocked",
             "complete",
@@ -183,9 +188,32 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 EdgeCondition::OnOutcome(StepOutcome::Blocked),
             ),
             // Approval closes the reviewer, then hands the PR to the
-            // implementation agent to squash-merge.
+            // implementation agent to squash-merge. GitHub must confirm the
+            // merge before the implementation agent is closed; a blocked
+            // report or an unmerged PR leaves it open.
             ("close_approved", "merge", EdgeCondition::Always),
-            ("merge", "complete", EdgeCondition::Always),
+            ("merge", "merge_wait", EdgeCondition::Always),
+            (
+                "merge_wait",
+                "merge_verify",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            (
+                "merge_wait",
+                "merge_blocked",
+                EdgeCondition::OnOutcome(StepOutcome::Blocked),
+            ),
+            (
+                "merge_verify",
+                "close_implementer",
+                EdgeCondition::OnOutcome(StepOutcome::Completed),
+            ),
+            (
+                "merge_verify",
+                "merge_unconfirmed",
+                EdgeCondition::OnOutcome(StepOutcome::Failed),
+            ),
+            ("close_implementer", "complete", EdgeCondition::Always),
             (
                 "follow_feedback",
                 "feedback_classifier",
@@ -235,10 +263,15 @@ pub const BUILT_IN_CATALOG: &[BlueprintContract] = &[
                 node_id: "follow_feedback",
                 must_contain: "{{node.reviewer.output}}",
             },
-            // Approval asks the implementation agent to squash-merge this PR.
+            // Approval asks the implementation agent to squash-merge this PR,
+            // bringing an out-of-date branch up to date first.
             PromptAssertion {
                 node_id: "merge",
                 must_contain: "gh pr merge {{pr.number}} --squash",
+            },
+            PromptAssertion {
+                node_id: "merge",
+                must_contain: "gh pr update-branch",
             },
         ],
     },
@@ -580,6 +613,16 @@ mod tests {
                 assert_eq!(target_node_id.as_deref(), Some("implementer"));
             }
             other => panic!("merge must be InjectPty, got {other:?}"),
+        }
+        match &graph
+            .node("close_implementer")
+            .expect("close_implementer required by contract")
+            .kind
+        {
+            CircuitNodeKind::CloseAgentNode { target_node_id } => {
+                assert_eq!(target_node_id.as_deref(), Some("implementer"));
+            }
+            other => panic!("close_implementer must be CloseAgentNode, got {other:?}"),
         }
     }
 

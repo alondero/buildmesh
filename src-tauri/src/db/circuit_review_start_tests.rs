@@ -11,9 +11,8 @@
 //! `create_node_circuit_run_locked`. The per-test in-memory `db::circuit_tests`
 //! suite drives the locked helper exclusively, so it stays green even if a
 //! future change re-adds an observation precondition to the wrapper. These
-//! tests close that gap by driving the public entry point against the
-//! process-global DB (`db::test_support::ensure_db_for_tests`) — run with
-//! `--test-threads=1` like the other global-DB suites (AGENTS.md).
+//! tests close that gap by driving the public entry point against a
+//! per-test private database (`db::test_support::isolated`, issue #2048).
 
 use super::*;
 use crate::models::{EnvType, SessionStatus};
@@ -23,7 +22,7 @@ use crate::models::{EnvType, SessionStatus};
 /// first-writer dedupe must still apply on a retry.
 #[test]
 fn review_preset_starts_on_an_unobserved_running_source() {
-    crate::db::test_support::ensure_db_for_tests();
+    let _db = crate::db::test_support::isolated();
     let mesh = create_mesh(
         "review-start-unobserved",
         &format!("/tmp/review-start-unobserved-{}", std::process::id()),

@@ -123,10 +123,10 @@ closes the menu. On short windows, scroll the menu to reach every tool.
 The inspector groups **Project Files** and **Agent Changes** under **Files &
 changes**, and **GitHub Issues** and **Pull Requests** under **GitHub**. Switch
 subviews inside the panel. The header shows the subject and whether it follows
-selection or is pinned; each subview retains its own pin. Files shows the
-working tree, while Agent Changes compares against HEAD or the selected
-repository's base merge point. Commands still open the exact requested view.
-The last Files subview is restored when you restart.
+your current selection. Files shows the working tree, while Agent Changes
+compares against HEAD or the selected repository's base merge point. Commands
+still open the exact requested view. The last Files subview is restored when
+you restart.
 
 **Agent History** finds lifecycle records across repositories, including
 archived nodes. Search by name, repository, branch or session, and filter by
@@ -134,6 +134,38 @@ repository or lifecycle state. **Reopen** restores an archived node to the
 workspace without starting its process; **Resume** starts it separately using
 its saved session when available. **Discovered sessions** scans CLI history
 for the explicitly selected repository.
+
+## See which scope you are looking at
+
+The control left of the view modes always names what the canvas is showing.
+When a single Mesh is in scope it reads that Mesh's name; otherwise it reads
+the view and the node count, such as **Pinned across meshes · 3 nodes** or
+**Filtered across meshes · 2 of 5 nodes**. In **Single** it names the Agent
+Node you are soloing and its Mesh. On narrow windows the name collapses to an
+icon; hovering shows the same wording in full.
+
+Choose **All Nodes** to leave Mesh scope. It is the only route out, and it
+clears the Mesh selection.
+
+Open the same control to choose a Mesh. The list shows every Mesh with a tick
+beside the current one. Choosing a Mesh moves the canvas to that Mesh's nodes
+and retargets the Mesh-scoped tools in the inspector — Files, Properties,
+Worktree Manager, GitHub Issues and Archived Nodes all follow. Choosing the
+Mesh you are already in returns the canvas to its grid. Escape or a click
+outside closes the list and returns focus to the control, leaving the scope
+unchanged.
+
+Entering **Mesh Grid** with no Mesh selected asks which Mesh you meant rather
+than guessing one. The canvas stays on its "no Mesh selected" state until you
+choose, and the picker opens with focus inside it so you can tab straight to
+the list. `Ctrl+Alt+G` (`Cmd+Alt+G` on macOS) rotates through the view modes
+and asks the same way.
+
+Two scope changes announce themselves. A search that leaves a single Mesh
+tells you the results span every Mesh, because the search matches Agent Node
+names rather than one Mesh. Deleting the Mesh you are looking at tells you the
+canvas moved to **All Nodes**. Both are reminders only — the view still
+changes.
 
 ## Find agents that need attention
 
@@ -197,20 +229,59 @@ issue-driven review flow run the same loop:
    to the implementation agent, which commits and pushes fixes. The same reviewer,
    still open, is then asked to review again, up to the round limit.
 3. On approval the reviewer is closed and the implementation agent is asked to
-   squash and merge the pull request. It marks a draft ready and waits for
-   required checks first, and stops and reports instead of merging if a check
-   fails or the merge is blocked. The circuit then finishes and hands the agent
+squash and merge the pull request. It marks a draft ready, brings an
+   out-of-date branch up to date with the base branch first, and waits for
+   required checks before merging. It stops and reports instead of merging only
+   if a check genuinely fails on the code or the merge stays blocked for any
+   other reason. The circuit then finishes and hands the agent
    back to you. The agent stays open, so read its report to confirm the merge.
 
 Legacy Autopilot controls are removed. Existing nodes, worktrees and history are
 retained, and the previous global agent cap and custom wrap-up template are carried
 forward. Old mesh-level Autopilot settings have no effect on Circuit launches.
 
+## Read a node's status mark
+
+Each node in the sidebar and on its card title bar has one small mark. The
+**circle** is what the agent is doing: solid for running, a hollow ring for
+idle, a dashed ring while starting, a ring with a dot (pulsing) for a node
+that needs attention, a red cross for an error, a ring with a slash for lost,
+half-filled for suspended, a ring with a dot for a node whose pull request is
+open, and the same ring with a dot for a node that is just ready.
+
+Idle and running share cyan but differ in shape (hollow ring vs solid
+circle), so they are told apart by shape alone. `pending` and `spawning`
+both draw a dashed muted ring (the same "Starting…" state from two code
+paths); `completed` and `ready` both draw a green ringed dot (the
+pre-existing ✓/green grouping). Hover the mark for its label.
+
+When a Circuit is driving the node, a **ring** circles the mark. A violet comet
+that moves round it means the Circuit is working. A held amber half ring means it
+is waiting, a red dashed ring means it needs attention, and a closed green ring
+means it finished. Hover the mark for a sentence describing both. If your
+operating system is set to reduce motion, the comet stays still at the top of the
+ring instead of circling. On a card title bar, click the mark to open that run in
+the Circuits tab.
+
 ## Understand a circuit checkpoint
 
 An **Unverified Checkpoint** means Buildmesh cannot currently establish the
 evidence needed for the next circuit step. It does not mean the agent failed,
 and a Done label on the agent does not by itself prove the circuit can advance.
+
+A run that needs you says so on its card: a **What to do next** box explains
+what happened in plain words (the raw error is under *Technical detail*) and offers
+the actions that apply. On a failed run, **Retry this step** runs the failed step
+again, and **I've done this — continue** records that you did the step yourself
+(you write a short note, which is kept in the history) and lets the run carry on.
+An action that cannot work is not offered; the box says why instead, for example
+that a closed agent has to be resumed from Archive before a retry. A review
+approval can never be recorded on the reviewer's behalf; use **Review again**.
+
+Each run is named after its implementation agent, with when it started and
+finished and how long it ran. Time spent waiting in the queue is not counted.
+Circuit Run History opens on the key events; **Show technical detail** reveals the
+rest.
 
 Expand the run and inspect its reason and Circuit Run History. The reason can
 identify missing session/report evidence, changed input, or uncertain input

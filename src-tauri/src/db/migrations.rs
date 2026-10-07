@@ -291,14 +291,26 @@ pub(crate) enum AlwaysStep {
     /// across rounds, and a squash-merge hand-off on approval. Existing runs
     /// are pinned to the graph they started with first.
     UpgradeReviewPublicationFlow,
+    /// Give stock review graphs the merge hand-off that updates an
+    /// out-of-date branch first, and the issue-review blueprint its verified
+    /// merge: GitHub must confirm the squash-merge before the implementation
+    /// agent is closed. Existing runs are pinned to the graph they started with.
+    UpgradeMergeVerification,
+    /// Remove the dead `completed` feedback route that the verdict upgrade used
+    /// to leave beside the `working` one, then apply the publication-flow and
+    /// merge-verification upgrades it had blocked (their flags were already
+    /// recorded). Unfinished runs lose only that route from their pinned graph.
+    RepairReviewFeedbackRoute,
 }
 
 const REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG: &str = "review_publication_flow_upgrade_v1";
+const MERGE_VERIFICATION_UPGRADE_FLAG: &str = "merge_verification_upgrade_v1";
+const REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG: &str = "review_feedback_route_repair_v1";
 
 const REVIEW_CONTRACT_PROMPT_UPGRADE_FLAG: &str = "review_contract_prompt_upgrade_v1";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_COMPLETE: &str = "complete";
 const REVIEW_CONTRACT_PROMPT_UPGRADE_DEFERRED: &str = "deferred";
-const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%'";
+const LEGACY_REVIEW_GRAPH_PREDICATE: &str = "c.graph_json LIKE '%Review the work of agent {{source.agent_id}}%' OR c.graph_json LIKE '%An independent reviewer requested changes to your work.%' OR c.graph_json LIKE '%review PR {{pr.number}} as%' OR c.graph_json LIKE '%Follow the feedback comments on PR #{{pr.number}}%' OR c.graph_json LIKE '%Do not make further changes. If a required check fails%'";
 type ReviewContractCandidate = (Option<i64>, Option<String>, Option<i64>, bool);
 
 // ---------------------------------------------------------------------------
@@ -1089,6 +1101,8 @@ const ALWAYS_STEPS: &[AlwaysStep] = &[
     AlwaysStep::ConsolidateContinuedReviews,
     AlwaysStep::EnsureAgentNodeLifecycleLeases,
     AlwaysStep::UpgradeReviewPublicationFlow,
+    AlwaysStep::UpgradeMergeVerification,
+    AlwaysStep::RepairReviewFeedbackRoute,
 ];
 
 // ---------------------------------------------------------------------------
@@ -1675,7 +1689,7 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                     continue;
                 };
                 let graph_json = graph_json.expect("legacy circuit candidate has graph_json");
-                let is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
+                let _is_preset = is_preset.expect("legacy circuit candidate has is_preset") != 0;
                 let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
                     Ok(graph) => graph,
                     Err(error) => {
@@ -1688,10 +1702,22 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
                         continue;
                     }
                 };
-                let changed = if is_preset {
-                    graph.upgrade_legacy_agent_review_prompts()
-                } else {
+                // Route by blueprint, not by preset flag: independent copies
+                // of the review blueprint are stored non-preset with no
+                // blueprint marker, and only the local-review upgrade can
+                // rewrite their stock merge text. Both upgrades replace
+                // exact stock texts only, so custom prompts are preserved
+                // on every path.
+                // Route by blueprint, not by preset flag: independent copies
+                // of the review blueprint are stored non-preset with no
+                // blueprint marker, and only the local-review upgrade can
+                // rewrite their stock merge text. Both upgrades replace
+                // exact stock texts only, so custom prompts are preserved
+                // on every path.
+                let changed = if graph.is_issue_driven_autopilot_review() {
                     graph.upgrade_legacy_issue_review_contract()
+                } else {
+                    graph.upgrade_legacy_agent_review_prompts()
                 };
                 if changed {
                     let upgraded_json = graph.to_json().map_err(|error| {
@@ -1848,6 +1874,176 @@ fn run_always(conn: &Connection, step: AlwaysStep) -> SqlResult<()> {
             conn.execute(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
                 params![REVIEW_PUBLICATION_FLOW_UPGRADE_FLAG],
+            )?;
+        }
+        AlwaysStep::UpgradeMergeVerification => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+                || !table_present(conn, "circuit_run_snapshots")?
+            {
+                return Ok(());
+            }
+            let already_done: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+                params![MERGE_VERIFICATION_UPGRADE_FLAG],
+                |row| row.get(0),
+            )?;
+            if already_done {
+                return Ok(());
+            }
+            let circuits: Vec<(i64, String, bool)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, graph_json, is_preset != 0 FROM autopilot_circuits ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, graph_json, is_preset) in circuits {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect circuit {} for merge verification: {}",
+                            id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                // Review-derived copies are user-owned; only the read-only
+                // preset and issue-review blueprints are server-owned.
+                let changed = if is_preset {
+                    graph.upgrade_merge_prompt()
+                } else if graph.is_issue_driven_autopilot_review() {
+                    let prompt = graph.upgrade_merge_prompt();
+                    let verification = graph.upgrade_issue_review_merge_verification();
+                    prompt || verification
+                } else {
+                    false
+                };
+                if !changed {
+                    continue;
+                }
+                let upgraded_json = graph.to_json().map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        error,
+                    )))
+                })?;
+                // Runs without a snapshot read the circuit row; pin them so
+                // active work and failed-run recovery keep their own graph.
+                conn.execute(
+                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
+                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
+                    params![id],
+                )?;
+                conn.execute(
+                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, upgraded_json],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                params![MERGE_VERIFICATION_UPGRADE_FLAG],
+            )?;
+        }
+        AlwaysStep::RepairReviewFeedbackRoute => {
+            if !table_present(conn, "autopilot_circuits")?
+                || !table_present(conn, "autopilot_circuit_runs")?
+                || !table_present(conn, "circuit_run_snapshots")?
+            {
+                return Ok(());
+            }
+            let already_done: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM app_settings WHERE key = ?1",
+                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
+                |row| row.get(0),
+            )?;
+            if already_done {
+                return Ok(());
+            }
+            let to_sql_error = |error: String| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error,
+                )))
+            };
+            let circuits: Vec<(i64, String)> = {
+                let mut stmt =
+                    conn.prepare("SELECT id, graph_json FROM autopilot_circuits ORDER BY id")?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (id, graph_json) in circuits {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect circuit {} for the feedback route repair: {}",
+                            id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                if !graph.repair_issue_review_feedback_route() {
+                    continue;
+                }
+                // The stale route is what made the stock topology unrecognisable
+                // to these two upgrades, so they can apply now.
+                graph.upgrade_issue_review_publication_flow();
+                graph.upgrade_merge_prompt();
+                graph.upgrade_issue_review_merge_verification();
+                let repaired_json = graph.to_json().map_err(to_sql_error)?;
+                // Runs without a snapshot read the circuit row; pin them so
+                // active work and failed-run recovery keep their own graph.
+                conn.execute(
+                    "INSERT OR IGNORE INTO circuit_run_snapshots (run_id, graph_json, behavior_revision)
+                     SELECT r.id, c.graph_json, 1 FROM autopilot_circuit_runs r
+                     JOIN autopilot_circuits c ON c.id = r.circuit_id WHERE c.id = ?1",
+                    params![id],
+                )?;
+                conn.execute(
+                    "UPDATE autopilot_circuits SET graph_json = ?2, updated_at = datetime('now') WHERE id = ?1",
+                    params![id, repaired_json],
+                )?;
+            }
+            // A run that can still reach its review step would fail the same way
+            // on its pinned graph. Only the dead route is removed there: the
+            // topology a run started with is not upgraded under it.
+            let snapshots: Vec<(i64, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT s.run_id, s.graph_json FROM circuit_run_snapshots s
+                     JOIN autopilot_circuit_runs r ON r.id = s.run_id
+                     WHERE r.state != 'completed' ORDER BY s.run_id",
+                )?;
+                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<SqlResult<Vec<_>>>()?
+            };
+            for (run_id, graph_json) in snapshots {
+                let mut graph = match crate::circuit::model::CircuitGraph::from_json(&graph_json) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        tracing::warn!(
+                            "evolve_to: cannot inspect run {} snapshot for the feedback route repair: {}",
+                            run_id,
+                            error
+                        );
+                        continue;
+                    }
+                };
+                if !graph.repair_issue_review_feedback_route() {
+                    continue;
+                }
+                conn.execute(
+                    "UPDATE circuit_run_snapshots SET graph_json = ?2 WHERE run_id = ?1",
+                    params![run_id, graph.to_json().map_err(to_sql_error)?],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, '1')",
+                params![REVIEW_FEEDBACK_ROUTE_REPAIR_FLAG],
             )?;
         }
     }
@@ -2071,24 +2267,14 @@ mod tests {
     }
 
     /// v36 — Defense-in-depth range constraint on `meshes.circuit_run_capacity`.
-    /// Module-scope serial mutex (#1224 pattern) so concurrent DB tests
-    /// don't race on the process-global writer connection. The test uses
-    /// a unique mesh name (`p_unique`) to avoid collisions with other
-    /// tests' rows; the trigger fires on raw INSERT/UPDATE so the test
-    /// doesn't need any production DB calls.
+    /// A per-test database (#2048) replaces the module-scope serial mutex this
+    /// needed for the process-global writer connection. The test uses a unique
+    /// mesh name (`p_unique`) to avoid collisions with other tests' rows; the
+    /// trigger fires on raw INSERT/UPDATE so the test doesn't need any
+    /// production DB calls.
     #[test]
     fn circuit_run_capacity_trigger_blocks_out_of_range_writes() {
-        use std::sync::Mutex;
-        static SERIAL: Mutex<()> = Mutex::new(());
-        let _guard = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
-        let path = std::env::temp_dir().join(format!(
-            "buildmesh_circuit_run_capacity_trigger_{}.db",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        crate::db::init(&path).unwrap();
+        let _db = crate::db::test_support::isolated();
 
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2155,7 +2341,5 @@ mod tests {
             rusqlite::params![&ok_name, 8i32],
         )
         .expect("in-range update must succeed");
-
-        std::fs::remove_file(&path).ok();
     }
 }

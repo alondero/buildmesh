@@ -7,9 +7,10 @@ import { AttentionList } from '../../src/components/Sidebar/AttentionList';
 import { AgentHistoryTab } from '../../src/components/Probe/AgentHistoryTab';
 import { ReadinessSteps } from '../../src/components/AgentNodeView/ReadinessSteps';
 import { CanvasEmptyStateContainer } from '../../src/components/AgentNodeView/CanvasEmptyStateContainer';
+import { deriveScope } from '../../src/lib/viewModes';
 import { useSettingsResources } from '../../src/components/AppSettings/useSettingsResources';
 import { FileTree } from '../../src/components/FileTree/FileTree';
-import { useUIStore } from '../../src/stores/uiStore';
+import { useUIStore, type ViewMode } from '../../src/stores/uiStore';
 import { useMeshStore } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
@@ -55,12 +56,17 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+// #2071 — the container renders the scope `AgentNodeView` derives; these
+// tests build the same one for a hand-set canvas state.
+const emptyScope = (viewMode: ViewMode, selectedMeshId: number | null, agentNodes: AgentNode[]) =>
+  deriveScope({ viewMode, lastNonSingleMode: viewMode === 'single' ? 'all' : viewMode, agentNodes, selectedMeshId, activeNodeId: null });
+
 describe('October desktop audit follow-up', () => {
   it('a skipped guide stays optional on another empty repository while its Terminal and restore actions remain available', () => {
     localStorage.setItem('buildmesh.readiness-dismissed', 'true');
     vi.mocked(invoke).mockReturnValue(new Promise(() => {}));
     const elsewhere = [node(20, 'Other repository work', 'running', 2)];
-    render(<CanvasEmptyStateContainer viewMode="mesh" lastNonSingleMode="mesh" selectedMeshId={1} activeNodeId={null} agentNodes={elsewhere} visibleNodesLength={0} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.queryByRole('list', { name: 'Getting started' })).toBeNull();
     expect((screen.getByRole('button', { name: 'Start Terminal' }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Show setup guide' }));
@@ -87,7 +93,7 @@ describe('October desktop audit follow-up', () => {
     vi.mocked(invoke).mockImplementation(cmd => cmd === 'list_providers' ? (++reads === 1 ? checks.promise : retry.promise) : Promise.resolve([]));
     const elsewhere = [node(20, 'Other repository work', 'running', 2)];
     seedAgentNodes(elsewhere);
-    render(<CanvasEmptyStateContainer viewMode="mesh" lastNonSingleMode="mesh" selectedMeshId={1} activeNodeId={null} agentNodes={elsewhere} visibleNodesLength={0} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={elsewhere} scope={emptyScope('mesh', 1, elsewhere)} />);
     expect(screen.getByRole('button', { name: 'Start Terminal' })).toBeTruthy();
     expect(screen.getByRole('status').textContent).toContain('Checking available harnesses');
     fireEvent.click(screen.getByRole('button', { name: 'Check runtime and login' }));
@@ -137,7 +143,12 @@ describe('October desktop audit follow-up', () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Audit recipe' } });
     const form = screen.getByLabelText('Name').closest('form')!;
     fireEvent.click(within(form).getByRole('button', { name: 'Save' }));
-    await screen.findByRole('button', { name: 'Edit Audit recipe' });
+    // `findByRole` defaults to a 1000ms wait, which the save -> refresh ->
+    // re-render cycle can exceed when this file runs alongside 287 others. The
+    // assertion is unchanged; only how long it may take to become true (issue
+    // #2049). This case is flaky at the base commit too, so the budget, not a
+    // behaviour change, is the fix.
+    await screen.findByRole('button', { name: 'Edit Audit recipe' }, { timeout: 10000 });
     await waitFor(() => expect(routingReads).toBe(2));
     expect(liveReads).toBe(2);
     fireEvent.click(screen.getByRole('tab', { name: 'Providers' }));
@@ -250,7 +261,7 @@ describe('October desktop audit follow-up', () => {
     vi.mocked(invoke).mockResolvedValue([]);
     const creating = deferred<AgentNode>();
     vi.mocked(invoke).mockImplementation(cmd => cmd === 'create_agent_node' ? creating.promise : Promise.resolve([]));
-    render(<CanvasEmptyStateContainer viewMode="all" lastNonSingleMode="all" selectedMeshId={1} activeNodeId={null} agentNodes={[]} visibleNodesLength={0} />);
+    render(<CanvasEmptyStateContainer selectedMeshId={1} agentNodes={[]} scope={emptyScope('all', 1, [])} />);
     const start = screen.getByRole('button', { name: 'Start Terminal' });
     fireEvent.click(start); fireEvent.click(start);
     expect(vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'create_agent_node')).toHaveLength(1);

@@ -299,6 +299,234 @@ mod tests {
         assert_eq!(read(2), issue);
     }
 
+    /// Run 340: circuits whose verdict upgrade left a `completed` feedback route
+    /// beside the `working` one were skipped by the publication-flow and merge
+    /// verification upgrades, which have already recorded themselves as done.
+    #[test]
+    fn feedback_route_repair_unblocks_stuck_review_circuits_and_pins_run_graphs() {
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'repair', 'C:/repair')",
+            [],
+        )
+        .unwrap();
+
+        let stuck = CircuitGraph::from_json(include_str!(
+            "../../tests/fixtures/stuck-issue-review-circuit.json"
+        ))
+        .unwrap();
+        let stuck_json = stuck.to_json().unwrap();
+        // A customized circuit is repaired but its topology is otherwise kept.
+        let mut customized = stuck.clone();
+        customized.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        let customized_json = customized.to_json().unwrap();
+        for (id, graph) in [(1, &stuck_json), (2, &customized_json)] {
+            conn.execute(
+                "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (?1, 1, 'c', ?2, 0)",
+                rusqlite::params![id, graph],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
+                (10, 1, 1, 'issue:7:a', 'running'),
+                (11, 1, 1, 'issue:7:b', 'failed'),
+                (12, 1, 1, 'issue:7:c', 'completed');
+             DELETE FROM app_settings WHERE key = 'review_feedback_route_repair_v1';",
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let read_circuit = |id: i64| -> CircuitGraph {
+            let json: String = conn
+                .query_row(
+                    "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            CircuitGraph::from_json(&json).unwrap()
+        };
+        let read_snapshot = |run: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = ?1",
+                [run],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let feedback_edges = |graph: &CircuitGraph| {
+            graph
+                .edges
+                .iter()
+                .filter(|edge| edge.from == "review_classifier" && edge.to == "follow_feedback")
+                .count()
+        };
+
+        // The stock circuit reaches the current flow in one step.
+        let repaired = read_circuit(1);
+        repaired.validate().unwrap();
+        assert!(
+            repaired.has_review_topology_of(&CircuitGraph::issue_driven_autopilot_review(
+                "buildmesh:run"
+            ))
+        );
+        assert!(repaired.node("merge_verify").is_some());
+
+        let custom = read_circuit(2);
+        assert_eq!(feedback_edges(&custom), 1);
+        assert!(custom.node("announce").is_some());
+        assert!(custom.node("merge_verify").is_none());
+
+        // Unfinished runs lose only the dead route and keep the rest of the
+        // graph they started with; a completed run's record is untouched.
+        for run in [10, 11] {
+            let snapshot = CircuitGraph::from_json(&read_snapshot(run)).unwrap();
+            assert_eq!(feedback_edges(&snapshot), 1, "run {run}");
+            assert!(snapshot.node("close_reviewer").is_some(), "run {run}");
+            assert!(snapshot.node("merge_verify").is_none(), "run {run}");
+        }
+        assert_eq!(read_snapshot(12), stuck_json);
+
+        // The flag makes the scan one-shot.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 1",
+            [&stuck_json],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(feedback_edges(&read_circuit(1)), 2);
+    }
+
+    #[test]
+    fn merge_verification_upgrade_pins_runs_and_rewrites_only_stock_server_owned_graphs() {
+        use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
+        use crate::circuit::test_support::publication_flow_issue_review;
+        use crate::review_contract::{legacy_merge_approved_pr, merge_approved_pr};
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'merge', 'C:/merge')",
+            [],
+        )
+        .unwrap();
+
+        // The built-in preset, saved with the previous merge hand-off text.
+        let mut preset_graph = CircuitGraph::agent_review(None, None, 3);
+        preset_graph.replace_stock_text(
+            "merge",
+            &merge_approved_pr("your pull request for this work", ""),
+            &legacy_merge_approved_pr("your pull request for this work", ""),
+        );
+        let preset = preset_graph.to_json().unwrap();
+        let issue = publication_flow_issue_review().to_json().unwrap();
+        // A Review-derived copy is user-owned, and a customized issue graph
+        // has extra obligations: the copy is not touched at all and the customized
+        // graph keeps its topology.
+        let copy = preset.clone();
+        let mut customized = publication_flow_issue_review();
+        customized.nodes.push(CircuitNode {
+            id: "announce".into(),
+            kind: CircuitNodeKind::Notify {
+                message: "custom".into(),
+            },
+        });
+        let customized = customized.to_json().unwrap();
+        for (id, graph, is_preset) in [
+            (1, &preset, 1),
+            (2, &issue, 0),
+            (3, &copy, 0),
+            (4, &customized, 0),
+        ] {
+            conn.execute(
+                "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (?1, 1, 'c', ?2, ?3)",
+                rusqlite::params![id, graph, is_preset],
+            )
+            .unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO autopilot_circuit_runs (id, circuit_id, mesh_id, trigger_identity, state) VALUES
+                (10, 2, 1, 'issue:7:run', 'running');
+             DELETE FROM app_settings WHERE key = 'merge_verification_upgrade_v1';",
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let read = |id: i64| -> String {
+            conn.query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+
+        // The preset keeps its topology and gets the branch-update hand-off.
+        let upgraded_preset = CircuitGraph::from_json(&read(1)).unwrap();
+        assert!(upgraded_preset.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
+        assert!(matches!(
+            upgraded_preset.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+        ));
+        // The stock issue circuit now verifies the merge before closing the implementer.
+        let upgraded_issue = CircuitGraph::from_json(&read(2)).unwrap();
+        assert!(upgraded_issue.has_review_topology_of(
+            &CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
+        ));
+        assert!(upgraded_issue.node("merge_verify").is_some());
+        // A user-owned copy whose merge prompt still matches the legacy stock
+        // text gains the branch-update hand-off too (its prompt is a literal
+        // match, so the upgrade is safe), but its topology is preserved.
+        let upgraded_copy = CircuitGraph::from_json(&read(3)).unwrap();
+        assert_ne!(
+            read(3),
+            copy,
+            "a non-preset copy with stock merge text is rewritten"
+        );
+        assert!(upgraded_copy.has_review_topology_of(&CircuitGraph::agent_review(None, None, 3)));
+        assert!(matches!(
+            upgraded_copy.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+        ));
+        // A customized topology is not rewritten; only its still-stock merge
+        // prompt gains the branch-update step.
+        let upgraded_custom = CircuitGraph::from_json(&read(4)).unwrap();
+        assert!(upgraded_custom.node("merge_verify").is_none());
+        assert!(upgraded_custom.node("announce").is_some());
+        assert!(matches!(
+            upgraded_custom.node("merge").map(|n| &n.kind),
+            Some(CircuitNodeKind::InjectPty { prompt, .. }) if prompt.contains("gh pr update-branch")
+        ));
+
+        let snapshot: String = conn
+            .query_row(
+                "SELECT graph_json FROM circuit_run_snapshots WHERE run_id = 10",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snapshot, issue,
+            "an active run keeps executing the graph it started with"
+        );
+
+        // The flag makes the scan one-shot.
+        conn.execute(
+            "UPDATE autopilot_circuits SET graph_json = ?1 WHERE id = 2",
+            [&issue],
+        )
+        .unwrap();
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        assert_eq!(read(2), issue);
+    }
+
     #[test]
     fn review_contract_upgrade_skips_active_rows_retries_and_preserves_custom_prompts() {
         let conn = Connection::open_in_memory().unwrap();
@@ -457,6 +685,147 @@ mod tests {
                 .unwrap(),
             &crate::circuit::model::CircuitGraph::local_review_prompt()
         );
+    }
+
+    #[test]
+    fn review_contract_upgrade_rearms_for_merge_only_legacy_graphs() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id, name, path) VALUES (1, 'merge-migration', 'C:/merge-migration')",
+            [],
+        ).unwrap();
+
+        // Issue-review preset whose only legacy marker is the merge text: the
+        // reviewer keeps current stock (which matches no predicate clause)
+        // and the feedback is customized (likewise), so only the merge
+        // clause can match this row.
+        let mut issue =
+            crate::circuit::model::CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+        for node in &mut issue.nodes {
+            if node.id == "follow_feedback" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom team feedback process".to_string();
+                }
+            }
+            if node.id == "merge" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = crate::review_contract::legacy_merge_prompt(
+                        "PR #{{pr.number}} ({{pr.url}})",
+                        " {{pr.number}}",
+                    );
+                }
+            }
+        }
+        // Independent review-blueprint copy: non-preset, no blueprint marker,
+        // with customized reviewer/feedback and only the local merge text as
+        // its legacy marker.
+        let mut copy =
+            crate::circuit::model::CircuitGraph::agent_review_with_provider(None, None, None, 3);
+        assert!(!copy.is_issue_driven_autopilot_review());
+        for node in &mut copy.nodes {
+            if node.id == "reviewer" {
+                if let crate::circuit::model::CircuitNodeKind::SpawnAgentNode { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom reviewer instructions".to_string();
+                }
+            }
+            if node.id == "feedback" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = "custom feedback instructions".to_string();
+                }
+            }
+            if node.id == "merge" {
+                if let crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. } =
+                    &mut node.kind
+                {
+                    *prompt = crate::review_contract::legacy_merge_prompt(
+                        "your pull request for this work",
+                        "",
+                    );
+                }
+            }
+        }
+        conn.execute(
+            "INSERT INTO autopilot_circuits (id, mesh_id, name, graph_json, is_preset) VALUES (1, 1, 'issue-preset', ?1, 1), (2, 1, 'review-copy', ?2, 0)",
+            [issue.to_json().unwrap(), copy.to_json().unwrap()],
+        ).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1), ('review_contract_prompt_upgrade_v1', 'complete')",
+            [crate::db::migrations::SCHEMA_VERSION.to_string()],
+        )
+        .unwrap();
+
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+
+        let upgraded_issue: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let issue_graph = crate::circuit::model::CircuitGraph::from_json(&upgraded_issue).unwrap();
+        assert!(
+            matches!(
+                issue_graph.node("merge").map(|node| &node.kind),
+                Some(crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. })
+                    if prompt == &crate::circuit::model::CircuitGraph::pr_merge_prompt()
+            ),
+            "preset issue-review merge text must upgrade even though the flag was complete"
+        );
+        let upgraded_copy: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let copy_graph = crate::circuit::model::CircuitGraph::from_json(&upgraded_copy).unwrap();
+        assert!(
+            matches!(
+                copy_graph.node("merge").map(|node| &node.kind),
+                Some(crate::circuit::model::CircuitNodeKind::InjectPty { prompt, .. })
+                    if prompt.contains("gh pr update-branch")
+                        && !prompt.contains("Do not make further changes")
+            ),
+            "non-preset review copy merge text must upgrade via the local-review path"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'review_contract_prompt_upgrade_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "complete"
+        );
+
+        // No legacy markers remain, so a later startup must not rescan.
+        crate::db::migrations::evolve_to(crate::db::migrations::SCHEMA_VERSION, &conn).unwrap();
+        let stable_issue: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stable_copy: String = conn
+            .query_row(
+                "SELECT graph_json FROM autopilot_circuits WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stable_issue, upgraded_issue);
+        assert_eq!(stable_copy, upgraded_copy);
     }
 
     #[test]
