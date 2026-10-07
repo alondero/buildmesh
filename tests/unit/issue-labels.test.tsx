@@ -18,7 +18,7 @@ function deferred<T>() {
 const issue = { number: 101, title: 'Implement the widget', body: 'Widget details', url: '', state: 'open', labels: ['bug'], blocked_by: [], author: '' };
 const mesh = { id: 42, name: 'demo', path: '/repos/demo', layout: 'single', position: 0, created_at: '', scratchpad: '', sandbox: false };
 function circuit(label: string, enabled = true, meshId = 42, type = 'github_issue_label'): AutopilotCircuit {
-  return { id: 1, mesh_id: meshId, name: 'Implementation', description: '', enabled, concurrency_limit: 1, is_preset: false, created_at: '', updated_at: '',
+  return { id: 1, mesh_id: meshId, name: 'Implementation', description: '', enabled, is_preset: false, created_at: '', updated_at: '',
     graph_json: JSON.stringify({ version: 3, nodes: [{ id: 'trigger', type: { type, label } }], edges: [] }) };
 }
 function backend(circuits: AutopilotCircuit[] = []) {

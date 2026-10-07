@@ -45,19 +45,23 @@ function queueWaitText(detail: string): string {
   }
 }
 
+/** `circuit_limit` appears only on rows recorded before ADR 0042 retired the
+ *  per-circuit step budget; nothing writes it now, but the ledger keeps them. */
 interface CapacityWindow { circuit_limit?: boolean; agent_limit?: boolean }
 
 /** Humanise the `{before,after}` diff of a step's `capacity_wait` window. */
 function stepCapacityWaitText(detail: string): string {
   const change = parseDetail<{ before?: string | null; after?: string | null }>(detail);
   const after = change?.after ? parseDetail<CapacityWindow>(change.after) : null;
-  // A freed window (blank, or both budgets free) is a resolution, not a wait;
+  // A freed window (blank, or every budget free) is a resolution, not a wait;
   // it must not render under "Step capacity wait ..." as if still parked.
   if (!after || (!after.circuit_limit && !after.agent_limit)) {
-    return 'Step capacity wait cleared — the step is no longer parked on step or agent slots.';
+    return 'Step capacity wait cleared — the step is no longer parked on a slot.';
   }
   const binding = [
-    after.circuit_limit ? 'step slots busy' : 'step slots free',
+    ...(after.circuit_limit === undefined
+      ? []
+      : [after.circuit_limit ? 'step slots busy' : 'step slots free']),
     after.agent_limit ? 'agent slot busy' : 'agent slot free',
   ];
   return `Step capacity wait — ${binding.join(' · ')}.`;

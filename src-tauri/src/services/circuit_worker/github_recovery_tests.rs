@@ -3,9 +3,7 @@ use crate::circuit::context::CircuitContext;
 use crate::circuit::model::{
     CircuitEdge, CircuitGraph, CircuitNode, CircuitNodeKind, EdgeCondition, GithubActionKind,
 };
-use crate::circuit::stepper::{
-    advance, CircuitEvent, RunState, RunView, StepStatus, StepView,
-};
+use crate::circuit::stepper::{advance, CircuitEvent, RunState, RunView, StepStatus, StepView};
 use crate::db::circuit::evidence::{EffectIntent, EffectKind, EvidenceWrite};
 use crate::db::CircuitStepOp;
 use crate::services::github::tests::{fake_server, Scripted};
@@ -17,29 +15,65 @@ static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 #[test]
 fn inherited_retry_attempt_can_commit_github_result() {
     let fixture = dispatch_fixture();
-    crate::db::commit_circuit_advance(fixture.run_id, None, None, &[
-        CircuitStepOp { node_id: "implementer".into(), status: "completed".into(),
-            outcome: Some(Some("completed".into())), error: None, agent_node_id: None,
-            attempt: 2, fresh_attempt: true },
-        CircuitStepOp { node_id: "open_pr".into(), status: "failed".into(),
-            outcome: Some(Some("failed".into())), error: Some(Some("branch not pushed".into())),
-            agent_node_id: None, attempt: 1, fresh_attempt: false },
-    ]).unwrap();
+    crate::db::commit_circuit_advance(
+        fixture.run_id,
+        None,
+        None,
+        &[
+            CircuitStepOp {
+                node_id: "implementer".into(),
+                status: "completed".into(),
+                outcome: Some(Some("completed".into())),
+                error: None,
+                agent_node_id: None,
+                attempt: 2,
+                fresh_attempt: true,
+            },
+            CircuitStepOp {
+                node_id: "open_pr".into(),
+                status: "failed".into(),
+                outcome: Some(Some("failed".into())),
+                error: Some(Some("branch not pushed".into())),
+                agent_node_id: None,
+                attempt: 1,
+                fresh_attempt: false,
+            },
+        ],
+    )
+    .unwrap();
     let mut view = running_view(fixture.run_id);
-    let transition = advance(&mut view, &CircuitEvent::Tick(
-        crate::circuit::stepper::Capacity { circuit_free_slots: 4, agent_free_slots: 4 }));
+    let transition = advance(
+        &mut view,
+        &CircuitEvent::Tick(crate::circuit::stepper::Capacity {
+            agent_free_slots: 4,
+        }),
+    );
     persist_transition(fixture.run_id, &mut view, &transition).unwrap();
     assert_eq!(view.step("open_pr").unwrap().attempt, 2);
     assert_eq!(view.step("open_pr").unwrap().status, StepStatus::Running);
-    let event = CircuitEvent::GithubActionResult { node_id: "open_pr".into(), success: true,
-        pr_number: Some(314), pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
-        pr_head_ref: Some(DISPATCH_HEAD.into()), pr_title: Some("Fixed".into()), error: None };
-    persist_effect_result(&mut view, &event).expect("retry projection must match durable attempt and error");
+    let event = CircuitEvent::GithubActionResult {
+        node_id: "open_pr".into(),
+        success: true,
+        pr_number: Some(314),
+        pr_url: Some("https://github.com/example/buildmesh/pull/314".into()),
+        pr_head_ref: Some(DISPATCH_HEAD.into()),
+        pr_title: Some("Fixed".into()),
+        error: None,
+    };
+    persist_effect_result(&mut view, &event)
+        .expect("retry projection must match durable attempt and error");
     assert_eq!(reopened_run(fixture.run_id).state, "completed");
     assert_eq!(run_context(fixture.run_id).get("pr.number"), Some("314"));
     let stored = crate::db::list_circuit_run_steps(fixture.run_id).unwrap();
-    let step = stored.iter().find(|step| step.node_id == "open_pr").unwrap();
-    assert_eq!(step.outcome.as_deref(), Some("completed"), "restart must preserve outcome-based routing");
+    let step = stored
+        .iter()
+        .find(|step| step.node_id == "open_pr")
+        .unwrap();
+    assert_eq!(
+        step.outcome.as_deref(),
+        Some("completed"),
+        "restart must preserve outcome-based routing"
+    );
 }
 
 #[test]
@@ -66,17 +100,26 @@ fn unsupported_github_mutations_stay_uncertain_without_replay_on_recovery() {
         )
         .unwrap();
         assert_eq!(events.len(), 1);
-        assert!(matches!(
-            &events[0],
-            CircuitEvent::EffectUncertain { attempt: 1, reason, .. }
-                if reason == "Read-only external-action recheck is unavailable for this GitHub action."
-        ), "{action:?} recovery must require an operator outcome");
+        assert!(
+            matches!(
+                &events[0],
+                CircuitEvent::EffectUncertain { attempt: 1, reason, .. }
+                    if reason == "Read-only external-action recheck is unavailable for this GitHub action."
+            ),
+            "{action:?} recovery must require an operator outcome"
+        );
 
         let event = events.pop().unwrap();
         let mut projected = view.clone();
         let transition = advance(&mut projected, &event);
-        assert!(transition.effects.is_empty(), "uncertain recovery cannot redispatch {action:?}");
-        assert_eq!(projected.step("open_pr").unwrap().status, StepStatus::Unverified);
+        assert!(
+            transition.effects.is_empty(),
+            "uncertain recovery cannot redispatch {action:?}"
+        );
+        assert_eq!(
+            projected.step("open_pr").unwrap().status,
+            StepStatus::Unverified
+        );
         persist_effect_result(&mut view, &event).unwrap();
         assert_eq!(open_pr_step_status(fixture.run_id), "unverified");
         assert_eq!(effect_state(fixture.run_id), "uncertain");
@@ -128,7 +171,6 @@ fn open_pr_fixture() -> OpenPrFixture {
         mesh.id,
         &format!("OpenPr recovery {sequence}"),
         "",
-        1,
         &graph.to_json().unwrap(),
     )
     .unwrap();
@@ -364,7 +406,8 @@ fn assert_cancelled_open_pr_without_reconcile(run_id: i64) {
     assert_eq!(context.get("pr.number"), None);
     assert_eq!(open_pr_step_status(run_id), "cancelled");
     assert_eq!(
-        open_pr_step_attempt(run_id), 1,
+        open_pr_step_attempt(run_id),
+        1,
         "the rejected late result must not reopen the attempt"
     );
     assert_eq!(effect_state(run_id), "uncertain");
@@ -377,10 +420,9 @@ fn restart_view_from_db(run_id: i64, circuit_graph_json: &str) -> RunView {
     let run = crate::db::get_circuit_run(run_id)
         .expect("read run")
         .expect("run row survives");
-    let mut context =
-        CircuitContext::from_json(&run.context_json).expect("context parses");
-    let revision = crate::db::circuit::evidence::observation_revision(&run)
-        .expect("revision reads");
+    let mut context = CircuitContext::from_json(&run.context_json).expect("context parses");
+    let revision =
+        crate::db::circuit::evidence::observation_revision(&run).expect("revision reads");
     context.set("evidence.revision", revision.to_string());
     context.with_run(run_id);
     RunView {
@@ -459,9 +501,7 @@ impl HeldOpenPrEndpoint {
             // always sends `done`, so this loop cannot spin forever; a
             // panic before `done` fails the test first and the parked
             // thread dies with the process.
-            listener
-                .set_nonblocking(true)
-                .expect("watch nonblocking");
+            listener.set_nonblocking(true).expect("watch nonblocking");
             loop {
                 if done_rx.try_recv().is_ok() {
                     break;
@@ -471,9 +511,7 @@ impl HeldOpenPrEndpoint {
                         thread_requests.fetch_add(1, Ordering::SeqCst);
                         drop(sock);
                     }
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock =>
-                    {
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                     Err(error) => panic!("duplicate watch accept failed: {error}"),
@@ -508,8 +546,7 @@ impl HeldOpenPrEndpoint {
     }
 
     fn request_count(&self) -> usize {
-        self.requests
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.requests.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn join(mut self) {
@@ -543,8 +580,7 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
         "head": {"ref": "feature/circuit-recovery"}
     }]))
     .unwrap();
-    let endpoint =
-        HeldOpenPrEndpoint::spawn(pr_body, "head=example%3Afeature%2Fcircuit-recovery");
+    let endpoint = HeldOpenPrEndpoint::spawn(pr_body, "head=example%3Afeature%2Fcircuit-recovery");
 
     let order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
     let active = fixture.active.clone();
@@ -638,18 +674,16 @@ fn open_pr_late_lookup_after_cancellation_is_rejected_through_worker_handoff() {
     // must be rejected before any follow-on executes or any progress emits.
     // The stubs panic instead of silently passing, so a regression that
     // commits the stale result fails loudly right here.
-    assert!(
-        super::drain_effect_outcomes(
-            view_with_result.run_id,
-            &mut view_with_result,
-            vec![event],
-            &mut |_, _| -> Result<Vec<CircuitEvent>, String> {
-                panic!("a rejected stale outcome must not execute follow-ons")
-            },
-            &mut |_, _, _| panic!("a rejected stale outcome must not emit progress"),
-        )
-        .is_err()
-    );
+    assert!(super::drain_effect_outcomes(
+        view_with_result.run_id,
+        &mut view_with_result,
+        vec![event],
+        &mut |_, _| -> Result<Vec<CircuitEvent>, String> {
+            panic!("a rejected stale outcome must not execute follow-ons")
+        },
+        &mut |_, _, _| panic!("a rejected stale outcome must not emit progress"),
+    )
+    .is_err());
 
     // A fresh read and the append-only history agree: nothing from the late
     // result landed, and the attempt was not reopened.
@@ -769,10 +803,7 @@ fn dispatch_target_detail(head: &str) -> String {
 /// The percent-encoded `head=OWNER:BRANCH` value the client must emit
 /// (the owner separator and any nested ref slash are both escaped).
 fn dispatch_expected_head() -> String {
-    format!(
-        "{DISPATCH_OWNER}%3A{}",
-        DISPATCH_HEAD.replace('/', "%2F")
-    )
+    format!("{DISPATCH_OWNER}%3A{}", DISPATCH_HEAD.replace('/', "%2F"))
 }
 
 fn dispatch_pull_request_json() -> serde_json::Value {
@@ -844,7 +875,6 @@ fn dispatch_fixture() -> DispatchFixture {
         mesh.id,
         &format!("OpenPr dispatch {sequence}"),
         "",
-        1,
         &graph.to_json().unwrap(),
     )
     .unwrap();
@@ -1047,14 +1077,16 @@ fn reconcile_stuck_github_step(view: &mut RunView) {
 fn operator_recheck(run_id: i64) {
     let active = active_run(run_id);
     let revision = crate::db::circuit::evidence::observation_revision(&active.run).unwrap();
-    crate::db::circuit::evidence::record_outcome(&crate::db::circuit::evidence::CheckpointRequest {
-        run_id,
-        node_id: "open_pr".into(),
-        attempt: 1,
-        expected_revision: revision,
-        action: crate::db::circuit::evidence::CheckpointAction::Recheck,
-        reason: "Reconcile the saved pull-request target without creating one.".into(),
-    })
+    crate::db::circuit::evidence::record_outcome(
+        &crate::db::circuit::evidence::CheckpointRequest {
+            run_id,
+            node_id: "open_pr".into(),
+            attempt: 1,
+            expected_revision: revision,
+            action: crate::db::circuit::evidence::CheckpointAction::Recheck,
+            reason: "Reconcile the saved pull-request target without creating one.".into(),
+        },
+    )
     .unwrap();
 }
 
@@ -1064,36 +1096,64 @@ fn automatic_pr_reconciliation_is_read_only_durable_and_bounded() {
     let mut view = running_view(fixture.run_id);
     reconcile_stuck_github_step(&mut view);
     for index in 0..5 {
-        let event = CircuitEvent::GithubRecheckDue { node_id:"open_pr".into(), attempt:1, now_ms:1000 + index * 60_000 };
+        let event = CircuitEvent::GithubRecheckDue {
+            node_id: "open_pr".into(),
+            attempt: 1,
+            now_ms: 1000 + index * 60_000,
+        };
         let transition = advance(&mut view, &event);
-        assert_eq!(transition.effects.len(),1);
+        assert_eq!(transition.effects.len(), 1);
         persist_transition(fixture.run_id, &mut view, &transition).unwrap();
         let active = active_run(fixture.run_id);
-        let missing = github::reconcile_open_pr_for_worker(&active, &mut view, "open_pr", |_,_,_| Ok(None));
+        let missing =
+            github::reconcile_open_pr_for_worker(&active, &mut view, "open_pr", |_, _, _| Ok(None));
         persist_effect_result(&mut view, &missing).unwrap();
         // Reconstruct solely from the ledger, as after an app restart.
         view = running_view(fixture.run_id);
-        let too_soon = advance(&mut view, &CircuitEvent::GithubRecheckDue {
-            node_id:"open_pr".into(), attempt:1, now_ms:1001 + index * 60_000 });
+        let too_soon = advance(
+            &mut view,
+            &CircuitEvent::GithubRecheckDue {
+                node_id: "open_pr".into(),
+                attempt: 1,
+                now_ms: 1001 + index * 60_000,
+            },
+        );
         assert!(too_soon.effects.is_empty());
     }
-    let exhausted = advance(&mut view, &CircuitEvent::GithubRecheckDue {
-        node_id:"open_pr".into(), attempt:1, now_ms:1_000_000 });
+    let exhausted = advance(
+        &mut view,
+        &CircuitEvent::GithubRecheckDue {
+            node_id: "open_pr".into(),
+            attempt: 1,
+            now_ms: 1_000_000,
+        },
+    );
     assert!(exhausted.effects.is_empty());
-    assert_eq!(view.step("open_pr").unwrap().status,StepStatus::Unverified);
-    assert_eq!(history_count(fixture.run_id,"effect_possible_dispatch"),1);
+    assert_eq!(view.step("open_pr").unwrap().status, StepStatus::Unverified);
+    assert_eq!(history_count(fixture.run_id, "effect_possible_dispatch"), 1);
     let history = crate::db::circuit::evidence::history(fixture.run_id).unwrap();
-    assert!(history.entries.iter().any(|entry| entry.kind == "checkpoint_reason"
-        && entry.detail.contains("No open pull request was found")));
+    assert!(history
+        .entries
+        .iter()
+        .any(|entry| entry.kind == "checkpoint_reason"
+            && entry.detail.contains("No open pull request was found")));
     operator_recheck(fixture.run_id);
     let mut view = resume_queued_recheck(fixture.run_id);
     let active = active_run(fixture.run_id);
-    let found = github::reconcile_open_pr_for_worker(&active, &mut view,"open_pr", |_,_,_| Ok(Some(pull_request("feature/circuit-recovery"))));
+    let found = github::reconcile_open_pr_for_worker(&active, &mut view, "open_pr", |_, _, _| {
+        Ok(Some(pull_request("feature/circuit-recovery")))
+    });
     persist_effect_result(&mut view, &found).unwrap();
-    assert_eq!(reopened_run(fixture.run_id).state,"completed");
+    assert_eq!(reopened_run(fixture.run_id).state, "completed");
     let history = crate::db::circuit::evidence::history(fixture.run_id).unwrap();
-    assert!(history.entries.iter().any(|entry| entry.kind == "checkpoint_reason"
-        && entry.detail.contains("No open pull request was found")), "recovery retains the original reason");
+    assert!(
+        history
+            .entries
+            .iter()
+            .any(|entry| entry.kind == "checkpoint_reason"
+                && entry.detail.contains("No open pull request was found")),
+        "recovery retains the original reason"
+    );
 }
 
 /// The worker's next tick promotes the queued recheck back to `Running` and
@@ -1105,7 +1165,6 @@ fn resume_queued_recheck(run_id: i64) -> RunView {
     let transition = advance(
         &mut view,
         &CircuitEvent::Tick(crate::circuit::stepper::Capacity {
-            circuit_free_slots: 4,
             agent_free_slots: 4,
         }),
     );
@@ -1199,16 +1258,35 @@ fn open_pr_create_dispatch_crash_reconciles_found_pr_after_restart_without_secon
     // Automatic read-only reconciliation uses the same durable attempt and
     // production effect dispatcher; the scripted endpoint rejects a POST.
     let mut resumed = running_view(fixture.run_id);
-    let transition = advance(&mut resumed, &CircuitEvent::GithubRecheckDue {
-        node_id:"open_pr".into(), attempt:1, now_ms:1000 });
-    assert_eq!(transition.effects.len(),1);
+    let transition = advance(
+        &mut resumed,
+        &CircuitEvent::GithubRecheckDue {
+            node_id: "open_pr".into(),
+            attempt: 1,
+            now_ms: 1000,
+        },
+    );
+    assert_eq!(transition.effects.len(), 1);
     persist_transition(fixture.run_id, &mut resumed, &transition).unwrap();
     let active = active_run(fixture.run_id);
-    let event = super::execute_call_github_effect(&active, &mut resumed, "open_pr",
-        GithubActionKind::OpenPr, None, None, Some(&client)).unwrap().remove(0);
+    let event = super::execute_call_github_effect(
+        &active,
+        &mut resumed,
+        "open_pr",
+        GithubActionKind::OpenPr,
+        None,
+        None,
+        Some(&client),
+    )
+    .unwrap()
+    .remove(0);
     assert!(matches!(
         event,
-        CircuitEvent::GithubActionResult { success: true, pr_number: Some(314), .. }
+        CircuitEvent::GithubActionResult {
+            success: true,
+            pr_number: Some(314),
+            ..
+        }
     ));
     persist_effect_result(&mut resumed, &event).unwrap();
 
@@ -1366,7 +1444,11 @@ fn open_pr_dispatch_crash_then_cancellation_fences_the_stale_recheck() {
     let event = recheck_with_client(&active, &mut in_flight, &client);
     assert!(matches!(
         event,
-        CircuitEvent::GithubActionResult { success: true, pr_number: Some(314), .. }
+        CircuitEvent::GithubActionResult {
+            success: true,
+            pr_number: Some(314),
+            ..
+        }
     ));
     assert!(
         persist_effect_result(&mut in_flight, &event).is_err(),

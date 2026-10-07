@@ -74,7 +74,6 @@ const circuitsWithRuns = [
       name: 'Issue review loop',
       description: 'Review labelled issues and report the result.',
       enabled: true,
-      concurrency_limit: 1,
       graph_json: '{"nodes":[],"edges":[]}',
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',

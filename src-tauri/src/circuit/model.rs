@@ -105,38 +105,6 @@ impl CircuitBlueprintKind {
         }
     }
 
-    /// Concurrency floor. The review blueprint MUST be ≥2 because the
-    /// implementation and reviewer agent nodes share the same circuit's
-    /// concurrency pool — a 1-slot circuit deadlocks the reviewer behind
-    /// the implementation node's still-live process.
-    pub const fn min_concurrency_limit(self) -> i64 {
-        match self {
-            Self::WalkingSkeleton => 1,
-            Self::IssueDrivenAutopilotReview => 2,
-        }
-    }
-
-    /// Default concurrency the Probe UI ships with.
-    pub const fn default_concurrency_limit(self) -> i64 {
-        match self {
-            Self::WalkingSkeleton => 1,
-            Self::IssueDrivenAutopilotReview => 2,
-        }
-    }
-
-    /// Upper bound on a circuit's step-slot budget. The floor is
-    /// blueprint-specific ([`Self::min_concurrency_limit`]); this ceiling
-    /// keeps one circuit from monopolising the app-wide agent pool.
-    pub const MAX_CONCURRENCY_LIMIT: i64 = 16;
-
-    /// Clamp a requested step-slot budget into this blueprint's allowed
-    /// `[min_concurrency_limit, MAX_CONCURRENCY_LIMIT]` range. Shared by
-    /// creation ([`validate_circuit_request`]) and the post-creation
-    /// editor control so both enforce the same floor and ceiling.
-    pub fn clamp_concurrency_limit(self, requested: i64) -> i64 {
-        requested.clamp(self.min_concurrency_limit(), Self::MAX_CONCURRENCY_LIMIT)
-    }
-
     /// Whether Trigger Now (`trigger_circuit_now`) is permitted on this
     /// blueprint. The review blueprint is labelled-issue-driven — a
     /// manual fire would mint a run with no `issue.*` context.
@@ -1721,21 +1689,20 @@ impl CircuitGraph {
 
 /// Pure validation for a circuit creation request. Returns the
 /// normalised [`CircuitTriggerKind`], the trimmed trigger label (if any),
-/// the validated interval seconds (if any), and the clamped concurrency
-/// limit. The caller builds the [`CircuitGraph`] from the returned
-/// trigger kind and writes the row to the DB.
+/// and the validated interval seconds (if any). The caller builds the
+/// [`CircuitGraph`] from the returned trigger kind and writes the row to
+/// the DB.
 ///
 /// Keeping this in the domain model — rather than inside the Tauri
 /// command — means internal callers, the background worker, and any
 /// future CLI all share the same restrictions. A review blueprint
-/// cannot be constructed with a Manual trigger or a 1-slot concurrency
-/// pool; the model refuses here so the runtime can never deadlock it.
+/// cannot be constructed with a Manual trigger; the model refuses here so
+/// the runtime never mints a run with no `issue.*` context.
 pub fn validate_circuit_request(
     blueprint: CircuitBlueprintKind,
     trigger_kind: Option<CircuitTriggerKind>,
     trigger_label: Option<&str>,
     interval_seconds: Option<i64>,
-    concurrency_limit: i64,
 ) -> Result<ValidatedCircuitRequest, String> {
     use CircuitTriggerKind as T;
 
@@ -1766,13 +1733,10 @@ pub fn validate_circuit_request(
         _ => None,
     };
 
-    let concurrency_limit = blueprint.clamp_concurrency_limit(concurrency_limit);
-
     Ok(ValidatedCircuitRequest {
         trigger_kind: selected_trigger,
         trigger_label,
         interval_seconds,
-        concurrency_limit,
     })
 }
 
@@ -1783,7 +1747,6 @@ pub struct ValidatedCircuitRequest {
     pub trigger_kind: CircuitTriggerKind,
     pub trigger_label: Option<String>,
     pub interval_seconds: Option<i64>,
-    pub concurrency_limit: i64,
 }
 
 /// Convert a validated [`CircuitTriggerKind`]

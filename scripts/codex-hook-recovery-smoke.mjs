@@ -167,7 +167,6 @@ async function createCircuit(prompt) {
     meshId,
     name: 'Issue 1905 controlled Codex hook recovery',
     description: 'Disposable read-only live callback delivery fixture.',
-    concurrencyLimit: 1,
     initialPrompt: prompt,
     triggerKind: 'manual',
     triggerLabel: null,

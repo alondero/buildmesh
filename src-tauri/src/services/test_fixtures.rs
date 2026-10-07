@@ -121,15 +121,13 @@ fn create_review_activity_pair(
             (run_id, parent_id)
         }
         ReviewFixtureKind::IssueDriven => {
-            let graph =
-                crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
-                    "ready-for-agent",
-                );
+            let graph = crate::circuit::model::CircuitGraph::issue_driven_autopilot_review(
+                "ready-for-agent",
+            );
             let circuit = crate::db::create_autopilot_circuit(
                 mesh_id,
                 "Autopilot review verification",
                 "Real-runtime issue-driven review fixture",
-                2,
                 &graph.to_json()?,
             )
             .map_err(|error| error.to_string())?;
@@ -239,7 +237,8 @@ pub(crate) fn delete_review_activity_fixture(mesh_id: i64) -> Result<(), String>
 /// created on a scratch repository and populated with one real Codex turn, so
 /// a live continuation borrows real work rather than a fabricated row.
 pub(crate) fn create_review_continuation_fixture(source_node_id: i64) -> Result<Value, String> {
-    let source = crate::db::get_agent_node_by_id(source_node_id).map_err(|error| error.to_string())?;
+    let source =
+        crate::db::get_agent_node_by_id(source_node_id).map_err(|error| error.to_string())?;
     let mesh_id = source.mesh_id;
     let mesh_path = crate::db::get_mesh_by_id(mesh_id)
         .map(|mesh| mesh.path)
@@ -275,7 +274,10 @@ fn review_continuation_rows(
     }
     if !matches!(
         source.status,
-        SessionStatus::Running | SessionStatus::AwaitingInput | SessionStatus::Completed | SessionStatus::Ready
+        SessionStatus::Running
+            | SessionStatus::AwaitingInput
+            | SessionStatus::Completed
+            | SessionStatus::Ready
     ) {
         return Err(format!(
             "source agent {} is {:?}; a review borrows a running, ready or completed agent",
@@ -293,7 +295,9 @@ fn review_continuation_rows(
             node_id: "verdict".into(),
             status: "failed".into(),
             outcome: Some(Some(StepOutcome::Working.as_db_str().to_string())),
-            error: Some(Some("Fixture: the reviewer asked for changes and the round limit ran out".into())),
+            error: Some(Some(
+                "Fixture: the reviewer asked for changes and the round limit ran out".into(),
+            )),
             agent_node_id: None,
             attempt,
             fresh_attempt: false,
@@ -314,8 +318,7 @@ fn review_continuation_rows(
     let parent = crate::db::create_node_circuit_run(source.id, Some(copy.id), 2, None)?;
     crate::db::commit_circuit_advance(parent, Some("failed"), None, &review(2))
         .map_err(|error| error.to_string())?;
-    let first_successor =
-        crate::db::circuit::recovery::continue_failed_review(parent, 1)?;
+    let first_successor = crate::db::circuit::recovery::continue_failed_review(parent, 1)?;
     crate::db::commit_circuit_advance(first_successor, Some("failed"), None, &review(1))
         .map_err(|error| error.to_string())?;
 

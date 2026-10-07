@@ -16,7 +16,6 @@ import {
   buildCircuitProbeRows,
   circuitGraphFacts,
   countActiveRuns,
-  countRunningSteps,
   circuitActivityStats,
   isActiveRunState,
   isRunStale,
@@ -67,7 +66,6 @@ describe('run diagnostics', () => {
       name: 'one',
       description: '',
       enabled: true,
-      concurrency_limit: 1,
       graph_json: '{}',
       created_at: '2026-08-22 10:00:00',
       updated_at: '2026-08-22 10:00:00',
@@ -422,8 +420,6 @@ describe('run diagnostics', () => {
 
   describe('runActivity', () => {
     const FREE: CircuitCapacity = {
-      concurrencyLimit: 2,
-      runningSteps: 0,
       meshRunCapacity: 2,
       meshActiveRuns: 0,
     };
@@ -529,7 +525,7 @@ describe('run diagnostics', () => {
       const fullMesh = runActivity(
         { state: 'pending' },
         [],
-        { concurrencyLimit: 2, runningSteps: 0, meshRunCapacity: 2, meshActiveRuns: 2 }
+        { meshRunCapacity: 2, meshActiveRuns: 2 }
       );
       expect(fullMesh).toMatchObject({ kind: 'idle', label: 'Waiting to start', nodeId: null });
       expect(fullMesh.detail).toBe(
@@ -540,7 +536,7 @@ describe('run diagnostics', () => {
       const singularFull = runActivity(
         { state: 'pending' },
         [],
-        { concurrencyLimit: 1, runningSteps: 0, meshRunCapacity: 1, meshActiveRuns: 1 }
+        { meshRunCapacity: 1, meshActiveRuns: 1 }
       );
       expect(singularFull.detail).toBe(
         'Waiting for a circuit-run slot — this mesh allows 1 concurrent run, and that slot is busy.'
@@ -548,90 +544,29 @@ describe('run diagnostics', () => {
     });
 
     it('carries the capacity explanation on a queued step', () => {
-      const activity = runActivity({ state: 'running' }, [st('reviewer', 'pending_slot')], {
-        concurrencyLimit: 1,
-        runningSteps: 1,
-      });
+      const activity = runActivity(
+        { state: 'running' },
+        [st('reviewer', 'pending_slot')],
+        { meshRunCapacity: 2, meshActiveRuns: 1 }
+      );
       expect(activity.kind).toBe('queued');
       expect(activity.nodeId).toBe('reviewer');
-      expect(activity.detail).not.toBeNull();
+      expect(activity.detail).toBe(queuedReason());
     });
   });
 
   describe('queuedReason', () => {
-    it('blames the circuit budget when its step slots are all busy', () => {
-      expect(
-        queuedReason({
-          concurrencyLimit: 1,
-          runningSteps: 1,
-          meshRunCapacity: 2,
-          meshActiveRuns: 1,
-        })
-      ).toBe(
-        'Waiting for a slot — this circuit runs one step at a time, and that slot is busy.'
+    it('blames the circuit agent lease, the only thing that can park a step', () => {
+      // ADR 0042 retired the per-circuit step budget, so `schedule_ready`
+      // has exactly one reason to park a step: no free agent slot in the
+      // run's lease (or the optional app-wide pool).
+      expect(queuedReason()).toBe(
+        "Waiting for a circuit agent slot — this run's agent lease, or the app-wide agent pool, has no free slot."
       );
-      expect(
-        queuedReason({
-          concurrencyLimit: 2,
-          runningSteps: 2,
-          meshRunCapacity: 2,
-          meshActiveRuns: 1,
-        })
-      ).toContain("all 2 of this circuit's step slots are busy");
     });
 
-    it('blames the circuit agent lease when circuit slots are free', () => {
-      // `schedule_ready` only has two reasons to park a step, so with
-      // circuit capacity to spare the circuit-agent lease is the binding
-      // one by elimination. (#1467 makes this a fact, not an inference.)
-      expect(
-        queuedReason({
-          concurrencyLimit: 2,
-          runningSteps: 0,
-          meshRunCapacity: 2,
-          meshActiveRuns: 1,
-        })
-      ).toContain('circuit agent slot');
-    });
-
-    it('does not claim a zero limit is "busy"', () => {
-      // A 0 limit would divide the copy by a nonsense number; fall back
-      // to the circuit-agent explanation rather than "All 0 slots are busy".
-      expect(
-        queuedReason({
-          concurrencyLimit: 0,
-          runningSteps: 0,
-          meshRunCapacity: 2,
-          meshActiveRuns: 1,
-        })
-      ).toContain('circuit agent slot');
-    });
-
-    it('never claims one budget is THE reason', () => {
-      // Both budgets can be exhausted at once, and the ledger records
-      // neither — so the copy names *a* constraint it can see, and hedges
-      // the other. Asserting the absence of an exclusive claim is the point:
-      // "waiting for a slot" is true in every case, the detail is evidence.
-      const circuitFull = queuedReason({
-        concurrencyLimit: 2,
-        runningSteps: 2,
-        meshRunCapacity: 2,
-        meshActiveRuns: 1,
-      });
-      const circuitFree = queuedReason({
-        concurrencyLimit: 4,
-        runningSteps: 1,
-        meshRunCapacity: 2,
-        meshActiveRuns: 1,
-      });
-      for (const copy of [circuitFull, circuitFree]) {
-        expect(copy.startsWith('Waiting for a slot')).toBe(true);
-      }
-      expect(circuitFull).toContain("this circuit's step slots are busy");
-      // The circuit-agent branch says WHY it concluded that, so the reader can judge.
-      expect(circuitFree).toContain('spare step slots');
-      expect(circuitFree).toContain('circuit agent slot');
-      expect(circuitFree).not.toContain('Autopilot');
+    it('never mentions a per-circuit step budget', () => {
+      expect(queuedReason()).not.toMatch(/step slot|one step at a time|spare step/i);
     });
   });
 
@@ -648,17 +583,7 @@ describe('run diagnostics', () => {
     });
   });
 
-  describe('countRunningSteps / runStepProgress', () => {
-    it('counts running steps across every visible run of a circuit', () => {
-      expect(
-        countRunningSteps([
-          { steps: [{ status: 'running' }, { status: 'completed' }] },
-          { steps: [{ status: 'running' }] },
-          { steps: [{ status: 'pending_slot' }] },
-        ])
-      ).toBe(2);
-    });
-
+  describe('runStepProgress', () => {
     it('counts every terminal step as finished, failures included', () => {
       // A failed step is done moving; excluding it would leave a failed
       // run reading "2/4 steps" forever.
@@ -701,8 +626,6 @@ describe('run diagnostics', () => {
     it('names the mesh budget and the configured cap when full', () => {
       expect(
         pendingAdmissionDetail({
-          concurrencyLimit: 2,
-          runningSteps: 0,
           meshRunCapacity: 2,
           meshActiveRuns: 2,
         })
@@ -716,8 +639,6 @@ describe('run diagnostics', () => {
       // wording must NOT read "all 1 slots".
       expect(
         pendingAdmissionDetail({
-          concurrencyLimit: 1,
-          runningSteps: 0,
           meshRunCapacity: 1,
           meshActiveRuns: 1,
         })
@@ -729,11 +650,9 @@ describe('run diagnostics', () => {
     it('hedges a zero capacity rather than claiming a busy budget', () => {
       // A `meshRunCapacity === 0` should not happen on a healthy mesh
       // (the column is `1..=8` per #1467), but render defensively — the
-      // same shape `queuedReason` uses for a zero per-circuit limit.
+      // rather than "all 0 slots are busy".
       expect(
         pendingAdmissionDetail({
-          concurrencyLimit: 2,
-          runningSteps: 0,
           meshRunCapacity: 0,
           meshActiveRuns: 0,
         })
@@ -746,8 +665,6 @@ describe('run diagnostics', () => {
       // re-checked every 2 s — rather than fabricate a budget reason.
       expect(
         pendingAdmissionDetail({
-          concurrencyLimit: 2,
-          runningSteps: 0,
           meshRunCapacity: 2,
           meshActiveRuns: 1,
         })
@@ -755,25 +672,17 @@ describe('run diagnostics', () => {
     });
 
     it('uses a visually distinct vocabulary from the queued-step copy (#1467 AC)', () => {
-      // Per #1467's own AC: the three capacity concepts must read
-      // unambiguously as different budgets. The pending copy says
-      // "circuit-run slot(s)", the queued copy says "step slots" or
-      // "circuit agent slot" — no overlap.
+      // Per #1467's own AC: the capacity concepts must read unambiguously
+      // as different budgets. The pending copy says "circuit-run slot(s)",
+      // the queued copy says "circuit agent slot" — no overlap.
       const pendingCopy = pendingAdmissionDetail({
-        concurrencyLimit: 2,
-        runningSteps: 0,
         meshRunCapacity: 2,
         meshActiveRuns: 2,
       });
-      const queuedCopy = queuedReason({
-        concurrencyLimit: 2,
-        runningSteps: 2,
-        meshRunCapacity: 2,
-        meshActiveRuns: 1,
-      });
+      const queuedCopy = queuedReason();
       expect(pendingCopy).toContain('circuit-run');
-      expect(pendingCopy).not.toContain('step slot');
-      expect(queuedCopy).toContain('step slot');
+      expect(pendingCopy).not.toContain('agent slot');
+      expect(queuedCopy).toContain('agent slot');
       expect(queuedCopy).not.toContain('circuit-run');
     });
   });

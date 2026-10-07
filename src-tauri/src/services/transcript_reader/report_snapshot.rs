@@ -1168,7 +1168,6 @@ mod tests {
         run.state = RunState::Pending;
         advance(&mut run, &CircuitEvent::Triggered);
         let tick = CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 1,
         });
         advance(&mut run, &tick);
@@ -1366,7 +1365,6 @@ mod tests {
         run.state = RunState::Pending;
         advance(&mut run, &CircuitEvent::Triggered);
         let tick = CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 1,
         });
         advance(&mut run, &tick);
