@@ -52,8 +52,11 @@ credit balance, and `spend_control.individual_limit` into that contract; a null
 Muse Code (`muse-code`) reads the harness OAuth credential and calls Meta's
 `POST /muse-code/key` reconciliation endpoint. Its `subs_usage.window` and
 `subs_usage.weekly` supply percentages and Unix-second reset times; the plan
-label comes from `subs_tier_name`. Windows resolves credentials inside the
-WSL login environment, honoring `MUSE_AUTH_PATH` and `XDG_CONFIG_HOME`.
+label comes from `subs_tier_name`. Windows tries the native login first —
+one resolution in launcher precedence (`MUSE_AUTH_PATH`, then absolute
+`XDG_CONFIG_HOME`, then `%USERPROFILE%` with `HOME` as a last resort) —
+then the WSL guest credential path, using the first file that holds an
+OAuth login.
 Never derive remaining allowance from local requests or MSP token/context
 events, and never fold it into a Meta Model API pay-as-you-go wallet.
 
