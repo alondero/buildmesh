@@ -28,7 +28,7 @@
  *   - Display name (auto-save on blur, syncs the meshStore)
  *   - Directory (read-only, derived from the mesh row)
  *   - AI context portability (delegated to `<AiContextSection>`)
- *   - Default provider, sandbox toggle
+ *   - Default provider, sandbox toggle (developer-gated, issue #2034)
  *   - Project preset (auto-fill build / run)
  *   - Build / run commands, plus the per-context root overrides
  *
@@ -67,6 +67,7 @@ import {
   getWarmPoolCount,
   getWorktreeDirectoryConfig,
   listProviders,
+  sandboxDevModeEnabled,
   updateMeshColumn,
   updateMeshPoolSize,
   updateMeshSandbox,
@@ -118,6 +119,12 @@ export function ProjectSettingsTab() {
     defaultProvider: '',
     sandbox: false,
   });
+  // Whether the experimental agent sandbox is available in this process
+  // (issue #2034). The backend ignores `meshes.sandbox` entirely unless
+  // BUILDMESH_SANDBOX=1, so shipping builds must not offer the toggle at all —
+  // a control that appears to work while the spawn path discards it is worse
+  // than no control. Defaults to false so the toggle never flashes in.
+  const [sandboxDevMode, setSandboxDevMode] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [detected, setDetected] = useState<DetectedProject | null>(null);
   // App-wide default provider id (from preferences.json). Drives the
@@ -290,6 +297,19 @@ export function ProjectSettingsTab() {
     },
     [activeMeshPath],
   );
+
+  // Sandbox availability is a property of the running process, not of the
+  // selected Mesh, so it is read once on mount rather than inside the
+  // per-mesh load above. A failed read leaves the toggle hidden: the backend
+  // would ignore `meshes.sandbox` in that state anyway, so showing the control
+  // would advertise a setting that does nothing.
+  useEffect(() => {
+    let cancelled = false;
+    sandboxDevModeEnabled()
+      .then((enabled) => { if (!cancelled) setSandboxDevMode(enabled === true); })
+      .catch(() => { if (!cancelled) setSandboxDevMode(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   // One orchestrated load per mesh selection (issue #1460). `getMeshProperties`
   // is called ONCE and its single result feeds the form, the worktree
@@ -480,11 +500,13 @@ export function ProjectSettingsTab() {
     await wrappedSave(() => updateMeshColumn(activeMeshId, 'default_provider', value));
   };
 
-  // Sandbox toggle (#497 / #498). Optimistic, matching the "do not revert on
+  // Sandbox toggle (#497 / #528). Optimistic, matching the "do not revert on
   // failure" rule of the other binary controls — reverting a checkbox the user
   // just clicked is more confusing than an unchanged value. The flag is OS-
   // agnostic at the DB/UI layer; the OS-specific spawn policy is decided in
-  // `spawn_environment::wrap` on the backend.
+  // `spawn_environment::wrap` on the backend, which only honours it when
+  // BUILDMESH_SANDBOX=1 (#2034) — the same gate that decides whether this
+  // control is rendered at all.
   const saveSandbox = async (value: boolean) => {
     if (activeMeshId === null) return;
     setForm((p) => ({ ...p, sandbox: value }));
@@ -878,32 +900,44 @@ export function ProjectSettingsTab() {
               />
             </Field>
 
-            {/* Sandbox toggle (#498 Windows AppContainer / #497 macOS Seatbelt).
-                Default-on lands once the native spawn path is validated; until
-                then this persists the per-mesh preference. */}
-            <div>
-              <label
-                htmlFor="mesh-prop-sandbox"
-                className="flex items-center gap-2 text-xs text-text-muted cursor-pointer"
-              >
-                <input
-                  id="mesh-prop-sandbox"
-                  type="checkbox"
-                  checked={form.sandbox}
-                  onChange={async (e) => {
-                    const next = e.target.checked;
-                    setForm((p) => ({ ...p, sandbox: next }));
-                    await saveSandbox(next);
-                  }}
-                  className="accent-accent-cyan"
-                />
-                <span className="text-text-primary">Sandbox agent processes</span>
-              </label>
-              <p className="mt-1 text-xs text-text-muted">
-                Run this mesh&apos;s agents inside an OS process sandbox, confining
-                filesystem access to the node&apos;s worktree.
-              </p>
-            </div>
+            {/* Sandbox toggle (#528 Windows restricted token / #497 macOS
+                Seatbelt). Experimental and developer-gated (issue #2034):
+                rendered only when the backend reports BUILDMESH_SANDBOX=1, so
+                a release never presents it. The help text states the real
+                per-platform behaviour rather than promising worktree
+                confinement everywhere — Windows denies no filesystem access
+                (#542), Linux has no backend (#828), and WSL is not contained. */}
+            {sandboxDevMode && (
+              <div>
+                <label
+                  htmlFor="mesh-prop-sandbox"
+                  className="flex items-center gap-2 text-xs text-text-muted cursor-pointer"
+                >
+                  <input
+                    id="mesh-prop-sandbox"
+                    type="checkbox"
+                    checked={form.sandbox}
+                    onChange={async (e) => {
+                      const next = e.target.checked;
+                      setForm((p) => ({ ...p, sandbox: next }));
+                      await saveSandbox(next);
+                    }}
+                    className="accent-accent-cyan"
+                  />
+                  <span className="text-text-primary">
+                    Sandbox agent processes (experimental)
+                  </span>
+                </label>
+                <p className="mt-1 text-xs text-text-muted">
+                  Experimental, and weaker than the label suggests. macOS
+                  confines the agent to its worktree via Seatbelt; Windows
+                  restricts the process but does <em>not</em> deny filesystem
+                  reads or writes; Linux and WSL launches are not contained at
+                  all. If the sandbox cannot be set up on macOS the spawn is
+                  refused rather than run unconfined.
+                </p>
+              </div>
+            )}
           </ProbeSection>
 
           <ProbeSection

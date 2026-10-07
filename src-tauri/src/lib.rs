@@ -514,6 +514,10 @@ pub fn run() {
             // build and a simple `import.meta.env.PROD` check can't tell
             // them apart.
             commands::app::get_app_identifier,
+            // Experimental agent-sandbox availability (#2034). Gates whether
+            // the Mesh Sandbox toggle is offered at all; the spawn path
+            // re-checks the same predicate, so this is presentation only.
+            commands::app::sandbox_dev_mode_enabled,
             // Exit-confirmation cancel (issue #1501): retracts the eager
             // `CloseRequested` expected-exit marking when the user backs
             // out of the modal, so the watchdog still relaunches on a

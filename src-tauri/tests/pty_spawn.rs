@@ -108,7 +108,8 @@ fn run_recipe_through_pty(session_id: i64, recipe: SpawnRecipe, expected: &str) 
         &cwd.to_string_lossy(),
         session_id,
         false,
-    );
+    )
+    .expect("an unsandboxed command always assembles");
 
     // Stage markers (visible with --nocapture) so a hang in the ConPTY stack
     // points at the exact call rather than reading as a silent stall.
@@ -338,7 +339,8 @@ fn run_kill_mid_session_test(session_id: i64, recipe: SpawnRecipe) {
         &cwd.to_string_lossy(),
         session_id,
         false,
-    );
+    )
+    .expect("an unsandboxed command always assembles");
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
     let child = spawn_child(&pair, cmd).expect("spawn child");
@@ -429,7 +431,8 @@ fn windows_kill_session_closes_master() {
         &cwd.to_string_lossy(),
         session_id,
         false,
-    );
+    )
+    .expect("an unsandboxed command always assembles");
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
     let child = spawn_child(&pair, cmd).expect("spawn child");
@@ -545,7 +548,8 @@ fn windows_natural_child_exit_unblocks_reader_via_watcher() {
         &cwd.to_string_lossy(),
         session_id,
         false,
-    );
+    )
+    .expect("an unsandboxed command always assembles");
 
     let pair = open_pty_pair(24, 80).expect("open pty pair");
     let child = spawn_child(&pair, cmd).expect("spawn child");
@@ -625,7 +629,8 @@ fn windows_pi_interactive_tui() {
         &cwd.to_string_lossy(),
         session_id,
         false,
-    );
+    )
+    .expect("an unsandboxed command always assembles");
 
     eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
@@ -727,7 +732,8 @@ fn wsl_pi_interactive_tui() {
 
     let session_id = -915_4202;
     let cwd = "/home";
-    let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, None, None, cwd, session_id, false);
+    let cmd = spawn_environment::wrap(recipe, EnvType::Wsl, None, None, cwd, session_id, false)
+        .expect("an unsandboxed command always assembles");
 
     eprintln!("[pty-test {session_id}] opening pty pair");
     let pair = open_pty_pair(24, 80).expect("open pty pair");
