@@ -83,6 +83,7 @@ pub(crate) fn init_for_tests(app_data_dir: PathBuf) {
 pub(crate) fn reset_for_tests() {
     set_app_data_dir(None);
     set_cache(None);
+    super::secrets::test_support::reset();
 }
 
 /// The app-data directory `init` was wired to, for sibling config files
@@ -187,6 +188,12 @@ fn defaults() -> AppPreferences {
 /// the exact loss #1523 exists to prevent. Not being able to read the file is
 /// itself a reason to stop and say so.
 pub(crate) fn read_state() -> Result<LoadState, String> {
+    read_state_flagging_plaintext().map(|(state, _)| state)
+}
+
+/// [`read_state`] plus whether the file still held a plaintext API key
+/// (issue #830) — the cue for [`load`] to [`scrub_plaintext_keys`].
+fn read_state_flagging_plaintext() -> Result<(LoadState, bool), String> {
     let path = preferences_path()?;
     let raw = match std::fs::read(&path) {
         Ok(raw) => raw,
@@ -203,14 +210,20 @@ pub(crate) fn read_state() -> Result<LoadState, String> {
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
             ) =>
         {
-            return Ok(LoadState::Missing)
+            return Ok((LoadState::Missing, false))
         }
         Err(e) => return Err(format!("failed to read preferences.json: {}", e)),
     };
-    match recovery::classify(&raw) {
+    // Keys are restored into the JSON before the migrations and before
+    // `reconcile` (launch availability is derived from whether an account has
+    // one), so everything downstream sees exactly what a plaintext file gave.
+    let mut plaintext_in_file = false;
+    match recovery::classify_with(&raw, |value| {
+        plaintext_in_file = super::secrets::hydrate_json(value);
+    }) {
         Ok(mut prefs) => {
             super::launch_configurations::reconcile(&mut prefs);
-            Ok(LoadState::Healthy(Box::new(prefs)))
+            Ok((LoadState::Healthy(Box::new(prefs)), plaintext_in_file))
         }
         Err(payload) => {
             let info = payload.into_info(&path, recovery::backup_available(&path));
@@ -223,7 +236,7 @@ pub(crate) fn read_state() -> Result<LoadState, String> {
                 info.reason.as_str(),
                 info.detail
             );
-            Ok(LoadState::Corrupt(Box::new(info)))
+            Ok((LoadState::Corrupt(Box::new(info)), false))
         }
     }
 }
@@ -265,10 +278,16 @@ fn writable_state() -> Result<LoadState, String> {
 /// Private on purpose: it is the only thing that can replace the file, so
 /// keeping it module-private makes [`writable_state`] structurally
 /// unavoidable rather than a convention.
-fn write_to_disk(prefs: &AppPreferences) -> Result<(), String> {
-    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+fn write_to_disk(prefs: &AppPreferences, previous: Option<&AppPreferences>) -> Result<(), String> {
+    let _write_guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = preferences_path()?;
-    let json = serde_json::to_string_pretty(prefs)
+    // Issue #830: API keys go to the credential store, not into the file or
+    // its backup. `previous` lets the seam delete the entry of a key that was
+    // cleared or whose account was removed.
+    let on_disk = super::secrets::externalize(prefs, previous);
+    let json = serde_json::to_string_pretty(&on_disk)
         .map_err(|e| format!("failed to serialize preferences: {}", e))?;
     // The last-known-good backup is refreshed from the exact bytes that just
     // landed, *after* the atomic replacement — so a backup can never hold a
@@ -292,8 +311,19 @@ pub fn health() -> Result<PreferencesHealth, String> {
 /// command behind it is what the Settings pane's "Restore" action calls.
 pub fn restore_backup() -> Result<RecoveryOutcome, String> {
     let path = preferences_path()?;
-    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let outcome = recovery::restore_backup(&path)?;
+    let mut outcome = {
+        // Released before the scrub below: `write_to_disk` takes the same lock.
+        let _write_guard = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        recovery::restore_backup(&path)?
+    };
+    // A backup written since issue #830 holds no keys, so they come back from
+    // the credential store; one from an older build still carries them and is
+    // scrubbed, so the restore does not put plaintext keys back on disk.
+    let plaintext_in_file = super::secrets::hydrate(&mut outcome.preferences);
+    super::launch_configurations::reconcile(&mut outcome.preferences);
+    scrub_plaintext_keys(plaintext_in_file);
     adopt(&outcome.preferences);
     Ok(outcome)
 }
@@ -305,8 +335,14 @@ pub fn restore_backup() -> Result<RecoveryOutcome, String> {
 /// `commands::preferences::reset_app_preferences`.
 pub fn reset() -> Result<RecoveryOutcome, String> {
     let path = preferences_path()?;
-    let _write_guard = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let outcome = recovery::reset_to_defaults(&path)?;
+    let outcome = {
+        let _write_guard = WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        recovery::reset_to_defaults(&path)?
+    };
+    // Outside the write lock: `try_update` and `load` take the cache and then
+    // the write lock, so taking them in the opposite order here could deadlock.
     adopt(&outcome.preferences);
     Ok(outcome)
 }
@@ -327,6 +363,47 @@ pub fn preferences_directory() -> Result<PathBuf, String> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".")))
+}
+
+/// Move the plaintext API keys of a file written by an older build into the
+/// credential store (issue #830), in `preferences.json` and in its
+/// last-known-good backup, which holds the same secrets.
+///
+/// A surgical in-place edit, not a re-save: a read must not migrate the file's
+/// shape or fabricate a backup. Callers have just classified the file healthy,
+/// so this does not bypass the corruption gate. A failure leaves the file as it
+/// was and is retried on the next start.
+///
+/// `primary_has_plaintext` is what the read of `preferences.json` just saw. The
+/// backup is checked regardless: it can still hold keys when the primary is
+/// already clean (its earlier scrub failed, or an old copy was put back), and
+/// the primary's flag says nothing about it. Only the primary is authoritative:
+/// a key in the backup is older than the one in the store, so it is dropped
+/// rather than stored over it.
+fn scrub_plaintext_keys(primary_has_plaintext: bool) {
+    let Ok(path) = preferences_path() else { return };
+    // The scrub reads then replaces the file, so it must exclude `write_to_disk`
+    // or a settings save landing in between would be overwritten with the older
+    // content. Callers must not hold `WRITE_LOCK`.
+    let _write_guard = WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let targets = [
+        (path.clone(), true, primary_has_plaintext),
+        (recovery::backup_path(&path), false, true),
+    ];
+    for (file, authoritative, wanted) in targets {
+        if !wanted {
+            continue;
+        }
+        if let Err(e) = super::secrets::scrub_file(&file, authoritative) {
+            tracing::warn!(
+                "preferences: could not move API keys out of {}: {}",
+                file.display(),
+                e
+            );
+        }
+    }
 }
 
 /// Load preferences, populating the in-process cache on first call.
@@ -358,31 +435,42 @@ pub fn load() -> Result<AppPreferences, String> {
     // routed through the `with_cache_mut` cfg-divergent helper. The
     // closure captures the result so we don't have to thread `?` through
     // helper returns.
-    let result: Result<AppPreferences, String> = with_cache_mut(|guard| {
+    let result: Result<(AppPreferences, Option<bool>), String> = with_cache_mut(|guard| {
         if let Some(cached) = guard.as_ref() {
-            return Ok(cached.clone());
+            return Ok((cached.clone(), None));
         }
-        match read_state()? {
-            LoadState::Healthy(prefs) => {
+        match read_state_flagging_plaintext()? {
+            (LoadState::Healthy(prefs), plaintext_in_file) => {
                 *guard = Some((*prefs).clone());
-                Ok(*prefs)
+                Ok((*prefs, Some(plaintext_in_file)))
             }
-            LoadState::Missing => {
+            (LoadState::Missing, _) => {
                 let prefs = defaults();
                 *guard = Some(prefs.clone());
-                Ok(prefs)
+                Ok((prefs, None))
             }
-            LoadState::Corrupt(_) => Ok(defaults()),
+            (LoadState::Corrupt(_), _) => Ok((defaults(), None)),
         }
     });
-    result
+    let (prefs, cold_healthy_read) = result?;
+    // Issue #830: after the cache lock is released, so the credential-store
+    // calls and file rewrite never run under it and take the write lock only on
+    // their own.
+    if let Some(primary_has_plaintext) = cold_healthy_read {
+        scrub_plaintext_keys(primary_has_plaintext);
+    }
+    Ok(prefs)
 }
 
 /// Persist preferences to disk and refresh the cache.
 pub fn save(mut prefs: AppPreferences) -> Result<(), String> {
-    writable_state()?;
+    let previous = writable_state()?;
     super::launch_configurations::reconcile(&mut prefs);
-    write_to_disk(&prefs)?;
+    let previous = match &previous {
+        LoadState::Healthy(prefs) => Some(prefs.as_ref()),
+        LoadState::Missing | LoadState::Corrupt(_) => None,
+    };
+    write_to_disk(&prefs, previous)?;
     set_cache(Some(prefs));
     bump_generation();
     Ok(())
@@ -398,10 +486,15 @@ pub fn save(mut prefs: AppPreferences) -> Result<(), String> {
 /// docstring promises; releasing it between mutator and write would let two
 /// concurrent updaters both win the in-memory race against the on-disk one.
 pub fn update(mutator: impl FnOnce(&mut AppPreferences)) -> Result<AppPreferences, String> {
-    try_update(|prefs| { mutator(prefs); Ok(()) })
+    try_update(|prefs| {
+        mutator(prefs);
+        Ok(())
+    })
 }
 
-pub(crate) fn try_update(mutator: impl FnOnce(&mut AppPreferences) -> Result<(), String>) -> Result<AppPreferences, String> {
+pub(crate) fn try_update(
+    mutator: impl FnOnce(&mut AppPreferences) -> Result<(), String>,
+) -> Result<AppPreferences, String> {
     // The corruption gate runs *before* the cache lock: it is a plain
     // filesystem read, and a refused write should not have taken the lock
     // at all. Its result doubles as the cold-cache populate below, so the
@@ -416,10 +509,11 @@ pub(crate) fn try_update(mutator: impl FnOnce(&mut AppPreferences) -> Result<(),
                 LoadState::Missing | LoadState::Corrupt(_) => defaults(),
             });
         }
-        let mut candidate = guard
+        let previous = guard
             .as_ref()
             .expect("preferences cache was initialized")
             .clone();
+        let mut candidate = previous.clone();
         mutator(&mut candidate)?;
         super::launch_configurations::reconcile(&mut candidate);
         // Publish the new cached value only after the durable atomic
@@ -427,7 +521,7 @@ pub(crate) fn try_update(mutator: impl FnOnce(&mut AppPreferences) -> Result<(),
         // outer-mutex hold AND by `WRITE_LOCK` inside `write_to_disk`. A
         // failed write must not manufacture an in-memory verification
         // record that launch preflight could mistake for persisted proof.
-        write_to_disk(&candidate)?;
+        write_to_disk(&candidate, Some(&previous))?;
         *guard = Some(candidate.clone());
         Ok(candidate)
     });
@@ -450,7 +544,10 @@ pub fn default_provider() -> Option<String> {
     match load() {
         Ok(prefs) => prefs.default_provider.filter(|s| !s.is_empty()),
         Err(e) => {
-            tracing::warn!("preferences::default_provider load failed, falling back: {}", e);
+            tracing::warn!(
+                "preferences::default_provider load failed, falling back: {}",
+                e
+            );
             None
         }
     }
