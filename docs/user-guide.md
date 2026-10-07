@@ -218,7 +218,11 @@ restart. Restore the configured backend, then use **Recheck evidence** to retry.
 
 Issue-driven review flows prepare a draft pull request. Customize prompts and
 publication steps in the Circuit editor. The shared wrap-up template is stored in
-`circuits/finish.md` under the application data directory.
+`circuits/finish.md` under the application data directory. By default it asks the
+agent to run the verification command named in the project's agent instructions
+(such as `npm run verify`), fix what its change broke, and report, rather than
+fix, failures its change did not cause. A copy Buildmesh seeded and you never
+edited follows the current default; once you edit it, your text is kept.
 
 A review started from the title bar's **Start review or circuit** control and an
 issue-driven review flow run the same loop:
