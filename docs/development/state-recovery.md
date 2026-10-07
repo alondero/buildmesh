@@ -59,6 +59,17 @@ sit in `setup` *after* `db::init` is gone; `Bootstrap::promote()` replaces it an
 to stderr. The writer is the same fixed-name `RotatingWriter` (`diagnostics::main_log_writer`) the rest of the
 app uses, so a healthy startup still produces exactly one bounded log under the name the skills tail.
 
+**The file is scrubbed before it is written.** Frontend `console` lines enter through `log_frontend`, which
+masks the message and then caps it. The subscriber writer masks every line again on the way into
+`buildmesh.log`, and the bootstrap stderr mirror gets those same masked bytes. Masking covers provider
+key shapes, bearer and private-key material, `#pair=` invitations, `ticket=` handshake values, and every
+leaf under a JSON key that names a credential — a nested array, or a bare number such as a numeric PIN.
+A frontend payload larger than 64 KiB is omitted rather than cut through the middle of a secret.
+Ordinary diagnostic text is left in place. The structured pass is bounded per line (brackets resolved
+once, then a JSON parse budget), so a payload of nothing but braces cannot stall a logging thread;
+whatever falls outside that budget is still masked by the text rules.
+Prompts and local paths are not secrets and stay in the file.
+
 **Failures are typed, and retry is gated on stage.** `StartupFailure` carries a `StartupStage` (whose `label()`
 is prose, because a modal dialog must not read `StartupStage::AppData`), a summary authored here rather than
 derived from a driver error, a `SecretScrubber`-passed technical detail, and the resolved log and profile

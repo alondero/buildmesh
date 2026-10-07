@@ -461,8 +461,11 @@ the dev profile. The usual Windows locations are:
 - `panic.log` in the matching profile's `logs` directory
 
 Record the Buildmesh version from **Settings → General → About**, the OS
-version, and the last action before the failure. Do not upload the whole log if
-it contains prompts, paths, credentials, or tokens.
+version, and the last action before the failure. Buildmesh masks recognized
+credentials in `buildmesh.log` before they are written: API keys, bearer
+tokens, private keys, pairing links, and values logged under credential-like
+names. Prompts and local paths are still in the file, so read it before you
+upload it.
 
 ## Buildmesh shows a startup error and never opens
 
