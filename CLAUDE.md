@@ -3,7 +3,7 @@ Buildmesh is a Tauri 2 desktop app (React 19, Rust) for orchestrating AI coding 
 ## Start of every task
 1. Check `git status --short` and the branch; record the base commit. Inside a worktree, every path you edit must be under the worktree root (see *Worktree path discipline* below).
 2. Read `docs/agents/engineering.md` (seams, scope-based checks, evidence). For a cross-cutting change (new harness/provider, Tauri command, HTTP route, user-visible feature) follow the matching list in `docs/development/README.md#common-change-checklists`.
-3. Read only the architecture you need. `docs/knowledge-primer.md` is ~150 KB, so **never read it whole**: run `rg -n "^#{2,3} " docs/knowledge-primer.md`, then Read the relevant section with `offset`/`limit`, and confirm it against the owning module (the code wins when they disagree). Domain language: `CONTEXT.md`. Rationale: `docs/adr/*.md`.
+3. Read only the architecture you need. `docs/knowledge-primer.md` is an **index** (area → owner doc → owning module), not a manual: find your area's row, then read that doc in `docs/development/` by section (`rg -n "^#{2,3} " <file>`), and confirm it against the owning module (the code wins when they disagree). Don't read the primer *or* an owner doc whole. Domain language: `CONTEXT.md`. Rationale: `docs/adr/*.md`. Dated investigations live in `docs/archive/<yyyy-mm>/` and are not current contracts.
 4. Verify with `npm run verify` (scope-selected gates); iterate with the focused commands below.
 
 ## Commands
@@ -50,7 +50,7 @@ Claude hooks catch a subset of mistakes; their deny messages say how to proceed.
 
 ## Pointers
 - Design system: `DESIGN.md`. `src/App.css` `@theme` is the source of truth (dark + light); mobile mirrors it in `src/mobile/styles.css` `:root`. No hardcoded colours in components.
-- Doc boundaries: `docs/knowledge-primer.md` holds durable architecture only (no release narratives, speculative rules, or line numbers); `CONTEXT.md` holds ubiquitous language only (no code symbols, paths, store keys); README.md is user-facing only (no issue numbers or backlog).
+- Doc boundaries: the owner docs under `docs/development/` hold durable architecture only (no release narratives, speculative rules, or line numbers); `docs/knowledge-primer.md` is the index to them and holds the cross-area anti-patterns; `CONTEXT.md` holds ubiquitous language only (no code symbols, paths, store keys); README.md is user-facing only (no issue numbers or backlog). `docs/archive/<yyyy-mm>/` is history, not truth.
 - DB schema: `src-tauri/src/db/mod.rs` (`SCHEMA_VERSION`); tables `meshes`, `agent_nodes`.
 - Verification: `/verify` (`.claude/skills/verify/SKILL.md`). UI changes: `/verify-ui` drives the real dev-profile window (Playwright over CDP) for before/after PR screenshots.
 - Shared entrypoints: `AGENTS.md` points here; `.agents/skills` points to `.claude/skills`. If Windows checks out a pointer file instead of a symlink, read its target explicitly. Edit canonical files, preserving the links.

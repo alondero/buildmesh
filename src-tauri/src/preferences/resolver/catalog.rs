@@ -71,7 +71,7 @@ pub(crate) const BUILTIN_PROVIDER_ACCOUNTS: &[BuiltInProviderAccount] = &[
 // One row per credential/billing identity. Pairings live in the Spawn Menu
 // as composite ids (`claude:kimi`), not as additional rows here. See the
 // "First-class Model Providers and the single-meter invariant" section
-// in docs/knowledge-primer.md for the full rationale.
+// in docs/development/providers.md for the full rationale.
 
 /// Whether `id` names a Claude-compatible keyed provider — one that holds a
 /// global **credential** in Buildmesh and can be attached under a proxy-

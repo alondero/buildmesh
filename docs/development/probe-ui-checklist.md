@@ -1,5 +1,7 @@
 # Probe Panel interaction & visual checklist
 
+Status: current
+
 > **Audience:** anyone adding or reworking a tab in the Probe dock
 > (`src/components/Probe/`). **Scope:** the shell-level contracts a tab must
 > honour so the dock reads as one surface instead of eleven independently

@@ -37,6 +37,19 @@ the complete product manual.
 - [CLAUDE.md](../CLAUDE.md) and [knowledge-primer.md](knowledge-primer.md) are
   AI context, not a substitute for human-facing documentation.
 
+## AI architecture
+
+[knowledge-primer.md](knowledge-primer.md) is an **index**, not a manual: it maps
+each area to the focused owner document that holds its durable architecture, and
+to the code that owns the contract. Read the row for the area you are changing,
+then that document's relevant section, and confirm the claim against the source.
+The owner documents are deliberately unbounded, because they are read by section
+on demand; the always-loaded set (including the primer) has an enforced byte
+budget so it cannot quietly grow back.
+
+Dated investigations and run write-ups are not current contracts. They live under
+[archive/](archive/README.md), filed by the month they describe.
+
 ## Circuit architecture
 
 [Agent Node status observation](development/node-status-observation.md) explains
@@ -47,6 +60,8 @@ explains lifecycle evidence, report handoff, inference scheduling, and the
 remaining acceptance work for supervising many sessions.
 The [Circuit effect recovery contract](development/circuit-effect-recovery.md)
 maps action intent, dispatch, acknowledgement, cancellation, and restart policy.
+The durable circuit architecture itself is in
+[development/circuits.md](development/circuits.md).
 
 ## Documentation maintenance
 

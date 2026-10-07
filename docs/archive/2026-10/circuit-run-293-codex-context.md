@@ -59,7 +59,7 @@ application is required before this source change can affect it. Automatic
 handoff requires the source process, session and input boundary to remain
 current. An update that restarts the source may introduce a missing-process or
 new-incarnation checkpoint; the old report cannot bypass those fences. See
-[troubleshooting](../troubleshooting.md#a-completed-codex-agent-is-waiting-for-a-usable-harness-report)
+[troubleshooting](../../troubleshooting.md#a-completed-codex-agent-is-waiting-for-a-usable-harness-report)
 for the recovery procedure.
 
 ## Verification

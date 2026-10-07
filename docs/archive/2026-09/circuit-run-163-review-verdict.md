@@ -139,7 +139,7 @@ verdict, and the gate fix below prevents the failure either way.
   two decisions that produced no log line, so a node could change lifecycle
   state with nothing in the record saying why.
 - The user-visible behaviour change is recorded in
-  [the v1.4.0 release note](../releases/v1.4.0.md).
+  [the v1.4.0 release note](../../releases/v1.4.0.md).
 
 ## Limits
 

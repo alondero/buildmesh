@@ -1,5 +1,7 @@
 # Circuit review recovery journeys
 
+Status: current
+
 When a review stops, History distinguishes a review limit from an unclear verdict and shows the failure reason and retained report. A graph finishing never counts as reviewer approval.
 
 | Journey | Recovery |

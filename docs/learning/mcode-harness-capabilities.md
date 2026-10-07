@@ -278,4 +278,4 @@ one observed manifest can be the first of two simultaneous spawns and is not
 proof of ownership. Resuming a known id remains supported; a suspended node
 without an id cannot safely infer one from timestamps. Historical duplicate
 ownership is rejected rather than silently rewritten. See
-[runs 276/277](../development/circuit-runs-276-277.md) for the observed failure.
+[runs 276/277](../archive/2026-10/circuit-runs-276-277.md) for the observed failure.

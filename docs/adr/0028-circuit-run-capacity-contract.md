@@ -35,8 +35,11 @@ user intervened.
 
 ## Context
 
-`docs/knowledge-primer.md:319` flagged this exact gap as "per-run only
-until the multi-run scheduler milestone", and `docs/specs/prd-autopilot-mode.md:37`
+The knowledge primer flagged this exact gap as "per-run only until the
+multi-run scheduler milestone" (the passage is no longer in the primer, which has
+since been split into focused owner documents under `docs/development/`; see
+`docs/development/circuits.md` for the current circuit architecture), and
+`docs/specs/prd-autopilot-mode.md:37`
 defined `autopilot_concurrency_limit` as a per-mesh agent cap. Issue #1467
 is that "multi-run scheduler milestone".
 

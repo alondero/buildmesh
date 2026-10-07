@@ -1,5 +1,7 @@
 # Agent Node status observation
 
+Status: current
+
 ## Contract
 
 Node status describes the last observed session state. It is not proof that the

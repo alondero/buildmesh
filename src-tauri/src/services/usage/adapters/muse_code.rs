@@ -5,6 +5,7 @@ use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentity
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageWindow;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 pub(crate) struct MuseCodeAdapter;
 const ENDPOINT: &str = "https://api.meta.ai/muse-code/key";
@@ -48,12 +49,29 @@ fn fetch_from_credential(credential: Result<String, String>, endpoint: &str) -> 
 }
 
 fn credential() -> Result<String, String> {
-    let path = crate::env::muse_auth_path().ok_or(
-        "Muse subscription credential location unavailable. Check WSL availability and unset META_API_KEY to use a Muse account login.",
-    )?;
-    let content = std::fs::read_to_string(path)
-        .map_err(|_| "Cannot read Muse credentials. Run muse login in the harness environment.")?;
-    parse_credential(&content)
+    credential_from_candidates(&crate::env::muse_auth_candidates())
+}
+
+/// First OAuth token across the ordered candidate credential files: a
+/// missing file or a non-OAuth login in one runtime falls through to the
+/// next instead of hiding a healthy login behind it.
+fn credential_from_candidates(candidates: &[PathBuf]) -> Result<String, String> {
+    if candidates.is_empty() {
+        return Err("Muse subscription credential location unavailable. Unset META_API_KEY to use a Muse account login.".into());
+    }
+    let mut last_error =
+        "Cannot read Muse credentials. Run muse login with native muse.exe or in the WSL environment holding your login."
+            .to_string();
+    for path in candidates {
+        match std::fs::read_to_string(path) {
+            Ok(content) => match parse_credential(&content) {
+                Ok(token) => return Ok(token),
+                Err(error) => last_error = error,
+            },
+            Err(_) => continue,
+        }
+    }
+    Err(last_error)
 }
 
 fn parse_credential(content: &str) -> Result<String, String> {
@@ -239,6 +257,56 @@ mod tests {
             let error = parse_credential(body).unwrap_err();
             assert!(!error.contains("secret"));
         }
+    }
+
+    #[test]
+    fn credential_falls_through_a_missing_file_to_a_healthy_login() {
+        // Dual-install host: the first candidate (e.g. a WSL guest path with
+        // no guest `muse login`) is absent while the native login is healthy.
+        // Pre-fix `credential()` died at `read_to_string` on the first path
+        // and never attempted the second.
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("guest-auth.json");
+        let native = dir.path().join("native-auth.json");
+        std::fs::write(
+            &native,
+            r#"{"providers":{"meta":{"mechanism":"oauth","access_token":"native-token"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_from_candidates(&[missing, native]).unwrap(),
+            "native-token"
+        );
+    }
+
+    #[test]
+    fn credential_falls_through_a_non_oauth_login_to_a_healthy_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let api_key = dir.path().join("api-key-auth.json");
+        let oauth = dir.path().join("oauth-auth.json");
+        std::fs::write(
+            &api_key,
+            r#"{"providers":{"meta":{"mechanism":"api_key","api_key":"secret"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &oauth,
+            r#"{"providers":{"meta":{"mechanism":"oauth","access_token":"oauth-token"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_from_candidates(&[api_key, oauth]).unwrap(),
+            "oauth-token"
+        );
+    }
+
+    #[test]
+    fn credential_without_candidates_or_readable_files_reports_no_credential() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing = dir.path().join("absent-auth.json");
+        assert!(credential_from_candidates(&[]).is_err());
+        let error = credential_from_candidates(&[missing]).unwrap_err();
+        assert!(error.contains("muse login"), "unexpected hint: {error}");
     }
 
     /// Issue #1745 load-bearing test. Pre-#1745 the no-credential case

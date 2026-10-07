@@ -1,5 +1,7 @@
 # Releasing Buildmesh
 
+Status: current
+
 Buildmesh ships an in-app auto-updater (issue #826, ADR 0021). This is how to
 cut a release and the one-time setup behind it.
 

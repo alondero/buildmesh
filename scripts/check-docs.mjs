@@ -38,6 +38,20 @@ const DOC_HUB_LINKS = [
   'specs/README.md',
 ];
 
+// Documents every agent loads before it can do any work, with the byte ceiling
+// each one must stay under. These are the read-cost budget: an always-loaded
+// document that passes this gate can still be read whole without dominating the
+// context window. Raise a ceiling deliberately in a change that earns it, not
+// because a section happened to land there. Non-loaded reference documents
+// (docs/development/*, docs/adr/*, docs/specs/*) are deliberately unbounded --
+// they are read by section on demand (issue #2045).
+export const ALWAYS_LOADED_DOC_BUDGETS = {
+  'CLAUDE.md': 24 * 1024,
+  'CONTEXT.md': 48 * 1024,
+  'docs/agents/engineering.md': 20 * 1024,
+  'docs/knowledge-primer.md': 16 * 1024,
+};
+
 function walkMarkdown(dir) {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -168,6 +182,70 @@ export function checkLocalLinks({ root = repoRoot, files = collectMarkdownFiles(
   return failures;
 }
 
+export function checkAlwaysLoadedBudgets({ root = repoRoot, budgets = ALWAYS_LOADED_DOC_BUDGETS } = {}) {
+  const failures = [];
+  for (const [relativePath, budget] of Object.entries(budgets)) {
+    const path = resolve(root, relativePath);
+    if (!existsSync(path)) {
+      failures.push(`always-loaded document is missing: ${relativePath}`);
+      continue;
+    }
+    const bytes = statSync(path).size;
+    if (bytes > budget) {
+      failures.push(
+        `${relativePath} is ${formatKilobytes(bytes)}, over its `
+        + `${formatKilobytes(budget)} budget for always-loaded documents. `
+        + 'Move the detail into the owner doc it belongs to and link to it here.',
+      );
+    }
+  }
+  return failures;
+}
+
+function formatKilobytes(bytes) {
+  return `${Math.round((bytes / 1024) * 10) / 10} KB`;
+}
+
+// A repository path quoted in backticks is invisible to the Markdown link
+// checker, so moving a file leaves a stale pointer behind that no gate notices.
+// The signal is specific: a backticked docs/ path that no longer exists at the
+// stated location but whose filename does exist elsewhere under docs/ -- the
+// signature of a move. A path that exists nowhere is left alone, because that
+// is a placeholder or a typo in prose, not a pointer a move broke.
+export function checkBacktickedRepoPaths({ root = repoRoot, files = collectMarkdownFiles(root) } = {}) {
+  const pattern = /`(docs\/[A-Za-z0-9_./-]+\.md)`/g;
+  const failures = [];
+  // Built from every document, not just `files`, so a target that moved is
+  // still found when the caller checks a subset of the corpus.
+  const byBasename = new Map();
+  for (const file of collectMarkdownFiles(root)) {
+    const relativePath = relative(root, file).replaceAll('\\', '/');
+    if (!relativePath.endsWith('.md')) continue;
+    const name = relativePath.split('/').pop();
+    byBasename.set(name, [...(byBasename.get(name) ?? []), relativePath]);
+  }
+
+  for (const source of files) {
+    const relativePath = relative(root, source).replaceAll('\\', '/');
+    // Historical records name paths as they were when written.
+    if (relativePath.startsWith('docs/archive/') || relativePath.startsWith('docs/specs/')
+      || relativePath.startsWith('docs/learning/') || relativePath.startsWith('docs/adr/')) continue;
+    const markdown = stripFencedCode(readFileSync(source, 'utf8'));
+    for (const match of markdown.matchAll(pattern)) {
+      const token = match[1];
+      if (pathExistsExactly(root, resolve(root, token))) continue;
+      const name = token.split('/').pop();
+      const elsewhere = (byBasename.get(name) ?? []).filter((candidate) => candidate !== relativePath);
+      if (elsewhere.length === 0) continue;
+      failures.push(
+        `${relativePath}: backticked path "${token}" no longer exists; `
+        + `that file is now ${elsewhere[0]}`,
+      );
+    }
+  }
+  return failures;
+}
+
 export function checkDocumentation({ root = repoRoot, files = collectMarkdownFiles(root) } = {}) {
   const failures = [];
   const add = (anchor, message) => failures.push(`[${anchor}] ${message}`);
@@ -207,7 +285,12 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
     } else if (relativePath.startsWith('docs/releases/') && !/\/README\.md$/i.test(relativePath)) {
       add('release-note', `${relativePath} must be named vX.Y.Z.md`);
     }
-    if (!/^docs\/(?:adr|specs)\/[^/]+\.md$/i.test(relativePath) || /\/README\.md$/i.test(relativePath)) continue;
+    // A document outside the archive must declare whether it is current, so
+    // "docs/development/ holds current contracts, docs/archive/ holds history"
+    // is a checked property rather than a convention (issue #2045).
+    const statusRequired = /^docs\/(?:adr|specs|development)\/[^/]+\.md$/i.test(relativePath)
+      && !/\/README\.md$/i.test(relativePath);
+    if (!statusRequired) continue;
     const markdown = readFileSync(source, 'utf8');
     if (!hasDocumentStatus(markdown)) {
       add('document-status', `${relativePath} must declare a current/proposed/superseded/historical status`);
@@ -247,6 +330,8 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
   }
 
   for (const failure of checkLocalLinks({ root, files })) add('local-links', failure);
+  for (const failure of checkBacktickedRepoPaths({ root, files })) add('stale-pointer', failure);
+  for (const failure of checkAlwaysLoadedBudgets({ root })) add('read-cost', failure);
   return failures;
 }
 

@@ -1,5 +1,7 @@
 # Node activities
 
+Status: current
+
 Manual groups compose activity cards from the same Mesh without writing circuit
 ownership. `nodeActivityStore.groups` stores ordered lists of source node IDs
 under `buildmesh.node-groups` in local storage; selection and utility state remain

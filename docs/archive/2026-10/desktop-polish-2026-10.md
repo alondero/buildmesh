@@ -19,7 +19,7 @@ shortcuts, drag handle and terminal ownership are retained.
 
 The inventory used searches for white-alpha hover fills and extra opacity on
 neutral text across desktop TSX. Changes consume existing tokens from
-[DESIGN.md](../../DESIGN.md); no palette or status meaning changes.
+[DESIGN.md](../../../DESIGN.md); no palette or status meaning changes.
 
 | Surface | Treatment |
 |---|---|
@@ -61,7 +61,7 @@ Native WebView2 screenshots use an isolated `com.alond.buildmesh.gh2003.dev`
 profile with real Tauri IPC and backend resources. Completed review fixtures
 provide sidebar rows; native lifecycle events supply recovery presentations
 without launching a provider. Comparable before/after screenshots live in
-[the PR evidence directory](../pr-screenshots/gh2003/). Functional native checks
+[the PR evidence directory](../../pr-screenshots/gh2003). Functional native checks
 use the same viewport/theme/motion matrix; provider spawning and terminal
 lifetime changes are outside this polish pass.
 
