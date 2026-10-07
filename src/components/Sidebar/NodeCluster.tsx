@@ -15,9 +15,9 @@ interface NodeClusterProps {
   onDeleteNode: (e: React.MouseEvent, nodeId: number) => void;
 }
 
-/// Indent of the sub-member rail from the sidebar's left edge. The header
-/// marker and the rail share it so the cluster reads as one connected tree
-/// rather than a disconnected step.
+/// Indent of the cluster's single continuous rail from the sidebar's left
+/// edge. Header and members share it, so the cluster reads as one flat
+/// pairing rather than nested hierarchy.
 const RAIL_INDENT = 'ml-2';
 
 /** One Node Activity drawn in the mesh sidebar.
@@ -27,10 +27,10 @@ const RAIL_INDENT = 'ml-2';
  *  (a mesh with no pairings) is unchanged. Only a genuinely paired cluster pays
  *  for the chrome.
  *
- *  The root row keeps its full indent and the remaining members step in under a
- *  vertical rail, so the eye reads one card with sub-agents rather than N
- *  unrelated rows. Each member is still its own `NodeItem`: click, rename,
- *  status, context menu, and delete all keep working per node, because a paired
+ *  Header and members share one indent under a single continuous rail, so the
+ *  eye reads one flat pairing rather than nested hierarchy. Each member is
+ *  still its own `NodeItem`: click, rename, status, context menu, and delete
+ *  all keep working per node, because a paired
  *  member remains an independent Agent Node with its own worktree and lifecycle
  *  (CONTEXT.md). */
 function NodeClusterView({ cluster, meshColor, providerList, onSelectNode, onDeleteNode }: NodeClusterProps) {
@@ -51,36 +51,34 @@ function NodeClusterView({ cluster, meshColor, providerList, onSelectNode, onDel
     .map((member, index) => `${activityMemberRole(member, root.id, members.length, index - 1, handGrouped)}: ${member.name}`)
     .join('\n');
   return (
-    <div data-node-cluster-id={root.id} data-paired="true" className="mb-0.5">
-      {/* Both the header marker and the sub-member rail sit at `ml-2`, so the
-          marker's edge lands exactly on the rail and the cluster reads as one
-          connected tree instead of a disconnected step. */}
-      <div className={`relative ${RAIL_INDENT}`}>
-        {/* Paired marker on the header row. `role="img"` with an explicit label
-            carries the meaning to assistive tech, which a bare glyph would not.
-            Its colour tracks the group's COMBINED tone — a crashed reviewer
-            repaints it red even while the implementer's own row looks healthy.
-            Tone→token mapping mirrors `GridNodeHeader`'s activity dot, per
-            DESIGN.md rule 3 ("colour means status"). */}
-        <span
-          data-cluster-marker
-          role="img"
-          aria-label={`Paired group of ${members.length} agents — ${status.label}`}
-          title={`Paired with ${members.length - 1} other agent${members.length === 2 ? '' : 's'} — ${status.label}\n\n${roster}`}
-          className={`absolute left-0 top-0 h-full w-0.5 rounded-full ${
-            status.tone === 'error' ? 'bg-status-error'
-              : status.tone === 'warning' ? 'bg-status-warning'
-                : status.tone === 'active' ? 'bg-accent-cyan'
-                  : 'bg-accent-cyan/40'}`}
-        />
-        <NodeItem node={root} meshColor={meshColor} providerList={providerList}
-          onSelectNode={onSelectNode} onDeleteNode={onDeleteNode} />
-      </div>
-      <ul className={`relative list-none border-l-2 border-border-subtle pl-0 ${RAIL_INDENT}`} aria-label="Paired agents">
+    <div data-node-cluster-id={root.id} data-paired="true" className={`relative mb-0.5 ${RAIL_INDENT}`}>
+      {/* One continuous rail for the whole cluster, header row to last member.
+          A previous layout drew the marker on the header only and gave the
+          member list its own separate rail, which read as nested hierarchy
+          instead of one flat pairing: members sit at the same indent as
+          the header — the rail alone does the grouping, so no
+          row looks owned by another. `role="img"` with an explicit label
+          carries the meaning to assistive tech, which a bare line would not.
+          Its colour tracks the group's COMBINED tone — a crashed reviewer
+          repaints it red even while the implementer's own row looks healthy.
+          Tone→token mapping mirrors `GridNodeHeader`'s activity dot, per
+          DESIGN.md rule 3 ("colour means status"). */}
+      <span
+        data-cluster-marker
+        role="img"
+        aria-label={`Paired group of ${members.length} agents — ${status.label}`}
+        title={`Paired with ${members.length - 1} other agent${members.length === 2 ? '' : 's'} — ${status.label}\n\n${roster}`}
+        className={`absolute left-0 top-2 bottom-2 w-0.5 rounded-full ${
+          status.tone === 'error' ? 'bg-status-error'
+            : status.tone === 'warning' ? 'bg-status-warning'
+              : status.tone === 'active' ? 'bg-accent-cyan'
+                : 'bg-accent-cyan/40'}`}
+      />
+      <NodeItem node={root} meshColor={meshColor} providerList={providerList}
+        onSelectNode={onSelectNode} onDeleteNode={onDeleteNode} />
+      <ul className="list-none pl-0" aria-label="Paired agents">
         {rest.map(member => (
-          <li key={member.id} className="relative pl-2">
-            {/* Elbow joining this member to the rail. */}
-            <span aria-hidden="true" className="absolute -left-px top-1/2 h-px w-2 bg-border-subtle" />
+          <li key={member.id}>
             <NodeItem node={member} meshColor={meshColor} providerList={providerList}
               onSelectNode={onSelectNode} onDeleteNode={onDeleteNode} />
           </li>
