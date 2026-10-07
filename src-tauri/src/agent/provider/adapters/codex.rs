@@ -314,9 +314,10 @@ impl CodexInstallCache {
 /// Freshness predicate shared by [`CodexInstallCache::discover_at`] (cache
 /// reuse) and [`CodexInstallCache::is_fresh_at`] (cold-vs-warm reporting) so
 /// the two can never disagree on what counts as cached (issue #1948).
+/// `now` is read before the cache lock, so a concurrent resolution can be newer
+/// than it; that entry's age is zero, not unknown.
 fn is_entry_fresh(cached: &CachedCodexInstall, now: Instant) -> bool {
-    now.checked_duration_since(cached.resolved_at)
-        .is_some_and(|age| age < CODEX_INSTALL_CACHE_TTL)
+    now.saturating_duration_since(cached.resolved_at) < CODEX_INSTALL_CACHE_TTL
 }
 
 fn resolve_codex_install_cell(
@@ -1987,6 +1988,39 @@ mod tests {
             .unwrap();
         assert_eq!(refreshed.version, "0.145.0");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_caller_whose_clock_read_precedes_the_resolution_reuses_it() {
+        // `discover` reads the clock before it takes the cache lock, so a
+        // concurrent caller's resolution can land with a `resolved_at` later
+        // than this caller's `now`. That entry is brand new, not stale;
+        // treating it as stale replaced the slot and ran a duplicate probe.
+        let cache = CodexInstallCache::default();
+        cache
+            .discover(EnvType::Wsl, || Ok(test_install("0.144.0")))
+            .unwrap();
+        let resolved_at = cache
+            .entries
+            .lock()
+            .unwrap()
+            .get(runtime_identity(EnvType::Wsl))
+            .unwrap()
+            .cell
+            .get()
+            .unwrap()
+            .resolved_at;
+
+        // Milliseconds, not nanoseconds: under load the gap between the clock
+        // read and the lock is that wide, and Windows' `Instant` rounds a
+        // sub-tick difference to zero, which would hide the bug.
+        let earlier_clock_read = resolved_at - Duration::from_millis(1);
+        let reused = cache
+            .discover_at(EnvType::Wsl, earlier_clock_read, || {
+                panic!("a resolution newer than the caller's clock read must be reused")
+            })
+            .unwrap();
+        assert_eq!(reused.version, "0.144.0");
     }
 
     #[test]
