@@ -1528,6 +1528,12 @@ pub(crate) fn recover_circuit_agent_turn_inner(
     {
         return Ok(false);
     }
+    let agent = get_agent_node_by_id_inner(conn, fence.agent_node_id)?;
+    if view.report_has_known_blockers(&fence.step_id)
+        || crate::circuit::report_admission::lifecycle_blocker(agent.lifecycle.as_ref()).is_some()
+    {
+        return Ok(false);
+    }
     // Same rule as `commit_agent_lifecycle_inner`: a local process observation
     // must not persist a normalised health the harness never reported.
     let harness_reported_health = payload.provider_event.is_some()

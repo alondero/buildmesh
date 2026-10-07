@@ -20,12 +20,19 @@ mod tests {
     fn history_includes_archived_and_reopen_preserves_session_and_live_status() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api'),(2,'Web','C:/web')", []).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'API','C:/api'),(2,'Web','C:/web')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status,cli_session_id,provider,created_at) VALUES
             (1,1,'active','C:/api','running','active-session','codex','2026-10-01'),
             (2,2,'archived','C:/web','archived','saved-session','claude','2026-10-02')", []).unwrap();
         let history = crate::db::list_agent_history_inner(&conn).unwrap();
-        assert_eq!(history.iter().map(|node| node.id).collect::<Vec<_>>(), vec![2, 1]);
+        assert_eq!(
+            history.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
         assert_eq!(history[0].status, SessionStatus::Archived);
         let reopened = crate::db::reopen_agent_node_inner(&conn, 2).unwrap();
         assert_eq!(reopened.status, SessionStatus::Suspended);
@@ -64,43 +71,80 @@ mod tests {
     #[test]
     fn recovered_turn_accepts_sqlite_and_rfc3339_lifecycle_stamps() {
         let completed = 1789324053252;
-        for stamp in ["1789321859469:2026-09-13T18:25:20.569845100+00:00",
+        for stamp in [
+            "1789321859469:2026-09-13T18:25:20.569845100+00:00",
             "1789321859469:2026-09-13 18:25:20",
-            "1789321859469:2026-09-13 18:25:20.569"] {
-            assert!(crate::db::agent_turn_stamp_precedes(stamp, completed), "{stamp}");
+            "1789321859469:2026-09-13 18:25:20.569",
+        ] {
+            assert!(
+                crate::db::agent_turn_stamp_precedes(stamp, completed),
+                "{stamp}"
+            );
         }
-        for stamp in ["1789321859469:invalid", "bad:2026-09-13 18:25:20",
-            "1789321859469:2026-09-13 18:27:34"] {
-            assert!(!crate::db::agent_turn_stamp_precedes(stamp, completed), "{stamp}");
+        for stamp in [
+            "1789321859469:invalid",
+            "bad:2026-09-13 18:25:20",
+            "1789321859469:2026-09-13 18:27:34",
+        ] {
+            assert!(
+                !crate::db::agent_turn_stamp_precedes(stamp, completed),
+                "{stamp}"
+            );
         }
     }
 
     fn circuit_recovery_fixture() -> (Connection, crate::db::agent_node::CircuitRecoveryFence) {
         use crate::circuit::model::{CircuitGraph, CircuitNode, CircuitNodeKind};
-        let conn = conn_with_agent_nodes();
-        conn.execute_batch("CREATE TABLE autopilot_circuit_runs(id INTEGER PRIMARY KEY,state TEXT,context_json TEXT);
-            CREATE TABLE autopilot_circuit_run_steps(run_id INTEGER,node_id TEXT,status TEXT,attempt INTEGER,agent_node_id INTEGER);
-            INSERT INTO agent_nodes(id,status,session_started_at,status_changed_at) VALUES(77,'running',100,'2000-01-01T00:00:00Z');
-            INSERT INTO autopilot_circuit_runs VALUES(1,'running','{\"source.agent_id\":\"77\"}');
-            INSERT INTO autopilot_circuit_run_steps VALUES(1,'gate','unverified',1,NULL);").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute_batch("INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path,status,session_started_at,status_changed_at) VALUES(77,1,'agent','/repo','running',100,'2000-01-01T00:00:00Z');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,context_json) VALUES(1,1,1,'running','{\"source.agent_id\":\"77\"}');
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,status,attempt,agent_node_id) VALUES(1,'gate','unverified',1,NULL);").unwrap();
         let fence = crate::db::agent_node::CircuitRecoveryFence {
-            run_id: 1, step_id: "gate".into(), attempt: 1, agent_node_id: 77,
-            graph: CircuitGraph { version: 3, blueprint: None, edges: vec![], nodes: vec![CircuitNode {
-                id: "gate".into(), kind: CircuitNodeKind::AwaitAgentTurn { target_node_id: Some("$source".into()) },
-            }] },
+            run_id: 1,
+            step_id: "gate".into(),
+            attempt: 1,
+            agent_node_id: 77,
+            graph: CircuitGraph {
+                version: 3,
+                blueprint: None,
+                edges: vec![],
+                nodes: vec![CircuitNode {
+                    id: "gate".into(),
+                    kind: CircuitNodeKind::AwaitAgentTurn {
+                        target_node_id: Some("$source".into()),
+                    },
+                }],
+            },
         };
         (conn, fence)
     }
 
-    fn recovery_payload(status: SessionStatus) -> crate::agent::session_lifecycle::LifecycleChangedPayload {
-        use crate::agent::session_lifecycle::{HookSignalDetail, LifecycleChangedPayload, LifecycleKind};
-        let kind = if status == SessionStatus::Ready { LifecycleKind::TurnCompleted } else { LifecycleKind::InputRequired };
-        LifecycleChangedPayload::new(77, kind, status, &HookSignalDetail::default(), "recovered circuit turn")
+    fn recovery_payload(
+        status: SessionStatus,
+    ) -> crate::agent::session_lifecycle::LifecycleChangedPayload {
+        use crate::agent::session_lifecycle::{
+            HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+        };
+        let kind = if status == SessionStatus::Ready {
+            LifecycleKind::TurnCompleted
+        } else {
+            LifecycleKind::InputRequired
+        };
+        LifecycleChangedPayload::new(
+            77,
+            kind,
+            status,
+            &HookSignalDetail::default(),
+            "recovered circuit turn",
+        )
     }
 
     #[test]
     fn circuit_recovery_waiting_for_writer_rechecks_paused_and_cancelled_borrowed_run() {
-        use std::sync::{Arc, Mutex, mpsc};
+        use std::sync::{mpsc, Arc, Mutex};
         use std::time::Duration;
         for state in ["paused", "cancelled"] {
             for recovery_status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
@@ -108,7 +152,15 @@ mod tests {
                 let writer = Arc::new(Mutex::new(conn));
                 // Recovery already passed its observational Running check.
                 let lock = writer.lock().unwrap();
-                assert_eq!(lock.query_row("SELECT state FROM autopilot_circuit_runs WHERE id=1", [], |row| row.get::<_, String>(0)).unwrap(), "running");
+                assert_eq!(
+                    lock.query_row(
+                        "SELECT state FROM autopilot_circuit_runs WHERE id=1",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                    "running"
+                );
                 let worker_writer = writer.clone();
                 let (waiting_tx, waiting_rx) = mpsc::channel();
                 let recovery = std::thread::spawn(move || {
@@ -117,30 +169,90 @@ mod tests {
                     let transaction = conn.transaction().unwrap();
                     let mut payload = recovery_payload(recovery_status);
                     let committed = crate::db::agent_node::recover_circuit_agent_turn_inner(
-                        &transaction, &fence, "100:2000-01-01T00:00:00Z", &mut payload).unwrap();
+                        &transaction,
+                        &fence,
+                        "100:2000-01-01T00:00:00Z",
+                        &mut payload,
+                    )
+                    .unwrap();
                     transaction.commit().unwrap();
                     committed
                 });
                 waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                lock.execute("UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1", [state]).unwrap();
+                lock.execute(
+                    "UPDATE autopilot_circuit_runs SET state=?1 WHERE id=1",
+                    [state],
+                )
+                .unwrap();
                 drop(lock);
-                assert!(!recovery.join().unwrap(), "{state} must suppress {recovery_status:?} and its lifecycle publication");
-                assert_eq!(current_status(&writer.lock().unwrap(), 77), "running", "borrowed source is untouched");
+                assert!(
+                    !recovery.join().unwrap(),
+                    "{state} must suppress {recovery_status:?} and its lifecycle publication"
+                );
+                assert_eq!(
+                    current_status(&writer.lock().unwrap(), 77),
+                    "running",
+                    "borrowed source is untouched"
+                );
             }
         }
     }
 
     #[test]
+    fn circuit_recovery_preserves_observed_background_work() {
+        use crate::agent::session_lifecycle::{
+            HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+        };
+        let (conn, fence) = circuit_recovery_fixture();
+        let mut background = LifecycleChangedPayload::new(
+            77,
+            LifecycleKind::BackgroundRunning,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "child still working",
+        );
+        assert!(
+            crate::db::agent_node::commit_agent_lifecycle_inner(&conn, &mut background, &[])
+                .unwrap()
+        );
+        let stamp = format!("100:{}", background.timestamp);
+        for status in [SessionStatus::Ready, SessionStatus::AwaitingInput] {
+            let mut payload = recovery_payload(status);
+            assert!(
+                !crate::db::agent_node::recover_circuit_agent_turn_inner(
+                    &conn,
+                    &fence,
+                    &stamp,
+                    &mut payload
+                )
+                .unwrap(),
+                "report recovery must preserve known background work"
+            );
+            assert_eq!(current_status(&conn, 77), "running");
+        }
+    }
+
+    #[test]
     fn circuit_recovery_atomically_checks_attempt_target_and_lifecycle() {
-        for change in ["UPDATE autopilot_circuit_run_steps SET attempt=2",
+        for change in [
+            "UPDATE autopilot_circuit_run_steps SET attempt=2",
             "UPDATE autopilot_circuit_runs SET context_json='{\"source.agent_id\":\"88\"}'",
-            "UPDATE agent_nodes SET session_started_at=101"] {
+            "UPDATE agent_nodes SET session_started_at=101",
+        ] {
             let (mut conn, fence) = circuit_recovery_fixture();
             conn.execute_batch(change).unwrap();
             let transaction = conn.transaction().unwrap();
             let mut payload = recovery_payload(SessionStatus::Ready);
-            assert!(!crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
-                "100:2000-01-01T00:00:00Z", &mut payload).unwrap(), "{change}");
+            assert!(
+                !crate::db::agent_node::recover_circuit_agent_turn_inner(
+                    &transaction,
+                    &fence,
+                    "100:2000-01-01T00:00:00Z",
+                    &mut payload
+                )
+                .unwrap(),
+                "{change}"
+            );
             transaction.commit().unwrap();
             assert_eq!(current_status(&conn, 77), "running");
         }
@@ -148,8 +260,13 @@ mod tests {
             let (mut conn, fence) = circuit_recovery_fixture();
             let transaction = conn.transaction().unwrap();
             let mut payload = recovery_payload(recovery_status);
-            assert!(crate::db::agent_node::recover_circuit_agent_turn_inner(&transaction, &fence,
-                "100:2000-01-01T00:00:00Z", &mut payload).unwrap());
+            assert!(crate::db::agent_node::recover_circuit_agent_turn_inner(
+                &transaction,
+                &fence,
+                "100:2000-01-01T00:00:00Z",
+                &mut payload
+            )
+            .unwrap());
             transaction.commit().unwrap();
             assert_eq!(current_status(&conn, 77), recovery_status.to_db_str());
         }
@@ -202,10 +319,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(session_id, None);
-        let started: i64 = conn.query_row(
-            "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
-            params![id], |row| row.get(0),
-        ).unwrap();
+        let started: i64 = conn
+            .query_row(
+                "SELECT session_started_at FROM agent_nodes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(started > 0);
     }
 
@@ -213,11 +333,19 @@ mod tests {
     fn fresh_identity_and_recovery_timestamp_are_written_together() {
         let conn = conn_with_agent_nodes();
         let id = insert_node(&conn, "suspended");
-        conn.execute("UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1", [id]).unwrap();
+        conn.execute(
+            "UPDATE agent_nodes SET cli_session_id = 'old' WHERE id = ?1",
+            [id],
+        )
+        .unwrap();
         clear_cli_session_id_inner(&conn, id).unwrap();
-        let (identity, started): (Option<String>, Option<i64>) = conn.query_row(
-            "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
-            [id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let (identity, started): (Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT cli_session_id, session_started_at FROM agent_nodes WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(identity, None);
         assert!(started.is_some());
     }
@@ -293,7 +421,10 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!applied, "the update must be a no-op when expected mismatches");
+        assert!(
+            !applied,
+            "the update must be a no-op when expected mismatches"
+        );
         assert_eq!(current_status(&conn, id), "error");
         // A no-op UPDATE must not bump status_changed_at — the coordinator's
         // last_activity keeps reporting the real event (the reader's Error).
@@ -439,12 +570,8 @@ mod tests {
         let conn = conn_with_agent_nodes();
         let id = insert_node(&conn, "idle");
 
-        let result = update_agent_node_status_unless_in_inner(
-            &conn,
-            id,
-            SessionStatus::Spawning,
-            &[],
-        );
+        let result =
+            update_agent_node_status_unless_in_inner(&conn, id, SessionStatus::Spawning, &[]);
 
         assert!(
             result.is_err(),
@@ -526,8 +653,11 @@ mod tests {
         for _ in 0..600 {
             ids.push(insert_agent_node(&conn));
         }
-        let updates: Vec<(i64, i64)> =
-            ids.iter().enumerate().map(|(i, id)| (*id, (i + 1) as i64)).collect();
+        let updates: Vec<(i64, i64)> = ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (*id, (i + 1) as i64))
+            .collect();
 
         crate::db::update_agent_node_positions_batch_inner(&conn, &updates).unwrap();
 
@@ -594,7 +724,8 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(
-            plan.iter().any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
+            plan.iter()
+                .any(|line| line.contains("PRIMARY KEY") || line.contains("rowid")),
             "bulk UPDATE must use the INTEGER PRIMARY KEY index, got plan: {plan:?}"
         );
     }
@@ -615,7 +746,8 @@ mod tests {
             "CREATE TRIGGER abort_on_sentinel BEFORE UPDATE ON agent_nodes \
              WHEN OLD.id = {sentinel} \
              BEGIN SELECT RAISE(ABORT, 'sentinel'); END;"
-        )).unwrap();
+        ))
+        .unwrap();
 
         let err = crate::db::update_agent_node_positions_batch_inner(
             &conn,

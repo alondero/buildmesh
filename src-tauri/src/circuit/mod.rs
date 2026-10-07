@@ -19,9 +19,10 @@ pub mod capacity;
 pub mod context;
 pub mod model;
 pub mod model_node_review;
+pub mod observation;
+pub(crate) mod report_admission;
 pub mod stepper;
 pub mod vocabulary;
-pub mod observation;
 
 #[cfg(test)]
 mod blueprint_contract;
@@ -29,12 +30,12 @@ mod blueprint_contract;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-pub mod security;
-pub mod compatibility;
-pub mod evaluator;
 pub(crate) mod classifier;
-pub mod finish;
+pub mod compatibility;
 pub(crate) mod delivery;
-pub(crate) mod verification;
-pub(crate) mod launch;
+pub mod evaluator;
+pub mod finish;
 pub(crate) mod issue_dependencies;
+pub(crate) mod launch;
+pub mod security;
+pub(crate) mod verification;

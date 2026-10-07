@@ -48,6 +48,20 @@ claiming complete native ownership coverage. Known unfinished work, evidence
 conflicts and actual requests remain blockers. Review approval and external
 merge requirements remain separate.
 
+The shared `circuit::report_admission` policy also consumes the current persisted
+node lifecycle snapshot as negative evidence: explicit questions and permissions
+block report handoff, and BackgroundRunning blocks it as known outstanding work.
+Generic InputRequired is not a structured request. Report preflight, transactional
+classification commit and watchdog recovery apply this policy; the latter two
+re-read under the database writer so a newly delivered blocker cannot be bypassed.
+Observation receipts remain writable while blocked. A later valid lifecycle
+transition can release this snapshot veto, but cannot resolve separate durable
+request/child evidence or authorize completion by itself.
+
+The [six-harness reliability audit](../archive/2026-10/circuit-harness-reliability-audit.md)
+records the capability gaps and qualification requirements. Historical signal health
+and fixture tests do not establish a 99% autonomous Circuit completion rate.
+
 Terminal input attribution is streaming: focus notifications and cursor-position
 responses do not change the input generation or invent a draft, including when
 packets span writes. Real text, edits, paste and submission retain their fences.

@@ -1580,6 +1580,18 @@ pub(crate) fn commit_transition_locked(
                 "agent session incarnation changed before evidence commit",
             ));
         }
+        // Requests and background work can arrive while interpretation runs.
+        // Recheck under the writer transaction, but do not block observation
+        // receipts themselves: those are how outstanding work gets resolved.
+        if !evidence.classifications.is_empty() {
+            let agent =
+                crate::db::agent_node::get_agent_node_by_id_inner(&tx, guard.agent_node_id)?;
+            if let Some(blocker) =
+                crate::circuit::report_admission::lifecycle_blocker(agent.lifecycle.as_ref())
+            {
+                return Err(observation_freshness_rejection(&blocker.message()));
+            }
+        }
     }
     if let Some(expected) = evidence.expected {
         if expected
@@ -3108,6 +3120,128 @@ mod tests {
             .unwrap()
             .iter()
             .any(|entry| entry.kind == "evidence_recheck"));
+    }
+
+    #[test]
+    fn report_commit_rechecks_lifecycle_blockers_after_classification() {
+        use crate::agent::session_lifecycle::{
+            HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+        };
+        use crate::circuit::observation::{
+            RecordedClassification, ReportCompleteness, ReportInterpretation,
+        };
+        use crate::circuit::stepper::ObservationInputFence;
+        use crate::models::SessionStatus;
+        let mut db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path,status,cli_session_id,session_started_at) VALUES (9,1,'agent','/repo','running','session',1000);
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');").unwrap();
+        let guard = ObservationInputFence {
+            transcript_guard: None,
+            report_guard: None,
+            agent_node_id: 9,
+            input_stamp: "1:2".into(),
+            observed_at_ms: 2000,
+            session_id: "session".into(),
+            session_incarnation: "1000".into(),
+        };
+        let classifications = [RecordedClassification {
+            step_id: "review".into(),
+            attempt: 1,
+            interpretation: ReportInterpretation::Completed,
+            report_revision: Some("report".into()),
+            evidence_owner: None,
+            lifecycle_verified: false,
+            report_text: Some("Approved".into()),
+            report_completeness: ReportCompleteness::Complete,
+        }];
+        for (kind, status) in [
+            (
+                LifecycleKind::QuestionRequested,
+                SessionStatus::AwaitingInput,
+            ),
+            (
+                LifecycleKind::PermissionRequested,
+                SessionStatus::AwaitingInput,
+            ),
+            (LifecycleKind::BackgroundRunning, SessionStatus::Running),
+        ] {
+            let mut payload =
+                LifecycleChangedPayload::new(9, kind, status, &HookSignalDetail::default(), "");
+            assert!(
+                crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut payload, &[])
+                    .unwrap()
+            );
+            let result = commit_transition_locked(
+                &mut db,
+                1,
+                Some("completed"),
+                "{}",
+                &[],
+                EvidenceWrite {
+                    input_guard: Some(&guard),
+                    classifications: &classifications,
+                    ..Default::default()
+                },
+            );
+            assert!(
+                result.is_err(),
+                "{kind:?} must fence an already-classified report"
+            );
+            assert_eq!(
+                super::super::ledger::get_circuit_run_inner(&db, 1)
+                    .unwrap()
+                    .unwrap()
+                    .state,
+                "running"
+            );
+            assert!(history_inner(&db, 1).unwrap().is_empty());
+            // Receiving native evidence must remain possible while blocked.
+            commit_transition_locked(
+                &mut db,
+                1,
+                None,
+                "{}",
+                &[],
+                EvidenceWrite {
+                    input_guard: Some(&guard),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut payload = LifecycleChangedPayload::new(
+            9,
+            LifecycleKind::TurnCompleted,
+            SessionStatus::Ready,
+            &HookSignalDetail::default(),
+            "",
+        );
+        assert!(
+            crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut payload, &[]).unwrap()
+        );
+        commit_transition_locked(
+            &mut db,
+            1,
+            Some("completed"),
+            "{}",
+            &[],
+            EvidenceWrite {
+                input_guard: Some(&guard),
+                classifications: &classifications,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::ledger::get_circuit_run_inner(&db, 1)
+                .unwrap()
+                .unwrap()
+                .state,
+            "completed"
+        );
     }
 
     #[test]
