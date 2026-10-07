@@ -67,8 +67,13 @@
 //!   contains no transcript section rather than assuming it.
 //! - Windows Credential Manager blobs (the OpenCode OAuth token and
 //!   Antigravity's `gemini:antigravity` credential). These live outside any
-//!   file Buildmesh can copy; credential-storage remediation is tracked
-//!   separately in issue #830.
+//!   file Buildmesh can copy.
+//!
+//! Provider API keys also live in the credential store rather than in
+//! `preferences.json` (issue #830). A full-fidelity copy (a snapshot, or an
+//! export with redaction off) puts them back into its copy of
+//! `preferences.json` so it still restores them; the machine that restores it
+//! moves them into its own store on first load.
 //!
 //! A redacted export therefore restores **structure without credentials**:
 //! Meshes, Agent Nodes, Circuits, and preferences come back, and the
@@ -377,6 +382,10 @@ pub(crate) fn build_bundle(
     let mut redaction = redaction;
     match std::fs::read(prefs_path) {
         Ok(raw) => {
+            // Provider API keys live in the credential store, not the file
+            // (issue #830). Put them back first so a full-fidelity copy still
+            // restores them and a redacted one still reports what it left out.
+            let raw = crate::preferences::secrets::with_keys_inlined(raw);
             let bytes = if redact {
                 let cleaned = redact::redact_preferences(&raw)?;
                 if let Some(report) = redaction.as_mut() {
@@ -438,11 +447,7 @@ fn count_secret_preference_fields(raw: &[u8]) -> usize {
                 .map(|accounts| {
                     accounts
                         .iter()
-                        .filter(|a| {
-                            a.get("api_key")
-                                .map(|v| !v.is_null())
-                                .unwrap_or(false)
-                        })
+                        .filter(|a| a.get("api_key").map(|v| !v.is_null()).unwrap_or(false))
                         .count()
                 })
                 .unwrap_or(0);
@@ -538,13 +543,7 @@ pub(crate) fn snapshot_before_migration(
         // coming. Assume it is: preserving the file is the cheap side of that
         // bet, and `db::init`'s own probe treats this as version 0.
         tracing::warn!("could not read schema_version; snapshotting before migration anyway");
-        return write_snapshot(
-            app_data_dir,
-            db_path,
-            "pre-migration",
-            false,
-        )
-        .map(Some);
+        return write_snapshot(app_data_dir, db_path, "pre-migration", false).map(Some);
     };
     if current >= SCHEMA_VERSION {
         return Ok(None);
@@ -663,7 +662,10 @@ fn unique_snapshot_path(dir: &Path, slug: &str, kind: &str) -> PathBuf {
     }
     // A thousand files inside one second is not a state this app can reach;
     // fall back to a name that cannot collide rather than overwriting.
-    dir.join(format!("{slug}-{kind}-{}.{BUNDLE_EXTENSION}", std::process::id()))
+    dir.join(format!(
+        "{slug}-{kind}-{}.{BUNDLE_EXTENSION}",
+        std::process::id()
+    ))
 }
 
 fn file_name(path: &Path) -> String {
@@ -685,8 +687,7 @@ fn notice_path(app_data_dir: &Path) -> PathBuf {
 }
 
 fn record_notice(app_data_dir: &Path, notice: &RecoveryNotice) -> io::Result<()> {
-    let bytes = serde_json::to_vec_pretty(notice)
-        .map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec_pretty(notice).map_err(io::Error::other)?;
     std::fs::write(notice_path(app_data_dir), bytes)
 }
 
@@ -718,7 +719,10 @@ pub(crate) fn clear_notice(app_data_dir: &Path) {
 ///    fsynced, and only then is the marker written. A crash before the marker
 ///    leaves an inert directory; there is no state in which a partial restore
 ///    can apply.
-pub(crate) fn stage_restore(app_data_dir: &Path, bundle_path: &Path) -> Result<StateRestorePlan, String> {
+pub(crate) fn stage_restore(
+    app_data_dir: &Path,
+    bundle_path: &Path,
+) -> Result<StateRestorePlan, String> {
     let header = bundle::verify_bundle(bundle_path).map_err(|e| e.to_string())?;
     if header.section(SECTION_DB).is_none() {
         return Err(format!(
@@ -733,9 +737,11 @@ pub(crate) fn stage_restore(app_data_dir: &Path, bundle_path: &Path) -> Result<S
     // never been created — an empty profile has nothing worth rolling back to,
     // and `write_snapshot` would fail on a missing file.
     let rollback = if is_real_database_file(&db_path) {
-        Some(write_snapshot(app_data_dir, &db_path, "pre-restore", false).map_err(|e| {
-            format!("Could not preserve your current state before restoring: {e}")
-        })?)
+        Some(
+            write_snapshot(app_data_dir, &db_path, "pre-restore", false).map_err(|e| {
+                format!("Could not preserve your current state before restoring: {e}")
+            })?,
+        )
     } else {
         None
     };
@@ -793,13 +799,11 @@ pub(crate) fn stage_restore(app_data_dir: &Path, bundle_path: &Path) -> Result<S
     )
     .map_err(|e| format!("could not write the staged restore marker: {e}"))?;
 
-    let mut warnings = vec![
-        format!(
-            "Buildmesh will restart to apply this. Meshes, Agent Nodes, and Circuits in the \
+    let mut warnings = vec![format!(
+        "Buildmesh will restart to apply this. Meshes, Agent Nodes, and Circuits in the \
              bundle (schema v{}) replace the current state (schema v{current_version}).",
-            header.schema_version
-        ),
-    ];
+        header.schema_version
+    )];
     if header.redacted {
         warnings.push(
             "This export has no credentials. After restarting you will need to re-enter your \
@@ -821,9 +825,7 @@ pub(crate) fn stage_restore(app_data_dir: &Path, bundle_path: &Path) -> Result<S
         schema_version: header.schema_version,
         created_at: header.created_at,
         redacted: header.redacted,
-        rollback_snapshot: rollback
-            .map(|s| s.path)
-            .unwrap_or_default(),
+        rollback_snapshot: rollback.map(|s| s.path).unwrap_or_default(),
         requires_restart: true,
         warnings,
     })
@@ -844,9 +846,7 @@ pub(crate) struct RestoreApplied {
 /// This is not optional: SQLite would otherwise replay the *old* database's
 /// `-wal` frames on top of the restored file and corrupt it — the exact
 /// "partial state" failure the staging design exists to prevent.
-pub(crate) fn apply_pending_restore(
-    app_data_dir: &Path,
-) -> io::Result<Option<RestoreApplied>> {
+pub(crate) fn apply_pending_restore(app_data_dir: &Path) -> io::Result<Option<RestoreApplied>> {
     let pending = bundle::pending_dir(app_data_dir);
     if !pending.exists() {
         return Ok(None);
@@ -875,7 +875,9 @@ pub(crate) fn apply_pending_restore(
     // The staged payload was a verified container section, but the bytes on
     // disk since staging are not. Re-check before they become live state.
     if !is_restorable_database(&staged_db)? {
-        tracing::error!("state recovery: staged database fails its integrity check; keeping current state");
+        tracing::error!(
+            "state recovery: staged database fails its integrity check; keeping current state"
+        );
         std::fs::remove_dir_all(&pending)?;
         return Ok(None);
     }
@@ -963,7 +965,9 @@ pub(crate) fn build_info(app_data_dir: &Path) -> StateRecoveryInfo {
             .map(|s| s.len() as u32)
             .unwrap_or(0),
         retention: SNAPSHOT_RETENTION as u32,
-        pending_restore: bundle::pending_dir(app_data_dir).join(bundle::PENDING_MARKER).exists(),
+        pending_restore: bundle::pending_dir(app_data_dir)
+            .join(bundle::PENDING_MARKER)
+            .exists(),
         notice: read_notice(app_data_dir),
     }
 }
@@ -1147,7 +1151,10 @@ pub fn inspect_bundle(path: &Path) -> Result<StateRestorePlan, String> {
         );
     }
     if !header.sections.iter().any(|s| s.name == SECTION_DB) {
-        warnings.push("This bundle contains no database, so restoring it would not change any state.".to_string());
+        warnings.push(
+            "This bundle contains no database, so restoring it would not change any state."
+                .to_string(),
+        );
     }
     Ok(StateRestorePlan {
         bundle_path: path_string(path),

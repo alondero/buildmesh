@@ -88,6 +88,25 @@ Out of scope:
   in a spawned agent.
 - Issues only reproducible against an already-compromised host.
 
+## Where credentials are stored
+
+On Windows, provider API keys (MiniMax, Kimi, OpenRouter, custom endpoints)
+and the OpenCode and Antigravity sign-in tokens are held in **Windows
+Credential Manager**, scoped to your Windows user. They are not written to
+`preferences.json` or its `.bak` backup. A `preferences.json` written by an
+older version is cleaned the first time the new version starts: its keys move
+into Credential Manager and are blanked in the file and in the backup.
+
+If Credential Manager cannot be reached (for example a session with no
+interactive logon), Buildmesh keeps the key in `preferences.json` rather than
+lose it, and moves it out on the next start or settings change once the store
+is available. On macOS and Linux there is no credential store integration yet,
+so keys stay in `preferences.json`, which is created readable by your user only.
+
+The stable and dev builds keep separate entries, so running one never changes
+the other's keys. You can inspect or delete the entries with
+`cmdkey /list:buildmesh:*` or the Credential Manager control panel.
+
 ## Data export and backups
 
 **Settings → Data & Diagnostics → Export a copy…** writes a single
@@ -97,8 +116,11 @@ token, no coordinator tokens, no paired-device sessions, and **no LAN
 HTTPS certificate or private key** — a copy of that key would let its
 holder impersonate the HTTPS identity your paired devices already trust.
 Terminal transcripts are never part of stored state, so they are never
-included. Windows Credential Manager entries are stored outside the data
-folder and are not exportable.
+included. The OpenCode and Antigravity sign-in tokens in Windows Credential
+Manager are stored outside the data folder and are not exportable. Provider
+API keys are also kept in Credential Manager, but an export with redaction
+switched off puts them back into its copy of the settings so that it can
+carry them to another machine.
 
 A credential-free export is the one to attach to a bug report. If you turn
 redaction off, the file contains your API keys and tokens — treat it as a

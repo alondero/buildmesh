@@ -29,6 +29,7 @@ reviewer_provider: string | null,
  * MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
  * (#537) — kept so existing preferences.json files still load and the stored
  * key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.
+ * Stored in the credential store like `ProviderAccount::api_key`.
  */
 minimax_api_key: string | null, 
 /**
