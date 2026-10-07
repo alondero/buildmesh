@@ -235,6 +235,7 @@ mod tests {
             None,
         );
         build_spawn_command(resolved, provider, &[], mode, session_id, &config, prefill, sandbox)
+            .expect("command assembly")
     }
 
     /// Assigning a fresh session id appends `--session-id <uuid>` after the
@@ -328,7 +329,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
-        );
+        )
+        .expect("command assembly");
 
         // Plain claude recipe — the backend is selected via env, not argv.
         assert_eq!(
@@ -366,7 +368,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
-        );
+        )
+        .expect("command assembly");
         assert!(env_of(&cmd, "ANTHROPIC_BASE_URL").is_none());
         assert!(env_of(&cmd, "ANTHROPIC_AUTH_TOKEN").is_none());
     }
@@ -390,7 +393,8 @@ mod tests {
                 &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
-            );
+            )
+            .expect("command assembly");
             let args = argv(&cmd);
             let mut expected = expected_wsl("/usr/bin/codex", &[]);
             if cfg!(windows) {
@@ -443,7 +447,8 @@ mod tests {
                     &config,
                     None,
                     false,
-                );
+                )
+                .expect("command assembly");
                 let args = argv(&cmd);
                 let flags: Vec<usize> = args
                     .iter()
@@ -482,7 +487,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
-        );
+        )
+        .expect("command assembly");
         let args = argv(&cmd);
         assert!(!args.iter().any(|arg| arg == "--profile"));
         assert!(!args.iter().any(|arg| arg == "--model"));
@@ -500,7 +506,8 @@ mod tests {
                 let cmd = build_spawn_command_prepared(&wsl_resolved(), Provider::Codex, &routing, &mode,
                     SESSION_ID, &crate::agent::capabilities::ResolvedAgentConfig {
                         model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
-                    }, None, false);
+                    }, None, false)
+                    .expect("command assembly");
                 let args = argv(&cmd);
                 assert!(args.windows(2).any(|pair| pair == ["-c", "model_supports_reasoning_summaries=true"]));
                 assert!(args.windows(2).any(|pair| pair == ["-c", "model_reasoning_summary=\"none\""]));
@@ -535,7 +542,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
-        );
+        )
+        .expect("command assembly");
         let args = argv(&cmd);
         // Windows wraps the resolved path with `cmd.exe /c`; Unix spawns it
         // directly as argv[0]. Both routes must replace the bare `cline` stem.
@@ -588,6 +596,7 @@ mod tests {
                 None,
                 false,
             )
+            .expect("command assembly")
         };
         let first = command_for("buildmesh_first", "first-secret");
         let second = command_for("buildmesh_second", "second-secret");
@@ -633,7 +642,8 @@ mod tests {
                 &crate::agent::capabilities::ResolvedAgentConfig::default(),
                 None,
                 false,
-            );
+            )
+            .expect("command assembly");
             let log = temp.path().join(format!("invocation-{index}.log"));
             command.env("FAKE_CODEX_LOG", &log);
             let pair = open_pty_pair(24, 80).unwrap();
@@ -849,7 +859,8 @@ mod tests {
             &crate::agent::capabilities::ResolvedAgentConfig::default(),
             None,
             false,
-        );
+        )
+        .expect("command assembly");
 
         let args = argv(&cmd);
         assert_eq!(args.first().map(String::as_str), Some("claude.exe"));

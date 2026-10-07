@@ -16,6 +16,22 @@ pub fn get_app_identifier(app: tauri::AppHandle) -> String {
     app.config().identifier.clone()
 }
 
+/// Is the experimental agent sandbox available in this process?
+///
+/// The agent sandbox is not a shipped feature (#2034): Windows denies no
+/// filesystem access (#542), Linux has no backend (#828), and WSL launches are
+/// not contained. It stays behind [`crate::sandbox::DEV_SANDBOX_ENV`] until
+/// those gaps close.
+///
+/// This command only decides whether the UI *offers* the Mesh Sandbox toggle.
+/// It is deliberately not the guarantee — `crate::sandbox::sandbox_enabled`
+/// re-checks the gate at spawn time, so hiding the control here cannot become
+/// the thing that keeps a release from confining a process.
+#[command]
+pub fn sandbox_dev_mode_enabled() -> bool {
+    crate::sandbox::dev_sandbox_enabled()
+}
+
 /// Retract a user close request the frontend vetoed (issue #1501).
 ///
 /// The backend `CloseRequested` handler eagerly sets `USER_CLOSE_REQUESTED`

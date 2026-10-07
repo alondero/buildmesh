@@ -3,14 +3,21 @@
 //!
 //! - WSL on Windows: `wsl.exe -d <distro> --cd <path> --exec sh -lc ...`
 //! - WSL on Linux: direct invocation
-//! - macOS, `sandbox` on: `sandbox-exec -f <profile.sb> <binary> <args...>`
+//! - macOS, sandbox requested: `sandbox-exec -f <profile.sb> <binary> <args...>`
 //!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
-//! - macOS, `sandbox` off: direct invocation
+//! - macOS, sandbox not requested: direct invocation
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
 //!   (used by Codex so ANSI escapes propagate correctly through ConPTY)
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
 //!   (used by node-shim providers whose binary is a `.cmd` batch file)
 //! - Windows native + Direct: spawn the binary directly (rare; mainly for tests)
+//!
+//! "Sandbox requested" means the Mesh flag is on *and* the developer gate is
+//! open ([`crate::sandbox::sandbox_requested`]); the feature is experimental
+//! and inert in shipped builds (#2034). Because a requested sandbox is a
+//! promise, [`wrap`] is fallible: the macOS Seatbelt profile is written during
+//! command assembly, so a write failure returns `Err` rather than degrading to
+//! an unsandboxed spawn.
 
 use crate::agent::provider::{SpawnRecipe, WindowsShell};
 use crate::models::EnvType;
@@ -79,7 +86,7 @@ pub fn wrap(
     spawn_path: &str,
     session_id: i64,
     sandbox: bool,
-) -> CommandBuilder {
+) -> Result<CommandBuilder, String> {
     recipe.base_args.extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
     let mut cmd = if env_type == EnvType::WindowsInterop {
@@ -93,11 +100,11 @@ pub fn wrap(
         let mut command = CommandBuilder::new("powershell.exe");
         command.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encode_for_powershell(&format!("{script}; exit $LASTEXITCODE"))]);
         if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") { command.env("BUILDMESH_WSL_HOST", distro); }
-        command
+        Ok(command)
     } else if env_type == EnvType::Wsl && !cfg!(windows) {
         let mut c = CommandBuilder::new(executable);
         c.args(recipe.base_args);
-        c
+        Ok(c)
     } else if env_type == EnvType::Wsl {
         tracing::info!("spawn_environment: building WSL command via wsl.exe");
         let mut c = CommandBuilder::new("wsl.exe");
@@ -110,50 +117,53 @@ pub fn wrap(
         c.args(["--cd", spawn_path, "--exec", "sh", "-lc",
             "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"", "buildmesh", executable]);
         c.args(recipe.base_args);
-        c
+        Ok(c)
     } else if cfg!(target_os = "macos") {
         // macOS Seatbelt sandbox (issue #497). When the Mesh has the sandbox
-        // toggle on, launch the agent through `sandbox-exec -f <profile>` so it
-        // can only read/write the worktree (see `agent::sandbox`). The profile
-        // write is the only fallible step; on failure we log loudly and fall
-        // back to a direct spawn rather than blocking the user — the toggle is
-        // opt-in, so a direct spawn matches the off state, not a silent bypass
-        // of an expected guarantee.
-        if sandbox {
-            match crate::agent::sandbox::seatbelt_command(
-                recipe.binary,
+        // toggle on AND the developer gate is open, launch the agent through
+        // `sandbox-exec -f <profile>` so it can only read/write the worktree
+        // (see `agent::sandbox`).
+        //
+        // Writing the profile is the only fallible step, and this path **fails
+        // closed** (#2034): a requested sandbox that cannot be set up must not
+        // quietly become an unsandboxed launch. The caller turns this `Err`
+        // into a spawn error the user sees, which is the only outcome that
+        // keeps "sandboxed" and "sandboxing was requested" the same statement.
+        if crate::sandbox::sandbox_requested(sandbox) {
+            // `executable`, not `recipe.binary`: every other branch above runs
+            // the resolved override, and passing the raw recipe name here
+            // would confine and launch a *different* program than the one
+            // routing selected. Identical when no override is present.
+            crate::agent::sandbox::seatbelt_command(
+                executable,
                 &recipe.base_args,
                 spawn_path,
                 session_id,
-            ) {
-                Ok(c) => {
-                    tracing::info!(
-                        "spawn_environment: building sandboxed macOS command (sandbox-exec) for {}",
-                        executable
-                    );
-                    c
-                }
-                Err(e) => {
-                    tracing::error!(
-                        "spawn_environment: failed to write Seatbelt profile for session {} ({}); \
-                         falling back to UNSANDBOXED direct spawn for {}",
-                        session_id,
-                        e,
-                        recipe.binary
-                    );
-                    let mut c = CommandBuilder::new(executable);
-                    c.args(recipe.base_args);
-                    c
-                }
-            }
+            )
+            .inspect(|_| {
+                tracing::info!(
+                    "spawn_environment: building sandboxed macOS command (sandbox-exec) for {}",
+                    executable
+                );
+            })
+            .map_err(|e| {
+                tracing::error!(
+                    "spawn_environment: failed to write Seatbelt profile for session {} ({}); \
+                     refusing to launch {} unsandboxed",
+                    session_id,
+                    e,
+                    recipe.binary
+                );
+                crate::agent::sandbox::setup_failure_message(session_id, recipe.binary, &e)
+            })
         } else {
             tracing::info!("spawn_environment: building macOS command for {}", executable);
             let mut c = CommandBuilder::new(executable);
             c.args(recipe.base_args);
-            c
+            Ok(c)
         }
     } else {
-        match recipe.windows_shell {
+        Ok(match recipe.windows_shell {
             WindowsShell::PowerShell => {
                 tracing::info!(
                     "spawn_environment: building Windows powershell.exe for {}",
@@ -199,8 +209,8 @@ pub fn wrap(
                 c.args(recipe.base_args);
                 c
             }
-        }
-    };
+        })
+    }?;
 
     if (cfg!(windows) && env_type == EnvType::Wsl) || env_type == EnvType::WindowsInterop {
         cmd.cwd(crate::env::to_host_path(spawn_path));
@@ -229,7 +239,7 @@ pub fn wrap(
     pty::strip_git_env_vars(&mut cmd);
     pty::apply_interactive_tty_env(&mut cmd);
 
-    cmd
+    Ok(cmd)
 }
 
 /// Carry command-defined and adapter-declared environment variables across a
@@ -324,7 +334,8 @@ mod tests {
                         encode_for_powershell("[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)")])
                 };
                 let recipe = SpawnRecipe { binary: "probe", base_args: args, trailing_args: vec![], windows_shell: shell };
-                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false);
+                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false)
+                    .expect("an unsandboxed command always assembles");
                 apply_wsl_env(&mut command, EnvType::WindowsInterop, &[], &[]);
                 let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
                 let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
@@ -377,7 +388,7 @@ mod tests {
             base_args: vec!["-c".into(), "printf '%s\\n' \"$PWD\" \"$BUILDMESH_SESSION_ID\" \"$1\" > probe.txt".into(), "probe".into(), payload.into()],
             trailing_args: vec![], windows_shell: crate::agent::provider::WindowsShell::Direct,
         };
-        let mut command = super::wrap(recipe, resolved.env_type, None, None, &resolved.spawn_path, 8123, false);
+        let mut command = super::wrap(recipe, resolved.env_type, None, None, &resolved.spawn_path, 8123, false).unwrap();
         apply_wsl_env(&mut command, resolved.env_type, &[], &[]);
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
@@ -402,7 +413,7 @@ mod tests {
             binary: "probe", base_args: vec![], trailing_args: vec![],
             windows_shell: crate::agent::provider::WindowsShell::Cmd,
         };
-        let command = super::wrap(recipe, resolved.env_type, None, script.to_str(), &resolved.spawn_path, 8124, false);
+        let command = super::wrap(recipe, resolved.env_type, None, script.to_str(), &resolved.spawn_path, 8124, false).unwrap();
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
         assert!(child.wait().unwrap().success());
@@ -439,6 +450,85 @@ mod tests {
         assert_eq!(
             wslenv,
             "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u"
+        );
+    }
+
+    /// #2034 — the end-to-end fail-closed assertion on the platform that owns
+    /// the Seatbelt branch. Before this, a profile-write failure logged and
+    /// returned a *direct* command, so the requested sandbox silently became an
+    /// unsandboxed launch. `Err` here is what stops that: `launch_process`
+    /// propagates it before `spawn_child`, so no agent process is created.
+    ///
+    /// macOS-only because the branch is `cfg!(target_os = "macos")`; the
+    /// portable half of the contract — profile-write failure yields `Err` — is
+    /// pinned in `agent::sandbox` on every host.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn requested_sandbox_without_a_writable_profile_yields_no_command() {
+        let session_id = -97_512 - (std::process::id() as i64 % 100_000);
+        let profile = std::env::temp_dir().join(format!("buildmesh-sandbox-{session_id}.sb"));
+        // RAII: the gate restores the previous env value and the scratch
+        // directory is removed even if an assertion below panics.
+        let _scratch = crate::sandbox::test_support::block_writes_at(&profile);
+
+        let result = crate::sandbox::test_support::with_dev_gate_result(Some("1"), || {
+            let recipe = crate::agent::provider::SpawnRecipe {
+                binary: "claude",
+                base_args: vec!["--dangerously-skip-permissions".into()],
+                trailing_args: vec![],
+                windows_shell: crate::agent::provider::WindowsShell::Direct,
+            };
+            super::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                None,
+                &std::env::temp_dir().to_string_lossy(),
+                session_id,
+                true,
+            )
+        });
+
+        let error = match result {
+            Ok(_) => panic!("a failed sandbox setup must not yield a launchable command"),
+            Err(error) => error,
+        };
+        assert!(error.contains("sandbox setup failed"), "{error}");
+        // The remediation must name the real cause — a temp-directory write
+        // failure — not tell the user to re-enable a gate that was already
+        // open for this to be reachable.
+        assert!(error.contains("temporary directory"), "{error}");
+    }
+
+    /// #2034 — the developer gate is authoritative. Even with the Mesh flag on,
+    /// a process started without `BUILDMESH_SANDBOX=1` must build the ordinary
+    /// direct command rather than a `sandbox-exec` wrapper.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mesh_flag_alone_does_not_reach_the_seatbelt_wrapper() {
+        let command = crate::sandbox::test_support::with_dev_gate_result(None, || {
+            let recipe = crate::agent::provider::SpawnRecipe {
+                binary: "claude",
+                base_args: vec![],
+                trailing_args: vec![],
+                windows_shell: crate::agent::provider::WindowsShell::Direct,
+            };
+            super::wrap(
+                recipe,
+                EnvType::Windows,
+                None,
+                None,
+                &std::env::temp_dir().to_string_lossy(),
+                -97_513 - (std::process::id() as i64 % 100_000),
+                true,
+            )
+        })
+        .expect("the unsandboxed path always assembles");
+        let argv = command.get_argv();
+        assert_ne!(
+            argv.first().map(|s| s.to_string_lossy().into_owned()),
+            Some("sandbox-exec".to_string()),
+            "a persisted mesh flag must not open the sandbox in a release build: {argv:?}"
         );
     }
 

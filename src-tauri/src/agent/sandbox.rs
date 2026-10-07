@@ -173,6 +173,29 @@ fn profile_path(session_id: i64) -> PathBuf {
     std::env::temp_dir().join(format!("buildmesh-sandbox-{session_id}.sb"))
 }
 
+/// The user-facing message for a sandbox setup that could not be completed.
+///
+/// A requested sandbox that cannot be set up refuses the spawn (#2034), so this
+/// text is the *only* thing standing between the user and an unexplained
+/// failure.
+///
+/// It must not tell the user to enable the developer gate or the Mesh toggle:
+/// this message is only reachable once `sandbox_requested` is already true, so
+/// both are already on and suggesting them diagnoses an I/O failure as a
+/// configuration mistake. The remediation therefore targets the real cause —
+/// writing the profile into the system temporary directory — and the one
+/// deliberate escape hatch. Kept separate from the `Err` conversion so the
+/// contract is unit-testable on every platform, not only where Seatbelt exists.
+pub fn setup_failure_message(session_id: i64, binary: &str, error: &io::Error) -> String {
+    format!(
+        "sandbox setup failed for session {session_id}: Buildmesh could not write the macOS \
+         Seatbelt profile for {binary} ({error}). The agent was not started — it will not be \
+         launched outside the sandbox. Check that the temporary directory is writable and has \
+         free space. To run this Mesh's agents without a sandbox, turn the Sandbox toggle off in \
+         Project Settings."
+    )
+}
+
 /// Assemble a [`CommandBuilder`] that launches `binary` + `base_args` inside a
 /// macOS Seatbelt sandbox confined to `worktree_path`.
 ///
@@ -182,8 +205,8 @@ fn profile_path(session_id: i64) -> PathBuf {
 /// inherit anyway). The returned builder has no `cwd`/`env` set — the caller
 /// (`spawn_environment::wrap`) applies those uniformly for every spawn path.
 ///
-/// Returns `Err` only if the profile file cannot be written; the caller decides
-/// how to handle that (today: log and fall back to an unsandboxed direct spawn).
+/// Returns `Err` only if the profile file cannot be written; the caller fails
+/// the spawn closed rather than launching the agent outside Seatbelt (#2034).
 pub fn seatbelt_command(
     binary: &str,
     base_args: &[String],
@@ -310,5 +333,51 @@ mod tests {
         assert!(written.contains("(deny default)"));
         assert!(written.contains(WORKTREE));
         let _ = std::fs::remove_file(&profile_file);
+    }
+
+    /// #2034 — the fail-closed contract. A Seatbelt profile that cannot be
+    /// written must surface as `Err`, never as a usable command, because the
+    /// only caller treats `Err` as "refuse the spawn"; an `Ok` here would hand
+    /// back a sandbox-exec wrapper pointing at a missing profile.
+    ///
+    /// Blocking the write with a directory at the profile path is portable, so
+    /// this runs on every CI host rather than only where Seatbelt exists.
+    #[test]
+    fn seatbelt_command_reports_a_failed_profile_write_instead_of_a_command() {
+        // Process-unique: the path is a real temp file, and the shard runner
+        // runs several test binaries against one temp directory at a time.
+        let session_id = -97_311 - (std::process::id() as i64 % 100_000);
+        let path = profile_path(session_id);
+        let _scratch = crate::sandbox::test_support::block_writes_at(&path);
+
+        let error = match seatbelt_command("claude", &[], WORKTREE, session_id) {
+            Ok(_) => panic!(
+                "a blocked profile path must not yield a command: {} would launch the agent \
+                 unconfined",
+                path.display()
+            ),
+            Err(error) => error,
+        };
+
+        let message = setup_failure_message(session_id, "claude", &error);
+        // The refusal has to be actionable: a bare "spawn failed" would look
+        // like the harness is broken.
+        assert!(message.contains(&session_id.to_string()), "{message}");
+        assert!(message.contains("sandbox setup failed"), "{message}");
+        assert!(message.contains("claude"), "{message}");
+        assert!(message.contains("not started"), "{message}");
+        assert!(message.contains("Project Settings"), "{message}");
+        // It must name the real cause — this only fires once the developer gate
+        // and the Mesh toggle are *already* on, so pointing the user back at
+        // them would misdiagnose a temp-directory write failure as a missing
+        // setting.
+        assert!(
+            message.contains("temporary directory"),
+            "the message must name the actual failure: {message}"
+        );
+        assert!(
+            !message.contains(crate::sandbox::DEV_SANDBOX_ENV),
+            "re-enabling the already-open gate is not a remediation: {message}"
+        );
     }
 }
