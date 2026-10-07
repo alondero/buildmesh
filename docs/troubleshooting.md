@@ -75,8 +75,9 @@ provider accounts, API keys, pairings, and Autopilot settings are still on
 disk. The three actions in the panel are described in
 [Settings that matter](user-guide.md#when-buildmesh-cannot-read-your-settings).
 
-The log line is content-free by design - a corrupt `preferences.json` holds
-plaintext API keys, so nothing from the file is ever written to the log:
+The log line is content-free by design - a `preferences.json` can still hold
+API keys (always so on a machine without Credential Manager), so nothing from the
+file is ever written to the log:
 
 ```
 WARN preferences::storage::read_state preferences.json is corrupt (invalid_json): the file is not valid JSON (malformed JSON at line 1 column 24) - left on disk untouched, settings writes are refused until it is recovered
@@ -178,6 +179,25 @@ and its integration; some harnesses have no hook or passive watcher.
 - Restarting the node lets Buildmesh reinstall or refresh supported hooks.
 - If the badge claims attention after you answered, check the terminal and
   capture the node status plus the surrounding log entries for a report.
+
+Buildmesh writes those hooks into the harness's configuration files; the list
+of files and what each one POSTs is in [Attention hooks Buildmesh installs on
+disk](user-guide.md#attention-hooks-buildmesh-installs-on-disk).
+
+## A node reports “attention hooks unavailable”
+
+Buildmesh could not write the harness's hook, usually because the configuration
+file it merges into does not parse — a half-finished edit or a leftover comma in
+JSON, or a syntax error in Codex's and Kimi Code's TOML. The refusal is
+deliberate: your file is left exactly as it was rather than replaced.
+
+- Open the file named in the node's error. For Claude Code it is
+  `.claude/settings.local.json` in the project directory; Codex uses
+  `.codex/config.toml` and Kimi Code a `config.toml` in its configuration home.
+- Repair the file's syntax, or delete the file to let Buildmesh recreate it with
+  just its own entry.
+- Restart the node. The write is retried and the status mark clears when a
+  callback is delivered.
 
 ## Codex reports “Hook failed”
 

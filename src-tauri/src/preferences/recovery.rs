@@ -21,10 +21,11 @@
 //!     [`super::storage`], which owns the cache.
 //!
 //! **File contents never leave this module in a log line, an error message, or
-//! the wire type.** A corrupt `preferences.json` contains plaintext API keys
-//! (see [`crate::preferences::ProviderAccount::api_key`]), so every
-//! diagnostic here carries at most a serde *category* plus a line/column
-//! position — never the offending value, never the source text.
+//! the wire type.** A `preferences.json` written by a build older than issue
+//! #830 contains plaintext API keys (see
+//! [`crate::preferences::ProviderAccount::api_key`]), so every diagnostic here
+//! carries at most a serde *category* plus a line/column position — never the
+//! offending value, never the source text.
 
 use super::model::AppPreferences;
 use serde::{Deserialize, Serialize};
@@ -126,11 +127,7 @@ pub struct CorruptionInfo {
 
 impl CorruptPayload {
     /// Attach the file location, producing the wire type.
-    pub(crate) fn into_info(
-        self,
-        path: &Path,
-        backup_path: Option<PathBuf>,
-    ) -> CorruptionInfo {
+    pub(crate) fn into_info(self, path: &Path, backup_path: Option<PathBuf>) -> CorruptionInfo {
         CorruptionInfo {
             reason: self.reason,
             detail: self.detail,
@@ -192,10 +189,7 @@ pub struct PreferencesHealth {
 
 impl PreferencesHealth {
     /// Project a read result onto the wire type.
-    pub(crate) fn from_state(
-        path: &Path,
-        state: &super::storage::LoadState,
-    ) -> PreferencesHealth {
+    pub(crate) fn from_state(path: &Path, state: &super::storage::LoadState) -> PreferencesHealth {
         let (status, corruption) = match state {
             super::storage::LoadState::Missing => (PreferencesStatus::Missing, None),
             super::storage::LoadState::Healthy(_) => (PreferencesStatus::Healthy, None),
@@ -206,11 +200,7 @@ impl PreferencesHealth {
         PreferencesHealth {
             status,
             corruption,
-            preferences_directory: path
-                .parent()
-                .unwrap_or(path)
-                .display()
-                .to_string(),
+            preferences_directory: path.parent().unwrap_or(path).display().to_string(),
         }
     }
 }
@@ -236,6 +226,18 @@ impl PreferencesHealth {
 /// [`CorruptionReason::SchemaMismatch`] when it changed the type of a field
 /// this build already knows — and even then the file is preserved.
 pub fn classify(raw: &[u8]) -> Result<AppPreferences, CorruptPayload> {
+    classify_with(raw, |_| ())
+}
+
+/// [`classify`] with a hook that sees the parsed JSON **before** the read-time
+/// migration. Credentials live outside the file (issue #830), and a legacy
+/// migration reads `api_key` out of the raw JSON (ADR-0025 turns a keyed
+/// account's endpoint into a pairing), so they must be restored first or a
+/// scrubbed legacy file would migrate differently from a plaintext one.
+pub fn classify_with(
+    raw: &[u8],
+    before_migration: impl FnOnce(&mut serde_json::Value),
+) -> Result<AppPreferences, CorruptPayload> {
     let text = match std::str::from_utf8(raw) {
         Ok(text) => text,
         Err(e) => {
@@ -264,6 +266,7 @@ pub fn classify(raw: &[u8]) -> Result<AppPreferences, CorruptPayload> {
             ),
         });
     }
+    before_migration(&mut value);
     crate::preferences::migrations::migrate_prefs_json(&mut value);
     serde_json::from_value(value).map_err(describe_schema_error)
 }
@@ -343,10 +346,7 @@ pub fn corrupt_archive_path(path: &Path) -> PathBuf {
         return first;
     }
     for attempt in 1..1000 {
-        let candidate = sibling(
-            path,
-            &format!("{CORRUPT_ARCHIVE_PREFIX}{stamp}-{attempt}"),
-        );
+        let candidate = sibling(path, &format!("{CORRUPT_ARCHIVE_PREFIX}{stamp}-{attempt}"));
         if !candidate.exists() {
             return candidate;
         }
@@ -487,23 +487,37 @@ pub(crate) fn persist_with_backup(path: &Path, bytes: &[u8]) -> Result<(), Strin
 ///
 /// The temp file is created by `tempfile`, which creates with mode `0600` on
 /// Unix — so both `preferences.json` and its backup are owner-only, which
-/// matters because both contain plaintext API keys.
-fn persist_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// matters because on a build with no credential store both still hold
+/// plaintext API keys (issue #830).
+pub(crate) fn persist_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     use std::io::Write;
     let parent = path
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("failed to create temporary file in {}: {e}", parent.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+        format!(
+            "failed to create temporary file in {}: {e}",
+            parent.display()
+        )
+    })?;
     temporary
         .write_all(bytes)
         .and_then(|_| temporary.as_file().sync_all())
-        .map_err(|e| format!("failed to write temporary file in {}: {e}", parent.display()))?;
-    temporary
-        .persist(path)
-        .map_err(|e| format!("failed to atomically replace {}: {}", path.display(), e.error))?;
+        .map_err(|e| {
+            format!(
+                "failed to write temporary file in {}: {e}",
+                parent.display()
+            )
+        })?;
+    temporary.persist(path).map_err(|e| {
+        format!(
+            "failed to atomically replace {}: {}",
+            path.display(),
+            e.error
+        )
+    })?;
     sync_parent_dir(parent);
     Ok(())
 }
