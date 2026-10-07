@@ -34,6 +34,14 @@
 //!   uses, so healthy startup still produces exactly one bounded log file with
 //!   the name the `/use`, `/verify`, and `/verify-ui` skills tail.
 //!
+//! Every byte that reaches that file goes through
+//! [`SecretScrubber::scrub_for_persistence`](crate::secret_scrubber::SecretScrubber::scrub_for_persistence)
+//! first — subscriber lines and the durable startup record alike. The frontend
+//! command masks before it emits; this writer is the backstop, so a support
+//! copy of `buildmesh.log` is not a second copy of a credential a trace
+//! happened to include. The bootstrap stderr mirror receives the same masked
+//! bytes.
+//!
 //! The one thing that *does* change at [`Bootstrap::promote`] is the stderr
 //! mirror: during bootstrap the log is mirrored to stderr (a console launch, a
 //! CI run, and a `panic = "abort"` build with no console all need the launcher
@@ -62,6 +70,7 @@
 //! file buffer would flush. A single file handle also means a single rotation
 //! accounting, which two independent writers could not give.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -192,14 +201,13 @@ pub fn bootstrap(handle: &tauri::AppHandle) -> Result<&'static Bootstrap, Startu
     }
 
     // --- 1. Resolve the profile ---------------------------------------
-    let profile_dir = handle
-        .path()
-        .app_data_dir()
-        .map_err(|error| StartupFailure::app_data(
+    let profile_dir = handle.path().app_data_dir().map_err(|error| {
+        StartupFailure::app_data(
             "Buildmesh could not work out where to store its data.",
             error,
             None,
-        ))?;
+        )
+    })?;
 
     // --- 2. Create the profile ----------------------------------------
     if let Err(error) = std::fs::create_dir_all(&profile_dir) {
@@ -282,7 +290,11 @@ pub fn bootstrap(handle: &tauri::AppHandle) -> Result<&'static Bootstrap, Startu
         "Startup bootstrap: profile={} log={} stderr_mirror=on subscriber={}",
         bootstrap.profile_dir.display(),
         bootstrap.main_log.display(),
-        if installed_subscriber { "installed" } else { "pre-existing" }
+        if installed_subscriber {
+            "installed"
+        } else {
+            "pre-existing"
+        }
     );
 
     Ok(bootstrap)
@@ -365,35 +377,37 @@ impl SharedLog {
     fn with<R>(&self, f: impl FnOnce(&mut crate::diagnostics::RotatingWriter) -> R) -> R {
         // A poisoned log mutex must not take down the app it exists to
         // diagnose: the writer itself has no invariant to violate.
-        let mut writer = self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut writer = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f(&mut writer)
     }
 
     /// Append one timestamped line, forced to disk.
     fn append_and_sync(&self, line: &str) -> io::Result<()> {
+        let scrubbed = crate::secret_scrubber::SecretScrubber::scrub_for_persistence(line);
         self.with(|writer| {
-            writer.write_line(line)?;
+            writer.write_line(&scrubbed)?;
             writer.sync()
         })
     }
 
-    /// Write already-formatted bytes into the shared log, in full.
+    /// Write bytes into the shared log, in full.
     ///
     /// Inherent rather than an `io::Write` impl because the caller holds an
     /// `Arc<SharedLog>`, and an `Arc` only hands out `&T` — a trait method
     /// taking `&mut self` could not be reached through it. The interior
     /// `Mutex` is what makes `&self` sufficient.
     ///
-    /// The lock is taken **once, around the whole buffer**, and the standard
-    /// library's `write_all` does the looping. An earlier version looped here
-    /// and called `self.with(..)` per iteration, which released and re-took the
-    /// mutex between chunks — letting another thread interleave its own line
-    /// into the middle of this one. `Write::write_all` already handles short
-    /// writes, zero-progress, and `ErrorKind::Interrupted`, so re-implementing
-    /// that loop bought nothing and cost atomicity.
-    fn write_all_through(&self, buf: &[u8]) -> io::Result<()> {
-        // `RotatingWriter` implements the `Write` *trait*; the import is what
-        // brings `write_all` into scope for it.
+    /// Takes bytes the caller has already passed through
+    /// [`scrub_log_bytes`] — the mask is computed once per event and shared
+    /// with the stderr mirror — and takes the lock **once, around the whole
+    /// buffer**, leaving the looping to the standard library's `write_all`. An
+    /// earlier version looped here and called `self.with(..)` per iteration,
+    /// which released and re-took the mutex between chunks — letting another
+    /// thread interleave its own line into the middle of this one.
+    fn write_raw(&self, buf: &[u8]) -> io::Result<()> {
         use std::io::Write as _;
         self.with(|writer| writer.write_all(buf))
     }
@@ -401,6 +415,30 @@ impl SharedLog {
     fn flush_through(&self) -> io::Result<()> {
         use std::io::Write as _;
         self.with(|writer| writer.flush())
+    }
+}
+
+/// Mask a subscriber buffer before it is persisted.
+///
+/// The fmt layer formats one event into a `String` and then `write_all`s
+/// those bytes, so a valid UTF-8 buffer is one complete line — which is what
+/// lets the masker see the whole line rather than a slice of a token.
+/// Invalid UTF-8 is written unchanged: there is no text to mask, and dropping
+/// the line would hide the failure this log exists to record.
+///
+/// Returns borrowed bytes when nothing needed masking, so an ordinary
+/// diagnostic line costs no allocation.
+fn scrub_log_bytes(buf: &[u8]) -> Cow<'_, [u8]> {
+    match std::str::from_utf8(buf) {
+        Ok(text) => {
+            let scrubbed = crate::secret_scrubber::SecretScrubber::scrub_for_persistence(text);
+            if scrubbed == text {
+                Cow::Borrowed(buf)
+            } else {
+                Cow::Owned(scrubbed.into_bytes())
+            }
+        }
+        Err(_) => Cow::Borrowed(buf),
     }
 }
 
@@ -421,12 +459,19 @@ impl io::Write for Tee {
         // closed console or a full stderr buffer could abort the line before it
         // reached the file, which is the exact failure this whole module exists
         // to prevent.
-        self.log.write_all_through(buf)?;
+        // The mask is computed once, here, and both sinks receive exactly those
+        // bytes. Masking twice (once per sink) would run the UTF-8 check, the
+        // JSON parse and every regex pass twice per event for no gain, and the
+        // mirror must see the same mask, never the raw event. Return the
+        // caller's length, not the masked length: `write_all` treats a short
+        // result as "write the rest", and the rest would be the unmasked tail.
+        let scrubbed = scrub_log_bytes(buf);
+        self.log.write_raw(&scrubbed)?;
         // The mirror is best-effort by construction: `StderrMirror` already
         // no-ops once bootstrap promotes, and a genuine stderr error must not
         // turn into a lost log line. There is nowhere to report such an error
         // to, by definition.
-        let _ = self.stderr.write_all(buf);
+        let _ = self.stderr.write_all(&scrubbed);
         Ok(buf.len())
     }
 
@@ -615,7 +660,8 @@ mod tests {
         let writer = crate::diagnostics::main_log_writer(&dir).unwrap();
         let log = SharedLog::new(writer);
 
-        log.append_and_sync("STARTUP_FAILURE stage=test detail=boom").unwrap();
+        log.append_and_sync("STARTUP_FAILURE stage=test detail=boom")
+            .unwrap();
         // Readable immediately: the sync is the whole reason `record` can
         // promise the log is on disk before the error surface appears.
         let after_durable = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
@@ -626,7 +672,8 @@ mod tests {
 
         // An ordinary subscriber line through the same handle, which is how the
         // tracing layer reaches it.
-        log.write_all_through(b"an ordinary subscriber line\n").unwrap();
+        log.write_raw(&scrub_log_bytes(b"an ordinary subscriber line\n"))
+            .unwrap();
         log.flush_through().unwrap();
 
         let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
@@ -663,7 +710,8 @@ mod tests {
         .join();
 
         // Still writable, and the line reaches the file.
-        log.append_and_sync("STARTUP_FAILURE after=poisoned").unwrap();
+        log.append_and_sync("STARTUP_FAILURE after=poisoned")
+            .unwrap();
         let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
         assert!(
             contents.contains("STARTUP_FAILURE after=poisoned"),
@@ -712,7 +760,8 @@ mod tests {
             .write(payload)
             .expect("a broken console must not fail the durable write");
         assert_eq!(written, payload.len(), "the whole line must be consumed");
-        tee.flush().expect("flush must not depend on the mirror either");
+        tee.flush()
+            .expect("flush must not depend on the mirror either");
 
         let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
         assert!(
@@ -745,14 +794,14 @@ mod tests {
             thread_barrier.wait();
             for _ in 0..50 {
                 writer
-                    .write_all_through(b"Z-interloper\n")
+                    .write_raw(&scrub_log_bytes(b"Z-interloper\n"))
                     .expect("the racing writer must succeed");
             }
         });
 
         barrier.wait();
         for _ in 0..50 {
-            log.write_all_through(line.as_bytes())
+            log.write_raw(&scrub_log_bytes(line.as_bytes()))
                 .expect("the main writer must succeed");
         }
         racing.join().unwrap();
@@ -762,8 +811,7 @@ mod tests {
         // interlopener.
         for candidate in contents.lines() {
             assert!(
-                candidate == "Z-interloper"
-                    || candidate.starts_with('A'),
+                candidate == "Z-interloper" || candidate.starts_with('A'),
                 "a line was spliced by a concurrent writer: {candidate:?}"
             );
             if candidate.starts_with('A') {
@@ -797,5 +845,72 @@ mod tests {
             rendered.contains("buildmesh=debug"),
             "buildmesh must stay at debug, got {rendered}"
         );
+    }
+
+    /// A subscriber line is one formatted event, so the buffer the fmt layer hands
+    /// over is a whole line — which is what lets the masker see a whole secret.
+    /// `Tee` then writes these bytes; this is the masking half on its own.
+    #[test]
+    fn scrub_log_bytes_masks_a_whole_subscriber_line() {
+        let secret = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        let line =
+            format!("2026-10-07T00:00:00Z ERROR frontend: provider rejected {secret} s=42\n");
+        let scrubbed = scrub_log_bytes(line.as_bytes());
+        let text = std::str::from_utf8(&scrubbed).unwrap();
+        assert!(!text.contains(secret), "{text}");
+        assert!(text.contains("s=42"), "{text}");
+        assert!(text.contains("[REDACTED]"), "{text}");
+
+        // A line with nothing to mask is borrowed, so an ordinary diagnostic
+        // costs no allocation on the logging thread.
+        let clean = b"spawn_timing: session=42 checkpoint=xterm_mount elapsed=17ms\n";
+        assert!(matches!(
+            scrub_log_bytes(clean),
+            Cow::Borrowed(bytes) if bytes == clean
+        ));
+
+        // Invalid UTF-8 has no text to mask, and dropping it would hide the
+        // failure this log exists to record.
+        let binary = [0xffu8, 0xfe, b'\n'];
+        assert_eq!(scrub_log_bytes(&binary).as_ref(), &binary[..]);
+    }
+
+    /// `Tee` is the writer the tracing layer actually hands events to, and the
+    /// only place both sinks are fed. Two invariants live here: the bytes on
+    /// disk are masked, and the call is accounted for the caller's length, not
+    /// the masked one.
+    #[test]
+    fn tee_write_masks_once_and_reports_the_callers_length() {
+        let dir = std::env::temp_dir().join(format!("bm-startup-tee-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = Arc::new(SharedLog::new(
+            crate::diagnostics::main_log_writer(&dir).unwrap(),
+        ));
+        let mut tee = Tee {
+            // A disabled mirror keeps the assertion on the file alone, which is
+            // the sink a user is ever asked to hand over.
+            stderr: StderrMirror::new(Arc::new(AtomicBool::new(false))),
+            log: Arc::clone(&log),
+        };
+
+        let secret = "sk-ant-api03-DUMMYKEYEXAMPLEabcdefghijklmnop1234567890AB";
+        let line = format!("provider rejected {secret} session=42\n");
+        let reported = tee.write(line.as_bytes()).unwrap();
+        tee.flush().unwrap();
+
+        assert_eq!(
+            reported,
+            line.len(),
+            "the caller's length, or `write_all` replays the unmasked tail"
+        );
+        let contents = std::fs::read_to_string(dir.join("buildmesh.log")).unwrap();
+        assert!(
+            !contents.contains(secret),
+            "the log file must not keep the provider key: {contents}"
+        );
+        assert!(contents.contains("session=42"), "{contents}");
+        assert!(contents.contains("[REDACTED]"), "{contents}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -6,8 +6,8 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
-import { executedTests, planGates, touchedFormatDiffs } from './harness-plan.mjs';
 import { availableParallelism } from 'node:os';
+import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 
 const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
@@ -86,19 +86,55 @@ export function scopePaths(root, base, paths) {
     return true;
   });
 }
+// What can change a result without touching a file: the base and the toolchain.
+function runIdentity(root, base) {
+  return JSON.stringify({ base, node: process.version, platform: process.platform, tools: toolIdentity(root), environment: ['NODE_OPTIONS', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'CC', 'CXX', 'TS_RS_EXPORT_DIR'].map(key => [key, process.env[key] ?? null]) });
+}
+function entryOf(root, path) {
+  const full = join(root, path);
+  const stat = existsSync(full) ? lstatSync(full) : null;
+  const data = !stat ? 'deleted' : stat.isSymbolicLink() ? `link:${readlinkSync(full)}` : stat.isFile() ? readFileSync(full) : 'directory';
+  return { mode: stat?.mode ?? 0, data };
+}
+function treePaths(root) {
+  return [...new Set(git(root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean))].sort();
+}
 export function fingerprint(root, base, prefix = '') {
   const hash = createHash('sha256');
-  hash.update(JSON.stringify({ root, base, node: process.version, platform: process.platform, tools: toolIdentity(root), environment: ['NODE_OPTIONS', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'CC', 'CXX', 'TS_RS_EXPORT_DIR'].map(key => [key, process.env[key] ?? null]) }));
+  hash.update(runIdentity(root, base));
   hash.update(git(root, 'rev-parse', 'HEAD'));
   hash.update(git(root, 'ls-files', '--stage', '-z', '--', prefix || '.'));
-  const paths = [...new Set(git(root, 'ls-files', '--cached', '--others', '--exclude-standard', '-z').split('\0').filter(Boolean))].sort();
-  for (const path of paths) {
+  for (const path of treePaths(root)) {
     if (path.startsWith('.harness/') || !path.startsWith(prefix)) continue;
-    const full = join(root, path);
-    const stat = existsSync(full) ? lstatSync(full) : null;
-    const data = !stat ? 'deleted' : stat.isSymbolicLink() ? `link:${readlinkSync(full)}` : stat.isFile() ? readFileSync(full) : 'directory';
-    hash.update(`${path.length}:${path}\0${stat?.mode ?? 0}\0${data.length}:`);
+    const { mode, data } = entryOf(root, path);
+    hash.update(`${path.length}:${path}\0${mode}\0${data.length}:`);
     hash.update(data);
+  }
+  return hash.digest('hex');
+}
+// One content digest per working-tree file, read once so every gate's input hash
+// shares a single pass over the tree.
+function treeSnapshot(root) {
+  const entries = [];
+  for (const path of treePaths(root)) {
+    if (path.startsWith('.harness/')) continue;
+    const { mode, data } = entryOf(root, path);
+    entries.push({ path, line: `${path.length}:${path}\0${mode}\0${createHash('sha256').update(data).digest('hex')}\n` });
+  }
+  return entries;
+}
+// Hash of everything a gate reads. A gate without declared `ignores` reads the
+// whole tree, so it keys on the whole-tree fingerprint exactly as before; a
+// gate with them keys on the toolchain identity and only the files it reads
+// (index state and HEAD do not matter to it). The gate definition is part of
+// the key, so a changed command, deadline or input list never reuses a PASS.
+function gateInputs(gate, snapshot, identity, tree) {
+  const hash = createHash('sha256');
+  hash.update(JSON.stringify(gate));
+  if (!gate.ignores) hash.update(`\0tree:${tree}`);
+  else {
+    hash.update(`\0${identity}\0`);
+    for (const entry of snapshot) if (gateReads(gate, entry.path)) hash.update(entry.line);
   }
   return hash.digest('hex');
 }
@@ -265,16 +301,26 @@ function classify(gate, code, output, paths) {
   }
   return { outcome: 'PASS', count };
 }
-async function verify(root, { base: requestedBase, full = false } = {}) {
+// `plan` lets tests substitute fake gates for the real npm/cargo plan.
+export async function verify(root, { base: requestedBase, full = false, plan = planGates } = {}) {
   const task = taskAt(root);
   if (!task && !requestedBase) throw new Error('BLOCKED: start a task or provide --base <commit>; HEAD alone can miss committed work.');
   const base = resolveBase(root, requestedBase ?? task.base);
   if (task && base !== task.base) throw new Error('BLOCKED: verification base must match the active task.');
   const paths = changedPaths(root, base);
-  const gates = planGates(scopePaths(root, base, paths), { full });
+  const gates = plan(scopePaths(root, base, paths), { full });
   const tree = fingerprint(root, base);
-  const previous = readJson(statePath(root, 'receipt.json'));
+  const snapshot = treeSnapshot(root);
+  const identity = runIdentity(root, base);
   const receipt = { taskId: task?.id ?? null, root, base, head: git(root, 'rev-parse', 'HEAD').trim(), tree, full, paths, gatePlan: gates, gates: [], outcome: 'BLOCKED', startedAt: new Date().toISOString() };
+  // Passed gates survive across attempts of one task, so a failure part-way
+  // through the plan does not forget the gates it never reached. A cache that
+  // is missing, corrupt or another task's only costs time, never correctness.
+  const cachePath = statePath(root, 'gate-cache.json');
+  let stored = null;
+  try { stored = readJson(cachePath); } catch { stored = null; }
+  const reusable = stored?.taskId === receipt.taskId && stored.gates && typeof stored.gates === 'object' ? stored.gates : {};
+  const cache = { taskId: receipt.taskId, gates: { ...reusable } };
   if (task) {
     setPhase(task, 'verify');
     task.verificationAttempts += 1;
@@ -285,12 +331,13 @@ async function verify(root, { base: requestedBase, full = false } = {}) {
   // Persist a nonpassing receipt first so an interrupted attempt cannot leave
   // yesterday's green receipt authorizing completion.
   saveJson(statePath(root, 'receipt.json'), receipt);
-  const reusable = previous?.tree === tree && previous.taskId === receipt.taskId && JSON.stringify(previous.gatePlan) === JSON.stringify(gates);
   const execute = async (gate, isStopped) => {
-    const cached = reusable ? previous.gates.find(result => result.id === gate.id && result.outcome === 'PASS') : null;
-    if (cached) {
-      console.log(`PASS ${gate.id} (unchanged evidence)`);
-      return { ...cached, cached: true };
+    const inputs = gateInputs(gate, snapshot, identity, tree);
+    const cached = cache.gates[gate.id];
+    if (cached?.outcome === 'PASS' && cached.inputs === inputs) {
+      const log = cached.log && existsSync(cached.log) ? cached.log : null;
+      console.log(`PASS ${gate.id} (cached, inputs ${inputs.slice(0, 12)})`);
+      return { ...cached, cached: true, log };
     }
     let slot = null;
     if (gate.heavy) {
@@ -298,7 +345,7 @@ async function verify(root, { base: requestedBase, full = false } = {}) {
     }
     try {
       if (slot && isStopped()) return null;
-      const row = await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism()));
+      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism())), inputs };
       if (slot?.queuedMs) row.queuedMs = slot.queuedMs;
       event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
       return row;
@@ -309,7 +356,12 @@ async function verify(root, { base: requestedBase, full = false } = {}) {
     onResult: row => {
       receipt.gates.push(row);
       saveJson(statePath(root, 'receipt.json'), receipt);
-      if (!row.cached) console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+      if (row.cached) return;
+      if (row.outcome === 'PASS') {
+        cache.gates[row.id] = row;
+        saveJson(cachePath, cache);
+      }
+      console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
     },
   });
   // Lanes finish in completion order; the receipt reads in plan order.
@@ -320,6 +372,9 @@ async function verify(root, { base: requestedBase, full = false } = {}) {
   if (fingerprint(root, base) !== tree) {
     receipt.outcome = 'FAIL';
     receipt.reason = 'Source changed during verification, including possible generated binding drift. Inspect the diff and rerun.';
+    // A gate may have run against the changed source while its key was taken
+    // before the change, so nothing this attempt passed may be reused.
+    saveJson(cachePath, { taskId: receipt.taskId, gates: reusable });
   }
   saveJson(statePath(root, 'receipt.json'), receipt);
   event(root, { type: 'verification', taskId: receipt.taskId, outcome: receipt.outcome, durationMs: receipt.durationMs, attempt: task?.verificationAttempts ?? null });

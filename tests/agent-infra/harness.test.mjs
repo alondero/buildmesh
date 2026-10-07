@@ -5,8 +5,8 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { changedPaths, completion, fingerprint, runGate, scopePaths, waitForVerify } from '../../scripts/harness.mjs';
-import { executedTests, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
+import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
+import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
@@ -660,4 +660,284 @@ test('verify queues a heavy gate behind held machine-wide slots and runs it once
   // The receipt reads in plan order even though lanes finish in any order.
   const order = receipt.gates.map(row => row.id);
   assert.deepEqual(order, planGates(['src/owner.ts']).map(gate => gate.id).filter(id => order.includes(id)));
+});
+
+// Fake gates append their id to an untracked log, so a test can tell which gates
+// really ran. `ignores` is the same input declaration the real plan uses.
+function fakeGates(fixture) {
+  const log = join(fixture.cwd, '.harness/ran.log');
+  const marker = name => {
+    mkdirSync(join(fixture.cwd, '.harness'), { recursive: true });
+    return join(fixture.cwd, '.harness', name);
+  };
+  const gate = (id, ignores, body = '') => ({
+    id, minutes: 1, ...(ignores ? { ignores } : {}),
+    command: ['node', '-e', `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(log)},${JSON.stringify(`${id}\n`)});${body}`],
+  });
+  const failWhen = name => `if(fs.existsSync(${JSON.stringify(marker(name))}))process.exit(1);`;
+  const mutateWhen = name => `if(fs.existsSync(${JSON.stringify(marker(name))}))fs.writeFileSync(${JSON.stringify(join(fixture.cwd, 'src/owner.ts'))},'export const owner = 999;\\n');`;
+  const ran = () => {
+    const lines = existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean) : [];
+    rmSync(log, { force: true });
+    return lines;
+  };
+  return { gate, failWhen, mutateWhen, ran, marker };
+}
+const rows = receipt => Object.fromEntries(receipt.gates.map(row => [row.id, row]));
+
+test('a passed gate is reused until a file it reads changes, not until anything changes', async t => {
+  const fixture = repo(t);
+  const { gate, ran } = fakeGates(fixture);
+  const plan = () => [gate('frontend-fake', ['^src-tauri/', '^docs/']), gate('rust-fake', ['^src/', '^docs/']), gate('docs-fake')];
+  const run = () => verify(fixture.cwd, { base: fixture.base, plan });
+  const first = await run();
+  assert.equal(first.outcome, 'PASS');
+  assert.deepEqual(ran(), ['frontend-fake', 'rust-fake', 'docs-fake']);
+  assert.ok(first.gates.every(row => !row.cached && /^[0-9a-f]{64}$/.test(row.inputs)));
+
+  // A Rust-only edit re-runs the Rust gate and the whole-tree gate; the frontend gate is cached against the same hash.
+  fixture.put('src-tauri/src/secret_scrubber.rs', 'pub fn scrub() {}\n');
+  const rust = await run();
+  assert.deepEqual(ran(), ['rust-fake', 'docs-fake']);
+  assert.equal(rust.outcome, 'PASS');
+  assert.equal(rows(rust)['frontend-fake'].cached, true);
+  assert.equal(rows(rust)['frontend-fake'].inputs, rows(first)['frontend-fake'].inputs);
+  assert.notEqual(rows(rust)['rust-fake'].inputs, rows(first)['rust-fake'].inputs);
+
+  // A docs-only edit re-runs only the gate that reads docs.
+  fixture.put('docs/page.md', '# Page\n');
+  const docs = await run();
+  assert.deepEqual(ran(), ['docs-fake']);
+  assert.deepEqual(docs.gates.map(row => !!row.cached), [true, true, false]);
+
+  // A frontend edit re-runs the frontend gate and leaves the Rust gate cached.
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  await run();
+  assert.deepEqual(ran(), ['frontend-fake', 'docs-fake']);
+
+  // Nothing changed: everything is cached, and committing does not invalidate the gates that never read the index or HEAD.
+  assert.equal((await run()).gates.every(row => row.cached), true);
+  assert.deepEqual(ran(), []);
+  fixture.commit();
+  await run();
+  assert.deepEqual(ran(), ['docs-fake']);
+});
+
+test('a failed attempt keeps the gates it passed across attempts', async t => {
+  const fixture = repo(t);
+  const { gate, failWhen, ran, marker } = fakeGates(fixture);
+  const plan = () => [gate('first', ['^docs/']), gate('flaky', ['^docs/'], failWhen('fail')), gate('last', ['^docs/'])];
+  const run = () => verify(fixture.cwd, { base: fixture.base, plan });
+  writeFileSync(marker('fail'), '');
+  const failed = await run();
+  assert.equal(failed.outcome, 'FAIL');
+  assert.deepEqual(ran(), ['first', 'flaky']);
+  rmSync(marker('fail'));
+  const recovered = await run();
+  assert.equal(recovered.outcome, 'PASS');
+  // `first` kept its PASS across the failed attempt; the gates after the failure had never run.
+  assert.deepEqual(ran(), ['flaky', 'last']);
+  assert.equal(rows(recovered).first.cached, true);
+});
+
+test('reuse is keyed on the toolchain, the gate definition and the task, and a corrupt cache only costs time', async t => {
+  const fixture = repo(t);
+  const { gate, ran } = fakeGates(fixture);
+  let plan = () => [gate('scoped', ['^docs/'])];
+  const run = () => verify(fixture.cwd, { base: fixture.base, plan });
+  const cache = join(fixture.cwd, '.harness/gate-cache.json');
+  await run();
+  ran();
+  await run();
+  assert.deepEqual(ran(), [], 'identical inputs are reused');
+
+  // Same files, different toolchain environment: the PASS no longer applies.
+  const before = process.env.RUSTFLAGS;
+  t.after(() => { if (before === undefined) delete process.env.RUSTFLAGS; else process.env.RUSTFLAGS = before; });
+  process.env.RUSTFLAGS = '-D warnings';
+  await run();
+  assert.deepEqual(ran(), ['scoped']);
+  await run();
+  assert.deepEqual(ran(), []);
+
+  // Same files, edited gate definition (here: its input list) never reuses a PASS from the old definition.
+  plan = () => [gate('scoped', ['^docs/', '^android/'])];
+  await run();
+  assert.deepEqual(ran(), ['scoped']);
+
+  // Another task's cache is ignored.
+  writeFileSync(cache, JSON.stringify({ ...JSON.parse(readFileSync(cache, 'utf8')), taskId: 'some-other-task' }));
+  await run();
+  assert.deepEqual(ran(), ['scoped']);
+
+  writeFileSync(cache, 'not json');
+  assert.equal((await run()).outcome, 'PASS');
+  assert.deepEqual(ran(), ['scoped']);
+});
+
+test('a source change during verification fails the attempt and nothing it passed is reused', async t => {
+  const fixture = repo(t);
+  const { gate, mutateWhen, ran, marker } = fakeGates(fixture);
+  const plan = () => [gate('reads-src', ['^docs/']), gate('mutator', ['^docs/'], mutateWhen('mutate'))];
+  const run = () => verify(fixture.cwd, { base: fixture.base, plan });
+  writeFileSync(marker('mutate'), '');
+  const mutated = await run();
+  assert.equal(mutated.outcome, 'FAIL');
+  assert.match(mutated.reason, /Source changed during verification/);
+  assert.ok(mutated.gates.every(row => row.outcome === 'PASS'));
+  ran();
+  // The tree is back to what `reads-src` was keyed on, but it ran while the source was being rewritten.
+  rmSync(marker('mutate'));
+  fixture.put('src/owner.ts', 'export const owner = 1;\n');
+  const clean = await run();
+  assert.equal(clean.outcome, 'PASS');
+  assert.deepEqual(ran(), ['reads-src', 'mutator']);
+});
+
+test('completion needs every gate PASS on the current tree, cached or fresh', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  const cachedReceipt = () => {
+    passingReceipt(fixture, task);
+    const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+    receipt.gates = receipt.gates.map(row => ({ ...row, cached: true, inputs: 'a'.repeat(64) }));
+    fixture.put('.harness/receipt.json', JSON.stringify(receipt));
+    return receipt;
+  };
+  cachedReceipt();
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+  // A cached row still has to be PASS, and the receipt still has to list every planned gate.
+  const failing = cachedReceipt();
+  failing.gates[0].outcome = 'FAIL';
+  failing.outcome = 'FAIL';
+  fixture.put('.harness/receipt.json', JSON.stringify(failing));
+  assert.equal(completion(fixture.cwd).outcome, 'FAIL');
+  const partial = cachedReceipt();
+  partial.gates.pop();
+  fixture.put('.harness/receipt.json', JSON.stringify(partial));
+  assert.match(completion(fixture.cwd).reason, /every required gate/);
+  // Cached rows do not carry a receipt across an edit: the receipt itself is bound to the current tree.
+  cachedReceipt();
+  fixture.put('src/owner.ts', 'export const owner = 5;\n');
+  assert.match(completion(fixture.cwd).reason, /stale/);
+});
+
+test('the real plan reuses frontend gates after a Rust-only edit and docs-only edits skip code gates', () => {
+  const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
+  const rerun = path => plan.filter(row => gateReads(row, path)).map(row => row.id);
+  const frontend = ['frontend-build', 'bundle', 'frontend-tests', 'browser-smoke'];
+  const rust = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'];
+
+  const rustOnly = rerun('src-tauri/src/secret_scrubber.rs');
+  for (const id of rust) assert.ok(rustOnly.includes(id), id);
+  for (const id of [...frontend, 'lint', 'lint-fixtures', 'lint-tests']) assert.ok(!rustOnly.includes(id), `${id} must be reused after a Rust-only edit`);
+  // Whole-tree gates and repo-wide agent tests still look at it.
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'docs-tests', 'agent-tests']) assert.ok(rustOnly.includes(id), id);
+
+  const docsOnly = rerun('docs/agents/development-harness.md');
+  assert.deepEqual(docsOnly, ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'docs-tests', 'readme-tests']);
+
+  // Frontend edits re-run the Rust gates: Rust tests read src/ and embed the built mobile bundle.
+  const frontendEdit = rerun('src/App.tsx');
+  for (const id of [...frontend, ...rust]) assert.ok(frontendEdit.includes(id), id);
+  // Unknown and tooling paths invalidate everything that does not provably ignore them.
+  assert.deepEqual(rerun('some-new-top-level-dir/file'), plan.map(row => row.id));
+});
+
+test('Vitest keeps re-running for the src-tauri files it reads, and every Rust gate shares one input list', () => {
+  const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
+  const byId = Object.fromEntries(plan.map(row => [row.id, row]));
+  for (const path of ['src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'src-tauri/tauri.dev.conf.json', 'src-tauri/tauri.windows.conf.json', 'src-tauri/capabilities/default.json', 'src-tauri/src/lib.rs', 'src-tauri/src/commands/file_tree.rs', 'src-tauri/src/http/routes/issues.rs', 'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js', 'docs/brand/b3-relay-icon.svg', 'src/types/generated/Example.ts']) {
+    assert.ok(gateReads(byId['frontend-tests'], path), path);
+  }
+  for (const path of ['src-tauri/src/secret_scrubber.rs', 'src-tauri/src/db/mod.rs', 'src-tauri/tests/fixtures/transcripts/muse/muse_transcript.jsonl', 'docs/page.md']) {
+    assert.ok(!gateReads(byId['frontend-tests'], path), path);
+  }
+  assert.ok(gateReads(byId['frontend-build'], 'package.json') && gateReads(byId['frontend-build'], 'vite.config.ts'));
+  for (const path of ['src/types/generated/Example.ts', 'mobile/index.html', 'package-lock.json', 'src-tauri/tests/fixtures/x.json', 'scripts/rust-test-shards.mjs']) {
+    assert.ok(gateReads(byId['rust-tests'], path), path);
+  }
+  const rustInputs = ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift'].map(id => JSON.stringify(byId[id].ignores));
+  assert.equal(new Set(rustInputs).size, 1, 'binding-drift must never be reused while rust-tests re-runs');
+  assert.ok(rustInputs[0] !== undefined);
+  // Gates the audit did not cover keep reading the whole tree.
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'docs-tests', 'readme-tests']) assert.equal(byId[id].ignores, undefined, id);
+});
+
+test('new Vitest references to src-tauri are audited against the frontend-tests input list', () => {
+  // Vitest gate reuse is only sound while its input list covers every src-tauri file a test reads.
+  // We pin a snapshot of every referencing line so that any new or modified reference across any
+  // test file (including files already referencing src-tauri) forces re-audit against
+  // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
+  const files = execFileSync('git', ['ls-files', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
+    .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
+  const referencingLines = files.flatMap(file =>
+    readFileSync(join(root, file), 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.includes('src-tauri') && !/^\s*(?:\/\/|\*|\/\*)/.test(line))
+      .map(line => `${file}: ${line}`)
+  ).sort();
+  assert.deepEqual(referencingLines, [
+    "tests/e2e/app-launch.spec.ts: const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';",
+    "tests/e2e/app-launch.spec.ts: const debugExe = 'X:/src/buildmesh/src-tauri/target/debug/buildmesh.exe';",
+    "tests/e2e/utils/buildmesh-launcher.ts: 'src-tauri', 'target', 'release', 'buildmesh.exe',",
+    'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.lock"],',
+    'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.toml"],',
+    'tests/unit/app-version.test.ts: ["src-tauri", "tauri.conf.json"],',
+    'tests/unit/app-version.test.ts: cargo: read(["src-tauri", "Cargo.toml"]).match(/^version\\s*=\\s*"([^"]+)"/m)?.[1],',
+    'tests/unit/app-version.test.ts: const cargo = readFileSync(path.join(root, "src-tauri", "Cargo.toml"), "utf8");',
+    'tests/unit/app-version.test.ts: const lock = readFileSync(path.join(root, "src-tauri", "Cargo.lock"), "utf8");',
+    'tests/unit/app-version.test.ts: lock: read(["src-tauri", "Cargo.lock"]).match(',
+    'tests/unit/app-version.test.ts: mkdirSync(path.join(dir, "src-tauri"), { recursive: true });',
+    'tests/unit/app-version.test.ts: readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"),',
+    'tests/unit/app-version.test.ts: tauri: JSON.parse(read(["src-tauri", "tauri.conf.json"])).version,',
+    "tests/unit/async-command-blocking.test.ts: const COMMANDS_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');",
+    "tests/unit/async-command-blocking.test.ts: const HTTP_ROUTES_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'http', 'routes');",
+    "tests/unit/async-command-blocking.test.ts: it('walks src-tauri/src/commands and finds Rust files', () => {",
+    "tests/unit/async-command-blocking.test.ts: it('walks src-tauri/src/http/routes and finds Rust files', () => {",
+    'tests/unit/ci-rust-timeout-guard.test.ts: const path = `path: src-tauri/${logFile(script)}`;',
+    "tests/unit/conpty-runtime.test.ts: const common = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8'));",
+    "tests/unit/conpty-runtime.test.ts: const windows = JSON.parse(await readFile('src-tauri/tauri.windows.conf.json', 'utf8'));",
+    'tests/unit/event-payloads.test.ts: `  2. Run \\`cargo test\\` in src-tauri/ to regenerate the .ts file.\\n` +',
+    'tests/unit/event-payloads.test.ts: `payload to be a struct in src-tauri/src/ that derives #[derive(TS)] and is generated\\n` +',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\.claude\\\\worktrees\\\\red-rare-hedge\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/env/mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: expect(checkWorktreeEscape("src-tauri/src/db/mod.rs", CWD_WORKTREE)).toBeNull();',
+    'tests/unit/guard-antipatterns.test.ts: it("allows \\\\\\\\wsl$ inside src-tauri/src/env/", () => {',
+    'tests/unit/ipc-contract.test.ts: `\\n  1. Add the command to tauri::generate_handler![ ... ] in src-tauri/src/lib.rs` +',
+    "tests/unit/ipc-contract.test.ts: const LIB_RS = join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs');",
+    'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
+    "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
+    "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
+    "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",
+    "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.dev.conf.json'), 'utf8'),",
+  ]);
+
+  // Every actual read of a src-tauri file/subpath identified across those lines must be covered by frontend-tests:
+  const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
+  const frontendGate = plan.find(row => row.id === 'frontend-tests');
+  for (const readPath of [
+    'src-tauri/Cargo.toml',
+    'src-tauri/Cargo.lock',
+    'src-tauri/tauri.conf.json',
+    'src-tauri/tauri.dev.conf.json',
+    'src-tauri/tauri.windows.conf.json',
+    'src-tauri/capabilities/default.json',
+    'src-tauri/src/lib.rs',
+    'src-tauri/src/commands/file_tree.rs',
+    'src-tauri/src/http/routes/issues.rs',
+    'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js',
+  ]) {
+    assert.ok(gateReads(frontendGate, readPath), `frontend-tests must read ${readPath}`);
+  }
+  // Pure string-literal mentions in tests that do not read the filesystem (guard-antipatterns) are not inputs:
+  for (const unread of ['src-tauri/src/db/mod.rs', 'src-tauri/src/agent/spawn.rs', 'src-tauri/src/env/mod.rs']) {
+    assert.ok(!gateReads(frontendGate, unread), `frontend-tests must NOT read unread path ${unread}`);
+  }
 });

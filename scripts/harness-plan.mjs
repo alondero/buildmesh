@@ -1,6 +1,43 @@
 import { categorisePath } from './ci/changed-scope.mjs';
 import { stripVTControlCharacters } from 'node:util';
 
+// Input sets. A gate lists the paths it provably does NOT read (regex sources,
+// so the plan stays JSON-serialisable); every other tracked or untracked path is
+// an input, so a new or unknown path invalidates a reused PASS. A gate with no
+// `ignores` reads the whole tree, which is the safe default.
+//
+// These lists come from auditing what each gate really reads, and several reads
+// cross the obvious Rust/frontend boundary:
+//  - Vitest reads a handful of src-tauri files (config JSON, Cargo.*, lib.rs,
+//    the command and route sources, the opencode plugin) and docs/brand.
+//  - Rust tests read src/ (generated bindings, vocabulary) and embed the built
+//    dist/mobile, so frontend edits must re-run Rust. Rust never reads docs/,
+//    android/ or the repo-root tests/ (its fixtures live in src-tauri/tests/).
+//  - rust-tests and binding-drift MUST share one list: binding-drift only
+//    checks what rust-tests regenerated, so it must never be reused alone.
+const DOCS = '^docs/';
+const FRONTEND_BUILD_IGNORES = [DOCS, '^src-tauri/'];
+// A Vitest file that starts reading another src-tauri file must add it here
+// (the drift guard in tests/agent-infra/harness.test.mjs flags new references).
+export const VITEST_READS_FROM_SRC_TAURI = ['capabilities/', 'Cargo\\.', 'tauri[^/]*\\.json$', 'src/(?:commands/|http/routes/|lib\\.rs$|agent/provider/adapters/opencode_attention_plugin\\.js$)'];
+const FRONTEND_TEST_IGNORES = ['^docs/(?!brand/)', `^src-tauri/(?!(?:${VITEST_READS_FROM_SRC_TAURI.join('|')}))`];
+const RUST_IGNORES = [DOCS, '^android/', '^tests/'];
+const NODE_CHECK_IGNORES = [DOCS];
+
+// Whether `path` is an input of `gate`. Paths use forward slashes.
+export function gateReads(gate, path) {
+  if (!gate.ignores || gate.ignores.length === 0) return true;
+  if (!gate._ignoreRegexes) {
+    const compiled = gate.ignores.map(source => new RegExp(source));
+    try {
+      Object.defineProperty(gate, '_ignoreRegexes', { value: compiled, writable: true, enumerable: false });
+    } catch {
+      return !compiled.some(rx => rx.test(path));
+    }
+  }
+  return !gate._ignoreRegexes.some(rx => rx.test(path));
+}
+
 // A single local verification plan. Unknown inputs retain CI's conservative scope.
 export function planGates(paths, { full = false } = {}) {
   let frontend = full;
@@ -20,12 +57,13 @@ export function planGates(paths, { full = false } = {}) {
   node('docs', ['scripts/check-docs.mjs', '--base', '$BASE']);
   node('readme', ['scripts/check-readme-drift.mjs']);
   node('process-spawns', ['scripts/check-process-spawn-discipline.mjs']);
-  npm('agent-tests', 'test:agent', { tests: 'node' });
+  npm('agent-tests', 'test:agent', { tests: 'node', ignores: NODE_CHECK_IGNORES });
   npm('docs-tests', 'test:docs', { tests: 'node' });
   npm('readme-tests', 'test:readme', { tests: 'node' });
-  npm('lint-tests', 'test:lint', { tests: 'node' });
-  npm('lint', 'lint');
-  npm('lint-fixtures', 'lint:fixtures');
+  npm('lint-tests', 'test:lint', { tests: 'node', ignores: [DOCS, '^src-tauri/'] });
+  // ESLint already ignores docs/** and src-tauri/**; the Rust sources are not linted.
+  npm('lint', 'lint', { ignores: [DOCS, '^src-tauri/'] });
+  npm('lint-fixtures', 'lint:fixtures', { ignores: [DOCS, '^src-tauri/'] });
   if (paths.some(path => path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml')) {
     node('android', ['scripts/check-android.mjs'], { minutes: 25, tests: 'android' });
   }
@@ -33,18 +71,18 @@ export function planGates(paths, { full = false } = {}) {
   // into a frontend and a Rust lane that run concurrently (#2104), each keeping
   // its own order and fail-fast. `heavy` gates share a machine-wide slot limit.
   if (frontend) {
-    npm('frontend-build', 'build', { minutes: 10, lane: 'frontend' });
-    npm('bundle', 'check:bundle', { lane: 'frontend' });
-    npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, lane: 'frontend', heavy: true });
-    node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, lane: 'frontend' });
+    npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('bundle', 'check:bundle', { ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, ignores: FRONTEND_TEST_IGNORES, lane: 'frontend', heavy: true });
+    node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
   } else if (rust) {
-    npm('mobile-build', 'build:mobile', { minutes: 10, lane: 'rust' });
+    npm('mobile-build', 'build:mobile', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'rust' });
   }
   if (rust) {
     // `vite build` empties dist/ (including dist/mobile/), which the Rust crate
     // embeds, so compiling must not overlap the build. rust-format only parses.
     const built = frontend ? ['frontend-build'] : [];
-    const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, lane: 'rust', ...options });
+    const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, ignores: RUST_IGNORES, lane: 'rust', ...options });
     // The crate has a formatting backlog (#2022); like Clippy, only diffs in
     // touched files fail, and the remaining count stays visible.
     cargo('rust-format', ['fmt', '--all', '--check'], { touchedFormat: true });
@@ -52,8 +90,8 @@ export function planGates(paths, { full = false } = {}) {
     // All targets include the desktop binary (compile smoke). Tests stay
     // serial within a process (process-global DB, see CLAUDE.md), but the CI
     // shards run as concurrent processes so the suite is not single-core.
-    gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust', lane: 'rust', heavy: true, after: built });
-    node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings'], { lane: 'rust' });
+    gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust', ignores: RUST_IGNORES, lane: 'rust', heavy: true, after: built });
+    node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings'], { ignores: RUST_IGNORES, lane: 'rust' });
   }
   return gates;
 }
