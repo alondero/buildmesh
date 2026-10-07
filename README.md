@@ -167,7 +167,7 @@ rather than in CI.
 The Windows backend was pivoted off a per-node AppContainer: the AppContainer's
 private object namespace hung `claude.exe` at libuv's named-pipe creation and
 blocked loopback. The restricted token fixes both. Deny-by-default **read/write
-confinement** on Windows is deferred (#542) — a same-user restricted token
+confinement** on Windows is still deferred — a same-user restricted token
 can't deny home reads while MSYS `bash` runs (both are secured by the same user
 SID), so the surviving path is a separate low-privilege user principal (or WSL).
 
