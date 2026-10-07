@@ -186,14 +186,15 @@ disk](user-guide.md#attention-hooks-buildmesh-installs-on-disk).
 ## A node reports “attention hooks unavailable”
 
 Buildmesh could not write the harness's hook, usually because the configuration
-file it merges into is not valid JSON — a half-finished edit or a leftover
-comma. The refusal is deliberate: your file is left exactly as it was rather
-than replaced.
+file it merges into does not parse — a half-finished edit or a leftover comma in
+JSON, or a syntax error in Codex's and Kimi Code's TOML. The refusal is
+deliberate: your file is left exactly as it was rather than replaced.
 
 - Open the file named in the node's error. For Claude Code it is
-  `.claude/settings.local.json` in the project directory.
-- Repair the JSON, or delete the file to let Buildmesh recreate it with just its
-  own entry.
+  `.claude/settings.local.json` in the project directory; Codex uses
+  `.codex/config.toml` and Kimi Code a `config.toml` in its configuration home.
+- Repair the file's syntax, or delete the file to let Buildmesh recreate it with
+  just its own entry.
 - Restart the node. The write is retried and the status mark clears when a
   callback is delivered.
 

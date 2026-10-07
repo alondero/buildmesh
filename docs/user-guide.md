@@ -428,7 +428,7 @@ The current built-in catalog is:
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
-| Cline | Yes | None | Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
+| Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
@@ -452,10 +452,11 @@ Buildmesh implements that signal by writing a hook into the harness's own
 configuration before the agent starts. The hook is what lets a node show that it
 is waiting for you, instead of going quiet until you read its terminal.
 
-Claude Code's hook is written when you add the project; the others are written
-each time a node starts. Nothing is written for a harness whose signal is
-**Passive watcher** or **None**, and nothing is written anywhere until you spawn
-from Buildmesh.
+Claude Code's hook is written when you add the project and refreshed each time
+one of its nodes starts; the other eight appear the first time you start a node
+with that harness. Nothing is written for a harness whose signal is **Passive
+watcher** or **None**, and no hook file exists before you add the project or
+start a node from Buildmesh.
 
 | Harness | File Buildmesh writes | Written to |
 |---|---|---|
@@ -470,20 +471,25 @@ from Buildmesh.
 | Cline | `TaskComplete.ps1` or `TaskComplete.sh` under `hooks/` | Configuration home |
 
 *Configuration home* means the harness's own config directory — normally
-`~/.kimi`, `~/.minimax-code`, or `~/.cline`, or wherever **Settings → Providers**
-points for that profile. For a node running inside WSL, Codex, Kimi Code,
-MiniMax Code, and Cline resolve those paths inside the guest; the rest are
+`~/.kimi-code` for Kimi Code, `~/.minimax` for MiniMax Code, and `~/.cline` for
+Cline, unless you point that profile somewhere else in **Settings → Providers**
+or the harness honours its own environment override (`$KIMI_CODE_HOME`,
+`$MINIMAX_DATA_DIR`, `$CLINE_DIR`). For a node running inside WSL, Codex, Kimi
+Code, MiniMax Code, and Cline resolve those paths inside the guest; the rest are
 written on the host.
 
 ### What the hook does
 
-Each hook is one local command — `curl` on most harnesses, a short JavaScript
-plugin for OpenCode — that POSTs the harness's own lifecycle event to the
-running app:
+Each hook posts the harness's own lifecycle event to the running app: a `curl`
+line on most harnesses, a small PowerShell or bash script for Cline, and a short
+JavaScript plugin for OpenCode.
 
 ```text
 http://localhost:<app port>/api/attention/<node>
 ```
+
+MiniMax Code is the one variant: its callback is node-independent and posts to
+`/api/attention/mcode` instead of a node path.
 
 - **It stays on your machine.** The address is loopback, so the request never
   reaches the network. LAN and VPN access is a separate, opt-in feature with its
@@ -502,16 +508,18 @@ http://localhost:<app port>/api/attention/<node>
 Buildmesh merges instead of replacing. Your own hooks, matchers, and settings
 stay as they were, a later start refreshes only the Buildmesh entry, and writes
 are atomic, so an interrupted write leaves the previous file readable. If an
-existing file is not valid JSON — a half-finished edit, say — Buildmesh refuses
-to write and reports `attention hooks unavailable` on the node instead of
-overwriting your file. Repair or remove that file, then restart the node.
+existing file is not valid JSON — or, for Codex and Kimi Code, not valid TOML —
+Buildmesh refuses to write and reports `attention hooks unavailable` on the node
+instead of overwriting your file. Repair or remove that file, then restart the
+node.
 
 ### Before you commit
 
 The project-directory paths above are inside your working tree, so they can
-appear in `git status`. Most are already covered by the ignore conventions these
-harnesses ship with; `.cursor/hooks.json` is the one that commonly is not.
-Review the diff and ignore the paths you do not want tracked.
+appear in `git status`. Most are already ignored by the conventions these
+harnesses ship with — Buildmesh's own repository ignores every project-directory
+entry in the table above except `.cursor/hooks.json`. Review the diff and ignore
+the paths you do not want tracked.
 
 ### Removing a hook
 
