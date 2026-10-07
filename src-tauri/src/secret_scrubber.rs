@@ -27,6 +27,13 @@
 //! structured transcript fields (turn text, tool-call inputs, last assistant
 //! message) and never touches the JSON envelope's own keys, so it cannot
 //! corrupt the `{"status":…}` shape the Coordinator relies on.
+//!
+//! [`SecretScrubber::scrub_for_persistence`] is the log-file boundary. A log
+//! line is free text that may also contain a JSON object, and the text
+//! key/value rule leaks the tail of an array under a secret-named key. That
+//! entry point masks each embedded object or array first, then runs the same
+//! text pipeline, so `buildmesh.log` and a support copy of it are not a second
+//! copy of a credential.
 
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
@@ -52,9 +59,14 @@ static PRIVATE_KEY_RE: Lazy<Regex> = Lazy::new(|| {
 /// rule would mask only the scheme and *leave the token exposed* — the dedicated
 /// `Bearer …`/`Basic …` token rules own that header. `auth_token` stays (a
 /// genuine `auth_token=…` secret).
+///
+/// `ticket` is included because pairing tickets and WebSocket handshake
+/// tickets are credentials (`ticket=<hex>`, `{"ticket":"…"}`). A bare `pair`
+/// is not: it is a substring of `repair`. The `#pair=` fragment has its own
+/// rule below.
 const SECRET_WORDS: &str = concat!(
     r"password|passwd|secret|token|api[_\-]?key|access[_\-]?key|",
-    r"client[_\-]?secret|credentials?|auth[_\-]?token|private[_\-]?key"
+    r"client[_\-]?secret|credentials?|auth[_\-]?token|private[_\-]?key|ticket"
 );
 
 /// `key<sep>value` where the key carries a secret-word. The separator allows an
@@ -118,8 +130,9 @@ static QUOTED_VALUE_RE: Lazy<Regex> = Lazy::new(|| {
 /// *substring* match (so `accessToken`/`apiKey` camelCase keys are caught):
 /// over-masking a benign `tokens_used` is the safe direction for a secret
 /// scrubber; missing a real credential key is not.
-static SECRET_KEY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(&format!("(?i)(?:{SECRET_WORDS})")).expect("secret-key regex is valid"));
+static SECRET_KEY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!("(?i)(?:{SECRET_WORDS})")).expect("secret-key regex is valid")
+});
 
 /// An HTTP auth-scheme credential — `Bearer`/`Basic`/`token`/`OAuth` followed by
 /// the credential. Masks the credential while keeping the scheme word (in its
@@ -132,6 +145,12 @@ static AUTH_SCHEME_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)\b(?P<scheme>Bearer|Basic|token|OAuth)\s+[A-Za-z0-9._\-+/]{8,}={0,2}")
         .expect("auth-scheme regex is valid")
 });
+
+/// A pairing invitation in a URL fragment (`#pair=<ticket>`). The fragment key
+/// is `pair`, which the key/value rule must not treat as a secret word (it is
+/// inside `repair`). The value runs to the next whitespace, `#`, or `&`.
+static PAIRING_FRAGMENT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?i)#pair=[^\s&#]+").expect("pairing fragment regex is valid"));
 
 /// High-confidence, context-free token shapes. Each is distinctive enough that a
 /// match is almost certainly a real credential, so they are masked wherever they
@@ -168,14 +187,29 @@ pub struct SecretScrubber;
 
 impl SecretScrubber {
     /// Mask every secret in `input`, returning the cleaned string. Runs the
-    /// private-key, quoted-value, key/value, auth-scheme, and token-format
-    /// passes in turn; the passes are ordered so a `token=ghp_…` is masked
-    /// once by the key/value rule rather than twice, and a quoted passphrase
-    /// is masked whole by the quoted-value rule rather than leaking the words
-    /// after the first space (issue #1220). Idempotent: re-scrubbing
+    /// private-key, quoted-value, key/value, auth-scheme, pairing-fragment, and
+    /// token-format passes in turn; the passes are ordered so a `token=ghp_…`
+    /// is masked once by the key/value rule rather than twice, and a quoted
+    /// passphrase is masked whole by the quoted-value rule rather than leaking
+    /// the words after the first space (issue #1220). Idempotent: re-scrubbing
     /// already-masked text is a no-op.
     pub fn scrub(input: &str) -> String {
         scrub_str(input)
+    }
+
+    /// Mask a log line before it is written to `buildmesh.log`.
+    ///
+    /// Embedded JSON objects and arrays are parsed and passed through
+    /// [`scrub_json`](Self::scrub_json), so a secret-named key masks its whole
+    /// value — including a plain hex root or device token, and an array of
+    /// credentials the text rule would only nibble. The text pipeline masks
+    /// the surrounding prose (PEM blocks, authorization headers, pairing
+    /// fragments, token shapes) and is not run over the JSON again: a second
+    /// pass would treat the already-masked array as a key/value and tear the
+    /// brackets. A span that is not JSON, and a JSON value with nothing to
+    /// mask, is kept byte-for-byte.
+    pub fn scrub_for_persistence(input: &str) -> String {
+        scrub_log_line(input)
     }
 
     /// Recursively mask secrets inside a JSON value (used to scrub a tool call's
@@ -186,34 +220,271 @@ impl SecretScrubber {
     /// - every other string leaf is content-scrubbed (token shapes, `k=v`
     ///   secrets, private keys) via [`scrub`](Self::scrub).
     pub fn scrub_json(value: &mut serde_json::Value) {
-        match value {
-            serde_json::Value::String(s) => {
-                let cleaned = scrub_str(s);
-                if &cleaned != s {
-                    *s = cleaned;
+        scrub_json_at(value, 0);
+    }
+}
+
+/// How many times a string leaf may itself contain JSON. A hostile line can
+/// nest `{"a":"{\"a\":…}"}` without bound; past this depth the leaf is masked
+/// as text only.
+const MAX_EMBED_DEPTH: u32 = 8;
+
+/// Mask a log line: JSON values through [`scrub_json_at`], and the prose
+/// between them through [`scrub_str`].
+///
+/// A `{` or `[` inside a quoted span, or one that is not valid JSON, stays in
+/// the prose, so `password="correct {} horse"` is still one quoted value. A JSON value that
+/// is itself the value of a secret-named key (`token=["…"]`) is masked whole.
+/// A string leaf that contains JSON is scanned again, up to [`MAX_EMBED_DEPTH`].
+fn scrub_log_line(input: &str) -> String {
+    scrub_log_line_at(input, 0)
+}
+
+fn scrub_log_line_at(input: &str, depth: u32) -> String {
+    if depth > MAX_EMBED_DEPTH {
+        return scrub_str(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let mut search = i;
+        let mut parsed = None;
+        while let Some(start) = next_json_start(input, search) {
+            if let Some((end, value)) = parse_json_value(input, start) {
+                parsed = Some((start, end, value));
+                break;
+            }
+            // A brace that is not JSON stays in the prose span. Splitting
+            // there would hide the tail of `password="correct {horse}"` from
+            // the quoted-value rule.
+            search = start + 1;
+        }
+        let Some((start, end, mut value)) = parsed else {
+            out.push_str(&scrub_str(&input[i..]));
+            break;
+        };
+        let prose = &input[i..start];
+        if let Some(key_at) = secret_key_prefix(prose) {
+            let original = value.clone();
+            mask_all_strings(&mut value);
+            out.push_str(&scrub_str(&prose[..key_at]));
+            out.push_str(&prose[key_at..]);
+            if value == original {
+                out.push_str(&input[start..end]);
+            } else {
+                out.push_str(&value.to_string());
+            }
+        } else {
+            let original = value.clone();
+            scrub_json_at(&mut value, depth);
+            out.push_str(&scrub_str(prose));
+            if value == original {
+                out.push_str(&input[start..end]);
+            } else {
+                out.push_str(&value.to_string());
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// Next `{` or `[` that is not inside a quoted span.
+///
+/// A brace inside `password="correct {} horse"` is part of the secret, not a
+/// JSON value. Double quotes always open a span. A single quote opens one
+/// only after `=` or `:`, so an apostrophe in `it's` does not swallow a later
+/// object.
+fn next_json_start(input: &str, from: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut i = from;
+    let mut quote: Option<u8> = None;
+    let mut escape = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if let Some(q) = quote {
+            if escape {
+                escape = false;
+            } else if c == b'\\' && q == b'"' {
+                escape = true;
+            } else if c == q {
+                quote = None;
+            }
+        } else if c == b'"' {
+            quote = Some(b'"');
+        } else if c == b'\'' && opens_single_quote(bytes, i) {
+            // Skip a passphrase (`password='correct {} horse'`). A quoted
+            // span whose body is itself a JSON object or array stays visible,
+            // or `data='{"api_keys":["…"]}'` would never be parsed.
+            if let Some(end) = matching_single_quote(bytes, i) {
+                let body = &input[i + 1..end];
+                // A secret-named key owns the whole quoted value
+                // (`token='["<hex>"]'`). Leaving the JSON visible would hide
+                // that key from the quoted-value rule. A non-secret key
+                // (`data='{"api_keys":[…]}'`) still has to be parsed.
+                let owned_by_secret = secret_key_prefix(&input[from..i]).is_some();
+                if owned_by_secret || !json_container(body) {
+                    i = end;
+                    continue;
                 }
             }
-            serde_json::Value::Array(items) => {
-                for item in items {
-                    Self::scrub_json(item);
-                }
-            }
-            serde_json::Value::Object(map) => {
-                for (key, v) in map.iter_mut() {
-                    // Under a secret-named key, every string leaf is masked whole
-                    // — the key already says it's a credential, and a secret can
-                    // hide in an array/object value (`{"api_keys": ["k1","k2"]}`)
-                    // that carries no token shape of its own.
-                    if SECRET_KEY_RE.is_match(key) {
-                        mask_all_strings(v);
-                        continue;
-                    }
-                    Self::scrub_json(v);
-                }
-            }
-            _ => {}
+        } else if c == b'{' || c == b'[' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn matching_single_quote(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn json_container(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .is_some_and(|value| value.is_object() || value.is_array())
+}
+
+fn opens_single_quote(bytes: &[u8], at: usize) -> bool {
+    let mut j = at;
+    while j > 0 {
+        j -= 1;
+        match bytes[j] {
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b'=' | b':' => return true,
+            _ => return false,
         }
     }
+    true
+}
+
+fn parse_json_value(input: &str, start: usize) -> Option<(usize, serde_json::Value)> {
+    let end = json_value_end(input, start)?;
+    let value: serde_json::Value = serde_json::from_str(&input[start..end]).ok()?;
+    if value.is_array() || value.is_object() {
+        Some((end, value))
+    } else {
+        None
+    }
+}
+
+/// Byte offset of a secret-named key whose separator (`:` or `=`) is the last
+/// non-space before `prose` ends, which is where a JSON value is about to
+/// start. The key's value is then the whole JSON value, not a leaf inside it.
+fn secret_key_prefix(prose: &str) -> Option<usize> {
+    let trimmed_end = prose.trim_end().len();
+    if trimmed_end == 0 {
+        return None;
+    }
+    let head = &prose[..trimmed_end];
+    let last = *head.as_bytes().last()?;
+    if last != b':' && last != b'=' {
+        return None;
+    }
+    let mut key_end = head[..head.len() - 1].trim_end().len();
+    if key_end == 0 {
+        return None;
+    }
+    let quote = head.as_bytes()[key_end - 1];
+    if quote == b'"' || quote == b'\'' {
+        key_end -= 1;
+    }
+    if key_end == 0 {
+        return None;
+    }
+    let key_region = &head[..key_end];
+    let rel = match key_region
+        .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-'))
+    {
+        Some(at) => at + key_region[at..].chars().next()?.len_utf8(),
+        None => 0,
+    };
+    let key = &key_region[rel..];
+    if key.is_empty() || !SECRET_KEY_RE.is_match(key) {
+        return None;
+    }
+    Some(rel)
+}
+
+fn scrub_json_at(value: &mut serde_json::Value, depth: u32) {
+    match value {
+        serde_json::Value::String(s) => {
+            let cleaned = if depth >= MAX_EMBED_DEPTH {
+                scrub_str(s)
+            } else {
+                scrub_log_line_at(s, depth + 1)
+            };
+            if &cleaned != s {
+                *s = cleaned;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                scrub_json_at(item, depth);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                // Under a secret-named key, every string leaf is masked whole
+                // — the key already says it's a credential, and a secret can
+                // hide in an array/object value (`{"api_keys": ["k1","k2"]}`)
+                // that carries no token shape of its own.
+                if SECRET_KEY_RE.is_match(key) {
+                    mask_all_strings(v);
+                    continue;
+                }
+                scrub_json_at(v, depth);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Byte index just past the JSON value that opens at `start`, or `None` when
+/// the brackets never close. `start` points at `{` or `[`.
+fn json_value_end(input: &str, start: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut i = start;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                b'"' => in_string = true,
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Replace every string leaf in a JSON subtree with [`MASK`], preserving shape.
@@ -254,8 +525,11 @@ fn scrub_str(input: &str) -> String {
     let step4 = AUTH_SCHEME_RE.replace_all(&step3, |caps: &Captures| {
         format!("{} {}", &caps["scheme"], MASK)
     });
-    // 5. Context-free token shapes anywhere they appear.
-    let mut out = step4.into_owned();
+    // 5. Pairing invitations in URL fragments. Idempotent: `#pair=[REDACTED]`
+    //    matches the same value pattern and is replaced with itself.
+    let step5 = PAIRING_FRAGMENT_RE.replace_all(&step4, "#pair=[REDACTED]");
+    // 6. Context-free token shapes anywhere they appear.
+    let mut out = step5.into_owned();
     for (re, repl) in TOKEN_RES.iter() {
         out = re.replace_all(&out, *repl).into_owned();
     }
@@ -295,7 +569,8 @@ mod tests {
     #[test]
     fn masks_github_token_mid_sentence_context_free() {
         // No key=value context here — the distinctive ghp_ shape is enough.
-        let scrubbed = SecretScrubber::scrub("I ran it with ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 set.");
+        let scrubbed =
+            SecretScrubber::scrub("I ran it with ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345 set.");
         assert_eq!(scrubbed, "I ran it with [REDACTED] set.");
     }
 
@@ -461,6 +736,138 @@ mod tests {
             SecretScrubber::scrub(r#"DB_PASSWORD  =  "phrase with spaces""#),
             r#"DB_PASSWORD  =  "[REDACTED]""#
         );
+    }
+
+    #[test]
+    fn masks_pairing_fragment_and_ticket_assignment() {
+        let raw = "open https://127.0.0.1/#pair=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa then ticket=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let once = SecretScrubber::scrub(raw);
+        assert_eq!(
+            once,
+            "open https://127.0.0.1/#pair=[REDACTED] then ticket=[REDACTED]"
+        );
+        assert_eq!(SecretScrubber::scrub(&once), once);
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_nested_credential_array() {
+        // The text key/value rule stops at the first quote, so
+        // `{"api_keys":["plain-secret-no-shape"]}` would keep the secret.
+        // Persistence parsing has to mask the whole array.
+        let raw = r#"failed {"api_keys":["plain-secret-no-shape"],"author":"octocat"}"#;
+        let scrubbed = SecretScrubber::scrub_for_persistence(raw);
+        assert!(!scrubbed.contains("plain-secret-no-shape"), "{scrubbed}");
+        assert!(
+            scrubbed.contains(r#"["[REDACTED]"]"#),
+            "the array must stay intact around the mask: {scrubbed}"
+        );
+        assert!(scrubbed.contains("octocat"), "{scrubbed}");
+    }
+
+    #[test]
+    fn scrub_for_persistence_leaves_benign_prose_unchanged() {
+        // `repair` contains `pair` and `author` contains `auth`. Neither is a
+        // credential key. A log line with no secret must stay byte-identical
+        // so the writer does not rewrite ordinary diagnostics.
+        let raw = "repair=yes author=octocat session=42";
+        assert_eq!(SecretScrubber::scrub_for_persistence(raw), raw);
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_json_embedded_in_a_string() {
+        let raw = r#"{"message":"{\"api_keys\":[\"plain-secret-no-shape\"]}","author":"octocat"}"#;
+        let scrubbed = SecretScrubber::scrub_for_persistence(raw);
+        assert!(!scrubbed.contains("plain-secret-no-shape"), "{scrubbed}");
+        assert!(scrubbed.contains("octocat"), "{scrubbed}");
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_a_json_value_owned_by_a_secret_key() {
+        let array = r#"token=["0123456789abcdef0123456789abcdef"]"#;
+        let object = r#"token={"raw":"fedcba9876543210fedcba9876543210"}"#;
+        for raw in [array, object] {
+            let scrubbed = SecretScrubber::scrub_for_persistence(raw);
+            assert!(
+                !scrubbed.contains("0123456789abcdef0123456789abcdef"),
+                "{scrubbed}"
+            );
+            assert!(
+                !scrubbed.contains("fedcba9876543210fedcba9876543210"),
+                "{scrubbed}"
+            );
+            assert!(scrubbed.contains("token="), "{scrubbed}");
+            assert!(scrubbed.contains("[REDACTED]"), "{scrubbed}");
+        }
+    }
+
+    #[test]
+    fn scrub_for_persistence_masks_a_quoted_secret_that_contains_json() {
+        // `{}` is valid JSON. Pulling it out of a quoted secret splits the
+        // value and leaves the tail. The quote has to hide that brace from
+        // the JSON scan, including when the assignment sits inside a string.
+        let top = r#"password="correct {} horse" session=42"#;
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(top),
+            SecretScrubber::scrub(top),
+            "{top}"
+        );
+        assert!(!SecretScrubber::scrub_for_persistence(top).contains("horse"));
+        let nested = r#"{"message":"password=\"correct {} horse\"","author":"octocat"}"#;
+        let scrubbed = SecretScrubber::scrub_for_persistence(nested);
+        assert!(!scrubbed.contains("horse"), "{scrubbed}");
+        assert!(scrubbed.contains("octocat"), "{scrubbed}");
+    }
+
+    #[test]
+    fn scrub_for_persistence_still_parses_single_quoted_json() {
+        // A single quote after `=` hides a passphrase that contains `{}`.
+        // It must not hide a JSON object wrapped in those same quotes, or the
+        // text rule nibbles the array and keeps the credential.
+        let wrapped = r#"data='{"api_keys":["plain-secret-no-shape"]}'"#;
+        let scrubbed = SecretScrubber::scrub_for_persistence(wrapped);
+        assert!(!scrubbed.contains("plain-secret-no-shape"), "{scrubbed}");
+        let prose = "password='correct {} horse' session=42";
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(prose),
+            SecretScrubber::scrub(prose)
+        );
+        assert!(!SecretScrubber::scrub_for_persistence(prose).contains("horse"));
+        let apostrophe = r#"it's {"api_keys":["plain-secret-no-shape"]}"#;
+        assert!(
+            !SecretScrubber::scrub_for_persistence(apostrophe).contains("plain-secret-no-shape"),
+            "{apostrophe}"
+        );
+        // The secret name sits outside the JSON. Parsing the body would drop
+        // that name and keep the credential `scrub` removes.
+        let owned = "token='[\"0123456789abcdef0123456789abcdef\"]'";
+        assert_eq!(
+            SecretScrubber::scrub_for_persistence(owned),
+            SecretScrubber::scrub(owned),
+            "{owned}"
+        );
+        assert!(!SecretScrubber::scrub_for_persistence(owned).contains("0123456789abcdef"));
+        let named = r#"password='{"user":"alice"}'"#;
+        assert!(
+            !SecretScrubber::scrub_for_persistence(named).contains("alice"),
+            "{named}"
+        );
+    }
+
+    #[test]
+    fn scrub_for_persistence_matches_scrub_when_a_brace_is_not_json() {
+        // A `{` inside a quoted secret is not a JSON value. Splitting the line
+        // there lets the tail of the secret through. Persistence must mask the
+        // same span the text pipeline does.
+        for raw in [
+            r#"password="correct {horse}" session=42"#,
+            "token=abc{def session=42",
+        ] {
+            assert_eq!(
+                SecretScrubber::scrub_for_persistence(raw),
+                SecretScrubber::scrub(raw),
+                "{raw}"
+            );
+        }
     }
 
     #[test]

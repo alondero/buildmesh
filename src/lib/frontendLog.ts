@@ -37,16 +37,102 @@ import { invoke } from '@tauri-apps/api/core';
 
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug';
 
-function serializeArg(arg: unknown): string {
-  if (arg instanceof Error) {
-    return `${arg.name}: ${arg.message}\n${arg.stack ?? '<no stack>'}`;
+/** Per-argument cap. The Rust command caps again before the line is persisted. */
+const ARG_CAP = 4096;
+const STACK_CAP = 2048;
+const STRING_CAP = 1024;
+const MAX_DEPTH = 6;
+const MAX_KEYS = 40;
+
+/**
+ * Same secret-word list as `SECRET_WORDS` in `src-tauri/src/secret_scrubber.rs`.
+ * Bare `auth` is omitted so `author` survives. `ticket` covers pairing and
+ * WebSocket handshake tickets. `pair` is omitted so `repair` survives; the
+ * `#pair=` fragment is masked on the Rust side, which is the persistence boundary.
+ */
+const SECRET_KEY =
+  /password|passwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|credentials?|auth[_-]?token|private[_-]?key|ticket/i;
+
+/**
+ * Free-text credential shapes, the same set as `TOKEN_RES`, `AUTH_SCHEME_RE`,
+ * `PRIVATE_KEY_RE`, and `PAIRING_FRAGMENT_RE` in `secret_scrubber.rs`.
+ * Structured keys are handled separately. These run on the whole argument
+ * before the length cap: slicing first can leave a prefix of `sk-…` that the
+ * Rust masker no longer recognizes.
+ */
+function redactFreeText(text: string): string {
+  let out = text.replace(
+    /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----/g,
+    '[REDACTED PRIVATE KEY]',
+  );
+  out = out.replace(/#pair=[^\s&#]+/gi, '#pair=[REDACTED]');
+  out = out.replace(
+    /\b(Bearer|Basic|token|OAuth)\s+[A-Za-z0-9._\-+/]{8,}={0,2}/gi,
+    '$1 [REDACTED]',
+  );
+  out = out.replace(/\bgh[opsur]_[A-Za-z0-9]{20,}\b/g, '[REDACTED]');
+  out = out.replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, '[REDACTED]');
+  out = out.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED]');
+  out = out.replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, '[REDACTED]');
+  out = out.replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, '[REDACTED]');
+  out = out.replace(/\bsk-[A-Za-z0-9_-]{20,}\b/g, '[REDACTED]');
+  return out;
+}
+
+function cap(text: string, max: number): string {
+  const safe = redactFreeText(text);
+  if (safe.length <= max) return safe;
+  return `${safe.slice(0, max)}…<truncated ${safe.length - max} chars>`;
+}
+
+function isSecretKey(key: string): boolean {
+  return SECRET_KEY.test(key);
+}
+
+/**
+ * An `Error` is not `JSON.stringify`'d. `message` and `stack` are
+ * non-enumerable, so stringifying the object drops the diagnostic and keeps
+ * any extra field a caller attached — often the credential. Name, message,
+ * and a capped stack are the diagnostic. A `cause` is walked with the same
+ * rules as any other thrown value.
+ */
+function formatError(err: Error, depth: number): string {
+  const message = cap(String(err.message ?? ''), STRING_CAP);
+  const stack = cap(err.stack ?? '<no stack>', STACK_CAP);
+  let text = `${err.name}: ${message}\n${stack}`;
+  // `lib` does not include ES2022 `Error.cause`. Read it only when present.
+  const cause = (err as Error & { cause?: unknown }).cause;
+  if (depth < MAX_DEPTH && cause !== undefined) {
+    text += `\ncaused by: ${serializeArg(cause, depth + 1)}`;
   }
-  if (typeof arg === 'string') return arg;
+  return text;
+}
+
+function boundValue(value: unknown, depth: number): unknown {
+  if (typeof value === 'string') return cap(value, STRING_CAP);
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof Error) return formatError(value, depth);
+  if (depth >= MAX_DEPTH) return '…';
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_KEYS).map(item => boundValue(item, depth + 1));
+  }
+  const source = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(source).slice(0, MAX_KEYS)) {
+    out[key] = isSecretKey(key) ? '[REDACTED]' : boundValue(source[key], depth + 1);
+  }
+  return out;
+}
+
+function serializeArg(arg: unknown, depth = 0): string {
+  if (arg instanceof Error) return cap(formatError(arg, depth), ARG_CAP);
+  if (typeof arg === 'string') return cap(arg, ARG_CAP);
   if (arg === null || arg === undefined) return String(arg);
+  if (typeof arg !== 'object') return cap(String(arg), ARG_CAP);
   try {
-    return JSON.stringify(arg);
+    return cap(JSON.stringify(boundValue(arg, depth)) ?? String(arg), ARG_CAP);
   } catch {
-    return String(arg);
+    return cap(String(arg), ARG_CAP);
   }
 }
 
