@@ -12,8 +12,10 @@ import path from 'node:path';
 // The graph is chosen so the running worker leaves the fixtures alone:
 //   * `inject_pty` on a running step with no bound agent dispatches nothing;
 //   * `llm_turn_classifier` on an Unverified step yields a read-only Recheck;
-//   * `concurrency_limit = 1` with one running step keeps the queued step parked
-//     and the mesh `circuit_run_capacity = 1` keeps the pending run queued.
+//   * the waiting run is seeded `paused`, which the worker never drives, so its
+//     `pending_slot` step stays parked (a running run's queued step would be
+//     promoted now that no per-circuit step budget holds it back, ADR 0042);
+//   * the mesh `circuit_run_capacity = 1` keeps the pending run queued.
 const GRAPH = JSON.stringify({
   version: 2,
   nodes: [
@@ -29,7 +31,7 @@ export default async function ({ page, invoke }) {
   try {
     db.prepare('UPDATE meshes SET path=?, pre_spawn_pool_size=0, circuit_run_capacity=1 WHERE id=?')
       .run(process.cwd(), mesh.id);
-    const circuit = db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled,concurrency_limit) VALUES (?,?,?,0,1)")
+    const circuit = db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled) VALUES (?,?,?,0)")
       .run(mesh.id, 'Lifecycle states', GRAPH).lastInsertRowid;
     const insertRun = db.prepare('INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json) VALUES (?,?,?,?,?)');
     const insertStep = db.prepare('INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome,error_message) VALUES (?,?,?,?,?,?)');
@@ -42,11 +44,11 @@ export default async function ({ page, invoke }) {
       JSON.stringify({ behavior_revision: 1, graph_sha256: 'abcdef0123456789', reviewers: [] }),
       'run.configuration', 'applied');
 
-    // Waiting: a step parked on the circuit's single step slot.
-    const waiting = insertRun.run(circuit, mesh.id, 'manual:state-waiting', 'running', '{}').lastInsertRowid;
+    // Waiting: a step parked on an agent slot (paused so the worker leaves it be).
+    const waiting = insertRun.run(circuit, mesh.id, 'manual:state-waiting', 'paused', '{}').lastInsertRowid;
     insertStep.run(waiting, 'work', 'pending_slot', 1, null, null);
     insertHistory.run(waiting, 'work', 1, 'step_capacity_wait',
-      JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }),
+      JSON.stringify({ before: null, after: JSON.stringify({ agent_limit: true }) }),
       'circuit_worker.capacity', 'waiting');
 
     // Unverified: a checkpoint with a read-only Recheck action, plus a resolved
@@ -94,7 +96,7 @@ export default async function ({ page, invoke }) {
     await expect(page.getByTestId(`run-card-${working}`)).toBeVisible();
     await expect(page.getByTestId(`run-activity-${working}`)).toContainText('Running');
     await expect(page.getByTestId(`run-activity-${waiting}`)).toContainText('Queued');
-    await expect(page.getByTestId(`run-reason-${waiting}`)).toContainText(/Waiting for a slot/);
+    await expect(page.getByTestId(`run-reason-${waiting}`)).toContainText(/Waiting for a circuit agent slot/);
     await expect(page.getByTestId(`run-activity-${unverified}`)).toContainText('Unverified Checkpoint');
     await expect(page.getByTestId(`run-reason-${unverified}`)).toContainText(/Evidence is incomplete/);
     await expect(page.getByText(new RegExp(`Continues run #${predecessor}`))).toBeVisible();

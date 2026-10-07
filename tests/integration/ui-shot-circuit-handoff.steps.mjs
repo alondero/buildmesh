@@ -27,7 +27,7 @@ export default async function ({ page, invoke }) {
       { from: 'trigger', to: 'await_source', condition: 'always' },
       { from: 'await_source', to: 'done', condition: 'always' },
     ] });
-    const circuit = Number(db.prepare('INSERT INTO autopilot_circuits(mesh_id,name,graph_json,enabled,concurrency_limit) VALUES(?,?,?,0,1)')
+    const circuit = Number(db.prepare('INSERT INTO autopilot_circuits(mesh_id,name,graph_json,enabled) VALUES(?,?,?,0)')
       .run(mesh.id, 'Recover an inspected handoff', graph).lastInsertRowid);
     const context = JSON.stringify({ 'source.agent_id': String(agent) });
     const run = Number(db.prepare("INSERT INTO autopilot_circuit_runs(circuit_id,mesh_id,trigger_identity,state,context_json,source_agent_node_id) VALUES(?,?,'manual:handoff-ui','running',?,?)")

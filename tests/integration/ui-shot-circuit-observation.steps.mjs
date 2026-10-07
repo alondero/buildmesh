@@ -11,7 +11,7 @@ export default async function ({ page, invoke }) {
   try {
     db.prepare('UPDATE meshes SET path=?, pre_spawn_pool_size=0 WHERE id=?').run(process.cwd(), mesh.id);
     const graph = JSON.stringify({ version: 2, nodes: [{ id: 'review', type: { type: 'llm_turn_classifier', target_node_id: null } }], edges: [] });
-    const circuit = db.prepare('INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled,concurrency_limit) VALUES (?,?,?,0,1)').run(mesh.id, 'Observation readiness', graph).lastInsertRowid;
+    const circuit = db.prepare('INSERT INTO autopilot_circuits (mesh_id,name,graph_json,enabled) VALUES (?,?,?,0)').run(mesh.id, 'Observation readiness', graph).lastInsertRowid;
     const run = db.prepare('INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json) VALUES (?,?,?,?,?)').run(circuit, mesh.id, 'manual:observation-ui', 'paused', '{}').lastInsertRowid;
     const message = 'The session has an unfinished input draft. Submit or clear it; Buildmesh will recheck automatically.';
     db.prepare('INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,error_message) VALUES (?,?,?,?,?)').run(run, 'review', 'unverified', 1, message);

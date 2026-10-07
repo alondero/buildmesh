@@ -18,7 +18,7 @@ export default async function ({ page, invoke }) {
       { id: 'feedback', type: { type: 'inject_pty', prompt: 'Address {{node.reviewer.output}}', target_node_id: '$source' } },
       { id: 'retry', type: { type: 'retry_limit', max_retries: 3 } },
     ], edges: [] });
-    const circuit = Number(db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,enabled,concurrency_limit,graph_json,is_preset) VALUES (?,'Parser review',0,2,?,1)").run(mesh.id, graph).lastInsertRowid);
+    const circuit = Number(db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,enabled,graph_json,is_preset) VALUES (?,'Parser review',0,?,1)").run(mesh.id, graph).lastInsertRowid);
     const context = JSON.stringify({ 'source.review_preset': '1', 'source.agent_id': String(source), 'source.path': process.cwd(), 'node.verdict.review_verdict_attempt': '3', 'node.reviewer.output': 'The latest fixes address the parsing issue. Another pass is needed to verify the error handling.' });
     const run = Number(db.prepare("INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,source_agent_node_id,trigger_identity,state,context_json) VALUES (?,?,?,'manual:continuation-shot','failed',?)").run(circuit, mesh.id, source, context).lastInsertRowid);
     const step = db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome) VALUES (?,?,'completed',3,?)");
@@ -28,7 +28,7 @@ export default async function ({ page, invoke }) {
       { id: 'trigger', type: { type: 'manual' } },
       { id: 'trust', type: { type: 'collaborator_check', require_approval: true } },
     ], edges: [{ from: 'trigger', to: 'trust', condition: 'always' }] });
-    const approvalCircuit = Number(db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,enabled,concurrency_limit,graph_json) VALUES (?,'Authorization gate',0,1,?)").run(mesh.id, approvalGraph).lastInsertRowid);
+    const approvalCircuit = Number(db.prepare("INSERT INTO autopilot_circuits (mesh_id,name,enabled,graph_json) VALUES (?,'Authorization gate',0,?)").run(mesh.id, approvalGraph).lastInsertRowid);
     const approvalRun = Number(db.prepare("INSERT INTO autopilot_circuit_runs (circuit_id,mesh_id,trigger_identity,state,context_json) VALUES (?,?,'manual:approval-shot','running','{}')").run(approvalCircuit, mesh.id).lastInsertRowid);
     db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt,outcome) VALUES (?,'trigger','completed',1,'completed')").run(approvalRun);
     db.prepare("INSERT INTO autopilot_circuit_run_steps (run_id,node_id,status,attempt) VALUES (?,'trust','blocked',1)").run(approvalRun);

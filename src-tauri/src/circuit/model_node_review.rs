@@ -211,7 +211,6 @@ mod tests {
         advance(
             run,
             &CircuitEvent::Tick(Capacity {
-                circuit_free_slots: 2,
                 agent_free_slots: 1,
             }),
         )

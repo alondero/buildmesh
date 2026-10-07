@@ -19,15 +19,15 @@
 //!   whose fan-in rule is satisfied by ANY completed parent. Trigger
 //!   roots have no incoming edges.
 //! - Triggers auto-complete at run start — they fired to create the run.
-//! - Every `SpawnAgentNode` needs BOTH a free per-circuit step slot and a
-//!   free slot in its run's durable agent lease; otherwise the step parks in
-//!   `Queued` (`pending_slot` in the ledger) and promotes FIFO on a later
-//!   `Tick`. The worker reserves the blueprint's declared spawn slots before
-//!   admitting a run, so peer runs cannot steal capacity needed by a
-//!   downstream reviewer; an optional app-wide pool remains the explicit
-//!   host-safety backstop. Non-agent steps never wait on agent slots (they
-//!   still respect the per-circuit limit). Known milestone-1 scope note:
-//!   FIFO ordering is per-run — cross-run ordering on one circuit is
+//! - Every `SpawnAgentNode` needs a free slot in its run's durable agent
+//!   lease; otherwise the step parks in `Queued` (`pending_slot` in the
+//!   ledger) and promotes FIFO on a later `Tick`. The worker reserves the
+//!   blueprint's declared spawn slots before admitting a run, so peer runs
+//!   cannot steal capacity needed by a downstream reviewer; an optional
+//!   app-wide pool remains the explicit host-safety backstop. Non-agent
+//!   steps never wait on capacity: DAG eligibility is their only gate, as
+//!   there is no per-circuit step budget (ADR 0042). Known milestone-1 scope
+//!   note: FIFO ordering is per-run — cross-run ordering on one circuit is
 //!   tick order until the multi-run scheduler milestone.
 //! - `InjectPty` waits for `AgentReady` (the spawned agent's process is
 //!   live) before firing; this keeps injection off the async stage-2
@@ -554,8 +554,6 @@ fn spawn_node_for_agent(run: &RunView, classifier_node_id: &str) -> Option<Strin
 /// impure seam from live counts; the stepper only does arithmetic on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capacity {
-    /// Free per-circuit step slots (`concurrency_limit - running steps`).
-    pub circuit_free_slots: i64,
     /// Free slots in this run's durable agent lease, additionally bounded by
     /// the optional app-wide process pool.
     pub agent_free_slots: i64,
@@ -1062,7 +1060,7 @@ fn finish_observed_step(
     if evidence.completion_verified() || (hands_off_to_classifier && evidence.lifecycle_verified())
     {
         set_step(run, t, &expected.step_id, StepStatus::Completed);
-        cascade_after_completion(run, t, 1);
+        cascade_after_completion(run, t);
         finish_run_if_done(run, t);
     }
 }
@@ -1426,7 +1424,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 );
                 t.context_changed = true;
                 set_step(run, &mut t, node_id, StepStatus::Completed);
-                cascade_after_completion(run, &mut t, 1);
+                cascade_after_completion(run, &mut t);
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -1508,7 +1506,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         "piloted agent node reported error".to_string(),
                     );
                 }
-                cascade_after_completion(run, &mut t, 1);
+                cascade_after_completion(run, &mut t);
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -1604,7 +1602,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         }
                     }
                 }
-                cascade_after_completion(run, &mut t, 1);
+                cascade_after_completion(run, &mut t);
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -1803,7 +1801,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     ) {
                         if *classification == Classification::Completed {
                             complete_with_outcome(run, &mut t, node_id, StepOutcome::Completed);
-                            cascade_after_completion(run, &mut t, 1);
+                            cascade_after_completion(run, &mut t);
                             finish_run_if_done(run, &mut t);
                         }
                         return t;
@@ -1852,7 +1850,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     // completing a run on a transient yield.
                     if classifier_outcome_is_routed(run, node_id, outcome) {
                         complete_with_outcome(run, &mut t, node_id, outcome);
-                        cascade_after_completion(run, &mut t, 1);
+                        cascade_after_completion(run, &mut t);
                         finish_run_if_done(run, &mut t);
                     } else {
                         let count_key = format!("node.{node_id}.continuations.{attempt}");
@@ -1994,7 +1992,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 }
                 run.context.set("verification.outcome", outcome.as_db_str());
                 complete_with_outcome(run, &mut t, node_id, outcome);
-                cascade_after_completion(run, &mut t, 1);
+                cascade_after_completion(run, &mut t);
                 finish_run_if_done(run, &mut t);
             }
         }
@@ -2029,7 +2027,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         run.context.set("pr.title", title);
                     }
                     set_step(run, &mut t, node_id, StepStatus::Completed);
-                    cascade_after_completion(run, &mut t, 1);
+                    cascade_after_completion(run, &mut t);
                     finish_run_if_done(run, &mut t);
                 } else if matches!(
                     run.graph.node(node_id).map(|node| &node.kind),
@@ -2049,7 +2047,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     );
                     t.context_changed = true;
                     complete_with_outcome(run, &mut t, node_id, StepOutcome::Failed);
-                    cascade_after_completion(run, &mut t, 1);
+                    cascade_after_completion(run, &mut t);
                     finish_run_if_done(run, &mut t);
                 } else {
                     let failure = error
@@ -2540,12 +2538,12 @@ fn e_satisfied_completed(edge: &super::model::CircuitEdge, run: &RunView) -> boo
 
 /// Schedule every eligible node that has no step yet, respecting
 /// capacity. Runs to a FIXPOINT: instant-completing steps (Notify,
-/// joins, SetNodeStatus) free their circuit slot again immediately, so a
-/// chain of plain actions executes entirely within this one tick — no
+/// joins, SetNodeStatus) hand back their agent slot (if any) immediately, so
+/// a chain of plain actions executes entirely within this one tick — no
 /// 2s-per-node penalty. Queued (FIFO) steps promote first; agent spawns
-/// occupy their slot until the piloted node finishes.
+/// occupy their slot until the piloted node finishes. Only agent spawns can
+/// park: every other eligible step starts at once.
 fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
-    let mut circuit_free = capacity.circuit_free_slots;
     let mut agent_free = capacity.agent_free_slots;
 
     loop {
@@ -2568,12 +2566,11 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
                 Some(n) => n.kind.clone(),
                 None => continue,
             };
-            let started = try_start(run, t, &node_id, &kind, &mut circuit_free, &mut agent_free);
+            let started = try_start(run, t, &node_id, &kind, &mut agent_free);
             progressed |= started;
             if started && step_completed_instantly(run, &node_id) {
                 // Freed its slot again — but its successors are picked
                 // up on the next fixpoint pass.
-                circuit_free += 1;
                 if consumes_agent_slot(&kind) {
                     agent_free += 1;
                 }
@@ -2586,9 +2583,9 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             }
             let needs_agent_slot = consumes_agent_slot(&kind);
             let agent_fits = !needs_agent_slot || agent_free > 0;
-            if circuit_free <= 0 || !agent_fits {
+            if !agent_fits {
                 set_step(run, t, &node_id, StepStatus::Queued);
-                record_step_capacity_wait(run, t, &node_id, circuit_free <= 0, !agent_fits);
+                record_step_capacity_wait(run, t, &node_id, true);
                 continue;
             }
             start_step(run, t, &node_id, &kind);
@@ -2596,11 +2593,8 @@ fn schedule_ready(run: &mut RunView, t: &mut Transition, capacity: Capacity) {
             if step_completed_instantly(run, &node_id) {
                 // Instant completion: the slot is free again within this
                 // same pass, so don't charge it.
-            } else {
-                circuit_free -= 1;
-                if needs_agent_slot {
-                    agent_free -= 1;
-                }
+            } else if needs_agent_slot {
+                agent_free -= 1;
             }
         }
 
@@ -2655,18 +2649,16 @@ fn try_start(
     t: &mut Transition,
     node_id: &str,
     kind: &CircuitNodeKind,
-    circuit_free: &mut i64,
     agent_free: &mut i64,
 ) -> bool {
     let needs_agent_slot = consumes_agent_slot(kind);
     let agent_fits = !needs_agent_slot || *agent_free > 0;
-    if *circuit_free <= 0 || !agent_fits {
-        record_step_capacity_wait(run, t, node_id, *circuit_free <= 0, !agent_fits);
+    if !agent_fits {
+        record_step_capacity_wait(run, t, node_id, true);
         return false;
     }
-    record_step_capacity_wait(run, t, node_id, false, false);
+    record_step_capacity_wait(run, t, node_id, false);
     start_step(run, t, node_id, kind);
-    *circuit_free -= 1;
     if needs_agent_slot {
         *agent_free -= 1;
     }
@@ -2677,12 +2669,10 @@ fn record_step_capacity_wait(
     run: &mut RunView,
     t: &mut Transition,
     node_id: &str,
-    circuit_limit: bool,
     agent_limit: bool,
 ) {
     let key = format!("node.{node_id}.capacity_wait");
-    let value =
-        serde_json::json!({"circuit_limit":circuit_limit,"agent_limit":agent_limit}).to_string();
+    let value = serde_json::json!({ "agent_limit": agent_limit }).to_string();
     if run.context.get(&key) != Some(value.as_str()) {
         run.context.set(&key, value);
         t.context_changed = true;
@@ -2945,7 +2935,7 @@ fn execute_retry_limit(run: &mut RunView, t: &mut Transition, node_id: &str, max
         // Failed route instead of silently leaving a completed gate with no
         // successor. Ordinary RetryLimit gates retain fail-fast semantics.
         complete_with_outcome(run, t, node_id, StepOutcome::Failed);
-        cascade_after_completion(run, t, 1);
+        cascade_after_completion(run, t);
         finish_run_if_done(run, t);
     } else {
         fail_step(
@@ -3004,21 +2994,17 @@ fn reset_step_for_retry(run: &mut RunView, t: &mut Transition, node_id: &str, ne
     });
 }
 
-/// After completions, promote newly-eligible NON-agent nodes — but at
-/// most `budget` of them, one per step that just went terminal. Each
-/// terminal step frees exactly its own circuit slot, so capping the
-/// cascade at that count preserves the per-circuit concurrency limit
-/// between Ticks (the Tick's authoritative capacity snapshot re-checks).
+/// After completions, promote every newly-eligible NON-agent node: with no
+/// per-circuit step budget (ADR 0042) DAG eligibility is their only gate.
 /// Agent spawns always wait for the next Tick (which also recounts slots
 /// freed by the agent lifecycle), so they never cascade here.
-fn cascade_after_completion(run: &mut RunView, t: &mut Transition, budget: usize) {
-    if run.state != RunState::Running || budget == 0 {
+fn cascade_after_completion(run: &mut RunView, t: &mut Transition) {
+    if run.state != RunState::Running {
         return; // fail-fast: nothing new may start once the run failed
     }
     let eligible: Vec<(String, CircuitNodeKind)> = collect_eligible(run)
         .into_iter()
         .filter(|(_, kind)| !consumes_agent_slot(kind))
-        .take(budget)
         .collect();
     for (node_id, kind) in eligible {
         start_step(run, t, &node_id, &kind);
@@ -3041,8 +3027,7 @@ fn has_current_review_approval(run: &RunView, step: &StepView) -> bool {
 fn finish_run_if_done(run: &mut RunView, t: &mut Transition) {
     // A Failed/Cancelled run sweeps its leftovers: sibling Running/Queued steps are
     // cancelled so the ledger reflects reality and the concurrency
-    // counters (`count_running_circuit_steps` /
-    // `count_active_circuit_agent_nodes`, which only read runs in
+    // counters (`count_active_circuit_agent_nodes`, which only reads runs in
     // state 'running') stop leaking their slots.
     if run.state == RunState::Failed || run.state == RunState::Cancelled {
         let leftovers: Vec<String> = run
@@ -3207,15 +3192,14 @@ mod tests {
         }
     }
 
-    fn capacity(circuit_free: i64, agent_free: i64) -> Capacity {
+    fn capacity(agent_free: i64) -> Capacity {
         Capacity {
-            circuit_free_slots: circuit_free,
             agent_free_slots: agent_free,
         }
     }
 
-    fn tick(c: i64, m: i64) -> CircuitEvent {
-        CircuitEvent::Tick(capacity(c, m))
+    fn tick(m: i64) -> CircuitEvent {
+        CircuitEvent::Tick(capacity(m))
     }
 
     fn status_of(run: &RunView, node: &str) -> StepStatus {
@@ -3275,10 +3259,10 @@ mod tests {
     // -- scheduling & capacity --------------------------------------------------
 
     #[test]
-    fn first_tick_schedules_spawn_when_both_capacities_allow() {
+    fn first_tick_schedules_spawn_when_the_agent_slot_is_free() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(1, 1));
+        let t = advance(&mut run, &tick(1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert_eq!(
             t.effects,
@@ -3289,32 +3273,21 @@ mod tests {
     }
 
     #[test]
-    fn circuit_step_capacity_wait_tracks_reason_changes_and_admission_without_tick_noise() {
+    fn step_capacity_wait_tracks_agent_slot_changes_and_admission_without_tick_noise() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(0, 2));
+        advance(&mut run, &tick(0));
         let read = |run: &RunView| {
             serde_json::from_str::<serde_json::Value>(
                 run.context.get("node.spawn.capacity_wait").unwrap(),
             )
             .unwrap()
         };
-        assert_eq!(
-            read(&run),
-            serde_json::json!({"circuit_limit":true,"agent_limit":false})
-        );
-        let unchanged = advance(&mut run, &tick(0, 2));
+        assert_eq!(read(&run), serde_json::json!({"agent_limit":true}));
+        let unchanged = advance(&mut run, &tick(0));
         assert!(unchanged.is_empty());
-        advance(&mut run, &tick(2, 0));
-        assert_eq!(
-            read(&run),
-            serde_json::json!({"circuit_limit":false,"agent_limit":true})
-        );
-        let admitted = advance(&mut run, &tick(2, 1));
-        assert_eq!(
-            read(&run),
-            serde_json::json!({"circuit_limit":false,"agent_limit":false})
-        );
+        let admitted = advance(&mut run, &tick(1));
+        assert_eq!(read(&run), serde_json::json!({"agent_limit":false}));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert_eq!(admitted.effects.len(), 1);
     }
@@ -3323,26 +3296,32 @@ mod tests {
     fn spawn_queues_when_mesh_agent_slots_are_exhausted() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(2, 0));
+        let t = advance(&mut run, &tick(0));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
         assert!(t.effects.is_empty(), "queued steps emit no spawn effect");
     }
 
     #[test]
-    fn spawn_queues_when_circuit_concurrency_is_exhausted() {
+    fn non_agent_steps_start_when_no_agent_slot_is_free() {
+        // ADR 0042: no step slots exist, so only a spawn can park. A plain
+        // action chain runs to completion even with the agent lease empty.
         let mut run = linear_run();
+        run.graph.nodes[1].kind = CircuitNodeKind::Notify {
+            message: "no agent needed".to_string(),
+        };
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(0, 5));
-        assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
-        assert!(t.effects.is_empty());
+        advance(&mut run, &tick(0));
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+        assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+        assert_eq!(run.state, RunState::Completed);
     }
 
     #[test]
     fn queued_step_promotes_fifo_when_a_mesh_slot_frees() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(2, 0));
-        let t = advance(&mut run, &tick(2, 1));
+        advance(&mut run, &tick(0));
+        let t = advance(&mut run, &tick(1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert_eq!(
             t.effects,
@@ -3353,11 +3332,11 @@ mod tests {
     }
 
     #[test]
-    fn queued_step_stays_parked_until_both_limits_clear() {
+    fn queued_step_stays_parked_until_an_agent_slot_frees() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(0, 3)); // circuit full → queue
-        let t = advance(&mut run, &tick(1, 0)); // agent slots still gone
+        advance(&mut run, &tick(0)); // agent slots gone → queue
+        let t = advance(&mut run, &tick(0)); // still gone
         assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
         assert!(t.effects.is_empty());
     }
@@ -3366,8 +3345,8 @@ mod tests {
     fn re_tick_with_a_running_step_is_a_no_op() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
-        let again = advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
+        let again = advance(&mut run, &tick(1));
         assert!(again.is_empty(), "re-tick must be a no-op: {:?}", again);
     }
 
@@ -3378,7 +3357,7 @@ mod tests {
         use super::super::observation::CircuitObservationBlocker;
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let event = |attempt, agent_node_id, blocker| CircuitEvent::ObservationDeferred {
             node_id: "spawn".into(),
@@ -3432,7 +3411,7 @@ mod tests {
         use super::super::observation::*;
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let identity = ObservationIdentity {
             run_id: run.run_id,
@@ -3501,7 +3480,7 @@ mod tests {
         use super::super::observation::*;
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let identity = ObservationIdentity {
             run_id: run.run_id,
@@ -3557,7 +3536,7 @@ mod tests {
         use super::super::observation::*;
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let identity = ObservationIdentity {
             run_id: run.run_id,
@@ -3614,7 +3593,7 @@ mod tests {
     fn circuit_legacy_success_cannot_bypass_owned_work_evidence() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let transition = advance(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
@@ -3627,7 +3606,7 @@ mod tests {
     fn lost_agent_releases_an_unverified_run() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         advance(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
@@ -3641,7 +3620,7 @@ mod tests {
     fn circuit_agent_loss_retains_the_checkpoint_that_preceded_removal() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         run.step_mut("spawn").unwrap().status = StepStatus::Unverified;
         let checkpoint = "Classifier unavailable after 5 attempts. Restore the configured classifier and recheck evidence.";
@@ -3658,7 +3637,7 @@ mod tests {
     fn circuit_failure_cancels_siblings_without_claiming_their_agents_were_closed() {
         let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("a", 11);
         run.attach_agent_node("b", 12);
         let transition = advance(&mut run, &agent_finished(11, false));
@@ -3700,7 +3679,7 @@ mod tests {
     fn agent_finished_completes_the_bound_spawn_step_and_unblocks_successors() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
@@ -3718,7 +3697,7 @@ mod tests {
     fn simple_linear_run_lands_completed_end_to_end() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         assert_eq!(run.state, RunState::Completed);
@@ -3741,7 +3720,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         run.attach_agent_node("spawn", 900);
 
@@ -3795,7 +3774,7 @@ mod tests {
         // The next worker tick observes that the injection transition has
         // no remaining work and records the terminal run state. No PTY
         // effect is emitted from this completion-only transition.
-        let completion = advance(&mut run, &tick(1, 1));
+        let completion = advance(&mut run, &tick(1));
         assert!(completion.effects.is_empty());
         assert_eq!(run.state, RunState::Completed);
     }
@@ -3804,7 +3783,7 @@ mod tests {
     fn agent_error_fails_the_spawn_step_and_the_run_fail_fast() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let t = advance_with_completion_evidence(&mut run, &agent_finished(900, false));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Failed);
@@ -3820,7 +3799,7 @@ mod tests {
     fn closing_the_piloted_node_mid_run_cancels_its_step_and_fails_the_run() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
         assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
@@ -3928,7 +3907,7 @@ mod tests {
         // caller could pass anything.
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         let t = advance(
             &mut run,
@@ -3948,7 +3927,7 @@ mod tests {
     fn agent_lost_for_the_borrowed_source_cancels_active_work_with_its_checkpoint() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 88);
         run.context.set("source.agent_id", "77");
         let checkpoint = "Classifier unavailable after five attempts.";
@@ -3983,7 +3962,7 @@ mod tests {
         // slot the counters no longer attribute to this (failed) run.
         let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "b"), StepStatus::Running);
         run.attach_agent_node("a", 11);
         let t = advance_with_completion_evidence(&mut run, &agent_finished(11, false));
@@ -3998,12 +3977,10 @@ mod tests {
     }
 
     #[test]
-    fn cascade_starts_at_most_one_successor_per_freed_slot() {
-        // spawn → (notify, notify-b): completing the spawn frees exactly
-        // one circuit slot, so the cascade may start only ONE successor
-        // even though both are eligible. The next Tick's authoritative
-        // capacity snapshot admits the other. This is what keeps the
-        // per-circuit concurrency limit honest between ticks.
+    fn cascade_starts_every_eligible_non_agent_successor() {
+        // spawn → (notify, notify-b): completing the spawn makes both
+        // successors eligible, and with no step budget (ADR 0042) the
+        // cascade starts both rather than waiting a tick for the second.
         let mut run = linear_run();
         run.graph.nodes.push(CircuitNode {
             id: "notify-b".to_string(),
@@ -4017,22 +3994,22 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("spawn", 900);
         let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         let started = ["notify", "notify-b"]
             .iter()
             .filter(|n| matches!(run.step(n), Some(s) if s.status == StepStatus::Completed))
             .count();
-        assert_eq!(started, 1, "one freed slot admits exactly one successor");
-        assert!(t.effects.len() <= 1);
+        assert_eq!(started, 2, "every eligible plain successor starts together");
+        assert_eq!(t.effects.len(), 2);
     }
 
     #[test]
     fn lifecycle_events_for_unknown_agents_are_no_ops() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         let before = run.clone();
         advance_with_completion_evidence(&mut run, &agent_finished(12345, true));
         advance(
@@ -4092,7 +4069,7 @@ mod tests {
     fn inject_waits_for_agent_ready_then_fires_resolved_prompt() {
         let mut run = two_step_inject_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(3, 3));
+        advance(&mut run, &tick(3));
         run.attach_agent_node("spawn", 900);
         // Spawn finished → inject schedules but must NOT fire yet (no
         // live process observed).
@@ -4137,7 +4114,7 @@ mod tests {
     fn prompt_dispatch_survives_restart_without_replay_or_stale_acknowledgement() {
         let mut run = two_step_inject_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(3, 3));
+        advance(&mut run, &tick(3));
         run.attach_agent_node("spawn", 900);
         advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         let ready = CircuitEvent::AgentReady {
@@ -4211,7 +4188,7 @@ mod tests {
             },
         );
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "early-inject"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
         assert!(
@@ -4281,7 +4258,7 @@ mod tests {
     fn all_completed_join_executes_only_when_every_branch_finished() {
         let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "a"), StepStatus::Running);
         assert_eq!(status_of(&run, "b"), StepStatus::Running);
         assert!(run.step("j").is_none(), "join must wait while branches run");
@@ -4301,7 +4278,7 @@ mod tests {
     fn any_completed_join_executes_when_one_branch_finishes() {
         let mut run = fan_out_run(CircuitNodeKind::AnyCompleted);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("a", 11);
         run.attach_agent_node("b", 12);
         advance_with_completion_evidence(&mut run, &agent_finished(11, true));
@@ -4357,7 +4334,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("work", 5);
         advance_with_completion_evidence(&mut run, &agent_finished(5, false));
         assert_eq!(run.state, RunState::Failed);
@@ -4402,7 +4379,7 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
         let _ = t;
@@ -4432,24 +4409,30 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
-        // The spawn holds the only slot; the label step waits.
+        advance(&mut run, &tick(1));
+        // The spawn is still running, so the label step's edge is unmet.
         assert!(run.step("label").is_none());
 
         run.attach_agent_node("spawn", 900);
-        let _ = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
-        // The cascade frees exactly one slot; the
-        // label step schedules on the next Tick's authoritative snapshot.
-        let t = advance(&mut run, &tick(5, 5));
+        // Completing the spawn cascades straight into the plain GitHub step:
+        // no step slot gates it, so it need not wait for the next Tick.
+        let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         assert_eq!(status_of(&run, "label"), StepStatus::Running);
-        assert_eq!(
-            t.effects,
-            vec![Effect::CallGithub {
-                node_id: "label".to_string(),
-                action: GithubActionKind::AddLabel,
-                label: Some("in-progress".to_string()),
-                comment: None,
-            },]
+        let call = Effect::CallGithub {
+            node_id: "label".to_string(),
+            action: GithubActionKind::AddLabel,
+            label: Some("in-progress".to_string()),
+            comment: None,
+        };
+        assert!(
+            t.effects.contains(&call),
+            "the completion cascade must emit the call: {:?}",
+            t.effects
+        );
+        let next = advance(&mut run, &tick(1));
+        assert!(
+            !next.effects.contains(&call),
+            "the next Tick must not fire the call a second time"
         );
         // Worker delivers the successful GitHub action result
         advance(
@@ -4539,7 +4522,7 @@ mod tests {
     fn an_unmerged_pr_is_a_routed_outcome_that_does_not_fail_the_run() {
         let mut run = confirm_merged_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        let started = advance(&mut run, &tick(2, 2));
+        let started = advance(&mut run, &tick(2));
         assert!(started.effects.iter().any(|effect| matches!(effect,
             Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
                 if node_id == "verify")));
@@ -4552,7 +4535,7 @@ mod tests {
                 Some("PR #314 is still open and has not been merged"),
             ),
         );
-        let settled = advance(&mut run, &tick(2, 2));
+        let settled = advance(&mut run, &tick(2));
 
         assert_eq!(status_of(&run, "verify"), StepStatus::Completed);
         assert_eq!(
@@ -4595,9 +4578,9 @@ mod tests {
     fn a_merged_pr_takes_the_completed_branch() {
         let mut run = confirm_merged_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &tick(2));
         advance(&mut run, &github_result("verify", true, None));
-        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &tick(2));
 
         assert_eq!(status_of(&run, "merged"), StepStatus::Completed);
         assert!(run.step("unmerged").is_none());
@@ -4623,10 +4606,10 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         advance_with_completion_evidence(&mut run, &agent_finished(900, true));
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         advance(&mut run, &github_result("comment", false, Some("403")));
         assert_eq!(status_of(&run, "comment"), StepStatus::Failed);
         assert_eq!(run.state, RunState::Failed);
@@ -4669,7 +4652,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(2, 2));
+        let t = advance(&mut run, &tick(2));
         assert_eq!(status_of(&run, "comment"), StepStatus::Running);
         assert_eq!(
             t.effects,
@@ -4714,10 +4697,9 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
-        advance_with_completion_evidence(&mut run, &agent_finished(900, true));
-        let first = advance(&mut run, &tick(5, 5));
+        let first = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
         let replay = advance(
             &mut run,
             &CircuitEvent::GithubActionRetry {
@@ -4747,7 +4729,7 @@ mod tests {
     #[test]
     fn pending_run_does_not_schedule_from_ticks_alone() {
         let mut run = linear_run();
-        let t = advance(&mut run, &tick(9, 9));
+        let t = advance(&mut run, &tick(9));
         assert!(t.is_empty());
         assert_eq!(run.state, RunState::Pending);
     }
@@ -4809,7 +4791,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(1, 1));
+        let t = advance(&mut run, &tick(1));
         for n in ["a", "b", "c"] {
             assert_eq!(
                 status_of(&run, n),
@@ -4835,18 +4817,17 @@ mod tests {
     }
 
     #[test]
-    fn instant_chain_respects_the_concurrency_limit_between_instant_completions() {
-        // limit=1 with a two-node instant chain: a starts+completes (slot
-        // freed), b then fits in the same tick — but a SPAWN between them
-        // must still gate: trigger → spawn → notify runs spawn first and
-        // holds the slot; notify waits for the agent event.
+    fn instant_chain_waits_on_a_running_spawn_edge_not_a_slot() {
+        // trigger → spawn → notify: the spawn is a real agent step, so the
+        // downstream notify waits for its completion event. The only gate
+        // is the DAG edge — there is no step slot to hold.
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(1, 1));
+        let t = advance(&mut run, &tick(1));
         assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
         assert!(
             run.step("notify").is_none(),
-            "notify must wait while the spawn holds the only slot"
+            "notify must wait for the spawn's completion edge"
         );
         assert!(matches!(
             t.effects.first(),
@@ -4868,7 +4849,7 @@ mod tests {
             context: CircuitContext::new(),
             steps: vec![],
         };
-        advance(&mut run, &tick(9, 9));
+        advance(&mut run, &tick(9));
         assert_eq!(
             run.state,
             RunState::Running,
@@ -5514,7 +5495,7 @@ mod tests {
             &[],
         );
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &tick(2));
         run.attach_agent_node("work", 900);
         let identity = ObservationIdentity {
             run_id: 42,
@@ -5649,7 +5630,7 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &tick(2));
         run.attach_agent_node("work", 900);
         let identity = ObservationIdentity {
             run_id: 42,
@@ -5699,7 +5680,7 @@ mod tests {
             &[],
         );
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(2, 2));
+        advance(&mut run, &tick(2));
         run.attach_agent_node("work", 900);
         let identity = ObservationIdentity {
             run_id: 42,
@@ -5953,7 +5934,7 @@ mod tests {
     /// park Running; AutoRun completes instantly) — callers assert that.
     fn fire_to_gate(run: &mut RunView, gate_id: &str) {
         advance(run, &CircuitEvent::Triggered);
-        advance(run, &tick(5, 5));
+        advance(run, &tick(5));
         run.attach_agent_node("work", 900);
         advance_with_completion_evidence(run, &agent_finished(900, true));
         assert!(
@@ -5990,7 +5971,7 @@ mod tests {
             &[(StepOutcome::Completed, "next")],
         );
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("work", 900);
         let binding =
             crate::circuit::test_support::record_report_evidence(&mut run, "work", "Approved");
@@ -6130,7 +6111,7 @@ mod tests {
                 &[(StepOutcome::Completed, "next")],
             );
             advance(&mut run, &CircuitEvent::Triggered);
-            advance(&mut run, &tick(5, 5));
+            advance(&mut run, &tick(5));
             run.attach_agent_node("work", 900);
             let binding =
                 crate::circuit::test_support::record_report_evidence(&mut run, "work", "Approved");
@@ -6542,7 +6523,7 @@ mod tests {
             RunState::Running,
             "the successor waits for the next tick's capacity pass"
         );
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "after"), StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
     }
@@ -6617,7 +6598,7 @@ mod tests {
     fn pause_halts_advancement_while_the_current_step_finishes() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
 
         let t = advance(&mut run, &CircuitEvent::Paused);
@@ -6625,7 +6606,7 @@ mod tests {
         assert_eq!(run.state, RunState::Paused);
 
         // Ticks do nothing while paused.
-        let again = advance(&mut run, &tick(9, 9));
+        let again = advance(&mut run, &tick(9));
         assert!(again.is_empty());
 
         // The current step may finish — but nothing cascades.
@@ -6640,7 +6621,7 @@ mod tests {
     fn resume_continues_exactly_where_the_pause_stopped() {
         let mut run = linear_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         run.attach_agent_node("spawn", 900);
         advance(&mut run, &CircuitEvent::Paused);
         advance_with_completion_evidence(&mut run, &agent_finished(900, true));
@@ -6650,7 +6631,7 @@ mod tests {
         assert_eq!(run.state, RunState::Running);
 
         // The finished spawn's successor picks up on the next tick.
-        advance(&mut run, &tick(1, 1));
+        advance(&mut run, &tick(1));
         assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
         assert_eq!(run.state, RunState::Completed);
     }
@@ -6747,7 +6728,7 @@ mod tests {
     fn retry_limit_resets_the_failed_step_within_its_budget() {
         let mut run = retry_run(2);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("work", 11);
 
         // First failure does NOT fail-fast: the retry gate owns it. The
@@ -6788,7 +6769,7 @@ mod tests {
         assert_eq!(reset.attempt, 2);
 
         // Next tick re-executes the retried step.
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "work"), StepStatus::Running);
     }
 
@@ -6797,7 +6778,7 @@ mod tests {
         let mut run = retry_run(2);
         run.context.set("retry.max_retries", "1");
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("work", 11);
 
         advance_with_completion_evidence(&mut run, &agent_finished(11, false));
@@ -6810,10 +6791,10 @@ mod tests {
     fn flaky_step_succeeding_on_retry_completes_the_run() {
         let mut run = retry_run(2);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("work", 11);
         advance_with_completion_evidence(&mut run, &agent_finished(11, false));
-        advance(&mut run, &tick(5, 5)); // promote the attempt-2 execution
+        advance(&mut run, &tick(5)); // promote the attempt-2 execution
         assert_eq!(run.step("work").unwrap().attempt, 2);
         let t = advance_with_completion_evidence(&mut run, &agent_finished(11, true));
         assert_eq!(status_of(&run, "work"), StepStatus::Completed);
@@ -6825,11 +6806,11 @@ mod tests {
     fn exhausted_retry_budget_fails_the_run() {
         let mut run = retry_run(2);
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("work", 11);
         // Attempt 1 fails → reset to 2.
         advance_with_completion_evidence(&mut run, &agent_finished(11, false));
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         // Attempt 2 fails → budget spent. The gate is re-armed by the
         // failure, then executes on the next pass and fails the run.
         advance_with_completion_evidence(&mut run, &agent_finished(11, false));
@@ -6838,7 +6819,7 @@ mod tests {
             RunState::Running,
             "the gate still owns the failure"
         );
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
         assert!(run
             .step("retry")
@@ -6865,7 +6846,7 @@ mod tests {
             condition: Default::default(),
         });
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
         assert!(run
             .step("retry")
@@ -6944,7 +6925,7 @@ mod tests {
         };
 
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("agent_a", 101);
         run.attach_agent_node("agent_b", 202);
 
@@ -7054,7 +7035,7 @@ mod tests {
         };
 
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("spawn_branch_1", 1001);
         run.attach_agent_node("spawn_branch_2", 2002);
 
@@ -7092,7 +7073,7 @@ mod tests {
         };
 
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("worker", 777);
 
         // Agent finishes with captured tail text
@@ -7198,7 +7179,7 @@ mod tests {
 
         // --- Iteration 1 ---
         advance(&mut run, &CircuitEvent::Triggered);
-        let t1 = advance(&mut run, &tick(5, 5));
+        let t1 = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
         assert_eq!(
             t1.effects,
@@ -7213,7 +7194,7 @@ mod tests {
         assert_eq!(status_of(&run, "implementer"), StepStatus::Completed);
 
         // Reviewer starts iteration 1
-        let t_rev1 = advance(&mut run, &tick(5, 5));
+        let t_rev1 = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
         assert_eq!(
             t_rev1.effects,
@@ -7228,7 +7209,7 @@ mod tests {
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
 
         // Verify starts and returns Red (fails)
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "verify"), StepStatus::Running);
         let _t_v1 = advance(
             &mut run,
@@ -7248,7 +7229,7 @@ mod tests {
 
         // --- Iteration 2 ---
         // Promoting implementer attempt 2
-        let t2 = advance(&mut run, &tick(5, 5));
+        let t2 = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
         // Emits SpawnAgentNode so worker submits prompt to existing agent or respawns in worktree!
         assert_eq!(
@@ -7265,7 +7246,7 @@ mod tests {
         assert_eq!(run.step("implementer").unwrap().attempt, 2);
 
         // Reviewer re-promotes for iteration 2
-        let t_rev2 = advance(&mut run, &tick(5, 5));
+        let t_rev2 = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
         assert_eq!(run.step("reviewer").unwrap().attempt, 2);
         assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(202));
@@ -7281,7 +7262,7 @@ mod tests {
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
 
         // Verify runs again (attempt 2) and returns Green (passes!)
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "verify"), StepStatus::Running);
         let _t_v2 = advance(
             &mut run,
@@ -7349,7 +7330,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(5, 5));
+        advance(&mut run, &tick(5));
         run.attach_agent_node("branch_a", 101);
         run.attach_agent_node("branch_b", 202);
 
@@ -7358,7 +7339,7 @@ mod tests {
 
         // Advancing into step_in_a fails fast because target cannot be resolved!
         advance_with_completion_evidence(&mut run, &agent_finished(101, true));
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "step_in_a"), StepStatus::Failed);
         assert!(run
             .step("step_in_a")
@@ -7401,7 +7382,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        let t = advance(&mut run, &tick(5, 5));
+        let t = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "status_step"), StepStatus::Failed);
         assert!(run
             .step("status_step")
@@ -7454,7 +7435,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        let spawned = advance(&mut run, &tick(5, 5));
+        let spawned = advance(&mut run, &tick(5));
         assert_eq!(
             spawned.effects,
             vec![Effect::SpawnAgentNode {
@@ -7511,14 +7492,14 @@ mod tests {
         advance(run, &CircuitEvent::Triggered);
         // The first tick materializes the approval gate; the worker emits
         // this event automatically for a trusted issue.
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         advance(
             run,
             &CircuitEvent::CollaboratorApproved {
                 node_id: "collaborator_gate".into(),
             },
         );
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         run.attach_agent_node("implementer", 700);
         advance_with_completion_evidence(run, &agent_finished(700, true));
         advance_with_report_evidence(
@@ -7532,7 +7513,7 @@ mod tests {
             },
         );
         acknowledge_prompt(run, "finish");
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         advance_with_report_evidence(
             run,
             &classified("finish_classifier", Some(Classification::Completed)),
@@ -7565,7 +7546,7 @@ mod tests {
                 error: None,
             },
         );
-        advance(&mut replay, &tick(8, 8));
+        advance(&mut replay, &tick(8));
         replay.attach_agent_node("reviewer", 701);
         assert_eq!(replay.resolve_target_agent("open_pr"), None);
         assert_eq!(replay.resolve_open_pr_agent("open_pr"), Some(700));
@@ -7582,7 +7563,7 @@ mod tests {
                 error: Some("temporary lookup failure".into()),
             },
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         advance(
             &mut run,
             &CircuitEvent::AgentReady {
@@ -7590,7 +7571,7 @@ mod tests {
             },
         );
         acknowledge_prompt(&mut run, "wrapup_correction");
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         advance_with_report_evidence(
             &mut run,
             &classified("finish_classifier", Some(Classification::Completed)),
@@ -7617,7 +7598,7 @@ mod tests {
     fn issue_review_to_first_verdict(run: &mut RunView, reviewer: i64) {
         issue_review_to_open_pr(run);
         open_pr_succeeds(run, 314);
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
         finish_reviewer_turn(run, reviewer);
     }
@@ -7640,7 +7621,7 @@ mod tests {
     fn finish_reviewer_turn(run: &mut RunView, reviewer: i64) {
         run.attach_agent_node("reviewer", reviewer);
         advance_with_completion_evidence(run, &agent_finished(reviewer, true));
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         assert_eq!(status_of(run, "review_classifier"), StepStatus::Running);
     }
 
@@ -7673,7 +7654,7 @@ mod tests {
             "a fix round must keep the reviewer open: {:?}",
             delivered.effects
         );
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         advance_with_report_evidence(
             run,
             &classified("feedback_classifier", Some(Classification::Completed)),
@@ -7694,7 +7675,7 @@ mod tests {
         assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
 
         open_pr_succeeds(&mut run, 314);
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
         finish_reviewer_turn(&mut run, 701);
         let review_done = advance_with_report_evidence(
@@ -7728,7 +7709,7 @@ mod tests {
             .effects
             .iter()
             .all(|effect| !matches!(effect, Effect::CloseAgentNode { .. })));
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "feedback_classifier"), StepStatus::Running);
 
         let retry = advance_with_report_evidence(
@@ -7756,7 +7737,7 @@ mod tests {
         issue_review_to_first_verdict(&mut run, 701);
         request_changes_and_fix(&mut run, "Fix the race.");
 
-        let next = advance(&mut run, &tick(8, 8));
+        let next = advance(&mut run, &tick(8));
         assert!(
             next.effects.iter().all(|effect| !matches!(
                 effect,
@@ -7777,7 +7758,7 @@ mod tests {
                 if node_id == "re_review" && target == "reviewer" && prompt.contains("round 2 of 3"))));
         assert_eq!(run.resolve_target_agent("re_review"), Some(701));
         acknowledge_prompt(&mut run, "re_review");
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
         assert_eq!(run.step("review_classifier").unwrap().attempt, 2);
         assert_eq!(
@@ -7828,7 +7809,7 @@ mod tests {
                 Some("Approved. No remaining findings."),
             ),
         );
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         advance(
             run,
             &CircuitEvent::AgentReady {
@@ -7836,7 +7817,7 @@ mod tests {
             },
         );
         acknowledge_prompt(run, "merge");
-        advance(run, &tick(8, 8));
+        advance(run, &tick(8));
         assert_eq!(status_of(run, "merge_wait"), StepStatus::Running);
     }
 
@@ -7864,7 +7845,7 @@ mod tests {
             RunState::Running,
             "the run waits to deliver the merge request"
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "merge"), StepStatus::Running);
 
         let merge = advance(
@@ -7892,7 +7873,7 @@ mod tests {
             RunState::Running,
             "delivering the request is not a merge: the run keeps waiting"
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
         assert!(run.step("close_implementer").is_none());
         assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
@@ -7914,7 +7895,7 @@ mod tests {
             ),
         )
         .effects;
-        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        effects.extend(advance(&mut run, &tick(8)).effects);
         assert!(
             effects.iter().any(|effect| matches!(effect,
                 Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
@@ -7927,8 +7908,8 @@ mod tests {
         );
 
         let mut after = advance(&mut run, &github_result("merge_verify", true, None)).effects;
-        after.extend(advance(&mut run, &tick(8, 8)).effects);
-        after.extend(advance(&mut run, &tick(8, 8)).effects);
+        after.extend(advance(&mut run, &tick(8)).effects);
+        after.extend(advance(&mut run, &tick(8)).effects);
         assert!(
             after.iter().any(closes_implementer),
             "a confirmed merge closes the implementer: {after:?}"
@@ -7952,7 +7933,7 @@ mod tests {
                 Some("Squash-merged PR 314."),
             ),
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
 
         // The agent said it merged; GitHub says otherwise.
         let mut effects = advance(
@@ -7964,7 +7945,7 @@ mod tests {
             ),
         )
         .effects;
-        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        effects.extend(advance(&mut run, &tick(8)).effects);
 
         assert!(
             effects.iter().all(|effect| !closes_implementer(effect)),
@@ -8001,7 +7982,7 @@ mod tests {
             ),
         )
         .effects;
-        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        effects.extend(advance(&mut run, &tick(8)).effects);
 
         assert!(run.step("merge_verify").is_none(), "GitHub is never asked");
         assert!(
@@ -8030,7 +8011,7 @@ mod tests {
                 Some("Still waiting for the checks."),
             ),
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
 
         assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
         assert!(run.step("merge_verify").is_none());
@@ -8048,14 +8029,14 @@ mod tests {
     fn issue_run_failed_at_finish() -> RunView {
         let mut run = issue_review_run();
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         advance(
             &mut run,
             &CircuitEvent::CollaboratorApproved {
                 node_id: "collaborator_gate".into(),
             },
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         run.attach_agent_node("implementer", 700);
         advance_with_completion_evidence(&mut run, &agent_finished(700, true));
         advance_with_report_evidence(
@@ -8086,7 +8067,7 @@ mod tests {
 
         advance(&mut run, &CircuitEvent::Triggered);
         assert_eq!(run.state, RunState::Running, "admission reopens the run");
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "finish"), StepStatus::Running);
         assert_eq!(
             run.step("finish").unwrap().attempt,
@@ -8108,7 +8089,7 @@ mod tests {
             sent.effects
         );
         acknowledge_prompt(&mut run, "finish");
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "finish"), StepStatus::Completed);
         assert_eq!(
             status_of(&run, "finish_classifier"),
@@ -8131,8 +8112,8 @@ mod tests {
         run.state = RunState::Pending;
 
         advance(&mut run, &CircuitEvent::Triggered);
-        advance(&mut run, &tick(8, 8));
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
+        advance(&mut run, &tick(8));
 
         assert_eq!(run.state, RunState::Running);
         assert_eq!(
@@ -8160,10 +8141,10 @@ mod tests {
                 Some("Squash-merged PR 314."),
             ),
         );
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         let mut effects = advance(&mut run, &github_result("merge_verify", true, None)).effects;
-        effects.extend(advance(&mut run, &tick(8, 8)).effects);
-        effects.extend(advance(&mut run, &tick(8, 8)).effects);
+        effects.extend(advance(&mut run, &tick(8)).effects);
+        effects.extend(advance(&mut run, &tick(8)).effects);
         assert_eq!(run.state, RunState::Completed);
         assert!(run.step("follow_feedback").is_none());
         assert!(run.step("re_review").is_none());
@@ -8185,7 +8166,7 @@ mod tests {
                 Some("Cannot review: provider access is unavailable."),
             ),
         );
-        let terminal = advance(&mut run, &tick(8, 8));
+        let terminal = advance(&mut run, &tick(8));
         assert_eq!(run.state, RunState::Failed);
         assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
         assert!(transition
@@ -8210,7 +8191,7 @@ mod tests {
             .set("node.review_classifier.classification", "completed");
         run.context
             .set("node.reviewer.output", "Changes requested.");
-        let t = advance(&mut run, &tick(8, 8));
+        let t = advance(&mut run, &tick(8));
         assert!(run.step("close_approved").is_none());
         assert!(run.step("merge").is_none());
         assert!(run.step("complete").is_none());
@@ -8237,7 +8218,7 @@ mod tests {
         let mut run = issue_review_run();
         advance(&mut run, &CircuitEvent::Triggered);
         // First tick parks the gate — no spawn effect yet.
-        let t = advance(&mut run, &tick(8, 8));
+        let t = advance(&mut run, &tick(8));
         assert_eq!(
             run.step("collaborator_gate").map(|s| s.status),
             Some(StepStatus::Blocked),
@@ -8247,7 +8228,7 @@ mod tests {
         assert!(t.effects.is_empty(), "no spawn effect before approval");
 
         // A spurious tick does not advance the graph while blocked.
-        let parked = advance(&mut run, &tick(8, 8));
+        let parked = advance(&mut run, &tick(8));
         assert!(parked.is_empty());
 
         // Approving the gate flips it to Completed; the next tick (the
@@ -8268,7 +8249,7 @@ mod tests {
             "implementer awaits next tick"
         );
 
-        let approved = advance(&mut run, &tick(8, 8));
+        let approved = advance(&mut run, &tick(8));
         assert_eq!(
             run.step("implementer").map(|s| s.status),
             Some(StepStatus::Running)
@@ -8324,7 +8305,7 @@ mod tests {
         // the only agent spawned, and MUST NOT fan out a Notify
         // (the `complete` notify is gated on retry exhaustion, not
         // the happy path).
-        let spawn_reviewer = advance(&mut run, &tick(8, 8));
+        let spawn_reviewer = advance(&mut run, &tick(8));
         assert!(
             spawn_reviewer
                 .effects
@@ -8378,7 +8359,7 @@ mod tests {
         // worker reserves the complete blueprint before admission, so peer
         // runs cannot consume capacity needed by this reviewer.
         for run in &mut runs {
-            let transition = advance(run, &tick(8, 1));
+            let transition = advance(run, &tick(1));
             assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
             assert_eq!(
                 transition.effects,
@@ -8496,7 +8477,7 @@ mod tests {
             if round < 3 {
                 assert_eq!(run.state, RunState::Running);
                 assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
-                let next = advance(&mut run, &tick(8, 8));
+                let next = advance(&mut run, &tick(8));
                 assert!(
                     !next.effects.iter().any(|e| matches!(
                         e,
@@ -8512,10 +8493,10 @@ mod tests {
                     },
                 );
                 acknowledge_prompt(&mut run, "re_review");
-                advance(&mut run, &tick(8, 8));
+                advance(&mut run, &tick(8));
                 assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
             } else {
-                let last = advance(&mut run, &tick(8, 8));
+                let last = advance(&mut run, &tick(8));
                 assert_eq!(run.state, RunState::Failed);
                 assert!(run.step("complete").is_none());
                 assert!(
@@ -8573,7 +8554,7 @@ mod tests {
 
         // Three failed OpenPr attempts.
         for _attempt in 0..3 {
-            let retry = advance(&mut run, &tick(8, 8));
+            let retry = advance(&mut run, &tick(8));
             assert!(
                 !retry.effects.iter().any(
                     |e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
@@ -8622,7 +8603,7 @@ mod tests {
             },
         );
         assert_eq!(run.state, RunState::Running);
-        let retry = advance(&mut run, &tick(8, 8));
+        let retry = advance(&mut run, &tick(8));
         assert!(retry.effects.is_empty(), "correction waits for AgentReady");
         assert_eq!(status_of(&run, "wrapup_retry"), StepStatus::Completed);
         assert_eq!(status_of(&run, "wrapup_correction"), StepStatus::Running);
@@ -8640,7 +8621,7 @@ mod tests {
                 if target == "implementer" && prompt.contains("dirty worktree")
         )));
         acknowledge_prompt(&mut run, "wrapup_correction");
-        advance(&mut run, &tick(8, 8));
+        advance(&mut run, &tick(8));
         assert_eq!(status_of(&run, "finish_classifier"), StepStatus::Running);
     }
 
@@ -8697,7 +8678,7 @@ mod tests {
             steps: vec![],
         };
         advance(&mut run, &CircuitEvent::Triggered);
-        let t1 = advance(&mut run, &tick(5, 5));
+        let t1 = advance(&mut run, &tick(5));
         assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
         assert_eq!(
             t1.effects,

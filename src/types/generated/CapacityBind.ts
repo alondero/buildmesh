@@ -2,6 +2,6 @@
 
 /**
  * Which budget is binding a parked run or step. The UI renders this
- * verdict; it must not invent a fourth budget.
+ * verdict; it must not invent a third budget.
  */
-export type CapacityBind = "mesh_run_admission" | "circuit_step_slots" | "circuit_agent_lease";
+export type CapacityBind = "mesh_run_admission" | "circuit_agent_lease";

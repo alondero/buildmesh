@@ -80,7 +80,6 @@ const CIRCUIT: AutopilotCircuit = {
   name: 'nightly-sweep',
   description: '',
   enabled: true,
-  concurrency_limit: 1,
   graph_json: '{"version":1,"nodes":[],"edges":[]}',
   created_at: '2026-08-22 10:00:00',
   updated_at: '2026-08-22 10:00:00',
@@ -151,7 +150,7 @@ const HISTORY_ENTRIES: CircuitHistoryEntry[] = [
     detail: '{"reason":"mesh_capacity","capacity":2}', source: 'circuit_worker.admission',
     disposition: 'waiting', observed_at: '2026-08-22 10:05:00' },
   { id: 2, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
-    detail: '{"before":null,"after":"{\\"circuit_limit\\":true,\\"agent_limit\\":false}"}',
+    detail: '{"before":null,"after":"{\\"agent_limit\\":true}"}',
     source: 'circuit_worker.capacity', disposition: 'waiting', observed_at: '2026-08-22 10:05:10' },
   { id: 3, node_id: null, attempt: null, kind: 'review_continuation',
     detail: '{"from_run_id":88}', source: 'operator',
@@ -490,17 +489,16 @@ describe('CircuitsProbeTab', () => {
 
   it('reads the mesh\'s `circuit_run_capacity` from the mesh row, not from the circuit', async () => {
     // The admission copy comes from `meshRunCapacity` and `meshActiveRuns`
-    // (#1467 / #1475), NOT from the per-circuit `concurrency_limit`. Set
-    // a circuit-level cap of 1 and a mesh cap of 4 with only one admitted
-    // run — the queue row must reflect the mesh number (4) and the
-    // "spare capacity" wording (because we're under the cap, not full).
+    // (#1467 / #1475), NOT from the circuit row. Set a mesh cap of 4 with
+    // only one admitted run — the queue row must reflect the mesh number (4)
+    // and the "spare capacity" wording (because we're under the cap, not full).
     useMeshStore.setState({
       meshes: [{ ...MESH, circuit_run_capacity: 4 }],
       meshesById: new Map([[MESH.id, { ...MESH, circuit_run_capacity: 4 }]]),
       selectedMeshId: MESH.id,
     });
     mockBackend({
-      circuits: [{ ...CIRCUIT, concurrency_limit: 1 }],
+      circuits: [CIRCUIT],
       runs: [RUN_DONE, RUN_RUNNING],
       queue: [
         {
@@ -534,7 +532,6 @@ describe('CircuitsProbeTab', () => {
         meshId: 42,
         name: 'review-bot',
         description: '',
-        concurrencyLimit: 1,
         // The prompt is authored in the canvas editor's inspector now.
         initialPrompt: '',
         triggerKind: 'manual',
@@ -571,7 +568,7 @@ describe('CircuitsProbeTab', () => {
     });
   });
 
-  it('creates the issue-driven Autopilot review blueprint with two agent slots', async () => {
+  it('creates the issue-driven Autopilot review blueprint with its issue-label trigger', async () => {
     mockBackend();
     const user = userEvent.setup();
     openProbeDestination('circuits');
@@ -592,7 +589,6 @@ describe('CircuitsProbeTab', () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('create_circuit', expect.objectContaining({
         name: 'autopilot-review',
-        concurrencyLimit: 2,
         triggerKind: 'github_issue_label',
         triggerLabel: 'buildmesh:run',
         blueprint: 'issue_driven_autopilot_review',
@@ -994,16 +990,14 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
         step({ node_id: 'reviewer', status: 'pending_slot' }),
       ],
     };
-    // concurrency_limit 1 with a running step elsewhere on the circuit =>
-    // the circuit's own step budget is what's holding the reviewer back.
+    // A sibling run holding a running step must NOT change the explanation:
+    // ADR 0042 retired the per-circuit step budget, so only the agent lease
+    // can hold the reviewer back.
     const RUN_HOGGING: CircuitRunDetail = {
       run: { ...RUN_DONE.run, id: 22, state: 'running' },
       steps: [step({ node_id: 'implementer', status: 'running' })],
     };
-    mockBackend({
-      circuits: [{ ...CIRCUIT, concurrency_limit: 1 }],
-      runs: [RUN_QUEUED, RUN_HOGGING],
-    });
+    mockBackend({ runs: [RUN_QUEUED, RUN_HOGGING] });
     openProbeDestination('circuits');
 
     const activity = await screen.findByTestId('run-activity-21');
@@ -1012,21 +1006,9 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     // The raw scheduler token never reaches the user.
     expect(activity.textContent).not.toContain('pending_slot');
     expect(screen.getByTestId('run-reason-21').textContent).toBe(
-      'Waiting for a slot — this circuit runs one step at a time, and that slot is busy.'
+      "Waiting for a circuit agent slot — this run's agent lease, or the app-wide agent pool, has no free slot."
     );
-  });
-
-  it('attributes a queued step to the circuit agent lease when circuit slots are free', async () => {
-    const RUN_QUEUED: CircuitRunDetail = {
-      run: { ...RUN_DONE.run, id: 23, state: 'running' },
-      steps: [step({ node_id: 'implementer', status: 'pending_slot' })],
-    };
-    mockBackend({ circuits: [{ ...CIRCUIT, concurrency_limit: 2 }], runs: [RUN_QUEUED] });
-    openProbeDestination('circuits');
-
-    expect((await screen.findByTestId('run-reason-23')).textContent).toContain(
-      'waiting on a circuit agent slot'
-    );
+    expect(screen.getByTestId('run-reason-21').textContent).not.toMatch(/step slot/);
   });
 
   it('names the reviewer gate a run is parked on and keeps Approve working', async () => {
@@ -1738,12 +1720,11 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
     await listCircuitProbe(42, 10);
     expect(invoke).toHaveBeenLastCalledWith('list_circuit_probe', { meshId: 42, limit: 10 });
 
-    await createCircuit(42, 'n', 'd', 2, 'p');
+    await createCircuit(42, 'n', 'd', 'p');
     expect(invoke).toHaveBeenLastCalledWith('create_circuit', {
       meshId: 42,
       name: 'n',
       description: 'd',
-      concurrencyLimit: 2,
       initialPrompt: 'p',
       triggerKind: 'manual',
       triggerLabel: null,
@@ -1752,12 +1733,11 @@ describe('Autopilot Circuits IPC contract (ADR-0010 seam)', () => {
     });
 
     // Milestone-3 trigger vocabulary rides the same command (#1208).
-    await createCircuit(42, 'paced', '', 1, '', 'interval', undefined, 120);
+    await createCircuit(42, 'paced', '', '', 'interval', undefined, 120);
     expect(invoke).toHaveBeenLastCalledWith('create_circuit', {
       meshId: 42,
       name: 'paced',
       description: '',
-      concurrencyLimit: 1,
       initialPrompt: '',
       triggerKind: 'interval',
       triggerLabel: null,

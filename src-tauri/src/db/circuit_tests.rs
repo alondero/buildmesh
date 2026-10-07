@@ -83,8 +83,7 @@ fn review_blueprint_copy_is_manual_disabled_independent_and_has_no_transferred_r
     let mesh = create_mesh_inner(&conn, "blueprint", "/tmp/blueprint").unwrap();
     let original = sample_graph_json();
     let blueprint =
-        create_autopilot_circuit_inner(&conn, mesh.id, "Review Blueprint", "", 2, &original)
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "Review Blueprint", "", &original).unwrap();
     conn.execute(
         "UPDATE autopilot_circuits SET is_preset=1 WHERE id=?1",
         [blueprint.id],
@@ -95,7 +94,6 @@ fn review_blueprint_copy_is_manual_disabled_independent_and_has_no_transferred_r
     assert!(
         update_autopilot_circuit_graph_inner(&conn, blueprint.id, &sample_graph_json()).is_err()
     );
-    assert!(set_autopilot_circuit_concurrency_limit_inner(&conn, blueprint.id, 4).is_err());
     assert!(set_autopilot_circuit_enabled_inner(&conn, blueprint.id, true).is_err());
     assert!(
         delete_autopilot_circuit_locked(&mut conn, blueprint.id).is_err(),
@@ -168,7 +166,6 @@ fn copied_review_continuation_requires_the_frozen_review_contract() {
         mesh.id,
         "Review Blueprint",
         "",
-        2,
         &CircuitGraph::agent_review(None, None, 2).to_json().unwrap(),
     )
     .unwrap();
@@ -456,7 +453,6 @@ fn continued_review_dispatches_only_review_work_and_records_the_run_it_continues
         mesh.id,
         "PR review",
         "",
-        2,
         &original.to_json().unwrap(),
     )
     .unwrap();
@@ -606,7 +602,7 @@ fn circuit_run_pins_its_blueprint_before_later_edits() {
     let mesh = create_mesh_inner(&conn, "snapshot", "/tmp/snapshot").unwrap();
     let original = sample_graph_json();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "original", "", 1, &original).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "original", "", &original).unwrap();
     let id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:one", "{}").unwrap();
     conn.execute(
         "UPDATE autopilot_circuits SET graph_json=?1 WHERE id=?2",
@@ -989,7 +985,7 @@ fn circuit_failure_atomically_records_cleanup_and_releases_admission_lease() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "failure-cleanup", "/tmp/failure-cleanup").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cleanup", "", 2, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "cleanup", "", &sample_graph_json())
             .unwrap();
     let run =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cleanup", "{}").unwrap();
@@ -1385,7 +1381,6 @@ fn extending_failed_review_reuses_its_run_and_circuit_with_a_fresh_attempt() {
     let tick = advance(
         &mut view,
         &CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 2,
         }),
     );
@@ -1500,15 +1495,9 @@ fn extending_issue_review_replays_neither_implementation_nor_publication() {
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("ready-for-agent");
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "PR review",
-        "",
-        2,
-        &graph.to_json().unwrap(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", &graph.to_json().unwrap())
+            .unwrap();
     let run_id = create_circuit_run_locked(
         &mut conn,
         circuit.id,
@@ -1705,15 +1694,9 @@ fn failed_pr_review_continuation_preserves_scope_and_fences_cleanup() {
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let graph = CircuitGraph::issue_driven_autopilot_review("autopilot");
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "PR review",
-        "",
-        2,
-        &graph.to_json().unwrap(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "PR review", "", &graph.to_json().unwrap())
+            .unwrap();
     let old = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:7", r#"{"pr.number":"7","pr.url":"https://github.com/test/repo/pull/7","node.reviewer.output":"OLD REPORT"}"#).unwrap();
     assert!(review_recovery_inner(&conn, old, 1).is_err());
     let op = |node_id: &str, agent_node_id| CircuitStepOp {
@@ -1812,7 +1795,7 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let foreign =
-        create_autopilot_circuit_inner(&conn, other.id, "foreign", "", 1, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, other.id, "foreign", "", &sample_graph_json())
             .unwrap();
     assert!(
         create_node_circuit_run_locked(&mut conn, source.id, Some(foreign.id), 3, None)
@@ -1825,19 +1808,12 @@ fn node_circuit_rejects_other_mesh_and_nonmanual_blueprints() {
             interval_seconds: 60,
         },
     );
-    let timed = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "timed",
-        "",
-        1,
-        &interval.to_json().unwrap(),
-    )
-    .unwrap();
+    let timed =
+        create_autopilot_circuit_inner(&conn, mesh.id, "timed", "", &interval.to_json().unwrap())
+            .unwrap();
     assert!(create_node_circuit_run_locked(&mut conn, source.id, Some(timed.id), 3, None).is_err());
     let manual =
-        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", &sample_graph_json()).unwrap();
     let run =
         create_node_circuit_run_locked(&mut conn, source.id, Some(manual.id), 3, None).unwrap();
     assert_eq!(
@@ -2004,8 +1980,7 @@ fn node_review_ignores_ineligible_override_for_authored_circuit() {
     .unwrap();
     update_agent_node_status_inner(&conn, source.id, SessionStatus::Ready).unwrap();
     let manual =
-        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", 1, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "manual", "", &sample_graph_json()).unwrap();
     // Would be refused on the built-in preset path; the authored path
     // ignores the value entirely, so the run mints.
     let run = create_node_circuit_run_locked(
@@ -2122,14 +2097,12 @@ fn circuit_crud_round_trips_all_fields() {
         mesh.id,
         "nightly-sweep",
         "desc",
-        3,
         &sample_graph_json(),
     )
     .unwrap();
     assert_eq!(created.mesh_id, mesh.id);
     assert_eq!(created.name, "nightly-sweep");
     assert_eq!(created.description, "desc");
-    assert_eq!(created.concurrency_limit, 3);
     assert!(
         !created.enabled,
         "circuits default to disabled (draft-first, issue #1356)"
@@ -2168,15 +2141,9 @@ fn circuit_crud_round_trips_all_fields() {
 fn create_autopilot_circuit_is_draft_first_disabled() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-draft-mesh", "/tmp/circuit-draft").unwrap();
-    let created = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "still-authoring",
-        "",
-        1,
-        &sample_graph_json(),
-    )
-    .unwrap();
+    let created =
+        create_autopilot_circuit_inner(&conn, mesh.id, "still-authoring", "", &sample_graph_json())
+            .unwrap();
     assert!(!created.enabled);
 
     // Fresh-DB column default matches the INSERT (issue #1356).
@@ -2208,7 +2175,7 @@ fn create_autopilot_circuit_is_draft_first_disabled() {
 fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     // Issue #1209: the canvas editor's save seam. The whole graph_json
     // is replaced and round-trips back into the AST; other columns
-    // (name, enabled, concurrency_limit) are untouched.
+    // (name, enabled) are untouched.
     let conn = isolated_test_conn();
     let mesh = create_mesh_inner(
         &conn,
@@ -2217,7 +2184,7 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
     )
     .unwrap();
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "editable", "desc", 2, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "editable", "desc", &sample_graph_json())
             .unwrap();
 
     let new_graph = CircuitGraph {
@@ -2249,7 +2216,6 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.name, "editable");
-    assert_eq!(reloaded.concurrency_limit, 2);
     assert!(
         !reloaded.enabled,
         "graph save must not flip the draft-first enabled flag"
@@ -2264,78 +2230,6 @@ fn update_autopilot_circuit_graph_persists_a_new_blueprint() {
 }
 
 #[test]
-fn set_autopilot_circuit_concurrency_limit_persists_and_errors_on_missing() {
-    // The canvas editor's per-circuit step-slot control. Only
-    // `concurrency_limit` changes; every other column is untouched.
-    let conn = isolated_test_conn();
-    let mesh = create_mesh_inner(
-        &conn,
-        "circuit-set-concurrency-mesh",
-        "/tmp/circuit-set-concurrency",
-    )
-    .unwrap();
-    let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "tunable", "desc", 2, &sample_graph_json())
-            .unwrap();
-
-    set_autopilot_circuit_concurrency_limit_inner(&conn, created.id, 5).unwrap();
-    let reloaded = get_autopilot_circuit_inner(&conn, created.id)
-        .unwrap()
-        .unwrap();
-    assert_eq!(reloaded.concurrency_limit, 5);
-    assert_eq!(reloaded.name, "tunable");
-    assert_eq!(reloaded.description, "desc");
-    assert!(
-        !reloaded.enabled,
-        "a budget change must not flip the draft-first flag"
-    );
-
-    // A stale editor writing against a deleted circuit must error.
-    let missing = set_autopilot_circuit_concurrency_limit_inner(&conn, 999_999, 3);
-    assert!(missing.is_err());
-}
-
-#[test]
-fn update_circuit_concurrency_limit_clamps_by_blueprint_and_errors_on_missing() {
-    // Exercises the command's locked seam directly (not just its DB
-    // primitive): the blueprint floor must be applied and the returned row
-    // must report the clamped value.
-    let mut conn = isolated_test_conn();
-    let mesh = create_mesh_inner(
-        &conn,
-        "circuit-cmd-concurrency-mesh",
-        "/tmp/circuit-cmd-concurrency",
-    )
-    .unwrap();
-    let review_graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run")
-        .to_json()
-        .unwrap();
-    // Persist a 1-slot review circuit — the legacy state the floor exists to
-    // prevent. The command must clamp it up to 2 on the next write.
-    let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "review-loop", "", 1, &review_graph)
-            .unwrap();
-
-    let updated =
-        crate::commands::circuit::update_circuit_concurrency_limit_locked(&mut conn, created.id, 1)
-            .unwrap();
-    assert_eq!(updated.concurrency_limit, 2);
-    assert_eq!(
-        get_autopilot_circuit_inner(&conn, created.id)
-            .unwrap()
-            .unwrap()
-            .concurrency_limit,
-        2,
-        "the clamped value must be what the returned row reports"
-    );
-
-    // A stale editor writing against a deleted circuit must error.
-    let missing =
-        crate::commands::circuit::update_circuit_concurrency_limit_locked(&mut conn, 999_999, 3);
-    assert!(missing.is_err());
-}
-
-#[test]
 fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     let conn = isolated_test_conn();
     // Every app start runs `db::init` → `evolve_to` against the existing
@@ -2344,7 +2238,7 @@ fn circuits_persist_across_a_restart_equivalent_evolution_rerun() {
     // enabled circuit survives restarts.
     let mesh = create_mesh_inner(&conn, "circuit-persist-mesh", "/tmp/circuit-persist").unwrap();
     let created =
-        create_autopilot_circuit_inner(&conn, mesh.id, "survivor", "", 1, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "survivor", "", &sample_graph_json())
             .unwrap();
     set_autopilot_circuit_enabled_inner(&conn, created.id, true).unwrap();
 
@@ -2374,7 +2268,7 @@ fn run_and_step_ledger_records_status_outcome_and_timestamps() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-ledger-mesh", "/tmp/circuit-ledger").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "ledgered", "", 2, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "ledgered", "", &sample_graph_json())
             .unwrap();
 
     let run_id = create_circuit_run_locked(
@@ -2476,8 +2370,7 @@ fn pending_run_queue_is_oldest_first_and_can_be_reordered() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-queue-mesh", "/tmp/circuit-queue").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "queue", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "queue", "", &sample_graph_json()).unwrap();
 
     let first =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
@@ -2515,7 +2408,7 @@ fn pending_run_queue_supports_jump_to_edge_and_explicit_reorder() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-queue-edge", "/tmp/circuit-queue-edge").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "queue-edge", "", 2, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "queue-edge", "", &sample_graph_json())
             .unwrap();
 
     let first =
@@ -2602,15 +2495,9 @@ fn cancelling_a_missing_run_is_a_quiet_noop_not_an_error() {
         "/tmp/circuit-cancel-missing",
     )
     .unwrap();
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "cancel-missing",
-        "",
-        2,
-        &sample_graph_json(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "cancel-missing", "", &sample_graph_json())
+            .unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:gone", "{}").unwrap();
     // Single cancel of a live run works, second cancel of the now-terminal
@@ -2634,8 +2521,7 @@ fn batch_cancel_terminalises_every_run_in_one_transaction() {
     let mesh =
         create_mesh_inner(&conn, "circuit-batch-cancel", "/tmp/circuit-batch-cancel").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "batch", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "batch", "", &sample_graph_json()).unwrap();
     let first =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
     let second =
@@ -2661,15 +2547,9 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
     let mut conn = isolated_test_conn();
     let mesh =
         create_mesh_inner(&conn, "circuit-active-ledger", "/tmp/circuit-active-ledger").unwrap();
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "active ledger",
-        "",
-        2,
-        &sample_graph_json(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "active ledger", "", &sample_graph_json())
+            .unwrap();
 
     let older_active =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "active", "{}").unwrap();
@@ -2706,15 +2586,9 @@ fn circuit_ledger_keeps_older_active_runs_outside_the_history_limit() {
 fn review_preset_history_keeps_a_bounded_recovery_window() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "review-history", "/tmp/review-history").unwrap();
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "review history",
-        "",
-        2,
-        &sample_graph_json(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "review history", "", &sample_graph_json())
+            .unwrap();
     {
         // (using outer conn)
         conn.execute(
@@ -2756,7 +2630,6 @@ fn completed_review_verdict_needing_attention_stays_in_the_recovery_window() {
         mesh.id,
         "review attention",
         "",
-        2,
         &graph.to_json().unwrap(),
     )
     .unwrap();
@@ -2795,8 +2668,7 @@ fn cancelling_a_run_is_terminal_and_returns_only_helper_agents_for_cleanup() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cancel-mesh", "/tmp/circuit-cancel").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cancel", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "cancel", "", &sample_graph_json()).unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel", "{}").unwrap();
     set_circuit_run_state_inner(&conn, run_id, "running").unwrap();
@@ -2869,7 +2741,7 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cancel-race", "/tmp/circuit-cancel-race").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "cancel race", "", 2, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "cancel race", "", &sample_graph_json())
             .unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:cancel-race", "{}")
@@ -2907,15 +2779,9 @@ fn stale_worker_and_pause_writes_cannot_resurrect_a_cancelled_run() {
 fn circuit_agent_ownership_comes_from_the_step_ledger() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-owner-mesh", "/tmp/circuit-owner").unwrap();
-    let circuit = create_autopilot_circuit_inner(
-        &conn,
-        mesh.id,
-        "issue autopilot",
-        "",
-        2,
-        &sample_graph_json(),
-    )
-    .unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "issue autopilot", "", &sample_graph_json())
+            .unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "issue:42:run", "{}").unwrap();
     commit_circuit_advance_locked(
@@ -3004,7 +2870,7 @@ fn step_upsert_never_duplicates_a_node_row() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-upsert-mesh", "/tmp/circuit-upsert").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "dup", "", 1, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "dup", "", &sample_graph_json()).unwrap();
     let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "", "{}").unwrap();
 
     for _ in 0..3 {
@@ -3040,8 +2906,7 @@ fn deleting_a_circuit_explicitly_removes_runs_and_steps() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cascade-mesh", "/tmp/circuit-cascade").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "doomed", "", 1, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "doomed", "", &sample_graph_json()).unwrap();
     let run_id = create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "", "{}").unwrap();
     commit_circuit_advance_locked(
         &mut conn,
@@ -3099,7 +2964,6 @@ fn deleting_a_mesh_removes_its_circuits_runs_and_steps() {
         mesh.id,
         "doomed-with-mesh",
         "",
-        1,
         &sample_graph_json(),
     )
     .unwrap();
@@ -3147,12 +3011,12 @@ fn concurrency_counters_count_only_running_work() {
     let mut conn = isolated_test_conn();
     let mesh_a = create_mesh_inner(&conn, "circuit-count-a", "/tmp/circuit-count-a").unwrap();
     let mesh_b = create_mesh_inner(&conn, "circuit-count-b", "/tmp/circuit-count-b").unwrap();
-    let c1 = create_autopilot_circuit_inner(&conn, mesh_a.id, "one", "", 4, &sample_graph_json())
-        .unwrap();
-    let c2 = create_autopilot_circuit_inner(&conn, mesh_a.id, "two", "", 4, &sample_graph_json())
-        .unwrap();
-    let cb = create_autopilot_circuit_inner(&conn, mesh_b.id, "bee", "", 4, &sample_graph_json())
-        .unwrap();
+    let c1 =
+        create_autopilot_circuit_inner(&conn, mesh_a.id, "one", "", &sample_graph_json()).unwrap();
+    let c2 =
+        create_autopilot_circuit_inner(&conn, mesh_a.id, "two", "", &sample_graph_json()).unwrap();
+    let cb =
+        create_autopilot_circuit_inner(&conn, mesh_b.id, "bee", "", &sample_graph_json()).unwrap();
 
     // `count_active_circuit_agent_nodes_total` is global. With the
     // per-test in-memory DB (issue #1691), this test's rows are the
@@ -3239,8 +3103,6 @@ fn concurrency_counters_count_only_running_work() {
     )
     .unwrap();
 
-    assert_eq!(count_running_circuit_steps_inner(&conn, c1.id).unwrap(), 1);
-    assert_eq!(count_running_circuit_steps_inner(&conn, c2.id).unwrap(), 1);
     assert_eq!(
         count_active_circuit_agent_nodes_total_inner(&conn,).unwrap(),
         active_before + 3,
@@ -3263,11 +3125,11 @@ fn count_active_circuit_runs_includes_running_paused_only() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-run-count", "/tmp/circuit-run-count").unwrap();
     let c1 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", &sample_graph_json()).unwrap();
     let c2 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", &sample_graph_json()).unwrap();
     let c3 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", &sample_graph_json()).unwrap();
 
     // One pending, one running, one paused — only the latter two count.
     let r_pending = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
@@ -3305,11 +3167,11 @@ fn count_active_circuit_runs_excludes_terminal_states() {
     )
     .unwrap();
     let c1 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", &sample_graph_json()).unwrap();
     let c2 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c2", "", &sample_graph_json()).unwrap();
     let c3 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c3", "", &sample_graph_json()).unwrap();
 
     let r_done = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     commit_circuit_advance_locked(&mut conn, r_done, Some("completed"), None, &[]).unwrap();
@@ -3360,7 +3222,7 @@ fn commit_circuit_advance_terminal_state_is_idempotent_under_double_signal() {
     )
     .unwrap();
     let c1 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", &sample_graph_json()).unwrap();
     let r1 = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     set_circuit_run_state_inner(&conn, r1, "running").unwrap();
 
@@ -3396,7 +3258,7 @@ fn commit_circuit_advance_terminal_state_skips_already_terminal_runs() {
     )
     .unwrap();
     let c1 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", 4, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "c1", "", &sample_graph_json()).unwrap();
     let r1 = create_circuit_run_locked(&mut conn, c1.id, mesh.id, "", "{}").unwrap();
     set_circuit_run_state_inner(&conn, r1, "failed").unwrap();
 
@@ -3419,7 +3281,7 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-active-mesh", "/tmp/circuit-active").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "watched", "", 3, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "watched", "", &sample_graph_json())
             .unwrap();
     set_autopilot_circuit_enabled_inner(&conn, circuit.id, true).unwrap();
 
@@ -3439,7 +3301,6 @@ fn active_run_listing_joins_circuit_fields_and_skips_terminal_runs() {
     assert_eq!(active[0].run.id, live);
     assert_eq!(active[0].run.state, "pending");
     assert_eq!(active[0].circuit_name, "watched");
-    assert_eq!(active[0].circuit_concurrency_limit, 3);
     assert!(active[0].circuit_enabled);
     assert_eq!(
         CircuitGraph::from_json(&active[0].circuit_graph_json)
@@ -3458,9 +3319,9 @@ fn duplicate_trigger_identity_replays_the_existing_run() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-dedupe-mesh", "/tmp/circuit-dedupe").unwrap();
     let c1 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "one", "", 1, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "one", "", &sample_graph_json()).unwrap();
     let c2 =
-        create_autopilot_circuit_inner(&conn, mesh.id, "two", "", 1, &sample_graph_json()).unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "two", "", &sample_graph_json()).unwrap();
 
     let first =
         create_circuit_run_locked(&mut conn, c1.id, mesh.id, "issue:42:buildmesh:run", "{}")
@@ -3492,13 +3353,11 @@ fn enabled_circuits_listing_spans_meshes_and_skips_disabled() {
     let mesh_a = create_mesh_inner(&conn, "circuit-enabled-a", "/tmp/circuit-enabled-a").unwrap();
     let mesh_b = create_mesh_inner(&conn, "circuit-enabled-b", "/tmp/circuit-enabled-b").unwrap();
     let on_a =
-        create_autopilot_circuit_inner(&conn, mesh_a.id, "on-a", "", 1, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh_a.id, "on-a", "", &sample_graph_json()).unwrap();
     let on_b =
-        create_autopilot_circuit_inner(&conn, mesh_b.id, "on-b", "", 1, &sample_graph_json())
-            .unwrap();
-    let off = create_autopilot_circuit_inner(&conn, mesh_a.id, "off", "", 1, &sample_graph_json())
-        .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh_b.id, "on-b", "", &sample_graph_json()).unwrap();
+    let off =
+        create_autopilot_circuit_inner(&conn, mesh_a.id, "off", "", &sample_graph_json()).unwrap();
     set_autopilot_circuit_enabled_inner(&conn, on_a.id, true).unwrap();
     set_autopilot_circuit_enabled_inner(&conn, on_b.id, true).unwrap();
 
@@ -3524,8 +3383,7 @@ fn latest_run_created_at_tracks_the_newest_run_and_none_before_any() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-cooldown-mesh", "/tmp/circuit-cooldown").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "paced", "", 1, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "paced", "", &sample_graph_json()).unwrap();
 
     assert!(
         latest_circuit_run_created_at_inner(&conn, circuit.id)
@@ -3765,7 +3623,7 @@ fn paused_runs_stay_active_and_counters_count_them() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-pause-mesh", "/tmp/circuit-pause").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "pausable", "", 4, &sample_graph_json())
+        create_autopilot_circuit_inner(&conn, mesh.id, "pausable", "", &sample_graph_json())
             .unwrap();
 
     // A running step on a RUNNING run occupies one slot.
@@ -3787,7 +3645,7 @@ fn paused_runs_stay_active_and_counters_count_them() {
     )
     .unwrap();
 
-    // Pause the run: it must stay in the active list and keep counting.
+    // Pause the run: it must stay in the active list.
     // With the per-test in-memory DB (issue #1691), the only run visible
     // to this test is `r1`; the circuit-scoped filter is belt-and-suspenders.
     set_circuit_run_state_inner(&conn, r1, "paused").unwrap();
@@ -3802,10 +3660,6 @@ fn paused_runs_stay_active_and_counters_count_them() {
         "a paused run stays active (it resumes later)"
     );
     assert_eq!(mine[0].run.state, "paused");
-    assert_eq!(
-        count_running_circuit_steps_inner(&conn, circuit.id).unwrap(),
-        1
-    );
 
     // Resume flips the state back through the same setter.
     set_circuit_run_state_inner(&conn, r1, "running").unwrap();
@@ -3822,8 +3676,7 @@ fn fresh_attempt_ops_clear_the_previous_round_and_bump_attempt() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-retry-mesh", "/tmp/circuit-retry").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "flaky", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "flaky", "", &sample_graph_json()).unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
 
@@ -3884,8 +3737,7 @@ fn explicit_error_clear_works_for_running_and_completed_steps() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "classifier recovery", "/tmp/classifier-recovery").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", &sample_graph_json()).unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
     let mut op = CircuitStepOp {
@@ -3926,8 +3778,7 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
     let mut conn = isolated_test_conn();
     let mesh = create_mesh_inner(&conn, "circuit-gate-mesh", "/tmp/circuit-gate").unwrap();
     let circuit =
-        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", 2, &sample_graph_json())
-            .unwrap();
+        create_autopilot_circuit_inner(&conn, mesh.id, "gated", "", &sample_graph_json()).unwrap();
     let run_id =
         create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:1", "{}").unwrap();
 

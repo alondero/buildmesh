@@ -37,90 +37,61 @@ pub(crate) mod migrations;
 #[cfg(test)]
 pub mod test_support;
 
-pub mod mesh;
 pub mod agent_node;
-pub mod warm_pool;
 pub mod auth;
-pub mod drive;
-pub mod semantic_turns;
 pub mod circuit;
+pub mod drive;
+pub mod mesh;
+pub mod semantic_turns;
+pub mod warm_pool;
 
-pub use mesh::*;
 pub use agent_node::*;
-pub use warm_pool::*;
 pub use auth::*;
-pub use drive::*;
-pub use semantic_turns::*;
 pub use circuit::*;
+pub use drive::*;
+pub use mesh::*;
+pub use semantic_turns::*;
+pub use warm_pool::*;
 
 pub(crate) use auth::{COORDINATOR_DRIVE_TOKEN_KEY, COORDINATOR_READ_TOKEN_KEY};
 
 #[allow(unused_imports)]
 pub(crate) use mesh::{
-    get_mesh_by_id_inner,
-    get_mesh_scratchpad_inner,
-    set_mesh_scratchpad_inner,
-    set_mesh_sandbox_inner,
-    set_mesh_worktree_directory_inner,
+    get_mesh_by_id_inner, get_mesh_scratchpad_inner, set_mesh_sandbox_inner,
+    set_mesh_scratchpad_inner, set_mesh_worktree_directory_inner,
 };
 
 #[allow(unused_imports)]
 pub(crate) use agent_node::{
-    get_agent_node_by_id_inner,
-    adopt_manual_pool_slug_with_path_inner,
-    set_agent_node_pinned_inner,
-    toggle_agent_node_pinned_inner,
-    update_agent_node_signal_health_inner,
-    mark_agent_node_signal_unverified_inner,
-    clear_cli_session_id_inner,
-    agent_turn_stamp,
-    set_cli_session_id_if_missing_inner,
-    list_suspended_nodes_inner,
-    recover_suspended_cli_session_id_inner,
-    recover_live_cli_session_id,
-    recover_live_cli_session_id_inner,
-    cli_session_id_present_inner,
-    enqueue_worktree_removal_inner,
-    list_pending_worktree_removals_inner,
-    delete_pending_worktree_removal_inner,
-    delete_agent_node_enqueueing_removal_inner
+    adopt_manual_pool_slug_with_path_inner, agent_turn_stamp, clear_cli_session_id_inner,
+    cli_session_id_present_inner, delete_agent_node_enqueueing_removal_inner,
+    delete_pending_worktree_removal_inner, enqueue_worktree_removal_inner,
+    get_agent_node_by_id_inner, list_pending_worktree_removals_inner, list_suspended_nodes_inner,
+    mark_agent_node_signal_unverified_inner, recover_live_cli_session_id,
+    recover_live_cli_session_id_inner, recover_suspended_cli_session_id_inner,
+    set_agent_node_pinned_inner, set_cli_session_id_if_missing_inner,
+    toggle_agent_node_pinned_inner, update_agent_node_signal_health_inner,
 };
 
 #[cfg(test)]
 pub(crate) use agent_node::{
-    adopt_manual_pool_slug_inner,
-    create_agent_node_inner,
-    update_agent_node_positions_batch_inner,
+    adopt_manual_pool_slug_inner, create_agent_node_inner, update_agent_node_positions_batch_inner,
 };
 
 #[cfg(test)]
-pub(crate) use mesh::{
-    create_mesh_inner,
-    delete_mesh_inner,
-    update_mesh_positions_batch_inner,
-};
+pub(crate) use mesh::{create_mesh_inner, delete_mesh_inner, update_mesh_positions_batch_inner};
 
 #[allow(unused_imports)]
 pub(crate) use warm_pool::{
-    insert_warm_worktree_inner,
-    mark_warm_worktree_available_inner,
-    mark_warm_worktree_refreshing_inner,
-    list_available_warm_for_mesh_inner,
-    claim_warm_entry_for_mesh_inner,
-    delete_warm_worktree_inner,
-    delete_warm_worktrees_for_mesh_inner,
-    list_warm_paths_for_mesh_inner,
-    list_warm_paths_for_mesh_droppable_inner,
-    list_warm_worktrees_to_reconcile_inner,
-    delete_orphaned_claimed_warm_worktrees_inner,
-    count_available_warm_for_mesh_inner,
-    count_droppable_warm_entries_for_mesh_inner,
-    list_oldest_warm_entries_for_mesh_inner,
-    list_all_droppable_warm_entries_for_mesh_inner,
-    is_warm_pool_path_inner,
-    warm_pool_claims_path_inner,
-    list_worktree_enabled_meshes_for_warm_inner,
-    batch_delete_warm_worktrees_by_id,
+    batch_delete_warm_worktrees_by_id, claim_warm_entry_for_mesh_inner,
+    count_available_warm_for_mesh_inner, count_droppable_warm_entries_for_mesh_inner,
+    delete_orphaned_claimed_warm_worktrees_inner, delete_warm_worktree_inner,
+    delete_warm_worktrees_for_mesh_inner, insert_warm_worktree_inner, is_warm_pool_path_inner,
+    list_all_droppable_warm_entries_for_mesh_inner, list_available_warm_for_mesh_inner,
+    list_oldest_warm_entries_for_mesh_inner, list_warm_paths_for_mesh_droppable_inner,
+    list_warm_paths_for_mesh_inner, list_warm_worktrees_to_reconcile_inner,
+    list_worktree_enabled_meshes_for_warm_inner, mark_warm_worktree_available_inner,
+    mark_warm_worktree_refreshing_inner, warm_pool_claims_path_inner,
 };
 
 pub(crate) mod legacy_retirement;
@@ -164,14 +135,13 @@ mod circuit_prune_tests;
 #[cfg(test)]
 mod seam_tests;
 
-use rusqlite::{Connection, OpenFlags};
-pub use rusqlite::Result as SqlResult;
 use once_cell::sync::OnceCell;
+pub use rusqlite::Result as SqlResult;
+use rusqlite::{Connection, OpenFlags};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-
 
 // Eight handles cover the UI, HTTP, and worker polling fan-out while keeping
 // SQLite's file-descriptor and cache footprint bounded.
@@ -235,7 +205,10 @@ impl ReaderPool {
         loop {
             if let Some(conn) = available.pop() {
                 if started.elapsed() >= Duration::from_millis(10) {
-                    tracing::debug!(elapsed_ms = started.elapsed().as_millis(), "database reader pool contention ended");
+                    tracing::debug!(
+                        elapsed_ms = started.elapsed().as_millis(),
+                        "database reader pool contention ended"
+                    );
                 }
                 return Ok(ReadConnection {
                     pool: self,
@@ -244,7 +217,10 @@ impl ReaderPool {
             }
             let wait = self.ready.wait_for(&mut available, READER_CHECKOUT_TIMEOUT);
             if wait.timed_out() {
-                tracing::warn!(elapsed_ms = started.elapsed().as_millis(), "database reader pool checkout timed out");
+                tracing::warn!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "database reader pool checkout timed out"
+                );
                 return Err(rusqlite::Error::InvalidQuery);
             }
         }
@@ -276,11 +252,12 @@ impl Drop for ReadConnection<'_> {
                 if conn.execute_batch("ROLLBACK").is_ok() && conn.is_autocommit() {
                     conn
                 } else {
-                    match Connection::open_with_flags(&self.pool.db_path, self.pool.flags)
-                        .and_then(|replacement| {
+                    match Connection::open_with_flags(&self.pool.db_path, self.pool.flags).and_then(
+                        |replacement| {
                             apply_connection_pragmas(&replacement, true)?;
                             Ok(replacement)
-                        }) {
+                        },
+                    ) {
                         Ok(replacement) => replacement,
                         Err(error) => {
                             tracing::error!(%error, "failed to recycle database reader connection");
@@ -496,7 +473,9 @@ fn open_writer(db_path: &Path) -> SqlResult<Connection> {
 
 /// Initialize the database
 pub fn init(db_path: &Path) -> SqlResult<()> {
-    let _init_guard = INIT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _init_guard = INIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if DB.get().is_some() {
         return Ok(());
     }
@@ -553,7 +532,7 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
-        "
+        ",
     )?;
 
     // Create the baseline tables (IF NOT EXISTS so they're idempotent). For
@@ -743,6 +722,11 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
         --   * autopilot_circuit_run_agent_leases — one durable reservation
         --     per live run; its slots keep host-cap accounting independent
         --     of transient step/agent associations.
+        --
+        -- `autopilot_circuits.concurrency_limit` is retired (ADR 0042): the
+        -- per-circuit step budget no longer exists, so nothing reads or
+        -- writes it and new rows take the default. The column stays so an
+        -- older build can still open this database; do not reuse the name.
         CREATE TABLE IF NOT EXISTS autopilot_circuits (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             mesh_id INTEGER NOT NULL REFERENCES meshes(id) ON DELETE CASCADE,
@@ -961,7 +945,6 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
 // The always-run idempotent step runs every launch; the version-gated
 // pass no longer has its own duplicate call.
 
-
 // `migrate_projects_layout` removed (issue #249 — pre-v6 dead code).
 // The legacy `projects` table has not existed since v6; this helper
 // only ever ran via the version-gated `migrate_if_needed` ladder
@@ -1002,7 +985,6 @@ pub(crate) fn create_canonical_indexes_after_evolution(conn: &Connection) -> Sql
 // `WHERE provider = 'minimax'` guard makes it idempotent and the
 // registry's always-run pass handles DBs that bypassed the version
 // gate (the v18→v19 bug class the doc-comment warned about).
-
 
 fn get() -> &'static Database {
     // Per-test isolation (issue #2048): a test that called

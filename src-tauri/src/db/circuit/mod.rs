@@ -39,14 +39,13 @@ pub(crate) use leases::{
 #[cfg(test)]
 pub(crate) use ledger::{
     cancel_circuit_run_locked, cancel_circuit_runs_locked, clear_circuit_step_agent_node_inner,
-    commit_circuit_advance_locked, count_active_circuit_runs_inner,
-    count_running_circuit_steps_inner, create_autopilot_circuit_inner, create_circuit_run_locked,
-    create_node_circuit_run_locked, delete_autopilot_circuit_locked, get_autopilot_circuit_inner,
-    get_circuit_run_inner, latest_circuit_run_created_at_inner, list_active_circuit_runs_inner,
-    list_autopilot_circuits_inner, list_circuit_run_ids_for_cleanup_inner,
-    list_circuit_run_steps_inner, list_circuit_runs_inner, list_circuit_trigger_identities_inner,
-    list_circuits_with_recent_runs_inner, list_enabled_circuits_inner,
-    set_autopilot_circuit_enabled_inner, set_circuit_run_state_inner,
+    commit_circuit_advance_locked, count_active_circuit_runs_inner, create_autopilot_circuit_inner,
+    create_circuit_run_locked, create_node_circuit_run_locked, delete_autopilot_circuit_locked,
+    get_autopilot_circuit_inner, get_circuit_run_inner, latest_circuit_run_created_at_inner,
+    list_active_circuit_runs_inner, list_autopilot_circuits_inner,
+    list_circuit_run_ids_for_cleanup_inner, list_circuit_run_steps_inner, list_circuit_runs_inner,
+    list_circuit_trigger_identities_inner, list_circuits_with_recent_runs_inner,
+    list_enabled_circuits_inner, set_autopilot_circuit_enabled_inner, set_circuit_run_state_inner,
     set_circuit_step_agent_node_with_parent_inner, transition_circuit_run_state_inner,
     update_autopilot_circuit_graph_inner,
 };

@@ -42,15 +42,11 @@ fn admission_preserves_supplied_queue_order_and_paused_reservations() {
             assert!(transition.run_state_changed);
             let transition = advance(
                 run,
-                &observe_capacity_with(
-                    1,
-                    CapacityCounts {
-                        circuit_running: 0,
-                        reserved_for_run: 1,
-                        owned_by_run: 0,
-                        global_free_slots: 1,
-                    },
-                ),
+                &observe_capacity_with(CapacityCounts {
+                    reserved_for_run: 1,
+                    owned_by_run: 0,
+                    global_free_slots: 1,
+                }),
             );
             assert!(transition
                 .step_writes
@@ -79,30 +75,24 @@ fn admission_preserves_supplied_queue_order_and_paused_reservations() {
 #[test]
 fn capacity_tick_uses_lease_and_live_pool_and_never_restarts_cancelled_work() {
     let counts = CapacityCounts {
-        circuit_running: 1,
         reserved_for_run: 3,
         owned_by_run: 1,
         global_free_slots: 1,
     };
     assert!(matches!(
-        observe_capacity_with(3, counts),
+        observe_capacity_with(counts),
         CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 2,
             agent_free_slots: 1,
         })
     ));
     let mut run = view(spawn(), RunState::Running, StepStatus::Queued, None);
     let transition = advance(
         &mut run,
-        &observe_capacity_with(
-            1,
-            CapacityCounts {
-                circuit_running: i64::MAX,
-                reserved_for_run: 0,
-                owned_by_run: 0,
-                global_free_slots: 0,
-            },
-        ),
+        &observe_capacity_with(CapacityCounts {
+            reserved_for_run: 0,
+            owned_by_run: 0,
+            global_free_slots: 0,
+        }),
     );
     assert!(transition.effects.is_empty());
     assert_eq!(run.step("step").unwrap().status, StepStatus::Queued);
@@ -127,7 +117,6 @@ fn capacity_tick_uses_lease_and_live_pool_and_never_restarts_cancelled_work() {
     let transition = advance(
         &mut run,
         &CircuitEvent::Tick(Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 1,
         }),
     );

@@ -104,7 +104,6 @@ impl Observations for Script {
     fn capacity(&mut self) -> CircuitEvent {
         self.calls.push("capacity");
         CircuitEvent::Tick(crate::circuit::stepper::Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         })
     }

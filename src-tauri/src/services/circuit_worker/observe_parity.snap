@@ -3,7 +3,6 @@ pending
     Triggered,
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -19,7 +18,6 @@ uncertain spawn
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -43,7 +41,6 @@ missing agent
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -64,7 +61,6 @@ lookup failure
 [
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -88,7 +84,6 @@ lost agent
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -116,7 +111,6 @@ failed agent
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -168,7 +162,6 @@ working agent
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -224,7 +217,6 @@ acknowledged prompt
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -283,7 +275,6 @@ uncertain prompt
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -337,7 +328,6 @@ ack lookup failure
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -365,7 +355,6 @@ mid-work reviewer
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -398,7 +387,6 @@ needs input
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -422,7 +410,6 @@ classifier outage
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -441,7 +428,6 @@ uncertain continuation
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -469,7 +455,6 @@ retry continuation
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -496,7 +481,6 @@ approvals
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -521,7 +505,6 @@ verification
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -547,7 +530,6 @@ remote recheck
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -561,7 +543,6 @@ cleanup failure retry
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -572,7 +553,6 @@ cleanup acknowledged
 [
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -614,7 +594,6 @@ paused
     },
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),
@@ -625,7 +604,6 @@ cancelled
 [
     Tick(
         Capacity {
-            circuit_free_slots: 1,
             agent_free_slots: 2,
         },
     ),

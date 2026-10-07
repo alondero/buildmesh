@@ -81,7 +81,6 @@ const CIRCUIT: AutopilotCircuit = {
   name: 'nightly-sweep',
   description: '',
   enabled: true,
-  concurrency_limit: 1,
   graph_json: JSON.stringify({
     version: 1,
     nodes: [
@@ -158,7 +157,6 @@ describe('CircuitFlowEditor', () => {
     expect(screen.getByText('Read-only Review Blueprint')).toBeTruthy();
     expect(screen.queryByTestId('editor-save')).toBeNull();
     expect(screen.queryByTestId('circuit-palette')).toBeNull();
-    expect((screen.getByTestId('editor-step-slots') as HTMLSelectElement).disabled).toBe(true);
     fireEvent.click(await screen.findByTestId('circuit-node-spawn'));
     const prompt=await screen.findByTestId('inspector-prompt');
     expect(prompt.closest('fieldset')?.disabled).toBe(true);
@@ -210,108 +208,12 @@ describe('CircuitFlowEditor', () => {
     expect(graph.edges).toHaveLength(2);
   });
 
-  it('saves the step-slot budget and shows the persisted value', async () => {
-    vi.mocked(invoke).mockImplementation(async (cmd, args) =>
-      cmd === 'update_circuit_concurrency_limit'
-        ? { ...CIRCUIT, concurrency_limit: (args as { concurrencyLimit: number }).concurrencyLimit }
-        : undefined
-    );
+  it('offers no per-circuit step budget: run capacity is the only concurrency control', () => {
+    // ADR 0042 retired the Step slots select and its IPC; nothing in the editor
+    // header may let a circuit throttle its own sibling runs again.
     renderEditor();
-    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
-    // CIRCUIT's graph carries no blueprint → floor of 1, shared ceiling 16.
-    expect(select.value).toBe('1');
-    expect(Array.from(select.options).map((o) => Number(o.value))).toEqual(
-      Array.from({ length: 16 }, (_, i) => i + 1)
-    );
-
-    fireEvent.change(select, { target: { value: '4' } });
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_circuit_concurrency_limit', {
-        circuitId: 7,
-        concurrencyLimit: 4,
-      });
-    });
-    // The control must actually show the new budget — not just fire the IPC.
-    await waitFor(() => expect(select.value).toBe('4'));
-  });
-
-  it('adopts the row the command returns instead of the requested value', async () => {
-    // The backend clamps to the blueprint floor and returns the persisted
-    // row; the control must trust that, not its optimistic selection.
-    vi.mocked(invoke).mockResolvedValue({ ...CIRCUIT, concurrency_limit: 2 });
-    renderEditor();
-    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
-
-    fireEvent.change(select, { target: { value: '4' } });
-    await waitFor(() => expect(select.value).toBe('2'));
-  });
-
-  it('restores the previous budget and surfaces a failed update inline', async () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      vi.mocked(invoke).mockRejectedValue('invalid concurrency limit');
-      renderEditor();
-      const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
-      expect(select.value).toBe('1');
-
-      fireEvent.change(select, { target: { value: '4' } });
-      expect(await screen.findByTestId('editor-error')).toBeTruthy();
-      // Rolled back, not left showing the rejected selection.
-      await waitFor(() => expect(select.value).toBe('1'));
-    } finally {
-      consoleSpy.mockRestore();
-    }
-  });
-
-  it('offers only the review blueprint floor of 2 on a review circuit', async () => {
-    const reviewCircuit: AutopilotCircuit = {
-      ...CIRCUIT,
-      concurrency_limit: 2,
-      graph_json: JSON.stringify({
-        version: 3,
-        blueprint: 'issue_driven_autopilot_review',
-        nodes: [{ id: 'trigger', type: { type: 'github_issue_label', label: 'run' } }],
-        edges: [],
-      }),
-    };
-    render(<CircuitFlowEditor circuit={reviewCircuit} runs={[]} onClose={() => {}} />);
-    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
-    // A 1-slot review circuit would deadlock its reviewer, so 1 is not offered.
-    expect(select.options[0].value).toBe('2');
-    expect(select.value).toBe('2');
-  });
-
-  it('keeps a below-floor persisted budget visible and selectable', async () => {
-    // A review circuit persisted before the 2-slot floor existed. A
-    // controlled <select> whose value has no matching option would make the
-    // DOM fall back to the first option — misreporting the budget and
-    // swallowing clicks on it. The real value must stay in the list.
-    const legacyReview: AutopilotCircuit = {
-      ...CIRCUIT,
-      concurrency_limit: 1,
-      graph_json: JSON.stringify({
-        version: 3,
-        blueprint: 'issue_driven_autopilot_review',
-        nodes: [{ id: 'trigger', type: { type: 'github_issue_label', label: 'run' } }],
-        edges: [],
-      }),
-    };
-    vi.mocked(invoke).mockResolvedValue({ ...legacyReview, concurrency_limit: 2 });
-    render(<CircuitFlowEditor circuit={legacyReview} runs={[]} onClose={() => {}} />);
-    const select = (await screen.findByTestId('editor-step-slots')) as HTMLSelectElement;
-
-    expect(select.value).toBe('1');
-    expect(select.options[0].value).toBe('1');
-    expect(select.options[0].textContent).toContain('below minimum');
-
-    fireEvent.change(select, { target: { value: '2' } });
-    await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('update_circuit_concurrency_limit', {
-        circuitId: 7,
-        concurrencyLimit: 2,
-      });
-    });
-    await waitFor(() => expect(select.value).toBe('2'));
+    expect(screen.queryByTestId('editor-step-slots')).toBeNull();
+    expect(screen.queryByText('Step slots')).toBeNull();
   });
 
   it('exposes named outcome handles on gate nodes', async () => {

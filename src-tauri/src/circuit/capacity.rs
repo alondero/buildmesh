@@ -1,10 +1,11 @@
 //! Single Circuit capacity policy (issue #1660, extends ADR-0028).
 //!
-//! Admission (`circuit_run_capacity`), per-circuit step scheduling
-//! (`concurrency_limit`), and the optional app-wide Autopilot pool all
-//! live here. The worker observes live counts then calls these helpers;
-//! the UI explains the same verdict via the generated [`CapacityBind`]
-//! type. Limits are unchanged from ADR-0028.
+//! Admission (`circuit_run_capacity`), each run's agent lease, and the
+//! optional app-wide Autopilot pool all live here. The worker observes live
+//! counts then calls these helpers; the UI explains the same verdict via the
+//! generated [`CapacityBind`] type. There is no per-circuit step budget
+//! (ADR-0042 retired it): within an admitted run, steps are gated by DAG
+//! eligibility plus the agent lease.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,15 +14,13 @@ use super::stepper::Capacity;
 use super::vocabulary::RunState;
 
 /// Which budget is binding a parked run or step. The UI renders this
-/// verdict; it must not invent a fourth budget.
+/// verdict; it must not invent a third budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "CapacityBind.ts")]
 #[serde(rename_all = "snake_case")]
 pub enum CapacityBind {
     /// Mesh `circuit_run_capacity` — pending runs wait here.
     MeshRunAdmission,
-    /// Per-circuit `concurrency_limit` — steps park as `pending_slot`.
-    CircuitStepSlots,
     /// The run's durable SpawnAgentNode lease, optionally bounded by the
     /// app-wide Autopilot process pool.
     CircuitAgentLease,
@@ -46,17 +45,6 @@ pub fn pending_run_bind(active_runs: i64, mesh_run_capacity: i32) -> Option<Capa
         None
     } else {
         Some(CapacityBind::MeshRunAdmission)
-    }
-}
-
-/// Why a queued step is parked. Matches the Probe copy: a saturated
-/// per-circuit step budget binds first; otherwise the agent lease (or
-/// optional host pool) is the remaining constraint.
-pub fn queued_step_bind(concurrency_limit: i64, running_steps: i64) -> CapacityBind {
-    if concurrency_limit > 0 && running_steps >= concurrency_limit {
-        CapacityBind::CircuitStepSlots
-    } else {
-        CapacityBind::CircuitAgentLease
     }
 }
 
@@ -101,18 +89,10 @@ pub fn global_agent_reservation_fits(
 }
 
 /// Compose a Tick snapshot from already-observed counters. Fail-closed
-/// callers pass `i64::MAX` running-steps / `0` global-free when a count
-/// read fails.
-pub fn tick_capacity(
-    concurrency_limit: i64,
-    circuit_running: i64,
-    reserved_for_run: i64,
-    owned_by_run: i64,
-    global_free_slots: i64,
-) -> Capacity {
+/// callers pass `0` global-free when a count read fails.
+pub fn tick_capacity(reserved_for_run: i64, owned_by_run: i64, global_free_slots: i64) -> Capacity {
     let lease_free = reserved_for_run.saturating_sub(owned_by_run);
     Capacity {
-        circuit_free_slots: concurrency_limit - circuit_running,
         agent_free_slots: global_free_slots.min(lease_free),
     }
 }
@@ -137,22 +117,13 @@ mod tests {
     }
 
     #[test]
-    fn queued_step_bind_prefers_step_slots_then_agent_lease() {
-        assert_eq!(queued_step_bind(1, 1), CapacityBind::CircuitStepSlots);
-        assert_eq!(queued_step_bind(2, 2), CapacityBind::CircuitStepSlots);
-        assert_eq!(queued_step_bind(2, 1), CapacityBind::CircuitAgentLease);
-        assert_eq!(queued_step_bind(0, 0), CapacityBind::CircuitAgentLease);
-    }
-
-    #[test]
     fn tick_capacity_uses_the_tighter_of_lease_and_global_pool() {
-        let cap = tick_capacity(4, 1, 3, 1, 1);
-        assert_eq!(cap.circuit_free_slots, 3);
+        let cap = tick_capacity(3, 1, 1);
         assert_eq!(
             cap.agent_free_slots, 1,
             "global free (1) tighter than lease free (2)"
         );
-        let cap = tick_capacity(4, 1, 3, 2, 9);
+        let cap = tick_capacity(3, 2, 9);
         assert_eq!(
             cap.agent_free_slots, 1,
             "lease free (1) tighter than global (9)"

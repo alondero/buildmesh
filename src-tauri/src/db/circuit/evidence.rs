@@ -1340,15 +1340,16 @@ pub(super) fn record_wait_changes(
                 ).optional()?,
                 None => None,
             };
-            // A freed window (`circuit_limit`/`agent_limit` both false, or the
-            // key gone) is a resolution, not an active wait (issue #1909).
+            // A freed window (`agent_limit` false, or the key gone) is a
+            // resolution, not an active wait (issue #1909). Rows written
+            // before ADR 0042 also carried a `circuit_limit` flag; it is
+            // never read here because nothing sets it any more.
             let window = next
                 .get(key)
                 .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok());
-            let binding = window.as_ref().is_some_and(|value| {
-                value["circuit_limit"].as_bool().unwrap_or(false)
-                    || value["agent_limit"].as_bool().unwrap_or(false)
-            });
+            let binding = window
+                .as_ref()
+                .is_some_and(|value| value["agent_limit"].as_bool().unwrap_or(false));
             append_history(
                 db,
                 run_id,
@@ -2250,7 +2251,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let context = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":true,\"agent_limit\":false}"}).to_string();
+        let context =
+            serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":true}"}).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
             .unwrap();
         super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&context), &[])
@@ -2284,10 +2286,12 @@ mod tests {
             INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
             INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES(1,1,1,'running');
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status) VALUES(1,'spawn',1,'pending_slot');").unwrap();
-        let parked = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":true,\"agent_limit\":true}"}).to_string();
+        let parked =
+            serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":true}"}).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&parked), &[])
             .unwrap();
-        let freed = serde_json::json!({"node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}"}).to_string();
+        let freed =
+            serde_json::json!({"node.spawn.capacity_wait":"{\"agent_limit\":false}"}).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&freed), &[])
             .unwrap();
         let history = history_inner(&db, 1).unwrap();
@@ -2305,13 +2309,13 @@ mod tests {
         // clearing resolves. The real clear writes an empty attempt string
         // (`CircuitContext::set(key, "")`), so identity must survive it.
         let waiting = serde_json::json!({
-            "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
+            "node.spawn.capacity_wait":"{\"agent_limit\":false}",
             "node.spawn.wait.attempt":"1","node.spawn.wait.timeout_ms":"60000","node.spawn.wait.since_ms":"1000"
         }).to_string();
         super::super::ledger::commit_circuit_advance_locked(&mut db, 1, None, Some(&waiting), &[])
             .unwrap();
         let resolved = serde_json::json!({
-            "node.spawn.capacity_wait":"{\"circuit_limit\":false,\"agent_limit\":false}",
+            "node.spawn.capacity_wait":"{\"agent_limit\":false}",
             "node.spawn.wait.attempt":""
         })
         .to_string();
@@ -2435,7 +2439,7 @@ mod tests {
             tx.commit().unwrap();
         }
         let context = serde_json::json!({
-            "node.spawn.capacity_wait": "{\"circuit_limit\":true,\"agent_limit\":false}",
+            "node.spawn.capacity_wait": "{\"agent_limit\":true}",
             "node.spawn.wait.attempt": "2",
             "node.spawn.wait.timeout_ms": "60000",
             "node.spawn.wait.since_ms": "1000"
@@ -3341,7 +3345,6 @@ mod tests {
             1,
             "status recovery",
             "",
-            1,
             &graph.to_json().unwrap(),
         )
         .unwrap();
@@ -3474,7 +3477,6 @@ mod tests {
             1,
             "cancelled status recovery",
             "",
-            1,
             &graph.to_json().unwrap(),
         )
         .unwrap();
@@ -3648,7 +3650,6 @@ mod tests {
         let transition = advance(
             &mut view,
             &CircuitEvent::Tick(Capacity {
-                circuit_free_slots: 1,
                 agent_free_slots: 1,
             }),
         );
@@ -3998,7 +3999,6 @@ mod tests {
         advance(
             &mut view,
             &CircuitEvent::Tick(Capacity {
-                circuit_free_slots: 4,
                 agent_free_slots: 4,
             }),
         );

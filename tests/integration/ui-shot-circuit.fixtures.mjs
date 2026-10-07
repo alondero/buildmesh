@@ -15,7 +15,7 @@ export default {
         detail: JSON.stringify({ reason: 'mesh_capacity', capacity: 2 }),
         source: 'circuit_worker.admission', disposition: 'waiting', observed_at: '2026-01-01T00:00:01Z' },
       { id: 9003, node_id: 'spawn', attempt: 1, kind: 'step_capacity_wait',
-        detail: JSON.stringify({ before: null, after: JSON.stringify({ circuit_limit: true, agent_limit: false }) }),
+        detail: JSON.stringify({ before: null, after: JSON.stringify({ agent_limit: true }) }),
         source: 'circuit_worker.capacity', disposition: 'waiting', observed_at: '2026-01-01T00:00:02Z' },
       { id: 9004, node_id: 'reviewer', attempt: 1, kind: 'evidence_window_changed',
         detail: JSON.stringify({ before: null, after: { attempt: '1', timeout_ms: '60000', since_ms: '1767225600000', observed: '0', explicit_budget: '0' } }),

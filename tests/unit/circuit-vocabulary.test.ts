@@ -1,6 +1,6 @@
 /**
  * Circuit vocabulary lock (issue #1660): UI runtime constants import the
- * generated unions and queued-step bind matches the Rust capacity policy.
+ * generated unions and the run-admission bind matches the Rust capacity policy.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -8,7 +8,6 @@ import {
   isQueuedStepStatus,
   isTerminalRunState,
   pendingRunBind,
-  queuedStepBind,
   STEP_STATUS_QUEUED,
   stepStatusLabel,
   TERMINAL_RUN_STATES,
@@ -33,21 +32,10 @@ describe('circuit vocabulary', () => {
     expect([...ADMITTED_RUN_STATES]).toEqual(['running', 'paused']);
   });
 
-  it('queuedStepBind prefers step slots then the agent lease', () => {
-    expect(queuedStepBind(1, 1)).toBe('circuit_step_slots');
-    expect(queuedStepBind(2, 1)).toBe('circuit_agent_lease');
-    expect(queuedReason({
-      concurrencyLimit: 1,
-      runningSteps: 1,
-      meshRunCapacity: 2,
-      meshActiveRuns: 1,
-    })).toContain('one step at a time');
-    expect(queuedReason({
-      concurrencyLimit: 2,
-      runningSteps: 1,
-      meshRunCapacity: 2,
-      meshActiveRuns: 1,
-    })).toContain('circuit agent slot');
+  it('explains a queued step by the agent lease only, never a step budget', () => {
+    // ADR 0042: the only thing that can park a step is an agent slot.
+    expect(queuedReason()).toContain('circuit agent slot');
+    expect(queuedReason()).not.toMatch(/step slot|one step at a time/);
   });
 
   it('pendingRunBind returns mesh_run_admission only when mesh is full', () => {

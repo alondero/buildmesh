@@ -18,7 +18,7 @@ export default async function ({ page, invoke }) {
     // shell, WebView and other IPC remain connected to the dev backend.
     const issue = { number: 101, title: '[Circuit] Validate agent lifecycle and ownership', body: 'Prepare the implementation, then verify agent lifecycle ownership.', url: 'https://github.com/alondero/buildmesh/issues/101', state: 'open', labels: ['needs-triage', 'ready-for-agent'], blocked_by: [], author: 'alondero' };
     const labels = ['needs-triage', 'ready-for-agent', 'team/ui', 'a-very-long-repository-label-that-must-wrap-at-the-narrow-probe-width'];
-    const circuit = { id: 1, mesh_id: mesh.id, name: 'Ready for agent implementation', description: '', enabled: true, concurrency_limit: 1, is_preset: false, created_at: '', updated_at: '', graph_json: JSON.stringify({ version: 3, nodes: [{ id: 'trigger', type: { type: 'github_issue_label', label: 'ready-for-agent' } }], edges: [] }) };
+    const circuit = { id: 1, mesh_id: mesh.id, name: 'Ready for agent implementation', description: '', enabled: true, is_preset: false, created_at: '', updated_at: '', graph_json: JSON.stringify({ version: 3, nodes: [{ id: 'trigger', type: { type: 'github_issue_label', label: 'ready-for-agent' } }], edges: [] }) };
     let labelReads = 0;
     await page.route('http://ipc.localhost/**', async route => {
       const command = new URL(route.request().url()).pathname.slice(1);
