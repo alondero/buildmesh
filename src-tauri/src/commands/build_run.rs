@@ -222,11 +222,7 @@ impl BuildRunRegistry {
     /// Thread 2's process orphaned with no teardown. `PtyRegistry::insert`
     /// already returns the previous entry in a single lock acquisition
     /// (see `pty/registry.rs:33`); we use it directly.
-    fn insert(
-        &self,
-        node_id: i64,
-        mut process: BuildRunProcess,
-    ) -> (u64, Arc<BuildRunProcess>) {
+    fn insert(&self, node_id: i64, mut process: BuildRunProcess) -> (u64, Arc<BuildRunProcess>) {
         let generation = NEXT_BUILD_RUN_GENERATION.fetch_add(1, Ordering::Relaxed);
         process.generation = generation;
         let arc = Arc::new(process);
@@ -312,7 +308,9 @@ impl BuildRunRegistry {
             .get(&node_id)
             .ok_or_else(|| "Build run not running".to_string())?;
         let master = process.master.lock().unwrap_or_else(|e| e.into_inner());
-        let m = master.as_ref().ok_or_else(|| "Build run not running".to_string())?;
+        let m = master
+            .as_ref()
+            .ok_or_else(|| "Build run not running".to_string())?;
         m.resize(PtySize {
             rows,
             cols,
@@ -329,7 +327,10 @@ impl BuildRunRegistry {
 /// join (the thread is detached when the registry entry drops; the
 /// channel close will terminate its loop).
 fn set_reader_handle(process: &Arc<BuildRunProcess>, handle: JoinHandle<()>) {
-    *process.reader_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(handle);
+    *process
+        .reader_handle
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
 // `PtyRegistry` already wraps its inner `HashMap` in `Arc<Mutex<...>>`,
@@ -443,9 +444,9 @@ fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
         .take()
     {
         let still_alive = match child.try_wait() {
-            Ok(Some(_)) => false,   // already exited naturally
-            Ok(None) => true,       // still alive
-            Err(_) => true,         // unknown — be safe and kill
+            Ok(Some(_)) => false, // already exited naturally
+            Ok(None) => true,     // still alive
+            Err(_) => true,       // unknown — be safe and kill
         };
         if still_alive {
             if let Some(pid) = child.process_id() {
@@ -465,7 +466,10 @@ fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
                 .unwrap_or_else(|e| e.into_inner())
                 .take()
             {
-                join_with_timeout(handle, std::time::Duration::from_secs(2));
+                // A detached build-run reader is an expected outcome once
+                // the pty master is closed, so the outcome is not inspected
+                // here.
+                let _ = join_with_timeout(handle, std::time::Duration::from_secs(2));
             }
         }
         JoinPolicy::Drop => {
@@ -694,9 +698,7 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
             // just inserted. If a concurrent replacement insert has
             // already taken our generation, `remove_if_current` is a
             // no-op (round-4 review finding #4).
-            if let Some(orphan) =
-                BUILD_RUN_REGISTRY.remove_if_current(node_id, generation)
-            {
+            if let Some(orphan) = BUILD_RUN_REGISTRY.remove_if_current(node_id, generation) {
                 teardown_inc(&orphan, JoinPolicy::Join);
             }
             return Err(format!(
@@ -1070,7 +1072,10 @@ mod tests {
         let (g2, _) = registry.insert(-915_1534, dummy_process());
         let (g3, _) = registry.insert(-915_1533, dummy_process()); // same node_id, new generation
         assert!(g1 < g2, "g2 must be strictly greater than g1");
-        assert!(g2 < g3, "g3 must be strictly greater than g2 even on the same node_id");
+        assert!(
+            g2 < g3,
+            "g3 must be strictly greater than g2 even on the same node_id"
+        );
         assert_ne!(g1, g2);
         assert_ne!(g2, g3);
     }
@@ -1114,8 +1119,7 @@ mod tests {
             "replacement B must survive A's late EOF"
         );
         assert_eq!(
-            arc_b.generation,
-            g_b,
+            arc_b.generation, g_b,
             "replacement's generation must be unchanged"
         );
 
@@ -1279,9 +1283,7 @@ mod tests {
 
         // Recover from poison rather than abort — see the `teardown_inc`
         // doc for why we never `.expect()` here.
-        *arc.reader_handle
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(reader_handle);
+        *arc.reader_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(reader_handle);
 
         // Race the reader — start kill_session while the reader is
         // actively trying to reap. With the old outer Mutex, this would
@@ -1343,21 +1345,16 @@ mod tests {
                             // insertion (modulo other workers
                             // racing on the same key — exactly the
                             // contention we're testing).
-                            let (g, _) =
-                                registry.insert(node_id, dummy_process());
+                            let (g, _) = registry.insert(node_id, dummy_process());
                             // Vary the action so all three lifecycle
                             // paths get exercised across cycles.
                             match cycle % 3 {
                                 0 => {
-                                    let _ =
-                                        registry.reap_incarnation(node_id, g);
+                                    let _ = registry.reap_incarnation(node_id, g);
                                 }
                                 1 => {
                                     // Replace, then kill the replacement.
-                                    let _ = registry.insert(
-                                        node_id,
-                                        dummy_process(),
-                                    );
+                                    let _ = registry.insert(node_id, dummy_process());
                                     let _ = registry.kill_session(node_id);
                                 }
                                 _ => {

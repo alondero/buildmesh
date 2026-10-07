@@ -94,10 +94,11 @@ Cargo runs inside `src-tauri` so its binding-export configuration applies.
 The Rust test gate compiles once, then runs the CI shards, integration
 binaries and doctests up to four processes at a time; each process runs its
 own tests multi-threaded, which is safe because every DB-backed test installs
-a private database for its own thread (issue #2048). Some tests assert
-wall-clock budgets and can fail under CPU contention (#2049), so set
-`BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before attributing
-such a failure.
+a private database for its own thread (issue #2048). The concurrency suites
+assert a mechanism instead of a wall-clock budget (#2049); subprocess suites
+still use bounds tied to real budgets and can fail under CPU contention, so
+set `BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before
+attributing such a failure.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real

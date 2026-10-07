@@ -115,11 +115,10 @@ const jobs = [
   { label: 'doc', command: 'cargo', args: ['test', '--locked', '--doc'] },
 ];
 
-// Several suites assert wall-clock budgets (process kills, classifier
-// deadlines), so more processes than the longest jobs need only add CPU
-// contention. The suite's wall time is set by its longest jobs (doctests,
-// then the `services` shard), so a few slots, filled longest-first, keep
-// nearly all of the speed-up. BUILDMESH_RUST_TEST_JOBS overrides the limit.
+// The longest jobs (doctests, then the `services` shard) set the suite's
+// wall time, so a few slots filled longest-first keep nearly all of the
+// speed-up. More processes than that only add CPU contention.
+// BUILDMESH_RUST_TEST_JOBS overrides the limit.
 const slots = Number(process.env.BUILDMESH_RUST_TEST_JOBS) || Math.max(2, Math.min(4, Math.floor(os.availableParallelism() / 4)));
 const queue = [...jobs].sort((a, b) => Number(b.label === 'doc') - Number(a.label === 'doc'));
 console.log(`\nRunning ${jobs.length} test processes, ${slots} at a time: ${queue.map((job) => job.label).join(', ')}`);
@@ -146,7 +145,7 @@ for (const result of results) {
 
 if (failed) {
   console.error(`\nRust tests failed: ${results.filter((result) => result.code !== 0).map((result) => result.label).join(', ')}`);
-  console.error('Wall-clock-budget tests can fail under CPU contention; to rule that out, rerun one process at a time with BUILDMESH_RUST_TEST_JOBS=1 before attributing the failure.');
+  console.error('Concurrency suites assert a mechanism instead of a wall-clock budget (#2049), but subprocess suites still use bounds tied to real budgets and can stall under CPU contention. If you suspect contention, rerun one process at a time with BUILDMESH_RUST_TEST_JOBS=1 before attributing the failure.');
   process.exit(failed.code || 1);
 }
 console.log(`\nRust tests passed in ${jobs.length} processes, ${slots} at a time.`);

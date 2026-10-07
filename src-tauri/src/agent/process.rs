@@ -656,7 +656,7 @@ impl AgentProcessRegistry {
         };
         if let Some(prev) = previous {
             prev.deliberate_kill.store(true, Ordering::SeqCst);
-            teardown_incarnation(session_id, &prev, JoinPolicy::Both, false);
+            let _ = teardown_incarnation(session_id, &prev, JoinPolicy::Both, false);
         }
         generation
     }
@@ -683,7 +683,7 @@ impl AgentProcessRegistry {
         let Some(agent) = self.remove_if_current(session_id, generation) else {
             return;
         };
-        teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly, true);
+        let _ = teardown_incarnation(session_id, &agent, JoinPolicy::WriterOnly, true);
     }
 
     pub fn contains(&self, session_id: &i64) -> bool {
@@ -750,7 +750,7 @@ impl AgentProcessRegistry {
             return false;
         };
         agent.deliberate_kill.store(true, Ordering::SeqCst);
-        teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
+        let _ = teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
         true
     }
 
@@ -765,7 +765,7 @@ impl AgentProcessRegistry {
             // See the `deliberate_kill` field doc for why the reader
             // must not apply the early-exit Error heuristic here.
             agent.deliberate_kill.store(true, Ordering::SeqCst);
-            teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
+            let _ = teardown_incarnation(session_id, &agent, JoinPolicy::Both, true);
             return;
         }
 
@@ -785,6 +785,26 @@ fn sandbox_cleanup(session_id: i64) {
     let _ = session_id;
 }
 
+/// Per-thread join telemetry for a process incarnation teardown. A detached
+/// thread is an expected outcome, not an error: the master is already
+/// closed by then, so a reader that does not exit promptly can only be
+/// genuinely wedged, and a missing handle means there was nothing to join.
+///
+/// Production callers discard this; it is read only under `cfg(test)`, so
+/// the dead-code lint is silenced elsewhere.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct TeardownOutcome {
+    /// `Some(true)` when the reader thread was joined, `Some(false)` when
+    /// it had to be detached, `None` when there was no reader to join
+    /// (`JoinPolicy::WriterOnly` detaches by design; a missing handle
+    /// means the reader was never registered).
+    pub reader_joined: Option<bool>,
+    /// Same contract for the writer; `true` when there was no writer
+    /// handle. An idle writer is joined only when `close_input` runs
+    /// before the join — see [`AgentProcess::close_input`].
+    pub writer_joined: bool,
+}
+
 /// Shared teardown for a process incarnation (issue #1531). `kill_session`
 /// joins both worker threads; natural-exit reaping runs on the reader and
 /// therefore only joins the writer. The caller must already have removed
@@ -798,7 +818,7 @@ fn teardown_incarnation(
     agent: &AgentProcess,
     join: JoinPolicy,
     cleanup_sandbox: bool,
-) {
+) -> TeardownOutcome {
     // 1. Cancel input. Dropping the sender unblocks `recv()` so the
     //    writer join does not pay the two-second fallback.
     agent.close_input();
@@ -833,25 +853,34 @@ fn teardown_incarnation(
     //    reader that gets stuck after master close).
     agent.reader_alive.store(false, Ordering::SeqCst);
 
-    match join {
-        JoinPolicy::Both => {
-            if let Some(handle) = agent.reader_handle.lock().unwrap().take() {
-                crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2));
-            }
-        }
+    let reader_joined = match join {
+        JoinPolicy::Both => agent.reader_handle.lock().unwrap().take().map(|handle| {
+            // A detached reader is an expected outcome here (the master
+            // is already closed, so the reader can only be genuinely
+            // wedged).
+            crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2))
+        }),
         JoinPolicy::WriterOnly => {
             // This thread *is* the reader. Drop the handle without
             // joining — `JoinHandle::drop` detaches.
             drop(agent.reader_handle.lock().unwrap().take());
+            None
         }
-    }
+    };
 
-    if let Some(handle) = agent.writer_handle.lock().unwrap().take() {
-        crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2));
-    }
+    let writer_joined = match agent.writer_handle.lock().unwrap().take() {
+        Some(handle) => {
+            crate::pty::lifecycle::join_with_timeout(handle, std::time::Duration::from_secs(2))
+        }
+        None => true,
+    };
 
     if cleanup_sandbox {
         sandbox_cleanup(session_id);
+    }
+    TeardownOutcome {
+        reader_joined,
+        writer_joined,
     }
 }
 
@@ -1667,12 +1696,11 @@ mod tests {
         assert_eq!(input_buffer_state_after(5, true, b"\x1b[201~"), (5, false));
     }
 
-    /// `pub(crate)` so [`super::testing::capturing_registry`] can reuse the
-    /// fixture rather than duplicating the spawn setup.
-    pub(crate) fn insert_trivial_agent(
-        registry: &AgentProcessRegistry,
-        session_id: i64,
-    ) -> (u64, Arc<AtomicBool>) {
+    /// The #1531 fixture: a live child whose writer thread is parked in
+    /// `recv()` with nothing queued, plus a flag the writer sets once its
+    /// channel closes. Shared by the teardown tests that need the agent
+    /// itself rather than a registry entry.
+    fn idle_writer_process(session_id: i64) -> (AgentProcess, Arc<AtomicBool>) {
         let recipe = SpawnRecipe {
             binary: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" },
             base_args: if cfg!(windows) {
@@ -1718,22 +1746,30 @@ mod tests {
             }
             writer_exited_thread.store(true, Ordering::SeqCst);
         });
-        let generation = registry.insert(
-            session_id,
-            AgentProcess::new(
-                child,
-                writer_tx,
-                queue,
-                Some(writer_thread),
-                pair.master,
-                Arc::new(AtomicBool::new(true)),
-                Arc::new(AtomicBool::new(false)),
-                None,
-                None,
-                std::time::Instant::now(),
-                0,
-            ),
+        let agent = AgentProcess::new(
+            child,
+            writer_tx,
+            queue,
+            Some(writer_thread),
+            pair.master,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            None,
+            None,
+            std::time::Instant::now(),
+            0,
         );
+        (agent, writer_exited)
+    }
+
+    /// `pub(crate)` so [`super::testing::capturing_registry`] can reuse the
+    /// fixture rather than duplicating the spawn setup.
+    pub(crate) fn insert_trivial_agent(
+        registry: &AgentProcessRegistry,
+        session_id: i64,
+    ) -> (u64, Arc<AtomicBool>) {
+        let (agent, writer_exited) = idle_writer_process(session_id);
+        let generation = registry.insert(session_id, agent);
         (generation, writer_exited)
     }
 
@@ -2215,11 +2251,20 @@ mod tests {
         );
     }
 
-    /// Issue #1531: the writer thread blocks in `recv()` until every sender
-    /// is dropped. `kill_session` used to join that thread while still
-    /// holding `writer_tx` on the live `Arc<AgentProcess>`, so the join
-    /// always paid the two-second fallback. Closing the input channel
-    /// before the join must let an idle writer exit promptly.
+    /// Issue #1531, end to end: killing a session whose writer thread is
+    /// parked in `recv()` must leave no writer blocked on the channel, must
+    /// reap the registry entry, and must not wedge.
+    ///
+    /// This is deliberately *not* the test that pins the close-before-join
+    /// ordering — `teardown_closes_input_before_joining_the_writer` is, and
+    /// it asserts a flag instead of the clock. The distinction is not
+    /// cosmetic (issue #2049): when the sender is dropped after the join the
+    /// writer still exits moments later, so by the time `kill_session`
+    /// returns `writer_exited` is set either way, and the only other signal
+    /// is a two-second delay that `kill_process_tree` (`taskkill /F /T`, a
+    /// subprocess spawn that measured 2.20s on its own on a loaded 24-core
+    /// host) makes indistinguishable from contention noise. The old 1.5s
+    /// assertion here could only ever flake, never prove.
     #[test]
     fn kill_session_unblocks_idle_writer_promptly() {
         let recipe = SpawnRecipe {
@@ -2319,11 +2364,45 @@ mod tests {
         );
         assert!(
             writer_exited.load(Ordering::SeqCst),
-            "idle writer thread must exit once kill_session drops the sender"
+            "the idle writer thread must have stopped by the time \
+             kill_session returns; nothing may stay blocked in recv() \
+             holding the PTY writer"
         );
         assert!(
             !registry.contains(&session_id),
             "kill_session must reap the current incarnation from the registry"
+        );
+    }
+
+    /// The #1531 ordering invariant itself, asserted deterministically:
+    /// `teardown_incarnation` must drop the input sender *before* joining
+    /// the writer, so an idle writer is joined instead of hitting the
+    /// two-second fallback and being detached.
+    ///
+    /// The return value is the fact that distinguishes the two orders; the
+    /// elapsed time cannot (issue #2049: under CPU contention the clock
+    /// cannot tell a joined writer from a detached one). Reordering the two
+    /// steps makes this fail in ~2s with the message below, and it does so
+    /// without depending on how fast the host happens to run `taskkill`.
+    #[test]
+    fn teardown_closes_input_before_joining_the_writer() {
+        let session_id = -915_1539;
+        let (agent, writer_exited) = idle_writer_process(session_id);
+
+        // `JoinPolicy::Both` mirrors `kill_session`; this fixture has no
+        // reader handle, so only the writer join is exercised.
+        let outcome = teardown_incarnation(session_id, &agent, JoinPolicy::Both, false);
+
+        assert!(outcome.reader_joined.is_none());
+        assert!(
+            outcome.writer_joined,
+            "teardown_incarnation must close the writer channel before \
+             joining: an idle writer was detached at the two-second \
+             fallback instead of being joined (issue #1531)"
+        );
+        assert!(
+            writer_exited.load(Ordering::SeqCst),
+            "the joined writer must have run its exit path"
         );
     }
 

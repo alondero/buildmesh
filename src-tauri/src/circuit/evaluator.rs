@@ -53,7 +53,12 @@ static NODES: Lazy<Mutex<HashMap<i64, NodeEvaluatorState>>> =
 /// Start buffering PTY output for a node. Idempotent.
 #[cfg(test)]
 pub(crate) fn register(node_id: i64) {
-    NODES.lock().unwrap().entry(node_id).or_default().circuit_owned = true;
+    NODES
+        .lock()
+        .unwrap()
+        .entry(node_id)
+        .or_default()
+        .circuit_owned = true;
 }
 
 /// Start buffering PTY output for a Circuit-owned or borrowed node.
@@ -63,7 +68,9 @@ pub fn register_circuit(node_id: i64) {
     state.circuit_owned = true;
     // A borrowed source may already be silent when the circuit attaches.
     // Start observing silence now without inventing a report/turn boundary.
-    state.last_output.get_or_insert_with(std::time::Instant::now);
+    state
+        .last_output
+        .get_or_insert_with(std::time::Instant::now);
 }
 
 /// Is this node buffered for Circuit observation (fast, in-memory)?
@@ -151,11 +158,7 @@ pub fn millis_since_last_evaluation(node_id: i64) -> Option<u128> {
 /// transcript-publication retry, or an explicitly due classifier retry can
 /// wake the transcript reader. Probe keys include the gate attempt so another
 /// gate targeting the same agent is not suppressed by this gate's read.
-pub(crate) fn begin_circuit_probe(
-    node_id: i64,
-    probe_key: &str,
-    retry_due: bool,
-) -> Option<u64> {
+pub(crate) fn begin_circuit_probe(node_id: i64, probe_key: &str, retry_due: bool) -> Option<u64> {
     let nodes = NODES.lock().unwrap();
     let state = nodes.get(&node_id)?;
     if retry_due {
@@ -178,7 +181,11 @@ pub(crate) fn begin_circuit_probe(
 pub(crate) fn begin_circuit_wait_probe(node_id: i64, probe_key: &str) -> Option<u64> {
     let nodes = NODES.lock().unwrap();
     let state = nodes.get(&node_id)?;
-    if state.circuit_probes.get(probe_key).is_some_and(|p| p.checked_at.elapsed() < CIRCUIT_PROBE_RETRY) {
+    if state
+        .circuit_probes
+        .get(probe_key)
+        .is_some_and(|p| p.checked_at.elapsed() < CIRCUIT_PROBE_RETRY)
+    {
         return None;
     }
     Some(state.output_generation)
@@ -327,9 +334,7 @@ pub(crate) fn parse_classification(output: &str) -> Option<Classification> {
         .collect();
         let continue_hit = tokens.contains(&"CONTINUE");
         let negated_continue = continue_hit
-            && (tokens.contains(&"NOT")
-                || tokens.contains(&"NEVER")
-                || upper.contains("DON'T"));
+            && (tokens.contains(&"NOT") || tokens.contains(&"NEVER") || upper.contains("DON'T"));
         if negated_continue {
             continue;
         }
@@ -437,7 +442,10 @@ pub(crate) fn review_verdict_from_report(output: &str) -> Classification {
                     .any(|next| *next == "change" || *next == "changes")
         }) || tokens.windows(2).any(|pair| {
             pair[0] == "not"
-                && (pair[1] == "require" || pair[1] == "requires" || pair[1] == "need" || pair[1] == "needs")
+                && (pair[1] == "require"
+                    || pair[1] == "requires"
+                    || pair[1] == "need"
+                    || pair[1] == "needs")
         }) || segment.contains("n't need")
             || segment.contains("n't require")
     };
@@ -456,8 +464,7 @@ pub(crate) fn review_verdict_from_report(output: &str) -> Classification {
             || has("no further finding")
             || has("without finding")
             || has("zero finding");
-        let resolved =
-            !has("unresolv") && (has("addressed") || has("resolved") || has("fixed"));
+        let resolved = !has("unresolv") && (has("addressed") || has("resolved") || has("fixed"));
         says_findings |= has("finding") && !negated_findings && !resolved;
         says_changes |= has("change")
             && (has("request") || has("requir") || has("need"))
@@ -465,7 +472,10 @@ pub(crate) fn review_verdict_from_report(output: &str) -> Classification {
         // "non-blocking" (the review contract's own guidance) and code nouns
         // like "match block" are not blockers; only blocker word forms count.
         let blocked_word = tokens.iter().any(|token| {
-            matches!(*token, "blocked" | "blocker" | "blockers" | "blocks" | "blocking")
+            matches!(
+                *token,
+                "blocked" | "blocker" | "blockers" | "blocks" | "blocking"
+            )
         }) && !has("non-blocking")
             && !has("nonblocking");
         let negated_block =
@@ -504,7 +514,10 @@ pub(crate) fn review_verdict_from_report(output: &str) -> Classification {
     } else if says_blocked {
         Classification::Blocked
     } else if says_fix
-        && (!says_approve || lower.contains("but") || lower.contains("however") || lower.contains("please"))
+        && (!says_approve
+            || lower.contains("but")
+            || lower.contains("however")
+            || lower.contains("please"))
     {
         Classification::Working
     } else if says_approve {
@@ -524,12 +537,20 @@ pub(crate) fn review_prompt(output: &str) -> String {
     )
 }
 
-pub(crate) fn classify_with_prompt(node_id: i64, launch: &super::classifier::ClassifierLaunch, prompt: &str) -> Result<Classification, String> {
+pub(crate) fn classify_with_prompt(
+    node_id: i64,
+    launch: &super::classifier::ClassifierLaunch,
+    prompt: &str,
+) -> Result<Classification, String> {
     // No repository rules, tools, or hooks belong in a report classification task.
     let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
     let result = directory.path().join("verdict.txt");
     let cmd = launch.command(directory.path(), &result, prompt)?;
-    let output = match run_classifier_command(cmd, launch.stdin_prompt(prompt), std::time::Duration::from_secs(30)) {
+    let output = match run_classifier_command(
+        cmd,
+        launch.stdin_prompt(prompt),
+        std::time::Duration::from_secs(30),
+    ) {
         Ok(output) => output,
         Err(error) => {
             tracing::warn!("circuit evaluator({node_id}): {error}");
@@ -544,16 +565,28 @@ pub(crate) fn classify_with_prompt(node_id: i64, launch: &super::classifier::Cla
         parsed,
         output.trim().chars().take(80).collect::<String>()
     );
-    parsed.ok_or_else(|| format!("Classifier returned no recognised verdict: {}", classifier_diagnostic(output.as_bytes())))
+    parsed.ok_or_else(|| {
+        format!(
+            "Classifier returned no recognised verdict: {}",
+            classifier_diagnostic(output.as_bytes())
+        )
+    })
 }
 
 fn classifier_diagnostic(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(bytes);
-    crate::secret_scrubber::SecretScrubber::scrub(&text).chars().take(2000).collect()
+    crate::secret_scrubber::SecretScrubber::scrub(&text)
+        .chars()
+        .take(2000)
+        .collect()
 }
 
-fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout: std::time::Duration) -> Result<String, String> {
-    use std::io::{Read, Write};
+fn run_classifier_command(
+    mut cmd: std::process::Command,
+    prompt: &str,
+    timeout: std::time::Duration,
+) -> Result<String, String> {
+    use std::io::Write;
     let io_error = |error: std::io::Error| error.to_string();
     const MAX_OUTPUT: usize = 64 * 1024;
     // Drain stdin and stdout concurrently. A classifier that writes more than
@@ -572,21 +605,28 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
         .stderr(std::process::Stdio::piped());
     let mut child = cmd.spawn().map_err(io_error)?;
     let process_guard = crate::agent::background::BackgroundProcessGuard::new(child.id());
-    let mut input = child.stdin.take().ok_or_else(|| "classifier stdin was not piped".to_string())?;
-    let output = child.stdout.take().ok_or_else(|| "classifier stdout was not piped".to_string())?;
-    let errors = child.stderr.take().ok_or_else(|| "classifier stderr was not piped".to_string())?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| "classifier stdin was not piped".to_string())?;
+    let output = child
+        .stdout
+        .take()
+        .ok_or_else(|| "classifier stdout was not piped".to_string())?;
+    let errors = child
+        .stderr
+        .take()
+        .ok_or_else(|| "classifier stderr was not piped".to_string())?;
     let prompt_bytes = prompt.as_bytes().to_vec();
     let (input_tx, input_rx) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || { let _ = input_tx.send(input.write_all(&prompt_bytes)); });
+    std::thread::spawn(move || {
+        let _ = input_tx.send(input.write_all(&prompt_bytes));
+    });
     let output_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let output_oversized_reader = output_oversized.clone();
     let (output_tx, output_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let mut bytes = Vec::with_capacity(MAX_OUTPUT.min(8 * 1024));
-        let result = output.take((MAX_OUTPUT + 1) as u64).read_to_end(&mut bytes).map(|_| {
-            if bytes.len() > MAX_OUTPUT { output_oversized_reader.store(true, std::sync::atomic::Ordering::Release); }
-            bytes
-        });
+        let result = drain_classifier_stdout(output, MAX_OUTPUT, output_oversized_reader);
         let _ = output_tx.send(result);
     });
     let errors_oversized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -603,10 +643,15 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                if !status.success() { status_error = Some(format!("classifier exited with {status}")); }
+                if !status.success() {
+                    status_error = Some(format!("classifier exited with {status}"));
+                }
                 break;
             }
-            Ok(None) if std::time::Instant::now() < deadline && !output_oversized.load(std::sync::atomic::Ordering::Acquire) => {
+            Ok(None)
+                if std::time::Instant::now() < deadline
+                    && !output_oversized.load(std::sync::atomic::Ordering::Acquire) =>
+            {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Ok(None) => {
@@ -626,7 +671,10 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             }
         }
     }
-    if input_rx.recv_timeout(std::time::Duration::from_secs(1)).is_err() {
+    if input_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .is_err()
+    {
         process_guard.terminate();
         let _ = child.kill();
         let _ = child.wait();
@@ -640,7 +688,8 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             process_guard.terminate();
             let _ = child.kill();
             let _ = child.wait();
-            output_rx.recv_timeout(std::time::Duration::from_secs(1))
+            output_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
                 .map_err(|_| "classifier output reader did not finish".to_string())?
                 .map_err(io_error)?
         }
@@ -651,23 +700,84 @@ fn run_classifier_command(mut cmd: std::process::Command, prompt: &str, timeout:
             process_guard.terminate();
             let _ = child.kill();
             let _ = child.wait();
-            errors_rx.recv_timeout(std::time::Duration::from_secs(1))
-                .map_err(|_| "classifier error reader did not finish".to_string())?.map_err(io_error)?
+            errors_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .map_err(|_| "classifier error reader did not finish".to_string())?
+                .map_err(io_error)?
         }
     };
     drop(process_guard);
     let errors_were_truncated = errors_oversized.load(std::sync::atomic::Ordering::Acquire);
-    let stderr_diagnostic = if errors_were_truncated {
-        format!("{} [stderr truncated after 64 KiB]", classifier_diagnostic(&errors))
+    classifier_command_error(
+        status_error,
+        timed_out,
+        over_budget || bytes.len() > MAX_OUTPUT,
+        &bytes,
+        &errors,
+        errors_were_truncated,
+    )
+}
+
+/// Pure error composition for [`run_classifier_command`]'s tail (issue
+/// #2049): the message a failing classifier produces from its exit status
+/// plus the captured stdout/stderr and truncation flags. No child, no
+/// clock — the diagnostics contract below is asserted on injected bytes
+/// instead of an OS shell's start-up time.
+fn classifier_command_error(
+    status_error: Option<String>,
+    timed_out: bool,
+    over_limit: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+    stderr_truncated: bool,
+) -> Result<String, String> {
+    let stderr_diagnostic = if stderr_truncated {
+        format!(
+            "{} [stderr truncated after 64 KiB]",
+            classifier_diagnostic(stderr)
+        )
     } else {
-        classifier_diagnostic(&errors)
+        classifier_diagnostic(stderr)
     };
     if let Some(error) = status_error {
-        return Err(format!("{error}: {} {stderr_diagnostic}", classifier_diagnostic(&bytes)).trim().into());
+        return Err(format!(
+            "{error}: {} {stderr_diagnostic}",
+            classifier_diagnostic(stdout)
+        )
+        .trim()
+        .into());
     }
-    if timed_out { return Err("classifier exceeded its time budget".into()); }
-    if over_budget || bytes.len() > MAX_OUTPUT { return Err("classifier stdout exceeded 64 KiB".into()); }
-    String::from_utf8(bytes).map_err(|error| format!("classifier output was not UTF-8: {error}"))
+    if timed_out {
+        return Err("classifier exceeded its time budget".into());
+    }
+    if over_limit {
+        return Err("classifier stdout exceeded 64 KiB".into());
+    }
+    String::from_utf8(stdout.to_vec())
+        .map_err(|error| format!("classifier output was not UTF-8: {error}"))
+}
+
+/// Drain a classifier child's stdout to end, mirroring
+/// [`drain_classifier_stderr`]. Reads on a dedicated thread in
+/// [`run_classifier_command`] so a child that outruns the pipe buffer can
+/// never wedge the parent; the tests below pin the retention/cap contract
+/// on injected readers instead of an OS shell (issue #2049).
+fn drain_classifier_stdout(
+    reader: impl std::io::Read,
+    max_bytes: usize,
+    oversized: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024));
+    reader
+        .take((max_bytes + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map(|_| {
+            if bytes.len() > max_bytes {
+                oversized.store(true, std::sync::atomic::Ordering::Release);
+            }
+            bytes
+        })
 }
 
 fn drain_classifier_stderr(
@@ -679,10 +789,14 @@ fn drain_classifier_stderr(
     let mut chunk = [0_u8; 8 * 1024];
     loop {
         let read = reader.read(&mut chunk)?;
-        if read == 0 { break; }
+        if read == 0 {
+            break;
+        }
         let retain = read.min(max_bytes.saturating_add(1).saturating_sub(retained.len()));
         retained.extend_from_slice(&chunk[..retain]);
-        if retained.len() > max_bytes { oversized.store(true, std::sync::atomic::Ordering::Release); }
+        if retained.len() > max_bytes {
+            oversized.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
     Ok(retained)
 }
@@ -691,72 +805,157 @@ fn drain_classifier_stderr(
 mod tests {
     use super::*;
 
+    /// Outer hang guard for the two shell fixtures below — not a behaviour
+    /// bound. The drain/diagnostic contract is pinned on injected streams
+    /// (no child, no clock). `drains_output_larger_than_a_pipe_buffer`
+    /// still spawns a process because outrunning a real pipe buffer is the
+    /// property it guards, and `timeout_does_not_wait_for_stdin_consumption`
+    /// needs a real child that outlives the deadline without reading stdin.
+    /// Both children (`cmd.exe`/`ping` on Windows, `sh`/`sleep` elsewhere)
+    /// start in milliseconds, so CPU contention cannot false-fail them the
+    /// way a cold `powershell.exe` did (issue #2049). The 30s value matches
+    /// the budget production injects (`classify_with_prompt`); the verdict
+    /// comes from the content assertions, and only a genuinely wedged child
+    /// ever reaches the bound.
+    const FIXTURE_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
     #[test]
     fn circuit_classifier_failure_retains_authentication_diagnostics() {
-        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") }
-            else { crate::process_util::command_no_window("sh") };
-        if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.WriteLine('Failed to authenticate: OAuth session expired'); [Console]::Error.WriteLine('Refresh rejected'); exit 1"]);
-        } else {
-            cmd.args(["-c", "printf 'Failed to authenticate: OAuth session expired\\n'; printf 'Refresh rejected\\n' >&2; exit 1"]);
-        }
-        let error = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap_err();
+        // No child, no clock: the diagnostics contract is a pure function
+        // of the exit status plus the captured stdout/stderr (issue #2049).
+        let error = classifier_command_error(
+            Some("classifier exited with exit code: 1".to_string()),
+            false,
+            false,
+            b"Failed to authenticate: OAuth session expired\n",
+            b"Refresh rejected\n",
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("OAuth session expired"), "{error}");
         assert!(error.contains("Refresh rejected"), "{error}");
     }
 
     #[test]
+    fn circuit_classifier_stdout_drain_retains_bytes_and_flags_oversize() {
+        // The retention/cap contract of `drain_classifier_stdout`, on
+        // injected readers: small output passes through untouched, output
+        // past the cap is cut at one byte over and raises the flag.
+        let quiet = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let bytes = drain_classifier_stdout(
+            &b"COMPLETED\n"[..],
+            64 * 1024,
+            std::sync::Arc::clone(&quiet),
+        )
+        .unwrap();
+        assert_eq!(bytes, b"COMPLETED\n");
+        assert!(!quiet.load(std::sync::atomic::Ordering::Acquire));
+
+        let loud = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flood = vec![b'x'; 70 * 1024];
+        let bytes =
+            drain_classifier_stdout(&flood[..], 64 * 1024, std::sync::Arc::clone(&loud)).unwrap();
+        assert!(loud.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(bytes.len(), 64 * 1024 + 1);
+    }
+
+    #[test]
     fn circuit_classifier_drains_output_larger_than_a_pipe_buffer() {
-        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") } else { crate::process_util::command_no_window("sh") };
-        if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 32000; [Console]::In.ReadToEnd() | Out-Null; [Console]::OpenStandardOutput().Write($b,0,$b.Length); [Console]::WriteLine('COMPLETED')"]);
+        // The one property that needs a real OS pipe: the parent must keep
+        // draining while the child emits more than a pipe buffer, or the
+        // child blocks on write and the run wedges. `cmd.exe` starts in
+        // milliseconds, so this measures draining, not shell start-up.
+        let mut cmd = if cfg!(windows) {
+            crate::process_util::command_no_window("cmd.exe")
         } else {
-            cmd.args(["-c", "cat >/dev/null; head -c 32000 /dev/zero | tr '\\0' x; printf '\\nCOMPLETED\\n'"]);
+            crate::process_util::command_no_window("sh")
+        };
+        if cfg!(windows) {
+            cmd.args(["/c", "(for /L %i in (1,1,1200) do @echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx) & echo COMPLETED"]);
+        } else {
+            cmd.args([
+                "-c",
+                "cat >/dev/null; head -c 32000 /dev/zero | tr '\\0' x; printf '\\nCOMPLETED\\n'",
+            ]);
         }
-        let output = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_secs(10)).unwrap();
+        let output = run_classifier_command(cmd, &"prompt".repeat(10_000), FIXTURE_BUDGET).unwrap();
         assert!(output.len() > 32_000);
-        assert_eq!(parse_classification(&output), Some(Classification::Completed));
+        assert_eq!(
+            parse_classification(&output),
+            Some(Classification::Completed)
+        );
     }
 
     #[test]
     fn circuit_classifier_stderr_over_limit_is_truncated_without_killing_success() {
-        let mut cmd = if cfg!(windows) {
-            crate::process_util::command_no_window("powershell.exe")
-        } else {
-            crate::process_util::command_no_window("sh")
-        };
-        if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 70000; [Console]::OpenStandardError().Write($b,0,$b.Length); [Console]::Out.WriteLine('COMPLETED')"]);
-        } else {
-            cmd.args(["-c", "head -c 70000 /dev/zero | tr '\\0' x >&2; printf 'COMPLETED\\n'"]);
-        }
-        let output = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap();
-        assert_eq!(parse_classification(&output), Some(Classification::Completed));
+        // 70 KiB of stderr against a 64 KiB cap, all injected: the drain
+        // must flag the overflow and cut retention, and the composer must
+        // note the truncation while keeping the success output and a
+        // bounded error message.
+        let mut flood = vec![b'x'; 70 * 1024];
+        flood.extend_from_slice(b"classification failed\n");
+        let truncated = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let retained =
+            drain_classifier_stderr(&flood[..], 64 * 1024, std::sync::Arc::clone(&truncated))
+                .unwrap();
+        assert!(truncated.load(std::sync::atomic::Ordering::Acquire));
+        assert!(retained.len() <= 64 * 1024 + 1);
 
-        let mut cmd = if cfg!(windows) {
-            crate::process_util::command_no_window("powershell.exe")
-        } else {
-            crate::process_util::command_no_window("sh")
-        };
-        if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "$b=New-Object byte[] 70000; [Console]::OpenStandardError().Write($b,0,$b.Length); [Console]::Error.WriteLine('classification failed'); exit 1"]);
-        } else {
-            cmd.args(["-c", "head -c 70000 /dev/zero | tr '\\0' x >&2; printf 'classification failed\\n' >&2; exit 1"]);
-        }
-        let error = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(10)).unwrap_err();
+        let output =
+            classifier_command_error(None, false, false, b"COMPLETED\n", &retained, true).unwrap();
+        assert_eq!(
+            parse_classification(&output),
+            Some(Classification::Completed)
+        );
+
+        let error = classifier_command_error(
+            Some("classifier exited with exit code: 1".to_string()),
+            false,
+            false,
+            b"",
+            &retained,
+            true,
+        )
+        .unwrap_err();
         assert!(error.contains("stderr truncated after 64 KiB"), "{error}");
         assert!(error.contains("classifier exited"), "{error}");
         assert!(error.len() < 2200, "stderr diagnostics must remain bounded");
     }
 
+    /// A child that outlives the deadline without ever reading stdin —
+    /// the same shape as `process_util::tests::hang_cmd`: `ping` on
+    /// Windows (`-n 10` runs ~9s; `timeout` was tried there and exits at
+    /// once without a console), `sleep` elsewhere. Both start in
+    /// milliseconds, so unlike a cold `powershell.exe` neither can eat the
+    /// hang guard below under CPU contention (issue #2049).
+    ///
+    /// One function with the platform split *inside* the body: `cfg!` at
+    /// the call site does not prune the dead arm, so a `#[cfg]`-gated
+    /// item named from `cfg!` fails to compile on the other target.
+    fn hang_child_cmd(secs: u64) -> std::process::Command {
+        #[cfg(target_os = "windows")]
+        {
+            let mut cmd = crate::process_util::command_no_window("ping");
+            cmd.args(["-n", &secs.to_string(), "127.0.0.1"]);
+            cmd
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut cmd = crate::process_util::command_no_window("sleep");
+            cmd.arg(secs.to_string());
+            cmd
+        }
+    }
+
     #[test]
     fn circuit_classifier_timeout_does_not_wait_for_stdin_consumption() {
-        let mut cmd = if cfg!(windows) { crate::process_util::command_no_window("powershell.exe") } else { crate::process_util::command_no_window("sh") };
-        if cfg!(windows) {
-            cmd.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 10"]);
-        } else { cmd.args(["-c", "sleep 1"]); }
+        let cmd = hang_child_cmd(10);
         let started = std::time::Instant::now();
-        let result = run_classifier_command(cmd, &"prompt".repeat(10_000), std::time::Duration::from_millis(200));
+        let result = run_classifier_command(
+            cmd,
+            &"prompt".repeat(10_000),
+            std::time::Duration::from_millis(200),
+        );
         assert!(result.is_err());
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
@@ -768,7 +967,10 @@ mod tests {
         cmd.args(["-c", "sleep 60 & printf 'COMPLETED\\n'"]);
         let started = std::time::Instant::now();
         let result = run_classifier_command(cmd, "prompt", std::time::Duration::from_secs(2));
-        assert_eq!(parse_classification(&result.unwrap()), Some(Classification::Completed));
+        assert_eq!(
+            parse_classification(&result.unwrap()),
+            Some(Classification::Completed)
+        );
         assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
@@ -798,8 +1000,14 @@ mod tests {
 
     #[test]
     fn circuit_continuation_requires_an_explicit_classification() {
-        assert_eq!(parse_classification("CONTINUE"), Some(Classification::Continue));
-        assert_eq!(parse_classification("Verdict: CONTINUE."), Some(Classification::Continue));
+        assert_eq!(
+            parse_classification("CONTINUE"),
+            Some(Classification::Continue)
+        );
+        assert_eq!(
+            parse_classification("Verdict: CONTINUE."),
+            Some(Classification::Continue)
+        );
         assert_eq!(parse_classification("DISCONTINUE"), None);
         assert_eq!(parse_classification("Do not CONTINUE"), None);
         assert_eq!(parse_classification("NOT CONTINUE"), None);
@@ -827,7 +1035,11 @@ mod tests {
             "Approved. Does not require any changes.",
             "All findings addressed; approving.",
         ] {
-            assert_eq!(review_verdict_from_report(report), Classification::Completed, "{report}");
+            assert_eq!(
+                review_verdict_from_report(report),
+                Classification::Completed,
+                "{report}"
+            );
         }
         // Findings and change requests loop back for fixes.
         for report in [
@@ -855,7 +1067,11 @@ mod tests {
             "Reviewed the diff; see notes above.",
             "Disapprove.",
         ] {
-            assert_eq!(review_verdict_from_report(report), Classification::Blocked, "{report}");
+            assert_eq!(
+                review_verdict_from_report(report),
+                Classification::Blocked,
+                "{report}"
+            );
         }
         // The contract's own "non-blocking" guidance and code nouns like
         // "match block" are not blockers; an echoed template must not veto
@@ -867,7 +1083,11 @@ mod tests {
             "The match block looks solid. Approved.",
             "Review completion alone is not approval. Verdict: Approved.",
         ] {
-            assert_eq!(review_verdict_from_report(report), Classification::Completed, "{report}");
+            assert_eq!(
+                review_verdict_from_report(report),
+                Classification::Completed,
+                "{report}"
+            );
         }
     }
 
@@ -875,9 +1095,18 @@ mod tests {
 
     #[test]
     fn parses_bare_single_word_answers() {
-        assert_eq!(parse_classification("COMPLETED"), Some(Classification::Completed));
-        assert_eq!(parse_classification("BLOCKED\n"), Some(Classification::Blocked));
-        assert_eq!(parse_classification("  working  "), Some(Classification::Working));
+        assert_eq!(
+            parse_classification("COMPLETED"),
+            Some(Classification::Completed)
+        );
+        assert_eq!(
+            parse_classification("BLOCKED\n"),
+            Some(Classification::Blocked)
+        );
+        assert_eq!(
+            parse_classification("  working  "),
+            Some(Classification::Working)
+        );
     }
 
     #[test]
@@ -899,7 +1128,10 @@ mod tests {
     #[test]
     fn tokenless_or_empty_output_degrades_to_none() {
         assert_eq!(parse_classification(""), None);
-        assert_eq!(parse_classification("I am not sure what state this is."), None);
+        assert_eq!(
+            parse_classification("I am not sure what state this is."),
+            None
+        );
     }
 
     // ── buffering ───────────────────────────────────────────────────────────
@@ -946,7 +1178,10 @@ mod tests {
         note_turn_start(id);
         let cursor = output_cursor(id).unwrap();
         on_output(id, "\x1b[32m[Pasted Content 30 chars]\x1b[0m");
-        assert_eq!(cleaned_output_since(id, cursor), "[Pasted Content 30 chars]");
+        assert_eq!(
+            cleaned_output_since(id, cursor),
+            "[Pasted Content 30 chars]"
+        );
         assert_eq!(cleaned_turn_tail(id), "[Pasted Content 30 chars]");
         on_output(id, &"x".repeat(MAX_TAIL_CHARS));
         assert_eq!(cleaned_output_since(id, cursor), "x".repeat(MAX_TAIL_CHARS));
@@ -960,7 +1195,10 @@ mod tests {
         on_output(id, &"x".repeat(MAX_TAIL_CHARS - 10));
         note_turn_start(id);
         on_output(id, "Review complete: no remaining findings. Approved.");
-        assert_eq!(cleaned_turn_tail(id), "Review complete: no remaining findings. Approved.");
+        assert_eq!(
+            cleaned_turn_tail(id),
+            "Review complete: no remaining findings. Approved."
+        );
         unregister(id);
     }
 
@@ -1015,8 +1253,8 @@ mod tests {
         let id = 910_006;
         register_circuit(id);
         let key = "run:gate:1";
-        let generation = begin_circuit_probe(id, key, false)
-            .expect("registration permits one recovery probe");
+        let generation =
+            begin_circuit_probe(id, key, false).expect("registration permits one recovery probe");
         note_circuit_probe(id, key, generation);
         assert!(
             begin_circuit_probe(id, key, false).is_none(),
@@ -1031,8 +1269,8 @@ mod tests {
             "one gate cannot suppress a sibling gate"
         );
         on_output(id, "new turn");
-        let generation = begin_circuit_probe(id, key, false)
-            .expect("PTY output invalidates the probe clock");
+        let generation =
+            begin_circuit_probe(id, key, false).expect("PTY output invalidates the probe clock");
         note_circuit_probe(id, key, generation);
         assert!(begin_circuit_probe(id, key, false).is_none());
         unregister(id);
@@ -1055,7 +1293,10 @@ mod tests {
             .unwrap()
             .get(&id)
             .and_then(|state| state.last_evaluation);
-        assert_eq!(after, before, "transcript probes must not postpone backend retry");
+        assert_eq!(
+            after, before,
+            "transcript probes must not postpone backend retry"
+        );
         unregister(id);
     }
 
@@ -1071,6 +1312,4 @@ mod tests {
         assert!(!is_circuit_piloted(id));
         assert_eq!(cleaned_tail(id), "");
     }
-
-
 }

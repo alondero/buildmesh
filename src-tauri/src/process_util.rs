@@ -135,10 +135,7 @@ pub fn run_command_with_timeout(
                     // count is the signature of a stalling network path leaking
                     // (then killing) subprocesses.
                     crate::diagnostics::record_git_subprocess_timeout();
-                    return Err(format!(
-                        "{op_name} timed out after {}s",
-                        timeout.as_secs()
-                    ));
+                    return Err(format!("{op_name} timed out after {}s", timeout.as_secs()));
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
@@ -306,7 +303,9 @@ impl JobHandle {
                 return None;
             }
 
-            Some(JobHandle { handle: job as isize })
+            Some(JobHandle {
+                handle: job as isize,
+            })
         }
     }
 
@@ -452,29 +451,42 @@ mod tests {
 
     #[test]
     fn run_command_with_timeout_kills_long_running_child() {
-        // Spawn a child that would happily run for 30 seconds. The 1s
+        // Killing a real child takes real time, so this test needs a clock
+        // — but only just enough of one. Four ordered thresholds separate
+        // the cases (issue #2049): the 1s deadline must fire, the kill
+        // itself measured up to 3.78s on a loaded 24-core host (the 100ms
+        // `try_wait` poll plus `taskkill /F /T` walking the tree), the
+        // bound below must clear that with margin, and the child's own
+        // lifetime must clear the bound, so "the deadline killed it" and
+        // "the child finished on its own" cannot be confused.
+        //
+        // `hang_cmd` is `ping`/`sleep`, which start in milliseconds — no
+        // shell start-up is being measured here.
+        const CHILD_LIFETIME: Duration = Duration::from_secs(12);
+        // ~2x the worst kill latency measured under load, well under the
+        // child's own exit: a "kill is a no-op" regression fails here after
+        // ~12s instead of hanging ~29s as before.
+        const KILL_BOUND: Duration = Duration::from_secs(8);
+
+        // Spawn a child that would happily run for ~12 seconds. The 1s
         // timeout must fire and the helper must return Err. Without the
-        // bound, this test would hang the suite for ~30s.
+        // bound, this test would hang the suite for ~12s.
         let start = Instant::now();
-        let result = run_command_with_timeout(hang_cmd(30), "test hang", Duration::from_secs(1));
+        let result = run_command_with_timeout(hang_cmd(13), "test hang", Duration::from_secs(1));
         let elapsed = start.elapsed();
 
+        // Mechanism: only the deadline path produces this Err, and a child
+        // that could not have exited yet rules out a natural completion.
         assert!(result.is_err(), "expected timeout Err, got {result:?}");
         let msg = result.unwrap_err();
         assert!(
             msg.contains("timed out") && msg.contains("test hang"),
             "error must identify the operation and the timeout, got: {msg}"
         );
-        // Bound verification: the kill fires within the deadline + a small
-        // slack (we sleep 100ms between polls, then `taskkill /F /T`
-        // walks the process tree). 3s absorbs Windows CI noise under
-        // parallel load (the 100ms poll can land near the deadline +
-        // taskkill latency is variable) but is still tight enough that a
-        // "no bound" regression (e.g. someone replaces `kill()` with a
-        // no-op) fails this — the un-killed `ping` would hang for 30s.
         assert!(
-            elapsed < Duration::from_secs(3),
-            "expected kill within ~1s, took {elapsed:?}"
+            elapsed < KILL_BOUND,
+            "expected the deadline to kill the child well before its {CHILD_LIFETIME:?} \
+             natural exit, took {elapsed:?}"
         );
     }
 
@@ -545,7 +557,10 @@ mod tests {
         let result = run_command_with_timeout(cmd, "spawn-fail test", Duration::from_secs(5));
         let elapsed = start.elapsed();
 
-        assert!(result.is_err(), "missing binary should be Err, got {result:?}");
+        assert!(
+            result.is_err(),
+            "missing binary should be Err, got {result:?}"
+        );
         assert!(
             elapsed < Duration::from_secs(1),
             "spawn failure must short-circuit, took {elapsed:?}"
