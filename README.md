@@ -158,6 +158,14 @@ a host with no backend it's a safe no-op.
 
 The Windows backend was pivoted off a per-node AppContainer: the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation and blocked loopback. The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
 
+### Attention hooks
+
+Separately from the sandbox, spawning a node writes an attention hook into the
+harness's own configuration, and that hook POSTs lifecycle events to the local
+app over loopback HTTP. The exact files, where they land, and what the request
+carries are listed in [Attention hooks Buildmesh installs on
+disk](docs/user-guide.md#attention-hooks-buildmesh-installs-on-disk).
+
 ### What it is *not*
 
 - **Not a container or VM.** It's an OS access-control boundary on a single process tree, not virtualization or namespacing.

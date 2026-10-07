@@ -2,6 +2,11 @@
 
 Status: current
 
+User-facing counterpart: [Attention hooks Buildmesh installs on
+disk](../user-guide.md#attention-hooks-buildmesh-installs-on-disk) discloses the
+per-harness files written on disk and the loopback POST they make. Keep both in
+sync when a harness's hook target or payload changes.
+
 ## Attention System
 
 ### How It Works
