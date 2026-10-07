@@ -432,12 +432,19 @@ fn wsl_muse_auth_path() -> Option<PathBuf> {
 }
 
 /// The native Muse credential path from process variables, mirroring the
-/// trust seam (`adapters::muse::muse_config_root_from_vars`): an explicit
+/// launcher's own precedence (and the trust seam
+/// `adapters::muse::muse_config_root_from_vars`): an explicit
 /// `MUSE_AUTH_PATH` wins, then an *absolute* `XDG_CONFIG_HOME` (a relative
 /// one is ignored — Muse ignores it too), then the native home. The home is
 /// `USERPROFILE` on Windows, matching `usage::types::home_dir()` and every
-/// sibling adapter, with `HOME` as a last resort; `HOME` elsewhere. A set
-/// `META_API_KEY` vetoes everything: API keys carry no subscription.
+/// sibling adapter, with `HOME` as a last resort; `HOME` elsewhere.
+///
+/// Deliberately a single resolution, not one candidate per tier: when the
+/// user overrides the path, Muse reads only that file, and falling through
+/// to another tier could surface a different account's quota than the CLI
+/// shows. A set `META_API_KEY` vetoes the native resolution: API keys carry
+/// no subscription (the WSL probe applies the same veto to the guest
+/// environment).
 fn muse_auth_path_from_vars(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     if get("META_API_KEY").is_some_and(|value| !value.is_empty()) { return None; }
     if let Some(path) = get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()) {

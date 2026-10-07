@@ -5,6 +5,7 @@ use crate::services::usage::adapter::{shared_client, UsageAdapter, UsageIdentity
 use crate::services::usage::outcome::UsageOutcome;
 use crate::services::usage::types::UsageWindow;
 use serde::Deserialize;
+use std::path::PathBuf;
 
 pub(crate) struct MuseCodeAdapter;
 const ENDPOINT: &str = "https://api.meta.ai/muse-code/key";
@@ -54,7 +55,7 @@ fn credential() -> Result<String, String> {
 /// First OAuth token across the ordered candidate credential files: a
 /// missing file or a non-OAuth login in one runtime falls through to the
 /// next instead of hiding a healthy login behind it.
-fn credential_from_candidates(candidates: &[std::path::PathBuf]) -> Result<String, String> {
+fn credential_from_candidates(candidates: &[PathBuf]) -> Result<String, String> {
     if candidates.is_empty() {
         return Err("Muse subscription credential location unavailable. Unset META_API_KEY to use a Muse account login.".into());
     }
