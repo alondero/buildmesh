@@ -568,23 +568,79 @@ test('Vitest keeps re-running for the src-tauri files it reads, and every Rust g
 });
 
 test('new Vitest references to src-tauri are audited against the frontend-tests input list', () => {
-  // Vitest gate reuse is only sound while its input list covers every src-tauri file a test reads. If this
-  // fails, check that file's reads against VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs, then update the list below.
+  // Vitest gate reuse is only sound while its input list covers every src-tauri file a test reads.
+  // We pin a snapshot of every referencing line so that any new or modified reference across any
+  // test file (including files already referencing src-tauri) forces re-audit against
+  // VITEST_READS_FROM_SRC_TAURI in scripts/harness-plan.mjs.
   const files = execFileSync('git', ['ls-files', 'tests/unit', 'tests/integration', 'tests/e2e', 'tests/setup'], { cwd: root, encoding: 'utf8' })
     .split('\n').filter(file => /\.(?:tsx?|mjs)$/.test(file));
-  const referencing = files.filter(file => readFileSync(join(root, file), 'utf8').split('\n').some(line => line.includes('src-tauri') && !/^\s*(?:\/\/|\*|\/\*)/.test(line))).sort();
-  assert.deepEqual(referencing, [
-    'tests/e2e/app-launch.spec.ts',
-    'tests/e2e/utils/buildmesh-launcher.ts',
-    'tests/unit/app-version.test.ts',
-    'tests/unit/async-command-blocking.test.ts',
-    'tests/unit/ci-rust-timeout-guard.test.ts',
-    'tests/unit/conpty-runtime.test.ts',
-    'tests/unit/event-payloads.test.ts',
-    'tests/unit/guard-antipatterns.test.ts',
-    'tests/unit/ipc-contract.test.ts',
-    'tests/unit/opencode-attention-plugin.test.ts',
-    'tests/unit/tauri-capabilities.test.ts',
-    'tests/unit/tauri-dev-config.test.ts',
+  const referencingLines = files.flatMap(file =>
+    readFileSync(join(root, file), 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line.includes('src-tauri') && !/^\s*(?:\/\/|\*|\/\*)/.test(line))
+      .map(line => `${file}: ${line}`)
+  ).sort();
+  assert.deepEqual(referencingLines, [
+    "tests/e2e/app-launch.spec.ts: const EXE_PATH = 'X:/src/buildmesh/src-tauri/target/release/buildmesh.exe';",
+    "tests/e2e/app-launch.spec.ts: const debugExe = 'X:/src/buildmesh/src-tauri/target/debug/buildmesh.exe';",
+    "tests/e2e/utils/buildmesh-launcher.ts: 'src-tauri', 'target', 'release', 'buildmesh.exe',",
+    'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.lock"],',
+    'tests/unit/app-version.test.ts: ["src-tauri", "Cargo.toml"],',
+    'tests/unit/app-version.test.ts: ["src-tauri", "tauri.conf.json"],',
+    'tests/unit/app-version.test.ts: cargo: read(["src-tauri", "Cargo.toml"]).match(/^version\\s*=\\s*"([^"]+)"/m)?.[1],',
+    'tests/unit/app-version.test.ts: const cargo = readFileSync(path.join(root, "src-tauri", "Cargo.toml"), "utf8");',
+    'tests/unit/app-version.test.ts: const lock = readFileSync(path.join(root, "src-tauri", "Cargo.lock"), "utf8");',
+    'tests/unit/app-version.test.ts: lock: read(["src-tauri", "Cargo.lock"]).match(',
+    'tests/unit/app-version.test.ts: mkdirSync(path.join(dir, "src-tauri"), { recursive: true });',
+    'tests/unit/app-version.test.ts: readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"),',
+    'tests/unit/app-version.test.ts: tauri: JSON.parse(read(["src-tauri", "tauri.conf.json"])).version,',
+    "tests/unit/async-command-blocking.test.ts: const COMMANDS_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'commands');",
+    "tests/unit/async-command-blocking.test.ts: const HTTP_ROUTES_DIR = join(REPO_ROOT, 'src-tauri', 'src', 'http', 'routes');",
+    "tests/unit/async-command-blocking.test.ts: it('walks src-tauri/src/commands and finds Rust files', () => {",
+    "tests/unit/async-command-blocking.test.ts: it('walks src-tauri/src/http/routes and finds Rust files', () => {",
+    'tests/unit/ci-rust-timeout-guard.test.ts: const path = `path: src-tauri/${logFile(script)}`;',
+    "tests/unit/conpty-runtime.test.ts: const common = JSON.parse(await readFile('src-tauri/tauri.conf.json', 'utf8'));",
+    "tests/unit/conpty-runtime.test.ts: const windows = JSON.parse(await readFile('src-tauri/tauri.windows.conf.json', 'utf8'));",
+    'tests/unit/event-payloads.test.ts: `  2. Run \\`cargo test\\` in src-tauri/ to regenerate the .ts file.\\n` +',
+    'tests/unit/event-payloads.test.ts: `payload to be a struct in src-tauri/src/ that derives #[derive(TS)] and is generated\\n` +',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\.claude\\\\worktrees\\\\red-rare-hedge\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "X:\\\\src\\\\buildmesh\\\\src-tauri\\\\src\\\\db\\\\mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/agent/spawn.rs",',
+    'tests/unit/guard-antipatterns.test.ts: "src-tauri/src/env/mod.rs",',
+    'tests/unit/guard-antipatterns.test.ts: expect(checkWorktreeEscape("src-tauri/src/db/mod.rs", CWD_WORKTREE)).toBeNull();',
+    'tests/unit/guard-antipatterns.test.ts: it("allows \\\\\\\\wsl$ inside src-tauri/src/env/", () => {',
+    'tests/unit/ipc-contract.test.ts: `\\n  1. Add the command to tauri::generate_handler![ ... ] in src-tauri/src/lib.rs` +',
+    "tests/unit/ipc-contract.test.ts: const LIB_RS = join(REPO_ROOT, 'src-tauri', 'src', 'lib.rs');",
+    'tests/unit/opencode-attention-plugin.test.ts: const source = readFileSync(resolve("src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js"), "utf8");',
+    "tests/unit/tauri-capabilities.test.ts: describe('src-tauri/capabilities/default.json', () => {",
+    "tests/unit/tauri-capabilities.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/capabilities/default.json'), 'utf8'),",
+    "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),",
+    "tests/unit/tauri-dev-config.test.ts: readFileSync(resolve(process.cwd(), 'src-tauri/tauri.dev.conf.json'), 'utf8'),",
   ]);
+
+  // Every actual read of a src-tauri file/subpath identified across those lines must be covered by frontend-tests:
+  const plan = planGates(['src/owner.ts', 'src-tauri/src/lib.rs']);
+  const frontendGate = plan.find(row => row.id === 'frontend-tests');
+  for (const readPath of [
+    'src-tauri/Cargo.toml',
+    'src-tauri/Cargo.lock',
+    'src-tauri/tauri.conf.json',
+    'src-tauri/tauri.dev.conf.json',
+    'src-tauri/tauri.windows.conf.json',
+    'src-tauri/capabilities/default.json',
+    'src-tauri/src/lib.rs',
+    'src-tauri/src/commands/file_tree.rs',
+    'src-tauri/src/http/routes/issues.rs',
+    'src-tauri/src/agent/provider/adapters/opencode_attention_plugin.js',
+  ]) {
+    assert.ok(gateReads(frontendGate, readPath), `frontend-tests must read ${readPath}`);
+  }
+  // Pure string-literal mentions in tests that do not read the filesystem (guard-antipatterns) are not inputs:
+  for (const unread of ['src-tauri/src/db/mod.rs', 'src-tauri/src/agent/spawn.rs', 'src-tauri/src/env/mod.rs']) {
+    assert.ok(!gateReads(frontendGate, unread), `frontend-tests must NOT read unread path ${unread}`);
+  }
 });

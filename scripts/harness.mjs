@@ -84,9 +84,9 @@ export function scopePaths(root, base, paths) {
     return true;
   });
 }
-// What can change a result without touching a file: where it ran, the base, and the toolchain.
+// What can change a result without touching a file: the base and the toolchain.
 function runIdentity(root, base) {
-  return JSON.stringify({ root, base, node: process.version, platform: process.platform, tools: toolIdentity(root), environment: ['NODE_OPTIONS', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'CC', 'CXX', 'TS_RS_EXPORT_DIR'].map(key => [key, process.env[key] ?? null]) });
+  return JSON.stringify({ base, node: process.version, platform: process.platform, tools: toolIdentity(root), environment: ['NODE_OPTIONS', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'CC', 'CXX', 'TS_RS_EXPORT_DIR'].map(key => [key, process.env[key] ?? null]) });
 }
 function entryOf(root, path) {
   const full = join(root, path);
@@ -333,7 +333,8 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
     const inputs = gateInputs(gate, snapshot, identity, tree);
     const cached = cache.gates[gate.id];
     if (cached?.outcome === 'PASS' && cached.inputs === inputs) {
-      receipt.gates.push({ ...cached, cached: true });
+      const log = cached.log && existsSync(cached.log) ? cached.log : null;
+      receipt.gates.push({ ...cached, cached: true, log });
       console.log(`PASS ${gate.id} (cached, inputs ${inputs.slice(0, 12)})`);
       continue;
     }

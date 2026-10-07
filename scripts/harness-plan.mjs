@@ -26,7 +26,16 @@ const NODE_CHECK_IGNORES = [DOCS];
 
 // Whether `path` is an input of `gate`. Paths use forward slashes.
 export function gateReads(gate, path) {
-  return !gate.ignores?.some(source => new RegExp(source).test(path));
+  if (!gate.ignores || gate.ignores.length === 0) return true;
+  if (!gate._ignoreRegexes) {
+    const compiled = gate.ignores.map(source => new RegExp(source));
+    try {
+      Object.defineProperty(gate, '_ignoreRegexes', { value: compiled, writable: true, enumerable: false });
+    } catch {
+      return !compiled.some(rx => rx.test(path));
+    }
+  }
+  return !gate._ignoreRegexes.some(rx => rx.test(path));
 }
 
 // A single local verification plan. Unknown inputs retain CI's conservative scope.
