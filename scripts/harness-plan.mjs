@@ -67,25 +67,31 @@ export function planGates(paths, { full = false } = {}) {
   if (paths.some(path => path.startsWith('android/') || /^scripts\/check-android(?:-live)?\.mjs$/.test(path) || path === '.github/workflows/android.yml')) {
     node('android', ['scripts/check-android.mjs'], { minutes: 25, tests: 'android' });
   }
+  // Everything above is quick and runs first, in order. The product gates split
+  // into a frontend and a Rust lane that run concurrently (#2104), each keeping
+  // its own order and fail-fast. `heavy` gates share a machine-wide slot limit.
   if (frontend) {
-    npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES });
-    npm('bundle', 'check:bundle', { ignores: FRONTEND_BUILD_IGNORES });
-    npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, ignores: FRONTEND_TEST_IGNORES });
-    node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, ignores: FRONTEND_BUILD_IGNORES });
+    npm('frontend-build', 'build', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('bundle', 'check:bundle', { ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
+    npm('frontend-tests', 'test', { tests: 'vitest', minutes: 10, ignores: FRONTEND_TEST_IGNORES, lane: 'frontend', heavy: true });
+    node('browser-smoke', ['node_modules/@playwright/test/cli.js', 'test', '--project=verify-smoke', '--reporter=line'], { tests: 'playwright', browser: true, ignores: FRONTEND_BUILD_IGNORES, lane: 'frontend' });
   } else if (rust) {
-    npm('mobile-build', 'build:mobile', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES });
+    npm('mobile-build', 'build:mobile', { minutes: 10, ignores: FRONTEND_BUILD_IGNORES, lane: 'rust' });
   }
   if (rust) {
-    const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, ignores: RUST_IGNORES, ...options });
+    // `vite build` empties dist/ (including dist/mobile/), which the Rust crate
+    // embeds, so compiling must not overlap the build. rust-format only parses.
+    const built = frontend ? ['frontend-build'] : [];
+    const cargo = (id, args, options = {}) => gates.push({ id, command: ['cargo', ...args, '--manifest-path', 'Cargo.toml'], cwd: 'src-tauri', minutes: 30, rust: true, ignores: RUST_IGNORES, lane: 'rust', ...options });
     // The crate has a formatting backlog (#2022); like Clippy, only diffs in
     // touched files fail, and the remaining count stays visible.
     cargo('rust-format', ['fmt', '--all', '--check'], { touchedFormat: true });
-    cargo('rust-clippy', ['clippy', '--locked', '--all-targets', '--message-format=json'], { warnings: true });
+    cargo('rust-clippy', ['clippy', '--locked', '--all-targets', '--message-format=json'], { warnings: true, after: built });
     // All targets include the desktop binary (compile smoke). Tests stay
     // serial within a process (process-global DB, see CLAUDE.md), but the CI
     // shards run as concurrent processes so the suite is not single-core.
-    gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust', ignores: RUST_IGNORES });
-    node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings'], { ignores: RUST_IGNORES });
+    gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust', ignores: RUST_IGNORES, lane: 'rust', heavy: true, after: built });
+    node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings'], { ignores: RUST_IGNORES, lane: 'rust' });
   }
   return gates;
 }
@@ -101,7 +107,7 @@ export function touchedFormatDiffs(output, paths) {
 }
 
 export function isHarnessPath(path) {
-  return /^(?:scripts\/harness(?:-plan)?\.mjs|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
+  return /^(?:scripts\/harness(?:-plan|-lanes)?\.mjs|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
 }
 
 export function executedTests(kind, output) {

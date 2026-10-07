@@ -61,17 +61,76 @@ requires recording them again.
 
 ## Verify and finish
 
-Run verification in the background, not as a foreground tool call: a full run can
-exceed the ten-minute cap of a single tool invocation, and a killed run leaves
-`.harness/lock` behind. Each gate writes `.harness/logs/<timestamp>-<gate>.log`
-as it runs, so a backgrounded attempt can be read while it is still going, and
-the receipt reports the outcome, gate list and log paths.
+Run `npm run verify` in the foreground when it fits. The frontend and Rust
+gates run as two concurrent lanes (see below), so an idle machine finishes a
+Rust and frontend run in roughly the time of the longer lane, inside a single
+ten-minute tool call. Documentation- and harness-only changes take seconds.
+When the run may not fit (a busy machine, or a harness that caps calls lower),
+start it in the background and block on it with `harness wait` rather than
+polling with sleeps:
 
 ```powershell
-npm run verify
+npm run verify                       # foreground; or start it in the background
+npm run harness -- wait --max-seconds 540
 npm run harness -- update --spec .tmp/progress.json
 npm run harness -- finish
 ```
+
+`wait` blocks until no harness operation holds `.harness/lock` (a verify holds it
+for its whole run), then prints the receipt summary: the outcome line, then each
+nonpassing gate with its reason and log path, in at most about 20 lines. It exits
+0 on PASS, 1 on FAIL, 2 on BLOCKED and 124 on TIMEOUT. If the limit passes while
+the run is still going it prints the gates finished so far, exits 124, and can be
+called again; the run itself is not stopped. It also reports BLOCKED, never a
+stale PASS, when no verify is running and the last receipt is unfinished or
+predates the run that just ended. `--max-seconds` defaults to 540, under the
+ten-minute call cap. `wait` is read-only and does not take the lock, so it
+behaves the same on every harness. Each gate also writes
+`.harness/logs/<timestamp>-<gate>.log` as it runs, so a log can be read while the
+run is still going. A killed run is recovered automatically (see the lock
+paragraph below).
+
+### Lanes and the machine-wide slot limit
+
+Quick infrastructure gates (whitespace, shared rules, docs, README, process
+spawns, contract tests, ESLint) run first, in order. The product gates then run
+as two lanes at the same time, each keeping its own order and fail-fast:
+
+| Lane | Order |
+|---|---|
+| Frontend | `frontend-build` → `bundle` → `frontend-tests` → `browser-smoke` |
+| Rust | `rust-format` → `rust-clippy` → `rust-tests` → `binding-drift` |
+
+`rust-clippy` and `rust-tests` also wait for `frontend-build` to pass: that build
+empties `dist/` (including `dist/mobile/`, which the Rust crate embeds), so the
+crate must not compile while it runs. `rust-format` only parses and overlaps it.
+`cargo test` rewrites the ts-rs bindings in `src/types/generated/` on every run,
+while the Vite dev servers behind `browser-smoke` and the `ui-shot` tests run
+beside it; `vite.config.ts` therefore excludes that directory from the watcher,
+since a reload would detach elements mid-test.
+With no frontend scope the Rust lane opens with `mobile-build` and has nothing
+to wait for. After any nonpassing gate no new gate starts in either lane, gates
+already running finish so their logs and receipt rows stay complete, and a gate
+whose dependency did not pass is not run. The receipt lists gates in plan order
+whatever order they finished in, and its `durationMs` is wall time.
+
+When both lanes hold a heavy gate, each of `frontend-tests` and `rust-tests` is
+limited to half the cores (`VITEST_MAX_WORKERS`, `RUST_TEST_THREADS`, and two
+concurrent Rust test processes). Left at one worker per core each, the two
+suites oversubscribe the machine and tests with real-time bounds (process
+spawns, pipe drains) fail on load instead of on a defect. A lone heavy gate
+keeps the whole machine.
+
+Gates from several worktrees compete for the same CPU, so the two heavy gates,
+`rust-tests` and `frontend-tests`, take a machine-wide slot first: at most 2 run
+at once across all worktrees (set `BUILDMESH_HEAVY_GATE_LIMIT` to change it). A
+gate that has to wait prints `QUEUED <gate>: ...` naming the holders, repeats
+the notice every minute, and records `queuedMs` in its receipt row; its own
+`durationMs` and deadline start only once it holds a slot. Slots are files under
+`%LOCALAPPDATA%\buildmesh\gate-slots` (`$XDG_STATE_HOME` or `~/.local/state` off
+Windows; `BUILDMESH_GATE_SLOTS_DIR` overrides). A slot held by a dead process is
+reclaimed, so a killed run needs no cleanup. The per-worktree `.harness/lock` is
+unchanged.
 
 Without an active task, `npm run verify -- --base <commit>` runs the same checks
 and records a standalone receipt. It cannot finish a task. `--full` expands
@@ -140,8 +199,8 @@ the production bundle budget check the wrong artifact.
 | TIMEOUT | Deadline exceeded; inspect for code hangs and resource contention before retrying | 124 |
 
 Unexpected nonzero commands are FAIL, not automatically attributed to the
-environment. The first nonpassing gate stops the attempt; unrun gates remain
-absent and cannot count as green. Receipt JSON preserves the command, base,
+environment. The first nonpassing gate stops the attempt (gates already running
+in the other lane finish); unrun gates remain absent and cannot count as green. Receipt JSON preserves the command, base,
 HEAD, worktree, paths, outcome, count, duration and log reference. Its content
 fingerprint includes tracked/untracked inputs, tests, harness configuration,
 lockfiles, HEAD, index content and tool versions. Staged paths must match the

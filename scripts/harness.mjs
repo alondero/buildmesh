@@ -6,9 +6,11 @@ import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { runGuarded } from './ci/run-guarded.mjs';
+import { availableParallelism } from 'node:os';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harness-plan.mjs';
+import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
 
-const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
+const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
 const EXIT = { PASS: 0, FAIL: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -22,7 +24,7 @@ function saveJson(path, value) {
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
-function lock(root, name = 'lock') {
+function lock(root, name = 'lock', action = null) {
   mkdirSync(statePath(root, ''), { recursive: true });
   const path = statePath(root, name);
   let fd;
@@ -37,7 +39,7 @@ function lock(root, name = 'lock') {
     try { fd = openSync(path, 'wx'); } catch { throw new Error(`BLOCKED: another harness operation owns .harness/${name}.`); }
     event(root, { type: 'lock-reclaimed', lock: name, pid: owner.pid, startedAt: owner.startedAt ?? null });
   }
-  writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  writeFileSync(fd, JSON.stringify({ pid: process.pid, action, startedAt: new Date().toISOString() }));
   return () => { closeSync(fd); unlinkSync(path); };
 }
 function event(root, value) {
@@ -256,7 +258,7 @@ function preflight(root, gate) {
   }
   return null;
 }
-export async function runGate(root, gate, base, paths = []) {
+export async function runGate(root, gate, base, paths = [], extraEnv = {}) {
   mkdirSync(statePath(root, 'logs'), { recursive: true });
   const log = statePath(root, `logs/${Date.now()}-${gate.id}.log`);
   const started = Date.now();
@@ -266,7 +268,7 @@ export async function runGate(root, gate, base, paths = []) {
   else {
     const command = commandFor(root, gate, base);
     const nodeEnv = gate.id === 'frontend-build' || gate.id === 'mobile-build' ? 'production' : 'test';
-    const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1' };
+    const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1', ...extraEnv };
     delete env.FORCE_COLOR;
     delete env.BUILDMESH_PREFILL;
     delete env.NODE_TEST_CONTEXT;
@@ -329,26 +331,41 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   // Persist a nonpassing receipt first so an interrupted attempt cannot leave
   // yesterday's green receipt authorizing completion.
   saveJson(statePath(root, 'receipt.json'), receipt);
-  for (const gate of gates) {
+  const execute = async (gate, isStopped) => {
     const inputs = gateInputs(gate, snapshot, identity, tree);
     const cached = cache.gates[gate.id];
     if (cached?.outcome === 'PASS' && cached.inputs === inputs) {
       const log = cached.log && existsSync(cached.log) ? cached.log : null;
-      receipt.gates.push({ ...cached, cached: true, log });
       console.log(`PASS ${gate.id} (cached, inputs ${inputs.slice(0, 12)})`);
-      continue;
+      return { ...cached, cached: true, log };
     }
-    const row = { ...await runGate(root, gate, base, paths), inputs };
-    receipt.gates.push(row);
-    event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
-    saveJson(statePath(root, 'receipt.json'), receipt);
-    if (row.outcome === 'PASS') {
-      cache.gates[gate.id] = row;
-      saveJson(cachePath, cache);
+    let slot = null;
+    if (gate.heavy) {
+      slot = await acquireSlot({ gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for a heavy-gate slot (limit ${heavyGateLimit()}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
     }
-    console.log(`${row.outcome} ${gate.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
-    if (row.outcome !== 'PASS') break;
-  }
+    try {
+      if (slot && isStopped()) return null;
+      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism())), inputs };
+      if (slot?.queuedMs) row.queuedMs = slot.queuedMs;
+      event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
+      return row;
+    } finally { slot?.release(); }
+  };
+  await runPlan(gates, {
+    execute,
+    onResult: row => {
+      receipt.gates.push(row);
+      saveJson(statePath(root, 'receipt.json'), receipt);
+      if (row.cached) return;
+      if (row.outcome === 'PASS') {
+        cache.gates[row.id] = row;
+        saveJson(cachePath, cache);
+      }
+      console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+    },
+  });
+  // Lanes finish in completion order; the receipt reads in plan order.
+  receipt.gates.sort((a, b) => gates.findIndex(gate => gate.id === a.id) - gates.findIndex(gate => gate.id === b.id));
   receipt.durationMs = Date.now() - started;
   receipt.finishedAt = new Date().toISOString();
   receipt.outcome = receipt.gates.find(row => row.outcome !== 'PASS')?.outcome ?? (receipt.gates.length === gates.length ? 'PASS' : 'BLOCKED');
@@ -412,6 +429,54 @@ export function completion(root) {
   if (receipt.gates.length !== expected.length || expected.some(gate => !receipt.gates.some(row => row.id === gate.id && row.outcome === 'PASS'))) return { outcome: 'BLOCKED', reason: 'Receipt does not include every required gate.' };
   if (task.evidence.length !== task.criteria.length || task.evidence.some(value => !value.trim()) || task.review?.verdict !== 'APPROVE' || task.review.findings.length || task.evidenceTree !== receipt.tree || task.reviewTree !== receipt.tree || task.blockers.length) return { outcome: 'BLOCKED', reason: 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.' };
   return { outcome: 'PASS', reason: 'Required gates are current; acceptance and review evidence are recorded.' };
+}
+const MAX_SUMMARY_GATES = 8;
+const oneLine = (text, limit = 300) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, limit);
+// At most 2 lines per failing gate plus a header, whatever the plan size, so a
+// waiting agent reads a bounded result instead of the whole receipt.
+function receiptSummary(root, held) {
+  const receipt = readJson(statePath(root, 'receipt.json'));
+  if (!receipt) return { outcome: 'BLOCKED', lines: ['BLOCKED: no receipt exists. Run npm run verify.'] };
+  const progress = receipt.gates.map(row => `${row.id}:${row.outcome}`).join(' ');
+  // A verify that died before writing its first receipt leaves yesterday's file.
+  if (held && Date.parse(receipt.startedAt) < Date.parse(held.startedAt)) return { outcome: 'BLOCKED', lines: ['BLOCKED: the verify run ended without writing a receipt; read its own output for the reason.'] };
+  if (!receipt.finishedAt) return { outcome: 'BLOCKED', lines: [`BLOCKED: no verify is running and the last one never finished (interrupted?). Gates recorded: ${progress || 'none'}. Rerun npm run verify.`] };
+  const failed = receipt.gates.filter(row => row.outcome !== 'PASS');
+  const lines = [`${receipt.outcome}: ${receipt.gates.length}/${receipt.gatePlan.length} gates in ${Math.round(receipt.durationMs / 1000)}s${receipt.reason ? `; ${oneLine(receipt.reason)}` : ''}. Receipt: .harness/receipt.json`];
+  for (const row of failed.slice(0, MAX_SUMMARY_GATES)) {
+    lines.push(`${row.outcome} ${row.id}: ${oneLine(row.reason)}`);
+    if (row.log) lines.push(`  ${row.log}`);
+  }
+  if (failed.length > MAX_SUMMARY_GATES) lines.push(`(+${failed.length - MAX_SUMMARY_GATES} more nonpassing gates in the receipt)`);
+  return { outcome: receipt.outcome, lines };
+}
+// Block until no harness operation holds .harness/lock (a verify holds it for
+// its whole run), then summarise the receipt. Read-only, so it never competes
+// for the lock. `graceMs` covers a verify launched in the background a moment
+// before this call, which has not taken the lock yet.
+export async function waitForVerify(root, { maxMs = 540000, graceMs = 2000, pollMs = 1000, sleep = ms => new Promise(done => setTimeout(done, ms)) } = {}) {
+  const readLock = () => {
+    const path = statePath(root, 'lock');
+    if (!existsSync(path)) return null;
+    // A lock being written is momentarily empty; treat it as held.
+    try { return readJson(path) ?? { pid: null }; } catch { return { pid: null }; }
+  };
+  const started = Date.now();
+  let held = readLock();
+  for (let until = started + graceMs; !held && Date.now() < until; held = readLock()) await sleep(Math.min(200, graceMs));
+  let seen = held && typeof held.startedAt === 'string' ? held : null;
+  while (held) {
+    if (typeof held.pid === 'number' && !alive(held.pid)) break;
+    if (Date.now() - started >= maxMs) {
+      const receipt = readJson(statePath(root, 'receipt.json'));
+      const progress = receipt?.gates.map(row => `${row.id}:${row.outcome}`).join(' ');
+      return { outcome: 'TIMEOUT', lines: [`TIMEOUT: still running after ${Math.round((Date.now() - started) / 1000)}s (${held.action ?? 'harness operation'}, pid ${held.pid ?? 'unknown'}). Gates so far: ${progress || 'none'}. Run npm run harness -- wait again.`] };
+    }
+    await sleep(Math.min(pollMs, Math.max(1, maxMs - (Date.now() - started))));
+    held = readLock();
+    if (held && typeof held.startedAt === 'string') seen = held;
+  }
+  return receiptSummary(root, seen);
 }
 function status(root) {
   const task = taskAt(root);
@@ -511,6 +576,7 @@ function parse(argv) {
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i];
     if (flag === '--full') options.full = true;
+    else if (flag === '--max-seconds' && Number(argv[i + 1]) > 0) options.maxSeconds = Number(argv[++i]);
     else if (['--spec', '--base', '--case', '--ref'].includes(flag) && argv[i + 1]) options[flag.slice(2)] = argv[++i];
     else throw new Error(USAGE);
   }
@@ -533,7 +599,13 @@ async function main() {
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
-    release = lock(root);
+    if (options.action === 'wait') {
+      const result = await waitForVerify(root, { maxMs: (options.maxSeconds ?? 540) * 1000 });
+      console.log(result.lines.join('\n'));
+      process.exitCode = EXIT[result.outcome];
+      return;
+    }
+    release = lock(root, 'lock', options.action);
     process.env.NODE_ENV = 'test';
     process.env.NO_COLOR = '1';
     delete process.env.FORCE_COLOR;

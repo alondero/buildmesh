@@ -43,7 +43,10 @@ export default defineConfig(async ({ mode }) => {
           }
         : undefined,
       watch: {
-        ignored: ["**/src-tauri/**"],
+        // `cargo test` rewrites the ts-rs bindings on every run (even with
+        // identical content), and a reload would detach elements from browser
+        // tests that run beside it.
+        ignored: ["**/src-tauri/**", "**/src/types/generated/**"],
       },
     },
   };
