@@ -375,25 +375,42 @@ pub(crate) fn parse_wsl_codex_home_output(output: &[u8]) -> Option<PathBuf> {
     parse_marked_wsl_path(output, "__BUILDMESH_WSL_CODEX_HOME__")
 }
 
-/// Resolve Muse credentials in the same login environment used for spawning.
+/// Ordered Muse credential locations for the usage meter, native-first.
 ///
-/// On Windows the native `muse.exe` (1.3.0) login lives at
-/// `%USERPROFILE%/.config/muse/auth.json`, while older WSL-only installs keep
-/// it in the default distro's guest config dir. Prefer the WSL guest path when
-/// it resolves (existing behavior), otherwise fall back to the native Windows
-/// variables so a WSL-less host still finds the OAuth login its own spawn
-/// recipe uses. Without the fallback the usage meter serves a stale
-/// last-known reading while `/usage` shows live quota.
-pub(crate) fn muse_auth_path() -> Option<PathBuf> {
-    if cfg!(windows) {
-        static MUSE_AUTH_PATH: Lazy<Option<PathBuf>> = Lazy::new(|| {
-            wsl_muse_auth_path()
-                .or_else(|| muse_auth_path_from_vars(|name| env::var_os(name)))
-        });
-        MUSE_AUTH_PATH.clone()
-    } else {
-        muse_auth_path_from_vars(|name| env::var_os(name))
+/// The spawn recipe ranks native `muse.exe` ahead of the WSL fallback, and
+/// the trust provisioner writes to the native `USERPROFILE`-rooted store on
+/// Windows — so the meter reads the native login first and the WSL guest
+/// path second. The caller tries each candidate in order; a missing file or
+/// a non-OAuth login in one runtime falls through to the next instead of
+/// collapsing the whole fetch to `NoCredential` (which serves a stale
+/// last-known reading while `/usage` shows live quota).
+///
+/// Only the WSL *path* is memoised: the probe spawns `wsl.exe`, so it runs
+/// once, but file existence is checked live on every fetch — a later
+/// `muse login` in either runtime is visible without a restart.
+pub(crate) fn muse_auth_candidates() -> Vec<PathBuf> {
+    static WSL_PATH: Lazy<Option<PathBuf>> = Lazy::new(wsl_muse_auth_path);
+    resolve_muse_auth_candidates(|| WSL_PATH.clone(), |name| env::var_os(name))
+}
+
+/// Composition seam for [`muse_auth_candidates`]: the WSL probe is injected
+/// so tests assert the ordering without spawning `wsl.exe`.
+fn resolve_muse_auth_candidates(
+    wsl_probe: impl FnOnce() -> Option<PathBuf>,
+    get: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(native) = muse_auth_path_from_vars(get) {
+        candidates.push(native);
     }
+    if cfg!(windows) {
+        if let Some(guest) = wsl_probe() {
+            if !candidates.contains(&guest) {
+                candidates.push(guest);
+            }
+        }
+    }
+    candidates
 }
 
 /// Probe the default WSL distro for the guest Muse credential path. Returns
@@ -414,13 +431,33 @@ fn wsl_muse_auth_path() -> Option<PathBuf> {
     Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
 }
 
+/// The native Muse credential path from process variables, mirroring the
+/// trust seam (`adapters::muse::muse_config_root_from_vars`): an explicit
+/// `MUSE_AUTH_PATH` wins, then an *absolute* `XDG_CONFIG_HOME` (a relative
+/// one is ignored — Muse ignores it too), then the native home. The home is
+/// `USERPROFILE` on Windows, matching `usage::types::home_dir()` and every
+/// sibling adapter, with `HOME` as a last resort; `HOME` elsewhere. A set
+/// `META_API_KEY` vetoes everything: API keys carry no subscription.
 fn muse_auth_path_from_vars(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     if get("META_API_KEY").is_some_and(|value| !value.is_empty()) { return None; }
-    get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()).map(PathBuf::from)
-        .or_else(|| get("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map(PathBuf::from)
-            .or_else(|| get("HOME").filter(|v| !v.is_empty()).map(|home| PathBuf::from(home).join(".config")))
-            .or_else(|| get("USERPROFILE").filter(|v| !v.is_empty()).map(|profile| PathBuf::from(profile).join(".config")))
-            .map(|root| root.join("muse/auth.json")))
+    if let Some(path) = get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(path));
+    }
+    if let Some(root) = get("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+    {
+        return Some(root.join("muse/auth.json"));
+    }
+    let home = if cfg!(windows) {
+        get("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .or_else(|| get("HOME").filter(|v| !v.is_empty()))
+    } else {
+        get("HOME").filter(|v| !v.is_empty())
+    };
+    home.map(|home| PathBuf::from(home).join(".config/muse/auth.json"))
 }
 
 #[cfg(test)]
@@ -429,15 +466,27 @@ mod muse_path_tests {
 
     #[test]
     fn muse_credential_path_precedence() {
-        let resolve = |auth: &str, xdg: &str| muse_auth_path_from_vars(|name| match name {
+        // `is_absolute` is platform-scoped (a bare `/opt/...` is not
+        // absolute on Windows), so the XDG fixture must be absolute on the
+        // platform under test.
+        #[cfg(windows)]
+        let xdg = "C:\\opt\\config";
+        #[cfg(not(windows))]
+        let xdg = "/opt/config";
+        let resolve = |auth: &str| muse_auth_path_from_vars(|name| match name {
             "MUSE_AUTH_PATH" => Some(auth.into()),
             "XDG_CONFIG_HOME" => Some(xdg.into()),
             "HOME" => Some("/home/test".into()),
             _ => None,
         }).unwrap();
-        assert_eq!(resolve("/var/lib/muse/auth.json", "/opt/config"), PathBuf::from("/var/lib/muse/auth.json"));
-        assert_eq!(resolve("", "/opt/config"), PathBuf::from("/opt/config/muse/auth.json"));
-        assert_eq!(resolve("", ""), PathBuf::from("/home/test/.config/muse/auth.json"));
+        assert_eq!(resolve("/var/lib/muse/auth.json"), PathBuf::from("/var/lib/muse/auth.json"));
+        assert_eq!(resolve(""), PathBuf::from(xdg).join("muse/auth.json"));
+        let resolve_home = |auth: &str| muse_auth_path_from_vars(|name| match name {
+            "MUSE_AUTH_PATH" => Some(auth.into()),
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(resolve_home(""), PathBuf::from("/home/test/.config/muse/auth.json"));
         assert_eq!(muse_auth_path_from_vars(|_| None), None);
         assert_eq!(muse_auth_path_from_vars(|name| match name {
             "META_API_KEY" => Some("test-api-key".into()),
@@ -446,15 +495,17 @@ mod muse_path_tests {
         }), None);
     }
 
+    /// Native Windows muse.exe (1.3.0) stores OAuth at
+    /// %USERPROFILE%/.config/muse/auth.json. The native home is USERPROFILE
+    /// (matching `usage::types::home_dir()` and the trust seam), ahead of
+    /// HOME, so a Git Bash/MSYS `HOME=/c/...` never diverts the meter away
+    /// from the login `muse.exe` reads.
+    #[cfg(windows)]
     #[test]
-    fn muse_credential_path_falls_back_to_userprofile_on_windows_native() {
-        // Native Windows muse.exe (1.3.0) stores OAuth at
-        // %USERPROFILE%/.config/muse/auth.json and HOME is usually unset
-        // there. Without this fallback the Windows usage meter resolves no
-        // credential on WSL-less hosts and serves a stale last-known
-        // reading (weekly 3% vs live ~47%) while /usage shows live quota.
+    fn muse_credential_path_prefers_userprofile_over_home_on_windows() {
         let resolved = muse_auth_path_from_vars(|name| match name {
             "USERPROFILE" => Some("C:\\Users\\test".into()),
+            "HOME" => Some("/c/diverted".into()),
             _ => None,
         })
         .expect("USERPROFILE must resolve a native Muse credential path");
@@ -470,6 +521,69 @@ mod muse_path_tests {
         })
         .unwrap();
         assert_eq!(resolved, PathBuf::from("/var/lib/muse/auth.json"));
+    }
+
+    #[test]
+    fn muse_credential_path_rejects_a_relative_xdg_config_home() {
+        // Matches the trust seam: Muse ignores a relative XDG root too, so
+        // resolving against the process cwd would silently mismatch it.
+        let resolved = muse_auth_path_from_vars(|name| match name {
+            "XDG_CONFIG_HOME" => Some("relative/config".into()),
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/test/.config/muse/auth.json")
+        );
+    }
+
+    /// The guest candidate only exists on Windows: elsewhere the probe is
+    /// dead code by construction, so guest ordering is asserted here.
+    #[cfg(windows)]
+    #[test]
+    fn muse_candidates_are_native_first_then_wsl() {
+        let vars = |name: &str| match name {
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        };
+        // Both runtimes: native first (the spawn recipe ranks native ahead
+        // of WSL), guest second.
+        assert_eq!(
+            resolve_muse_auth_candidates(
+                || Some(PathBuf::from("\\\\wsl$\\Ubuntu\\home\\test\\.config\\muse\\auth.json")),
+                vars,
+            ),
+            vec![
+                PathBuf::from("/home/test/.config/muse/auth.json"),
+                PathBuf::from("\\\\wsl$\\Ubuntu\\home\\test\\.config\\muse\\auth.json"),
+            ]
+        );
+        // A probe echoing the native path is not listed twice.
+        assert_eq!(
+            resolve_muse_auth_candidates(
+                || Some(PathBuf::from("/home/test/.config/muse/auth.json")),
+                vars,
+            ),
+            vec![PathBuf::from("/home/test/.config/muse/auth.json")]
+        );
+    }
+
+    #[test]
+    fn muse_candidates_without_a_probe_are_native_or_empty() {
+        let vars = |name: &str| match name {
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        };
+        // WSL-less host: native only.
+        assert_eq!(
+            resolve_muse_auth_candidates(|| None, vars),
+            vec![PathBuf::from("/home/test/.config/muse/auth.json")]
+        );
+        // No login anywhere: empty, so the caller reports "no credential"
+        // instead of probing a file that cannot exist.
+        assert!(resolve_muse_auth_candidates(|| None, |_| None).is_empty());
     }
 
     #[test]
