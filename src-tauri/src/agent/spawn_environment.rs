@@ -334,7 +334,8 @@ mod tests {
                         encode_for_powershell("[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)")])
                 };
                 let recipe = SpawnRecipe { binary: "probe", base_args: args, trailing_args: vec![], windows_shell: shell };
-                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false);
+                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false)
+                    .expect("an unsandboxed command always assembles");
                 apply_wsl_env(&mut command, EnvType::WindowsInterop, &[], &[]);
                 let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
                 let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
