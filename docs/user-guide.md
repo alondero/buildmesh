@@ -420,15 +420,15 @@ The current built-in catalog is:
 | Claude Code | Yes | Hook | Model, effort, extra-argument, and prefill controls may be available |
 | Codex | Yes | Hook | Uses its own project trust and permission flow |
 | Antigravity | Yes | Hook | Requires a supported CLI version for attention hooks |
-| OpenCode | Yes | None | Transcript and attention behavior depends on the installed integration |
+| OpenCode | Yes | Hook | Attention arrives through a project plugin Buildmesh installs |
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
-| Kimi Code | Yes | None | Use the terminal when no lifecycle signal is available |
+| Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
 | MiniMax Code | Yes | Hook | Attention reports completed turns; the TUI rejects model/effort flags and is launched in Full Access |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
-| Cline | Yes | None | Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
+| Cline | Yes | Hook | Needs Cline 3.0.62 or newer. Manage providers with `cline auth`; Buildmesh injects account credentials at spawn |
 | Meta Muse | Yes | Passive watcher | Native on Windows since v1.3.0; WSL guest otherwise |
 | Terminal | No | None | A plain shell; closing the app loses its live process |
 
@@ -444,6 +444,89 @@ On Windows, Buildmesh bundles Microsoft's ConPTY runtime so animated terminal
 updates keep the text caret in place. Codex's Astra glitter and other harness
 animations remain enabled. After upgrading Buildmesh, restart the app to use
 the updated terminal runtime.
+
+## Attention hooks Buildmesh installs on disk
+
+Nine harnesses report their attention signal as **Hook** in the table above.
+Buildmesh implements that signal by writing a hook into the harness's own
+configuration before the agent starts. The hook is what lets a node show that it
+is waiting for you, instead of going quiet until you read its terminal.
+
+Claude Code's hook is written when you add the project and refreshed each time
+one of its nodes starts; the other eight appear the first time you start a node
+with that harness. Nothing is written for a harness whose signal is **Passive
+watcher** or **None**, and no hook file exists before you add the project or
+start a node from Buildmesh.
+
+| Harness | File Buildmesh writes | Written to |
+|---|---|---|
+| Claude Code | `.claude/settings.local.json` | Project directory |
+| Codex | `.codex/config.toml` and `.codex/hooks.json` | Project directory |
+| Cursor | `.cursor/hooks.json` | Project directory |
+| Antigravity | `.agents/hooks.json` | Project directory |
+| OpenCode | `.opencode/plugins/buildmesh-attention.js` | Project directory |
+| Grok Code | `.grok/hooks/buildmesh-attention.json` | Your user profile |
+| Kimi Code | `config.toml` in its configuration home | Configuration home |
+| MiniMax Code | `.claude-plugin/plugin.json` in its plugin directory | Configuration home |
+| Cline | `TaskComplete.ps1` or `TaskComplete.sh` under `hooks/` | Configuration home |
+
+*Configuration home* means the harness's own config directory — normally
+`~/.kimi-code` for Kimi Code, `~/.minimax` for MiniMax Code, and `~/.cline` for
+Cline, unless you point that profile somewhere else in **Settings → Providers**
+or the harness honours its own environment override (`$KIMI_CODE_HOME`,
+`$MINIMAX_DATA_DIR`, `$CLINE_DIR`). For a node running inside WSL, Codex, Kimi
+Code, MiniMax Code, and Cline resolve those paths inside the guest; the rest are
+written on the host.
+
+### What the hook does
+
+Each hook posts the harness's own lifecycle event to the running app: a `curl`
+line on most harnesses, a small PowerShell or bash script for Cline, and a short
+JavaScript plugin for OpenCode.
+
+```text
+http://localhost:<app port>/api/attention/<node>
+```
+
+MiniMax Code is the one variant: its callback is node-independent and posts to
+`/api/attention/mcode` instead of a node path.
+
+- **It stays on your machine.** The address is loopback, so the request never
+  reaches the network. LAN and VPN access is a separate, opt-in feature with its
+  own TLS listener; see [Remote access](#remote-access).
+- **The body is the harness's own hook payload** — the event name plus fields the
+  harness derives locally, such as a path to its own transcript file. Buildmesh
+  adds no prompt text, no file contents, and no credentials to it, and discards
+  the reply. The token Grok's command sends is read from the agent's environment
+  when the hook runs; no secret is written into the file.
+- **It never blocks the agent.** A hook that cannot reach Buildmesh exits
+  successfully and the agent carries on. A missed callback costs you an attention
+  notification, not agent work.
+
+### What happens to your existing configuration
+
+Buildmesh merges instead of replacing. Your own hooks, matchers, and settings
+stay as they were, a later start refreshes only the Buildmesh entry, and writes
+are atomic, so an interrupted write leaves the previous file readable. If an
+existing file is not valid JSON — or, for Codex and Kimi Code, not valid TOML —
+Buildmesh refuses to write and reports `attention hooks unavailable` on the node
+instead of overwriting your file. Repair or remove that file, then restart the
+node.
+
+### Before you commit
+
+The project-directory paths above are inside your working tree, so they can
+appear in `git status`. Most are already ignored by the conventions these
+harnesses ship with — Buildmesh's own repository ignores every project-directory
+entry in the table above except `.cursor/hooks.json`. Review the diff and ignore
+the paths you do not want tracked.
+
+### Removing a hook
+
+Delete the Buildmesh entry, or the whole file, and the hook stops firing — the
+node's terminal becomes the source of truth again. There is no per-harness
+opt-out: the next start from Buildmesh writes the hook back, so the way to keep
+these files out of a project is to not spawn that harness from Buildmesh.
 
 ## Worktrees, branches, and review
 
