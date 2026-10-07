@@ -179,6 +179,24 @@ and its integration; some harnesses have no hook or passive watcher.
 - If the badge claims attention after you answered, check the terminal and
   capture the node status plus the surrounding log entries for a report.
 
+Buildmesh writes those hooks into the harness's configuration files; the list
+of files and what each one POSTs is in [Attention hooks Buildmesh installs on
+disk](user-guide.md#attention-hooks-buildmesh-installs-on-disk).
+
+## A node reports “attention hooks unavailable”
+
+Buildmesh could not write the harness's hook, usually because the configuration
+file it merges into is not valid JSON — a half-finished edit or a leftover
+comma. The refusal is deliberate: your file is left exactly as it was rather
+than replaced.
+
+- Open the file named in the node's error. For Claude Code it is
+  `.claude/settings.local.json` in the project directory.
+- Repair the JSON, or delete the file to let Buildmesh recreate it with just its
+  own entry.
+- Restart the node. The write is retried and the status mark clears when a
+  callback is delivered.
+
 ## Codex reports “Hook failed”
 
 Buildmesh's Codex attention hook sends lifecycle updates to the local app. The
