@@ -156,6 +156,8 @@ pub(super) async fn launch_process(
         app_default.as_ref().filter(|_| !frozen),
     );
     timer.checkpoint("before_command_build");
+    // A sandbox-setup failure must not reach the PTY at all, so the error is
+    // raised here rather than carried as a poisoned command (#2034).
     let cmd = build_spawn_command_prepared(
         &resolved,
         provider,
@@ -165,7 +167,11 @@ pub(super) async fn launch_process(
         &resolved_config,
         prefill.as_deref(),
         sandbox,
-    );
+    )
+    .inspect_err(|error| {
+        adapter.on_process_terminated(session_id);
+        emit_provider_error(app, session_id, provider, error);
+    })?;
     timer.checkpoint("after_command_build");
 
     // A resumed Command Code process can append its first turn immediately.

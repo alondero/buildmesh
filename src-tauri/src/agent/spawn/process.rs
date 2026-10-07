@@ -528,7 +528,8 @@ mod tests {
             &cwd.to_string_lossy(),
             session_id,
             false,
-        );
+        )
+        .expect("an unsandboxed command always assembles");
         let pair = super::super::open_pty_pair(24, 80).expect("open pty pair");
         let child = super::spawn_child(&pair, cmd).expect("spawn child");
         drop(pair.slave);

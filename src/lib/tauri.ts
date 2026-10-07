@@ -218,10 +218,21 @@ export const updateMeshUseWorktree = (meshId: number, useWorktree: boolean) =>
   _invoke<void>('update_mesh_use_worktree', { meshId, useWorktree });
 
 /** Toggle whether this mesh's agent nodes run inside an OS process sandbox
- *  (Windows AppContainer #498 / macOS Seatbelt #497). Dedicated command (typed
- *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`. */
+ *  (Windows restricted token #528 / macOS Seatbelt #497). Dedicated command (typed
+ *  bool + zero-rows-is-an-error contract), like `updateMeshUseWorktree`.
+ *
+ *  Experimental and developer-gated (issue #2034): the backend ignores this
+ *  flag entirely unless `BUILDMESH_SANDBOX=1`, so a value persisted by a dev
+ *  build cannot confine processes in a release. */
 export const updateMeshSandbox = (meshId: number, sandbox: boolean) =>
   _invoke<void>('update_mesh_sandbox', { meshId, sandbox });
+
+/** Is the experimental agent sandbox available in this process (issue #2034)?
+ *  Only gates whether the Mesh Sandbox toggle is *offered* â€” the spawn path
+ *  re-checks `sandbox::sandbox_enabled`, so hiding the control here is not
+ *  what keeps a release unsandboxed. */
+export const sandboxDevModeEnabled = () =>
+  _invoke<boolean>('sandbox_dev_mode_enabled');
 
 /** Set the per-mesh limit on admitted Circuit Runs (1..8). */
 export const updateMeshCircuitRunCapacity = (meshId: number, capacity: number) =>

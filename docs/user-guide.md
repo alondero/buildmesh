@@ -649,10 +649,25 @@ an agent receives. Clear a template and leave the editor, or use
 wording in the editor. Writes to each prompt are saved in order, including resets;
 edits made during a pending save remain available for the next save.
 
-The **Sandbox agent processes** option is per Mesh and is off by default. It is
-an OS process boundary, not a VM or a promise that the agent cannot send data
-over the network. Windows currently has weaker file-read/write confinement than
-macOS; read [Agent sandboxing](../README.md#agent-sandboxing-security) before
+**Sandbox agent processes** is an experimental, developer-only option and is
+not part of a normal install. The toggle only appears if Buildmesh was started
+with `BUILDMESH_SANDBOX=1`; without it the setting is saved but ignored, and
+agents run unconfined. If you do enable it, the guarantee depends on the launch
+target:
+
+- **macOS** — Seatbelt confines the agent to its own worktree and denies the
+  rest, home credentials included. If that sandbox cannot be set up, the spawn
+  fails with an error instead of running the agent unconfined.
+- **Windows** — a restricted token. It restricts the process, but it does
+  **not** confine filesystem reads or writes, so treat it as no file
+  protection.
+- **Linux** — no sandbox backend exists; the toggle does nothing.
+- **WSL / cross-runtime** — a host sandbox cannot contain a guest process, so
+  the toggle does not apply.
+
+It is an OS process boundary, not a VM or a promise that the agent cannot send
+data over the network. Read
+[Agent sandboxing](../README.md#agent-sandboxing-security-experimental) before
 enabling it for untrusted prompts.
 
 ## Build and Run

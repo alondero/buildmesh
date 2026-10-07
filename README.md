@@ -137,32 +137,46 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 - **AI context portability**: share `CLAUDE.md`, `.claude/skills`, and friends with Codex, OpenCode, and Antigravity via `AGENTS.md` + `.agents/skills` git symlinks — no per-provider duplication.
 - **Dev / Stable side-by-side profiles**: run an in-development build (`buildmesh-dev`) without interrupting the stable hub you orchestrate agents from.
 
-## Agent sandboxing (security)
+## Agent sandboxing (security, experimental)
 
-A prompt-injected or runaway agent runs real shell commands on your machine. Each
-**Mesh** has an opt-in **Sandbox** toggle (off by default) that confines every
-agent node spawned from it to its own Git worktree, using the host OS's native
-confinement — **Seatbelt** on macOS, a **restricted token** on Windows. The toggle
-is read at spawn time, so flipping it never disturbs already-running agents, and on
-a host with no backend it's a safe no-op.
+> **Not a released feature.** Confinement is incomplete and platform-dependent,
+> so the sandbox is hidden behind a developer flag and ships disabled. Start
+> Buildmesh with `BUILDMESH_SANDBOX=1` to reveal the per-Mesh **Sandbox**
+> toggle; without that variable the setting is stored but never applied, so
+> agents run unconfined. Do not rely on it as a security boundary yet.
 
-### What it protects against
+A prompt-injected or runaway agent runs real shell commands on your machine.
+When a developer opts in, each **Mesh** can enable **Sandbox agent processes**,
+which wraps that mesh's agent processes in the host OS's native confinement.
+The toggle is read at spawn time, so flipping it never disturbs already-running
+agents. What you actually get differs sharply by platform:
 
-| Capability | macOS (Seatbelt) | Windows (restricted token) |
-|---|---|---|
-| Agent can spawn child processes (`bash`, `git`, `ripgrep`, hooks) | ✅ | ✅ |
-| Agent reaches the network (Anthropic API, `git push`) | ✅ | ✅ |
-| Agent reaches the hub on loopback (attention hook → `127.0.0.1`) | ✅ | ✅ |
-| **Writes** confined to the worktree (rest of disk read-only/denied) | ✅ | ⏳ not yet |
-| **Reads** of home credentials (`~/.ssh`, `~/.aws`, registry) denied | ✅ | ⏳ not yet |
+| Launch target | What the sandbox does |
+|---|---|
+| **macOS** (native) | Seatbelt confinement to the node's worktree: read/write there, everything else denied by default. Fails **closed** — if the profile cannot be written the spawn is refused rather than run unconfined. |
+| **Windows** (native) | A **restricted token**: process restrictions plus network and loopback reach. It does **not** deny filesystem reads or writes, so it is not worktree confinement. |
+| **Linux** | **Nothing.** No backend exists; the toggle is inert. |
+| **WSL / cross-runtime** | **Not contained.** A host sandbox cannot confine a guest process, so the toggle does not apply to WSL-backed launches. |
 
-The Windows backend was pivoted off a per-node AppContainer: the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation and blocked loopback. The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
+On macOS the Windows table's caveat applies only to the restricted-token
+backend: Seatbelt *is* deny-by-default for the filesystem. Its own limits still
+apply — the agent keeps network egress (it needs the model API), and the exact
+set of system read paths a given toolchain needs is verified on real hardware
+rather than in CI.
+
+The Windows backend was pivoted off a per-node AppContainer: the AppContainer's
+private object namespace hung `claude.exe` at libuv's named-pipe creation and
+blocked loopback. The restricted token fixes both. Deny-by-default **read/write
+confinement** on Windows is deferred (#542) — a same-user restricted token
+can't deny home reads while MSYS `bash` runs (both are secured by the same user
+SID), so the surviving path is a separate low-privilege user principal (or WSL).
 
 ### What it is *not*
 
 - **Not a container or VM.** It's an OS access-control boundary on a single process tree, not virtualization or namespacing.
 - **Not network egress control.** A sandboxed agent still reaches the internet (it has to, for the model API) — the sandbox limits *filesystem and host* access, not where data can be sent.
 - **Not a guarantee the agent binary is trustworthy.** It confines what the agent process can touch; it doesn't vet the agent or its dependencies.
+- **Not cross-runtime.** It cannot contain a process running inside WSL from a Windows host, or vice versa.
 
 ## Keyboard shortcuts
 

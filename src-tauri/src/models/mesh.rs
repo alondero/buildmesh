@@ -47,12 +47,16 @@ pub struct Mesh {
     /// (schema v17) and read back as the raw `String`. Empty string is a
     /// normal, non-error state ("no notes yet").
     pub scratchpad: String,
-    /// OS-level agent process sandbox toggle. When `true`, agent PTY
-    /// processes spawned in this mesh are confined to the node's Git
-    /// worktree — macOS Seatbelt (`sandbox-exec`, #497) and Windows
-    /// AppContainer (#498) each read this flag and apply their own
-    /// confinement policy. Off by default (`false`); ignored on hosts
-    /// where neither native spawn is built. Persisted as
+    /// Experimental agent-process sandbox preference for this mesh. What
+    /// `true` actually confers depends on the launch target: macOS Seatbelt
+    /// (`sandbox-exec`, #497) confines the agent to its worktree; the Windows
+    /// restricted token (#528) restricts the process without denying
+    /// filesystem access; Linux has no backend (#828); a WSL launch is not
+    /// contained.
+    ///
+    /// **Honoured only when `BUILDMESH_SANDBOX=1`** (#2034): a shipped build
+    /// stores this value and ignores it, so a flag left on by a dev build
+    /// cannot start confining released agents. Persisted as
     /// `meshes.sandbox INTEGER NOT NULL DEFAULT 0` (schema v18).
     pub sandbox: bool,
     /// Per-mesh target for the pre-spawn Worktree Pool worker
@@ -159,9 +163,10 @@ pub struct MeshRow {
     pub use_worktree: bool,
     pub worktree_mode: Option<String>,
     pub default_provider: Option<String>,
-    /// OS-level sandbox toggle (macOS Seatbelt #497, Windows AppContainer
-    /// #498) — see [`Mesh::sandbox`]. The column is one; the OS-specific
-    /// spawn policy is decided at `spawn_environment::wrap` time.
+    /// Sandbox preference (macOS Seatbelt #497, Windows restricted token
+    /// #528) — see [`Mesh::sandbox`]. The column is one; the OS-specific
+    /// spawn policy is decided at `spawn_environment::wrap` time, behind the
+    /// `BUILDMESH_SANDBOX` developer gate.
     pub sandbox: bool,
     /// Per-mesh pre-spawn pool target — see [`Mesh::pre_spawn_pool_size`].
     /// `0` = pool off, `1..=5` = target the worker fills to. Surfaced in
