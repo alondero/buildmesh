@@ -178,11 +178,15 @@ fn old_schema_is_snapshotted_before_migration() {
     )
     .unwrap();
 
-    let snapshot =
-        snapshot_before_migration(root, &db_path).unwrap().expect("a snapshot is expected");
+    let snapshot = snapshot_before_migration(root, &db_path)
+        .unwrap()
+        .expect("a snapshot is expected");
 
     assert_eq!(snapshot.kind, "pre-migration");
-    assert_eq!(snapshot.schema_version, 12, "records the pre-upgrade version");
+    assert_eq!(
+        snapshot.schema_version, 12,
+        "records the pre-upgrade version"
+    );
     assert!(Path::new(&snapshot.path).exists());
     assert!(!snapshot.redacted, "a rollback snapshot is full fidelity");
 
@@ -201,11 +205,16 @@ fn old_schema_is_snapshotted_before_migration() {
         .unwrap();
     assert_eq!(mesh_name, "legacy-mesh");
     let version: String = restored
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(version, "12", "the snapshot records the pre-upgrade version");
+    assert_eq!(
+        version, "12",
+        "the snapshot records the pre-upgrade version"
+    );
 }
 
 /// The upgrade itself: after `db::init`, the snapshot still restores the
@@ -247,9 +256,11 @@ fn snapshot_survives_a_real_migration_and_restores_pre_upgrade_rows() {
     }
     let live: Connection = Connection::open(&db_path).unwrap();
     let live_version: i32 = live
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .unwrap()
         .parse()
         .unwrap();
@@ -278,9 +289,11 @@ fn snapshot_survives_a_real_migration_and_restores_pre_upgrade_rows() {
         "the snapshot is the old schema, not a half-migrated one; got {columns:?}"
     );
     let version: String = restored
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(version, "3");
 }
@@ -303,7 +316,9 @@ fn no_snapshot_when_the_database_is_already_current() {
 fn a_fresh_install_is_not_snapshotted() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("buildmesh.db");
-    assert!(snapshot_before_migration(dir.path(), &missing).unwrap().is_none());
+    assert!(snapshot_before_migration(dir.path(), &missing)
+        .unwrap()
+        .is_none());
     assert!(!dir.path().join(SNAPSHOT_DIR).exists());
 }
 
@@ -323,8 +338,11 @@ fn snapshot_includes_committed_wal_content() {
         let conn = Connection::open(&db_path).unwrap();
         conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         crate::db::init_schema(&conn).unwrap();
-        conn.execute("INSERT INTO meshes (name, path) VALUES ('wal-mesh', 'C:/src/wal')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO meshes (name, path) VALUES ('wal-mesh', 'C:/src/wal')",
+            [],
+        )
+        .unwrap();
         // Leave the WAL un-checkpointed: the writer connection is still open
         // and the frames have not been folded into the main file.
         assert!(Path::new(&format!("{}-wal", db_path.to_string_lossy())).exists());
@@ -370,7 +388,12 @@ fn retention_keeps_the_newest_snapshots() {
     let dir = tempfile::tempdir().unwrap();
     let snap_dir = dir.path().join(SNAPSHOT_DIR);
     std::fs::create_dir_all(&snap_dir).unwrap();
-    for slug in ["20260101T000000Z", "20260102T000000Z", "20260103T000000Z", "20260104T000000Z"] {
+    for slug in [
+        "20260101T000000Z",
+        "20260102T000000Z",
+        "20260103T000000Z",
+        "20260104T000000Z",
+    ] {
         let (header, _) = build_bundle(
             &fixture_db(snap_dir.parent().unwrap()),
             &nonexistent(snap_dir.parent().unwrap()),
@@ -502,7 +525,10 @@ fn export_import_round_trips_non_secret_state() {
 
     // Non-secret preferences came back, byte-identical in the fields that matter.
     let prefs = read_string(&fixture.prefs_path);
-    assert!(!prefs.contains("drifted"), "the drifted preferences were replaced");
+    assert!(
+        !prefs.contains("drifted"),
+        "the drifted preferences were replaced"
+    );
     assert!(prefs.contains("\"default_provider\": \"anthropic\""));
     assert!(prefs.contains("\"worktree_directory\": \"C:/src/wt\""));
     assert!(prefs.contains("\"spawn_configurations\""));
@@ -532,9 +558,11 @@ fn the_restored_database_is_evolved_forward_to_the_current_schema() {
     let conn = Connection::open(&fixture.db_path).unwrap();
     crate::db::init_schema(&conn).unwrap();
     let version: i32 = conn
-        .query_row("SELECT value FROM app_settings WHERE key = 'schema_version'", [], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'schema_version'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .unwrap()
         .parse()
         .unwrap();
@@ -600,9 +628,9 @@ fn a_default_export_contains_no_credentials() {
                         .sections
                         .iter()
                         .find(|s| {
-                            let payload_start =
-                                12 + u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize
-                                    + s.offset as usize;
+                            let payload_start = 12
+                                + u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize
+                                + s.offset as usize;
                             at >= payload_start && at < payload_start + s.length as usize
                         })
                         .map(|s| s.name.clone())
@@ -614,18 +642,21 @@ fn a_default_export_contains_no_credentials() {
             );
         }
     }
-    assert!(result.omitted.len() >= 4, "the omissions are stated, not implied");
-    assert!(result
-        .omitted
-        .iter()
-        .any(|o| o.contains("private key")));
+    assert!(
+        result.omitted.len() >= 4,
+        "the omissions are stated, not implied"
+    );
+    assert!(result.omitted.iter().any(|o| o.contains("private key")));
 
     // ...and the useful data is still there.
     let mut reader = bundle::BundleReader::open(&dest).unwrap();
     reader.verify().unwrap();
     let prefs = String::from_utf8(reader.read_section(SECTION_PREFS).unwrap()).unwrap();
     assert!(prefs.contains("\"default_provider\""));
-    assert!(prefs.contains("anthropic"), "account identity is not a secret");
+    assert!(
+        prefs.contains("anthropic"),
+        "account identity is not a secret"
+    );
     assert!(prefs.contains("\"billing_mode\""));
 }
 
@@ -636,10 +667,54 @@ fn an_unredacted_export_is_only_produced_on_explicit_request() {
     let dest = fixture.root.join("full.bmsnap");
     let result = export_to_path(&fixture.root, &dest, false).unwrap();
     assert!(!result.redacted);
-    assert!(contains(
-        &std::fs::read(&dest).unwrap(),
-        b"sk-ant-SECRET"
-    ));
+    assert!(contains(&std::fs::read(&dest).unwrap(), b"sk-ant-SECRET"));
+}
+
+/// Issue #830: provider API keys live in the credential store, so the
+/// preferences file on disk no longer carries them. A full-fidelity copy must
+/// still restore them; a redacted one must still leave them out.
+#[test]
+fn keys_held_in_the_credential_store_travel_with_a_full_fidelity_copy_only() {
+    let fixture = Fixture::new();
+    fixture.write_preferences(
+        r#"{"provider_accounts": [{"id": "minimax", "name": "MiniMax", "enabled": true,
+            "billing_mode": "pay_as_you_go", "api_key": null}]}"#,
+    );
+    crate::preferences::secrets::test_support::seed_account_secret("minimax", "sk-vault-SECRET");
+
+    let full = fixture.root.join("full.bmsnap");
+    export_to_path(&fixture.root, &full, false).unwrap();
+    let mut reader = bundle::BundleReader::open(&full).unwrap();
+    let prefs = String::from_utf8(reader.read_section(SECTION_PREFS).unwrap()).unwrap();
+    assert!(
+        prefs.contains("sk-vault-SECRET"),
+        "an unredacted copy must carry the key it promises to carry, got {prefs}"
+    );
+
+    let safe = fixture.root.join("safe.bmsnap");
+    let (_, report) = build_bundle(
+        &fixture.db_path,
+        &fixture.prefs_path,
+        &safe,
+        "export",
+        true,
+        "2026-01-01T00:00:00Z",
+        "test",
+    )
+    .unwrap();
+    assert!(
+        !contains(&std::fs::read(&safe).unwrap(), b"sk-vault-SECRET"),
+        "a redacted export must not leak a key held in the credential store"
+    );
+    assert_eq!(
+        report.map(|r| r.preference_fields_removed),
+        Some(1),
+        "the report must count the key it left out"
+    );
+    assert!(
+        !read_string(&fixture.prefs_path).contains("sk-vault-SECRET"),
+        "the live file never gained the key"
+    );
 }
 
 /// Redaction must not mutate the live state — the whole point is that it runs
@@ -707,8 +782,7 @@ fn assert_rejected_without_side_effects(fixture: &Fixture, bundle_bytes: &[u8], 
     let db_before = std::fs::read(&fixture.db_path).unwrap();
     let prefs_before = std::fs::read(&fixture.prefs_path).unwrap();
 
-    let error = stage_restore(&fixture.root, &dest)
-        .expect_err("a bad bundle must be rejected");
+    let error = stage_restore(&fixture.root, &dest).expect_err("a bad bundle must be rejected");
     assert!(
         error.contains(needle),
         "error should explain the rejection (wanted {needle:?}), got: {error}"
@@ -743,7 +817,10 @@ fn redacting_preferences_alone_strips_every_credential_field() {
     assert!(!contains(text.as_bytes(), b"api_key"), "got: {text}");
     assert!(!contains(text.as_bytes(), b"minimax-SECRET"), "got: {text}");
     assert!(!contains(text.as_bytes(), b"sk-ant-SECRET"), "got: {text}");
-    assert!(text.contains("\"id\": \"a\""), "account identity survives: {text}");
+    assert!(
+        text.contains("\"id\": \"a\""),
+        "account identity survives: {text}"
+    );
 }
 
 #[test]
@@ -884,7 +961,10 @@ fn a_bundle_without_a_database_section_is_rejected() {
             schema_version: SCHEMA_VERSION,
             redacted: true,
         },
-        &[(SECTION_PREFS, br#"{"default_provider":"anthropic"}"#.to_vec())],
+        &[(
+            SECTION_PREFS,
+            br#"{"default_provider":"anthropic"}"#.to_vec(),
+        )],
     )
     .unwrap();
     assert_rejected_without_side_effects(&fixture, &read(&dest), "no `state.db` section");
@@ -1095,7 +1175,10 @@ fn two_rapid_snapshots_do_not_overwrite_each_other() {
     assert_eq!(listed.len(), 2, "both snapshots survive");
     // Newest first, per the shared ordering rule.
     let names: Vec<&str> = listed.iter().map(|s| s.file_name.as_str()).collect();
-    assert_eq!(names, vec![second.file_name.as_str(), first.file_name.as_str()]);
+    assert_eq!(
+        names,
+        vec![second.file_name.as_str(), first.file_name.as_str()]
+    );
 }
 
 #[test]

@@ -8,13 +8,11 @@
 //!
 //! See the [module-level docs](super) for what concerns each submodule owns.
 
-use crate::agent::provider::compatibility::{
-    CompatibilityDecision, ProviderAuthMode,
-};
+use crate::agent::provider::compatibility::{CompatibilityDecision, ProviderAuthMode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use ts_rs::TS;
 
 /// A user-selectable **Agent Harness** profile (ADR-0014 / PRD #534).
@@ -300,8 +298,10 @@ pub struct ProviderAccount {
     /// predates this field still gates correctly.
     #[serde(default)]
     pub claude_compatible: bool,
-    /// API key for usage fetching / custom endpoints. Stored plaintext in
-    /// preferences.json (matches the legacy `minimax_api_key` convention).
+    /// API key for usage fetching / custom endpoints. Held in memory as a plain
+    /// field, but kept out of preferences.json: it lives in the OS credential
+    /// store (Windows Credential Manager) and is put back on load (issue #830).
+    /// With no credential store available it stays in the file instead.
     #[serde(default)]
     pub api_key: Option<String>,
 }
@@ -368,6 +368,7 @@ pub struct AppPreferences {
     /// MiniMax API key for usage fetching. **Deprecated** by `provider_accounts`
     /// (#537) — kept so existing preferences.json files still load and the stored
     /// key survives via [`super::minimax_api_key_resolved`]'s read-through fallback.
+    /// Stored in the credential store like `ProviderAccount::api_key`.
     #[serde(default)]
     pub minimax_api_key: Option<String>,
     /// Google Cloud project for Antigravity/Gemini quota API. Defaults to "cloudshell-gca".
@@ -543,8 +544,7 @@ impl Default for AppPreferences {
         // without a serde default fails loudly here (and in the
         // `malformed_json_read_falls_back_to_defaults_without_touching_the_file`
         // test) instead of silently compiling with a divergent default.
-        serde_json::from_value(serde_json::json!({})).expect(
-            "AppPreferences must deserialize from {}: every field needs a serde default",
-        )
+        serde_json::from_value(serde_json::json!({}))
+            .expect("AppPreferences must deserialize from {}: every field needs a serde default")
     }
 }

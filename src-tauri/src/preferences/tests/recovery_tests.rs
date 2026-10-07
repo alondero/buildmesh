@@ -155,7 +155,10 @@ fn every_corrupt_shape_survives_a_load_and_an_attempted_update_unchanged() {
     let cases: [(&str, &[u8]); 3] = [
         ("invalid", b"{not valid json"),
         ("empty", b""),
-        ("shape-invalid", br#"{"spawn_configurations":"not-an-array"}"#),
+        (
+            "shape-invalid",
+            br#"{"spawn_configurations":"not-an-array"}"#,
+        ),
     ];
     for (label, payload) in cases {
         with_temp_dir(|tmp| {
@@ -331,19 +334,22 @@ fn restoring_the_backup_returns_provider_and_pairing_fields() {
         // Read-only callers keep working off defaults…
         assert_eq!(load().unwrap(), AppPreferences::default());
         // …but the corruption is reported, not silently absorbed.
-        assert!(matches!(
-            read_state().unwrap(),
-            LoadState::Corrupt(_)
-        ));
+        assert!(matches!(read_state().unwrap(), LoadState::Corrupt(_)));
 
         let outcome = super::super::storage::restore_backup().unwrap();
-        assert_eq!(outcome.preferences.default_provider.as_deref(), Some("claude:minimax"));
+        assert_eq!(
+            outcome.preferences.default_provider.as_deref(),
+            Some("claude:minimax")
+        );
         assert_eq!(
             outcome.preferences.provider_accounts[0].api_key.as_deref(),
             Some("sk-recovery-test")
         );
         assert_eq!(outcome.preferences.provider_pairings.len(), 1);
-        assert_eq!(outcome.preferences.provider_pairings[0].harness_id, "claude");
+        assert_eq!(
+            outcome.preferences.provider_pairings[0].harness_id,
+            "claude"
+        );
 
         // The file is the restored state, and the corrupt bytes are kept.
         let restored: AppPreferences = serde_json::from_slice(&read(&path)).unwrap();
@@ -449,9 +455,15 @@ fn an_explicit_reset_is_the_only_path_that_replaces_corrupt_data_and_it_archives
         // …and the explicit reset replaces it while preserving the bytes.
         let outcome = super::super::storage::reset().unwrap();
         assert_eq!(outcome.preferences, AppPreferences::default());
-        let archive = outcome.archive_path.expect("reset must archive the original");
+        let archive = outcome
+            .archive_path
+            .expect("reset must archive the original");
         let archive = std::path::PathBuf::from(archive);
-        assert_eq!(read(&archive), corrupt, "the archive must be byte-identical");
+        assert_eq!(
+            read(&archive),
+            corrupt,
+            "the archive must be byte-identical"
+        );
         assert!(
             archive
                 .file_name()
@@ -465,7 +477,10 @@ fn an_explicit_reset_is_the_only_path_that_replaces_corrupt_data_and_it_archives
         // The live file is a valid payload again and the app is writable.
         let rewritten: AppPreferences = serde_json::from_slice(&read(&path)).unwrap();
         assert_eq!(rewritten, AppPreferences::default());
-        assert_eq!(super::super::storage::health().unwrap().status, PreferencesStatus::Healthy);
+        assert_eq!(
+            super::super::storage::health().unwrap().status,
+            PreferencesStatus::Healthy
+        );
         update(|prefs| prefs.default_provider = Some("claude".into())).unwrap();
     });
 }
@@ -523,12 +538,25 @@ fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
         let legacy = legacy_json();
         std::fs::write(&path, &legacy).unwrap();
 
-        // The read applies the migration but must not write: persistence is
-        // an explicit-write decision, so a read can never destroy the
-        // pre-migration bytes of a file that *is* recoverable.
+        // The read applies the migration but must not persist it: persistence
+        // is an explicit-write decision, so a read can never destroy the
+        // pre-migration shape of a file that *is* recoverable. The one thing a
+        // read does change is the plaintext API key, which moves into the
+        // credential store (issue #830) — everything else stays as written.
         let loaded = load().unwrap();
         assert_eq!(loaded.circuit_agent_pool_size, Some(3));
-        assert_eq!(read(&path), legacy.as_bytes(), "the read persisted early");
+        let mut expected: serde_json::Value = serde_json::from_str(&legacy).unwrap();
+        expected["provider_accounts"][0]["api_key"] = serde_json::Value::Null;
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&read(&path)).unwrap(),
+            expected,
+            "the read persisted something other than the moved API key"
+        );
+        assert_eq!(
+            loaded.provider_accounts[0].api_key.as_deref(),
+            Some("sk-test-key"),
+            "the key must still be served from the credential store"
+        );
         assert!(
             !tmp.join(recovery::BACKUP_SUFFIX).exists(),
             "a read must not fabricate a last-known-good backup"
@@ -536,8 +564,7 @@ fn a_valid_old_schema_file_migrates_in_memory_and_persists_exactly_once() {
 
         // The explicit write persists the migrated shape.
         save(loaded).unwrap();
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&read(&path)).unwrap();
+        let persisted: serde_json::Value = serde_json::from_slice(&read(&path)).unwrap();
         assert_eq!(persisted["circuit_agent_pool_size"], serde_json::json!(3));
         assert!(
             persisted.get("autopilot_pool_size").is_none(),

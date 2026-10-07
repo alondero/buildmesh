@@ -83,7 +83,7 @@ Inside:
 | `logs\panic.log` | External crash-watchdog dump (Windows only). |
 | `circuits\finish.md` | Shared Circuit wrap-up template. |
 
-OAuth secrets for each provider are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory).
+OAuth secrets and provider API keys are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory). If Credential Manager is unreachable, API keys stay in `preferences.json` until it is.
 
 **Back up and restore from inside the app.** **Settings → Data & Diagnostics**
 checks your stored state, takes snapshots, and exports a portable copy with
@@ -157,6 +157,14 @@ a host with no backend it's a safe no-op.
 | **Reads** of home credentials (`~/.ssh`, `~/.aws`, registry) denied | ✅ | ⏳ not yet |
 
 The Windows backend was pivoted off a per-node AppContainer: the AppContainer's private object namespace hung `claude.exe` at libuv's named-pipe creation and blocked loopback. The restricted token fixes both. Deny-by-default **read/write confinement** on Windows is deferred — a same-user restricted token can't deny home reads while MSYS `bash` runs (both are secured by the same user SID), so the surviving path is a separate low-privilege user principal (or WSL). Until then the Windows sandbox fixes the hang and loopback but does **not** yet restrict file access.
+
+### Attention hooks
+
+Separately from the sandbox, spawning a node writes an attention hook into the
+harness's own configuration, and that hook POSTs lifecycle events to the local
+app over loopback HTTP. The exact files, where they land, and what the request
+carries are listed in [Attention hooks Buildmesh installs on
+disk](docs/user-guide.md#attention-hooks-buildmesh-installs-on-disk).
 
 ### What it is *not*
 
