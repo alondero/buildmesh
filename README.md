@@ -83,7 +83,7 @@ Inside:
 | `logs\panic.log` | External crash-watchdog dump (Windows only). |
 | `circuits\finish.md` | Shared Circuit wrap-up template. |
 
-OAuth secrets for each provider are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory).
+OAuth secrets and provider API keys are stored in the **Windows Credential Manager** (catch-all `CRED_TYPE_GENERIC` entries, *not* in this directory). If Credential Manager is unreachable, API keys stay in `preferences.json` until it is.
 
 **Back up and restore from inside the app.** **Settings → Data & Diagnostics**
 checks your stored state, takes snapshots, and exports a portable copy with

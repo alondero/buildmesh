@@ -683,8 +683,9 @@ If `preferences.json` is damaged, empty, truncated, or holds a field this
 version does not understand, Settings opens with a warning panel instead of
 silently showing defaults. Nothing is lost at that point: Buildmesh leaves
 the file exactly as it found it and refuses to write over it, so your
-provider accounts, API keys, provider pairings, harness defaults, and
-Autopilot settings are still on disk. Settings controls stay disabled until
+provider accounts, provider pairings, harness defaults, and Autopilot
+settings are still on disk, and your API keys are still in Windows Credential
+Manager. Settings controls stay disabled until
 you choose one of three actions:
 
 - **Restore last-known-good** puts back the settings Buildmesh last saved
@@ -864,10 +865,12 @@ contains no:
 - the remote-access root token, coordinator tokens, or paired-device sessions
 - the LAN HTTPS certificate or its private key
 - terminal scrollback and agent transcripts (never part of stored state)
-- Windows Credential Manager entries
+- the OpenCode and Antigravity sign-in tokens held in Windows Credential Manager
 
 Untick it only when you are moving to a machine you control and want your keys
-to come with you. There is deliberately **no** option to export the LAN
+to come with you. (Provider API keys live in Windows Credential Manager, not in
+the settings file; an export with this ticked off copies them in, and the new
+machine moves them into its own Credential Manager the first time it starts.) There is deliberately **no** option to export the LAN
 certificate's private key — a file containing it would let its holder
 impersonate the HTTPS identity your paired devices already trust.
 

@@ -25,13 +25,14 @@
 //! downstream crates continue to compile unchanged.
 
 pub mod compatibility;
+pub mod launch_catalog;
+pub mod launch_configurations;
 pub mod migrations;
 pub mod model;
 pub mod recovery;
 pub mod resolver;
+pub(crate) mod secrets;
 pub mod spawn_configurations;
-pub mod launch_configurations;
-pub mod launch_catalog;
 pub mod storage;
 
 // Per-feature test files. Shared fixtures (TEST_LOCK, with_temp_dir) live in
@@ -44,12 +45,14 @@ mod tests;
 #[allow(unused_imports)]
 pub use model::{
     ApiSurface, AppPreferences, BillingMode, HarnessConfigValue, HarnessProfile, ModelTiers,
-    PairingVerification, PairingVerificationStatus, ProxiedProviderOrder, ProviderAccount,
-    ProviderPairing, SurfaceEndpoint,
+    PairingVerification, PairingVerificationStatus, ProviderAccount, ProviderPairing,
+    ProxiedProviderOrder, SurfaceEndpoint,
 };
 
 // ----- Re-exports: storage ----------------------------------------------
 
+#[allow(unused_imports)]
+pub(crate) use storage::ensure_default_provider_normalized;
 #[allow(unused_imports)]
 pub use storage::{
     app_data_dir, circuit_agent_pool_size, default_provider, generation, health, init,
@@ -58,8 +61,6 @@ pub use storage::{
 };
 #[cfg(test)]
 pub(crate) use storage::{init_for_tests, reset_for_tests};
-#[allow(unused_imports)]
-pub(crate) use storage::ensure_default_provider_normalized;
 
 // ----- Re-exports: recovery ----------------------------------------------
 
@@ -74,37 +75,35 @@ pub use recovery::{
 
 #[allow(unused_imports)]
 pub use resolver::{
-    compatible_providers_by_harness, compatible_providers_for_harness, default_harness_profiles,
-    default_provider_accounts, effective_provider_pairings, endpoint_model_descriptor,
-    first_class_surfaces, harness_capabilities_for, harness_order, harness_profiles, harness_surface,
-    is_claude_compatible_id, is_known_harness_id, keyed_first_class_catalog,
-    merge_detected_profiles, minimax_api_key_resolved, pairing_compatibility, pairing_for,
-    provider_accounts, provider_pairings, provider_surfaces, proxied_order_for,
-    proxied_provider_order, remove_provider_account, remove_provider_pairing,
-    resolve_default_provider, resolve_harness_provider, resolve_harness_provider_for, harness_runtime, resolved_harness_profile, resolve_stored_pairing_and_account,
-    set_account_key_if_absent, set_harness_order, set_proxied_provider_order, surface_for_executor,
-    upsert_provider_account, upsert_provider_pairing,
+    apply_capability_mask, field_inputs, harness_config_str, resolve_field,
+    CapabilityMaskForResolver, HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
+};
+#[allow(unused_imports)]
+pub(crate) use resolver::{
+    claude_harness_id_from, deepseek_default_tiers, keyed_first_class_template, kimi_default_tiers,
+    minimax_default_tiers, BUILTIN_PROVIDER_ACCOUNTS,
 };
 #[allow(unused_imports)]
 pub use resolver::{
-    apply_capability_mask, field_inputs, harness_config_str, resolve_field, CapabilityMaskForResolver,
-    HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
+    compatible_providers_by_harness, compatible_providers_for_harness, default_harness_profiles,
+    default_provider_accounts, effective_provider_pairings, endpoint_model_descriptor,
+    first_class_surfaces, harness_capabilities_for, harness_order, harness_profiles,
+    harness_runtime, harness_surface, is_claude_compatible_id, is_known_harness_id,
+    keyed_first_class_catalog, merge_detected_profiles, minimax_api_key_resolved,
+    pairing_compatibility, pairing_for, provider_accounts, provider_pairings, provider_surfaces,
+    proxied_order_for, proxied_provider_order, remove_provider_account, remove_provider_pairing,
+    resolve_default_provider, resolve_harness_provider, resolve_harness_provider_for,
+    resolve_stored_pairing_and_account, resolved_harness_profile, set_account_key_if_absent,
+    set_harness_order, set_proxied_provider_order, surface_for_executor, upsert_provider_account,
+    upsert_provider_pairing,
 };
 #[allow(unused_imports)]
-pub(crate) use resolver::{
-    effective_pairings, pairing_can_potentially_match,
-};
-#[allow(unused_imports)]
-pub(crate) use resolver::{
-    BUILTIN_PROVIDER_ACCOUNTS, claude_harness_id_from, deepseek_default_tiers,
-    kimi_default_tiers, keyed_first_class_template, minimax_default_tiers,
-};
+pub(crate) use resolver::{effective_pairings, pairing_can_potentially_match};
 
 // ----- Re-exports: compatibility ----------------------------------------
 
 #[allow(unused_imports)]
 pub use compatibility::{
     harness_default_for, normalize_harness_default, preflight_resolve_provider_env,
-    resolve_provider_env, remove_harness_default, upsert_harness_default,
-    validate_harness_default,
+    remove_harness_default, resolve_provider_env, upsert_harness_default, validate_harness_default,
 };

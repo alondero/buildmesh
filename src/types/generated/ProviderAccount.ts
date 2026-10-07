@@ -45,7 +45,9 @@ billing_mode: BillingMode,
  */
 claude_compatible: boolean, 
 /**
- * API key for usage fetching / custom endpoints. Stored plaintext in
- * preferences.json (matches the legacy `minimax_api_key` convention).
+ * API key for usage fetching / custom endpoints. Held in memory as a plain
+ * field, but kept out of preferences.json: it lives in the OS credential
+ * store (Windows Credential Manager) and is put back on load (issue #830).
+ * With no credential store available it stays in the file instead.
  */
 api_key: string | null, };
