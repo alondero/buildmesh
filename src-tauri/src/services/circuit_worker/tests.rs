@@ -4167,52 +4167,30 @@ fn active_run(id: i64) -> db::ActiveCircuitRun {
     }
 }
 
-// -- Sweep test isolation ----------------------------------------------
-//
-// `APPROVALS` is a process-global `Lazy<Mutex<Vec<...>>>` shared by
-// every parallel `cargo test` worker. Tests cannot rely on the queue
-// being empty or on `clear_approvals_queue()` for isolation — another
-// test running concurrently may mutate it between our ops. The fix:
-// unique run-id namespaces per test, asserts only about OUR entries,
-// and a per-test tidying pass so our entries don't leak.
-// This mirrors the PLANNER_TEST_MESH constant pattern used by
-// the other Circuit worker tests for the same reason.
-
 #[test]
 fn approvals_sweep_drops_entries_for_vanished_runs() {
     const RUN_A: i64 = 910_001;
     const RUN_B: i64 = 910_002;
     const RUN_C: i64 = 910_003;
-    request_circuit_approval(RUN_A, "node-a".into());
-    request_circuit_approval(RUN_B, "node-b".into());
-    request_circuit_approval(RUN_C, "node-c".into());
+    let queued = vec![
+        (RUN_A, "node-a".into()),
+        (RUN_B, "node-b".into()),
+        (RUN_C, "node-c".into()),
+    ];
 
     // RUN_B vanished (deleted/completed) between the click and this
     // pass. The sweep must drop ONLY its entry; RUN_A and RUN_C
-    // survive. Use a 910_xxx namespace so other parallel tests' ops
-    // don't touch our entries (and ours don't touch theirs).
+    // survive. A local queue keeps this test independent of parallel
+    // callers that mutate the process-wide approvals queue.
     let active = vec![active_run(RUN_A), active_run(RUN_C)];
-    sweep_stale_approvals(&active);
+    let (remaining, dropped) = retain_active_approvals(queued, &active);
 
-    // Scope the lock so it drops before the trailing tidy (the mutex
-    // is not reentrant — holding the guard across another lock would
-    // deadlock).
-    let queue = lock_circuit_worker_static(&APPROVALS);
-    assert!(
-        !queue.iter().any(|(r, _)| *r == RUN_B),
-        "the vanished run's approval must be evicted"
+    assert_eq!(dropped, 1, "only the vanished run's approval is evicted");
+    assert_eq!(
+        remaining,
+        vec![(RUN_A, "node-a".into()), (RUN_C, "node-c".into())],
+        "live runs retain their approvals and queue order"
     );
-    assert!(
-        queue.iter().any(|(r, _)| *r == RUN_A),
-        "live run A's approval must survive the sweep"
-    );
-    assert!(
-        queue.iter().any(|(r, _)| *r == RUN_C),
-        "live run C's approval must survive the sweep"
-    );
-    // Tidy our test's entries so they don't leak into other tests.
-    drop(queue);
-    lock_circuit_worker_static(&APPROVALS).retain(|(r, _)| *r != RUN_A && *r != RUN_C);
 }
 
 // ---- Poison-recovery regression (issue #1224) ----
@@ -4226,13 +4204,21 @@ fn approvals_sweep_drops_entries_for_vanished_runs() {
 // static inside `catch_unwind`, then re-lock and prove normal
 // push/drain/wake still works.
 fn poison_circuit_worker_static<T>(mutex: &'static Mutex<T>) {
-    let _guard = mutex.lock().expect("first lock must succeed (test setup)");
+    assert!(
+        !mutex.is_poisoned(),
+        "the poison fixture must begin with an unpoisoned mutex"
+    );
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = mutex.lock().expect("first lock must succeed (test setup)");
         panic!("intentional circuit-worker poison for issue #1224 regression test");
     }));
     assert!(
         result.is_err(),
         "test fixture must panic to poison the mutex"
+    );
+    assert!(
+        mutex.is_poisoned(),
+        "the caught panic must poison the held mutex"
     );
 }
 

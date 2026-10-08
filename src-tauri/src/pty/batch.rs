@@ -231,19 +231,35 @@ mod tests {
     #[test]
     fn time_window_flushes_an_isolated_chunk_without_waiting_for_more() {
         let (tx, rx) = mpsc::sync_channel(8);
-        let handle = thread::spawn(move || collect(rx, Duration::from_millis(20), 4096));
+        let (flushed_tx, flushed_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            drain_batched_with(rx, Duration::from_millis(20), 4096, |batch| {
+                let _ = flushed_tx.send(batch);
+            })
+        });
 
         tx.send(b"a".to_vec()).unwrap();
-        // Sit past the window so the batcher cannot be waiting for a
-        // second chunk. 80 ms is generous against CI scheduling noise.
-        thread::sleep(Duration::from_millis(80));
+        // Wait for the batcher to flush "a" on its own, and only then send
+        // "b". The test used to sleep 80 ms and assume the batcher thread had
+        // run and expired its 20 ms window by then; a starved thread read "a"
+        // late, found "b" already queued inside the window, and coalesced
+        // them. This is a handshake, so scheduling delay cannot change the
+        // outcome. If the batcher waited for more data instead of flushing on
+        // the window, "a" would never arrive and this times out (the 5 s is a
+        // hang detector, not a performance bound).
+        let first = flushed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("an isolated chunk must flush on the time window without more input");
+        assert_eq!(first, b"a".to_vec());
+
         tx.send(b"b".to_vec()).unwrap();
         drop(tx);
+        handle.join().expect("batcher thread");
 
-        let batches = handle.join().expect("batcher thread");
+        let rest: Vec<Vec<u8>> = flushed_rx.try_iter().collect();
         assert_eq!(
-            batches,
-            vec![b"a".to_vec(), b"b".to_vec()],
+            rest,
+            vec![b"b".to_vec()],
             "isolated chunks separated by more than the window must not coalesce"
         );
     }

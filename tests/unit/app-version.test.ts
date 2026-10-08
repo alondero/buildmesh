@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { execSync, execFileSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -32,9 +32,17 @@ function manifestVersions() {
 }
 
 function latestTagVersion(): string {
-  const tag = execSync("git describe --abbrev=0 --tags", { cwd: root })
-    .toString()
-    .trim();
+  // execFileSync, not execSync: a command string goes through cmd.exe on
+  // Windows, which doubles the process starts (git's own run is ~75 ms; the
+  // starts are what stall when the machine is saturated). The explicit timeout
+  // turns a stalled start into a message that says so, instead of vitest's
+  // generic "Test timed out".
+  const tag = execFileSync("git", ["describe", "--abbrev=0", "--tags"], {
+    cwd: root,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: SUBPROCESS_TIMEOUT_MS - 5_000,
+  }).trim();
   return tag.replace(/^v/, "");
 }
 
@@ -131,10 +139,12 @@ describe("app version manifests", () => {
 
 function runVersionSet(version: string): { status: number; stderr: string } {
   try {
-    execSync(`node scripts/set-version.mjs ${version}`, {
+    // process.execPath, no shell: one process start instead of cmd.exe plus node.
+    execFileSync(process.execPath, ["scripts/set-version.mjs", version], {
       cwd: root,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     return { status: 0, stderr: "" };
   } catch (e: unknown) {

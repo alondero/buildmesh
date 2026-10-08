@@ -48,6 +48,48 @@ claiming complete native ownership coverage. Known unfinished work, evidence
 conflicts and actual requests remain blockers. Review approval and external
 merge requirements remain separate.
 
+The shared `circuit::report_admission` policy reads the last persisted harness
+lifecycle report as negative evidence: explicit questions and permissions block
+report handoff, and BackgroundRunning blocks it as known outstanding work.
+Generic InputRequired is not a structured request. The positive status projection
+still rejects snapshots whose timestamp or status no longer matches the node row,
+but process-only status writes do not release a negative lifecycle veto. Only a
+new settled lifecycle report can replace that report. WorkResumed and
+TurnCompleted are settled reports that release the veto; ProcessIdle,
+ProcessRunning and other process projections do not. An unreadable snapshot is
+treated as unavailable lifecycle evidence and fails closed. Report preflight,
+transactional classification commit, watchdog recovery and operator completion attestation all
+apply this policy; the commit paths re-read under the database writer. Child-work
+receipts remain writable so they can resolve separate durable child evidence,
+but they do not clear a lifecycle veto. The last harness lifecycle report also
+survives a Buildmesh process restart; a restart or process reconciliation alone
+does not prove that a request or background task was settled.
+
+A missing agent row or unreadable lifecycle report fails closed as
+`LifecycleEvidenceUnavailable`: it cannot prove that the last harness request
+was settled. The Circuit evidence view names the missing or inconsistent
+lifecycle evidence, and an operator must repair the record/report or pause/cancel
+the run before recording completion. `EvidenceConflict` is reserved for session
+observation conflicts such as inconsistent identity, foreground, or owned-work
+evidence; its guidance directs operators to inspect and recheck those observations.
+
+Known background work keeps an active step Running and appears in the Circuit's
+current harness observation details as “Waiting for background work”. It has no
+timeout or automatic release: if background work finishes without a lifecycle
+callback, inspect the harness session and trigger a fresh status report. If the
+harness cannot report again, pause or cancel the Circuit and resolve the agent
+before starting a new attempt. A Completed attestation is unavailable while the
+last lifecycle report still says a question, permission or background task is
+outstanding.
+
+The [October 2026 six-harness reliability audit](../archive/2026-10/circuit-harness-reliability-audit.md)
+is historical context. Current qualification gaps remain: there is no 30-session
+live soak across the six target harnesses, no measured per-harness callback
+delivery rate, and no evidence establishing a 99% autonomous Circuit completion
+rate. Qualification metrics are tracked in #2127; consolidating harness-owned
+observation strategies and diagnostics is tracked in #2128. Historical signal
+health and fixture tests cannot establish that target.
+
 Terminal input attribution is streaming: focus notifications and cursor-position
 responses do not change the input generation or invent a draft, including when
 packets span writes. Real text, edits, paste and submission retain their fences.

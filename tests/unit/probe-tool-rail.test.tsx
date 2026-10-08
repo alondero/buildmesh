@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -63,6 +64,9 @@ function railTabIds(): string[] {
   return [...screen.getByRole('tablist', { name: 'Probe destinations' })
     .querySelectorAll('[role="tab"]')].map((t) => t.getAttribute('data-testid'));
 }
+
+// Load the lazy Probe tab chunks up front so rendering a tab does not wait on disk.
+beforeAll(preloadProbeTabs, 60_000);
 
 describe('pushProbeWorkingSet (ADR-0032 reducer)', () => {
   it('appends a new destination at the end of the display order', () => {
