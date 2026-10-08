@@ -60,9 +60,18 @@ pub(crate) fn paths(run_id: i64, node_id: &str, attempt: i32) -> Option<HandoffP
 }
 
 /// A WSL agent runs inside Linux, so it needs the `/mnt/<drive>/...` form.
-/// Windows and Windows-interop agents keep the Windows path.
+/// Windows and Windows-interop agents keep the Windows path. The app data dir
+/// can arrive canonicalised (`\\?\C:\...`); agents get the plain form, which
+/// is also the only form the WSL conversion recognises.
 pub(crate) fn agent_visible_path(path: &Path, env: EnvType) -> String {
-    let text = path.display().to_string();
+    let display = path.display().to_string();
+    let text = if let Some(unc) = display.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        display
+            .strip_prefix(r"\\?\")
+            .map_or(display.clone(), str::to_string)
+    };
     match env {
         EnvType::Wsl => crate::env::windows_to_wsl(&text),
         EnvType::Windows | EnvType::WindowsInterop => text,
@@ -547,6 +556,19 @@ mod tests {
 
         remove_run_dir_in(&root, 7).expect("removing a missing run dir is Ok");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The app data dir arrives canonicalised on Windows (`\\?\C:\...`, seen in
+    /// a real run). Agents get the plain form, and WSL conversion needs a drive.
+    #[test]
+    fn agent_visible_path_drops_the_verbatim_prefix() {
+        let path = Path::new(r"\\?\C:\x\y.md");
+        assert_eq!(agent_visible_path(path, EnvType::Windows), r"C:\x\y.md");
+        assert_eq!(agent_visible_path(path, EnvType::Wsl), "/mnt/c/x/y.md");
+        assert_eq!(
+            agent_visible_path(Path::new(r"\\?\UNC\server\share\y.md"), EnvType::Windows),
+            r"\\server\share\y.md"
+        );
     }
 
     #[test]
