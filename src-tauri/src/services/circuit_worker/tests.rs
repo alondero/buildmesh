@@ -2532,7 +2532,9 @@ fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
         )
     };
     assert!(valid(SessionStatus::Ready, "100:yield", "report-1"));
-    assert!(!valid(SessionStatus::Completed, "100:yield", "report-1"));
+    // A finished turn that owes a result file is reminded as Completed, so the
+    // reminder must still be accepted when its delivery is confirmed current.
+    assert!(valid(SessionStatus::Completed, "100:yield", "report-1"));
     assert!(!valid(SessionStatus::Running, "100:yield", "report-1"));
     assert!(!valid(SessionStatus::Ready, "200:yield", "report-1"));
     assert!(!valid(SessionStatus::Ready, "100:new-input", "report-1"));

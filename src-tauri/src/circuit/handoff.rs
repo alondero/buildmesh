@@ -112,7 +112,11 @@ pub(crate) fn write_prompt(path: &Path, text: &str) -> std::io::Result<()> {
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// `Ok(None)` when the agent has not written a usable result yet (missing or blank).
@@ -401,6 +405,80 @@ fn parse_turn_marker(text: &str) -> Option<HandoffTurn> {
     })
 }
 
+/// Prepares a continuation prompt for an agent that may still owe a result file.
+/// Any result it wrote for an earlier turn is archived first, so the continuation
+/// is judged on its own report. Returns the prompt to deliver.
+pub(crate) fn prepare_continuation(
+    run_id: i64,
+    agent_node_id: i64,
+    env: EnvType,
+    prompt: &str,
+) -> String {
+    match crate::preferences::app_data_dir() {
+        Some(root) => prepare_continuation_in(&root, run_id, agent_node_id, env, prompt),
+        None => prompt.to_string(),
+    }
+}
+
+/// `prepare_continuation` under an explicit root. The turn marker is left alone:
+/// the continuation carries on the same turn, so it still owes the same result file.
+pub(crate) fn prepare_continuation_in(
+    root: &Path,
+    run_id: i64,
+    agent_node_id: i64,
+    env: EnvType,
+    prompt: &str,
+) -> String {
+    let Some(result) = expected_result_in(root, run_id, agent_node_id) else {
+        return prompt.to_string();
+    };
+    archive_result(run_id, &result);
+    let visible = agent_visible_path(&result, env);
+    // The missing-result reminder already names the path, so do not repeat it.
+    if prompt.contains(&visible) {
+        return prompt.to_string();
+    }
+    format!("{prompt}\n\n{}", result_instruction(&visible))
+}
+
+/// `<stem>.result.md` becomes `<stem>.result.superseded-<k>.md` in the same
+/// folder, where `k` is the smallest positive number not already taken.
+fn archive_result(run_id: i64, result: &Path) {
+    let mut k = 1;
+    while superseded_result_path(result, k).exists() {
+        k += 1;
+    }
+    let target = superseded_result_path(result, k);
+    match std::fs::rename(result, &target) {
+        Ok(()) => tracing::info!(
+            "circuits: run {run_id}: archived the superseded result {} to {}",
+            result.display(),
+            target.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            // Removing it is the safe fallback: a result that cannot be archived must never be read again.
+            tracing::warn!(
+                "circuits: run {run_id}: could not archive the superseded result {}, removing it instead: {error}",
+                result.display()
+            );
+            match std::fs::remove_file(result) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => tracing::warn!(
+                    "circuits: run {run_id}: could not remove the superseded result {}: {error}",
+                    result.display()
+                ),
+            }
+        }
+    }
+}
+
+fn superseded_result_path(result: &Path, k: u32) -> PathBuf {
+    let stem = result.file_stem().unwrap_or_default().to_string_lossy();
+    result.with_file_name(format!("{stem}.superseded-{k}.md"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,6 +597,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
 
         // The temp file is renamed away, not left behind.
+        assert!(!path.with_file_name("x.prompt.md.tmp").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_prompt_leaves_no_temp_file_when_the_rename_fails() {
+        let root = scratch("write-prompt-rename-fails");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Renaming a file onto an existing directory fails, so the rename step errors.
+        let path = root.join("x.prompt.md");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(write_prompt(&path, "x").is_err());
         assert!(!path.with_file_name("x.prompt.md.tmp").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -906,6 +998,155 @@ mod tests {
 
         assert_eq!(removed, Ok(0));
         assert!(!asked, "existence check must not run without run folders");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Stages a prompt that owes a result file and records the turn, as a real
+    /// launch does. Returns the result path the agent owes.
+    fn owe_result(root: &Path, run_id: i64, agent_node_id: i64, node_id: &str) -> PathBuf {
+        stage_prompt_in(
+            root,
+            run_id,
+            node_id,
+            1,
+            EnvType::Windows,
+            "Implement it.",
+            true,
+        );
+        let turn = HandoffTurn {
+            node_id: node_id.into(),
+            attempt: 1,
+        };
+        set_agent_turn_in(root, run_id, agent_node_id, Some(&turn));
+        paths_in(root, run_id, node_id, 1).result
+    }
+
+    /// `<stem>.result.md` becomes `<stem>.result.superseded-<k>.md` in the same folder.
+    fn superseded(result: &Path, k: u32) -> PathBuf {
+        let name = result.file_name().unwrap().to_string_lossy().into_owned();
+        let stem = name.strip_suffix(".result.md").unwrap();
+        result.with_file_name(format!("{stem}.result.superseded-{k}.md"))
+    }
+
+    #[test]
+    fn prepare_continuation_archives_a_stale_result_so_it_can_no_longer_be_read() {
+        let root = scratch("continuation-stale");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = owe_result(&root, 20, 50, "implement");
+        write_prompt(&result, "first report BUILDMESH_RESULT_V1: pass").unwrap();
+
+        prepare_continuation_in(&root, 20, 50, EnvType::Windows, "Continue the work.");
+
+        assert_eq!(read_result(&result).unwrap(), None);
+        assert_eq!(
+            std::fs::read_to_string(
+                result.with_file_name("implement-attempt1.result.superseded-1.md")
+            )
+            .unwrap(),
+            "first report BUILDMESH_RESULT_V1: pass"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_continuation_numbers_each_archived_result_without_overwriting_it() {
+        let root = scratch("continuation-numbering");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = owe_result(&root, 20, 50, "implement");
+
+        write_prompt(&result, "first report").unwrap();
+        prepare_continuation_in(&root, 20, 50, EnvType::Windows, "Continue.");
+        write_prompt(&result, "second report").unwrap();
+        prepare_continuation_in(&root, 20, 50, EnvType::Windows, "Continue.");
+
+        assert_eq!(
+            std::fs::read_to_string(superseded(&result, 1)).unwrap(),
+            "first report"
+        );
+        assert_eq!(
+            std::fs::read_to_string(superseded(&result, 2)).unwrap(),
+            "second report"
+        );
+        assert_eq!(read_result(&result).unwrap(), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_continuation_appends_the_result_instruction_for_the_visible_result_path() {
+        let root = scratch("continuation-instruction");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = owe_result(&root, 21, 51, "implement");
+        let visible = agent_visible_path(&result, EnvType::Windows);
+
+        let prompt = prepare_continuation_in(&root, 21, 51, EnvType::Windows, "Continue.");
+
+        assert_eq!(
+            prompt,
+            format!("Continue.\n\n{}", result_instruction(&visible))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_continuation_names_the_wsl_form_of_the_result_path_for_a_wsl_agent() {
+        let root = scratch("continuation-wsl");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = owe_result(&root, 22, 52, "implement");
+        let visible = agent_visible_path(&result, EnvType::Wsl);
+
+        let prompt = prepare_continuation_in(&root, 22, 52, EnvType::Wsl, "Continue.");
+
+        assert_eq!(
+            prompt,
+            format!("Continue.\n\n{}", result_instruction(&visible))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_continuation_keeps_a_prompt_that_already_names_the_result_path() {
+        let root = scratch("continuation-already-named");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = owe_result(&root, 23, 53, "implement");
+        write_prompt(&result, "old report").unwrap();
+        let visible = agent_visible_path(&result, EnvType::Windows);
+        let reminder = format!("Save your final report, ending with the required result line, to {visible} now (overwrite it).");
+
+        let prompt = prepare_continuation_in(&root, 23, 53, EnvType::Windows, &reminder);
+
+        assert_eq!(prompt, reminder);
+        // The stale result is still archived even though the prompt is kept.
+        assert_eq!(read_result(&result).unwrap(), None);
+        assert!(superseded(&result, 1).is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepare_continuation_leaves_the_disk_alone_when_the_turn_owes_no_result() {
+        let root = scratch("continuation-no-marker");
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = paths_in(&root, 24, "implement", 1);
+        write_prompt(&paths.result, "report from an unrelated turn").unwrap();
+        let before = std::fs::read_dir(run_dir_in(&root, 24))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+
+        let prompt = prepare_continuation_in(&root, 24, 54, EnvType::Windows, "Continue.");
+
+        assert_eq!(prompt, "Continue.");
+        assert_eq!(
+            std::fs::read_to_string(&paths.result).unwrap(),
+            "report from an unrelated turn"
+        );
+        let mut after = std::fs::read_dir(run_dir_in(&root, 24))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        after.sort();
+        let mut before = before;
+        before.sort();
+        assert_eq!(after, before);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

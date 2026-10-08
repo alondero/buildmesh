@@ -1743,7 +1743,10 @@ fn continuation_is_current(
     revision: Option<&str>,
 ) -> bool {
     alive
-        && matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput)
+        && matches!(
+            status,
+            SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput
+        )
         && view.context.source_agent_id() != Some(target)
         && view.continuation_target(node_id) == Some(target)
         && stamp.is_some()
@@ -2135,10 +2138,18 @@ pub(super) fn execute_effects(
                     .context
                     .get(&format!("node.{node_id}.continuation.input"))
                     .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
+                // The agent may owe a result file from an earlier turn. Archive it so the
+                // continuation cannot be judged from that stale report.
+                let prompt = crate::circuit::handoff::prepare_continuation(
+                    active.run.id,
+                    *target_agent_id,
+                    node.env,
+                    prompt,
+                );
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
                     *target_agent_id,
-                    prompt,
+                    &prompt,
                     app,
                     Some(expected),
                 ) {

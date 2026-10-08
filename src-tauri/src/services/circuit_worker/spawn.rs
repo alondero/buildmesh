@@ -533,6 +533,12 @@ pub(super) fn attach_spawned_agent(
     Ok(())
 }
 
+/// A reused agent node's stored environment is authoritative. The mesh path is
+/// only a guess for an agent that does not exist yet.
+fn staging_env(existing: Option<EnvType>, mesh_path: &str) -> EnvType {
+    existing.unwrap_or_else(|| EnvType::from(crate::env::env_for_path(Path::new(mesh_path))))
+}
+
 pub(super) fn spawn_step_agent(
     app: &AppHandle,
     run_id: i64,
@@ -616,7 +622,6 @@ pub(super) fn spawn_step_agent(
         .get("issue.number")
         .and_then(|number| number.parse::<i64>().ok());
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
-    // The agent does not exist yet, so its environment comes from the mesh path.
     // Staging happens before the delivery decision so every later use sees the
     // text the agent will actually receive. The turn it opens is recorded
     // against the agent id once that id is known.
@@ -624,7 +629,13 @@ pub(super) fn spawn_step_agent(
         (resolved_prompt, None)
     } else {
         let attempt = view.step(node_id).map_or(1, |s| s.attempt);
-        let env = EnvType::from(crate::env::env_for_path(Path::new(&mesh.path)));
+        // A retry or respawn reuses the step's existing agent node, so its stored env wins.
+        let existing_env = view
+            .step(node_id)
+            .and_then(|s| s.agent_node_id)
+            .and_then(|id| db::get_agent_node_by_id(id).ok())
+            .map(|node| node.env);
+        let env = staging_env(existing_env, &mesh.path);
         let staged = crate::circuit::handoff::stage_prompt(
             run_id,
             node_id,
@@ -872,4 +883,19 @@ pub(super) fn spawn_step_agent(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod staging_env_tests {
+    use super::*;
+
+    #[test]
+    fn staging_env_prefers_an_existing_agent_node_env_over_the_mesh_path() {
+        assert_eq!(staging_env(Some(EnvType::Wsl), r"C:\repo"), EnvType::Wsl);
+    }
+
+    #[test]
+    fn staging_env_falls_back_to_the_mesh_path_without_an_existing_node() {
+        assert_eq!(staging_env(None, r"C:\repo"), EnvType::Windows);
+    }
 }

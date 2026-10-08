@@ -424,6 +424,24 @@ fn a_finished_turn_missing_its_result_file_is_reminded_and_never_classified() {
         StepStatus::Running,
         Some(42),
     );
+    // The classifier's step is reminded through the spawn that owns the agent.
+    view.graph.nodes.push(CircuitNode {
+        id: "work".into(),
+        kind: spawn(),
+    });
+    view.graph.edges.push(CircuitEdge {
+        from: "work".into(),
+        to: "step".into(),
+        condition: EdgeCondition::default(),
+    });
+    view.steps.push(StepView {
+        node_id: "work".into(),
+        status: StepStatus::Completed,
+        agent_node_id: Some(42),
+        attempt: 1,
+        outcome: None,
+        error: None,
+    });
     let owed = |turn_missing: Option<MissingResult>| ClassifiedTurn {
         classifier_error: None,
         observation_blocker: None,
@@ -469,9 +487,15 @@ fn a_finished_turn_missing_its_result_file_is_reminded_and_never_classified() {
         "a first reminder raises no attention"
     );
 
-    // Two reminders are spent for this attempt, and this report is new: the
-    // step is exhausted, so the agent is marked for attention exactly once.
+    // Two reminders are spent for this attempt. The report revision is the
+    // same as the last reminder, but this is a new turn (new lifecycle stamp)
+    // that still lacks the file: the step is exhausted, so the agent is marked
+    // for attention exactly once.
     view.context.set("node.step.result_reminders.1", "2");
+    view.context
+        .set("node.step.result_reminder_revision", "report-1");
+    view.context
+        .set("node.step.result_reminder_stamp", "100:earlier-turn");
     let mut script = Script {
         turn: Some(owed(Some(missing()))),
         ..Default::default()
@@ -484,9 +508,10 @@ fn a_finished_turn_missing_its_result_file_is_reminded_and_never_classified() {
         [CircuitEvent::ResultFileMissing { .. }]
     ));
 
-    // The revision already answered is not raised again.
+    // The same observation (revision and stamp) already answered is not
+    // raised again.
     view.context
-        .set("node.step.result_reminder_revision", "report-1");
+        .set("node.step.result_reminder_stamp", "100:yield");
     let mut script = Script {
         turn: Some(owed(Some(missing()))),
         ..Default::default()

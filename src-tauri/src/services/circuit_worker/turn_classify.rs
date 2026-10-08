@@ -1015,21 +1015,21 @@ pub(super) fn observe_gates_with(
                         continue;
                     }
                     if let Some(missing) = missing_result {
-                        // Attention is raised once per unanswered revision, on the
-                        // event that exhausts the reminders, not on every tick.
-                        let reminders = view
-                            .context
-                            .get(&format!(
-                                "node.{}.result_reminders.{}",
-                                step.node_id, step.attempt
-                            ))
-                            .and_then(|value| value.parse::<u32>().ok())
-                            .unwrap_or(0);
-                        let answered = view
-                            .context
-                            .get(&format!("node.{}.result_reminder_revision", step.node_id))
-                            == Some(missing.revision.as_str());
-                        if reminders >= 2 && !answered && step.status == StepStatus::Running {
+                        // Attention is raised once per observed turn, on the event
+                        // the stepper exhausts (or cannot remind), not on every tick.
+                        // The stepper unverifies the step on this same event, so the
+                        // next tick is `Ignore` and this does not repeat.
+                        let decision = view.result_reminder_decision(
+                            &step.node_id,
+                            step.attempt,
+                            &missing.revision,
+                            &missing.stamp,
+                        );
+                        if matches!(
+                            decision,
+                            crate::circuit::stepper::ResultReminderDecision::Exhausted
+                                | crate::circuit::stepper::ResultReminderDecision::NotOwned
+                        ) {
                             let issue = view
                                 .context
                                 .get("issue.number")

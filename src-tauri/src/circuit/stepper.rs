@@ -448,6 +448,76 @@ impl RunView {
         self.resolve_target_agent(node_id)
     }
 
+    /// The agent a result reminder may be sent to: the continuation target,
+    /// never a borrowed source agent.
+    fn result_reminder_target(&self, node_id: &str) -> Option<i64> {
+        self.continuation_target(node_id)
+            .filter(|target| Some(*target) != self.context.source_agent_id())
+    }
+
+    /// True when this turn (identified by its report revision and lifecycle
+    /// stamp) has already been reminded. The report can stay identical across
+    /// turns, so the stamp is what tells a new turn from the same observation.
+    fn result_reminder_observed(&self, node_id: &str, revision: &str, stamp: &str) -> bool {
+        self.context
+            .get(&format!("node.{node_id}.result_reminder_revision"))
+            == Some(revision)
+            && self
+                .context
+                .get(&format!("node.{node_id}.result_reminder_stamp"))
+                == Some(stamp)
+    }
+
+    fn result_reminders_sent(&self, node_id: &str, attempt: i32) -> u32 {
+        self.context
+            .get(&format!("node.{node_id}.result_reminders.{attempt}"))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Decide what a finished turn that still owes its result file calls for.
+    /// Shared by the stepper and the worker's blocking decision, so both act on
+    /// the same rule.
+    pub fn result_reminder_decision(
+        &self,
+        node_id: &str,
+        attempt: i32,
+        revision: &str,
+        stamp: &str,
+    ) -> ResultReminderDecision {
+        if self.state != RunState::Running
+            || !self
+                .step(node_id)
+                .is_some_and(|s| s.status == StepStatus::Running && s.attempt == attempt)
+        {
+            return ResultReminderDecision::Ignore;
+        }
+        let delivery = self
+            .context
+            .get(&format!("node.{node_id}.continuation.delivery"));
+        if delivery == Some("claimed") {
+            return ResultReminderDecision::Ignore;
+        }
+        if self.result_reminder_observed(node_id, revision, stamp) {
+            // Nothing has changed since an undeliverable reminder, so sending it
+            // again would loop; a delivered one is simply still in progress.
+            return if delivery == Some("obsolete") {
+                ResultReminderDecision::Exhausted
+            } else {
+                ResultReminderDecision::Ignore
+            };
+        }
+        if self.result_reminder_target(node_id).is_none() {
+            return ResultReminderDecision::NotOwned;
+        }
+        let sent = self.result_reminders_sent(node_id, attempt);
+        if sent >= 2 {
+            ResultReminderDecision::Exhausted
+        } else {
+            ResultReminderDecision::Remind(sent + 1)
+        }
+    }
+
     /// Resolve the implementation agent whose worktree an OpenPr action
     /// inspects. This is deliberately separate from target-agent resolution:
     /// an OpenPr step observes a repository, it does not pilot a process.
@@ -941,6 +1011,23 @@ impl Transition {
 // The stepper.
 // ---------------------------------------------------------------------------
 
+/// What a finished turn that still owes its result file calls for. Produced by
+/// [`RunView::result_reminder_decision`] and read by both the stepper and the
+/// worker, so neither can block or send on a different rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultReminderDecision {
+    /// Not waiting on this turn: the step moved on, a delivery is in flight, or
+    /// this observation was already answered.
+    Ignore,
+    /// Send reminder `n` (1 or 2) for this attempt.
+    Remind(u32),
+    /// The reminders are spent, or the last one could not be delivered and the
+    /// turn has not changed since, so the step cannot finish on its own.
+    Exhausted,
+    /// The agent is borrowed from the source, so no reminder may be sent.
+    NotOwned,
+}
+
 fn result_reminder_prompt(path: &str) -> String {
     format!(
         "Save your final report, ending with the required result line, to {path} now (overwrite it). Do not redo the work."
@@ -1311,46 +1398,24 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             revision,
             input_stamp,
         } => {
-            if run.state != RunState::Running
-                || !run
-                    .step(node_id)
-                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
-            {
-                return t;
-            }
-            // One reminder per report revision: the same report observed again
-            // is the same unanswered turn, not a new one.
-            if run
-                .context
-                .get(&format!("node.{node_id}.result_reminder_revision"))
-                == Some(revision.as_str())
-            {
-                return t;
-            }
-            if run
-                .context
-                .get(&format!("node.{node_id}.continuation.delivery"))
-                == Some("claimed")
-            {
-                return t;
-            }
-            let count_key = format!("node.{node_id}.result_reminders.{attempt}");
-            let count = run
-                .context
-                .get(&count_key)
-                .and_then(|v| v.parse::<u32>().ok())
-                .unwrap_or(0);
-            // Never drive a borrowed source agent: its turn is not ours to answer.
-            let target = run
-                .continuation_target(node_id)
-                .filter(|target| Some(*target) != run.context.source_agent_id());
-            match target {
-                Some(target_agent_id) if count < 2 => {
-                    let count = count + 1;
+            // One reminder per observed turn (report revision and lifecycle
+            // stamp). The decision is shared with the worker, which blocks the
+            // agent on the same Exhausted/NotOwned outcome.
+            match run.result_reminder_decision(node_id, *attempt, revision, stamp) {
+                ResultReminderDecision::Ignore => return t,
+                ResultReminderDecision::Remind(count) => {
+                    let Some(target_agent_id) = run.result_reminder_target(node_id) else {
+                        return t;
+                    };
+                    let count_key = format!("node.{node_id}.result_reminders.{attempt}");
                     run.context.set(&count_key, count.to_string());
                     run.context.set(
                         &format!("node.{node_id}.result_reminder_revision"),
                         revision.clone(),
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.result_reminder_stamp"),
+                        stamp.clone(),
                     );
                     run.context.set(
                         &format!("node.{node_id}.continuation.stamp"),
@@ -1394,15 +1459,24 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         prompt: result_reminder_prompt(result_path),
                     });
                 }
-                Some(_) => unverify_step(
-                    run,
-                    &mut t,
-                    node_id,
-                    format!(
-                        "Agent finished without saving its result file to {result_path} after 2 reminders. Ask it to save the result, or inspect its report."
-                    ),
-                ),
-                None => unverify_step(
+                ResultReminderDecision::Exhausted => {
+                    let undeliverable = run.result_reminder_observed(node_id, revision, stamp)
+                        && run
+                            .context
+                            .get(&format!("node.{node_id}.continuation.delivery"))
+                            == Some("obsolete");
+                    let reason = if undeliverable {
+                        format!(
+                            "Agent finished without saving its result file to {result_path}, and the reminder could not be delivered. Inspect the agent; no further reminder will be sent."
+                        )
+                    } else {
+                        format!(
+                            "Agent finished without saving its result file to {result_path} after 2 reminders. Ask it to save the result, or inspect its report."
+                        )
+                    };
+                    unverify_step(run, &mut t, node_id, reason);
+                }
+                ResultReminderDecision::NotOwned => unverify_step(
                     run,
                     &mut t,
                     node_id,
@@ -5772,6 +5846,226 @@ mod tests {
         assert_eq!(
             error,
             "Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md after 2 reminders. Ask it to save the result, or inspect its report."
+        );
+    }
+
+    fn result_file_missing_at(
+        node_id: &str,
+        attempt: i32,
+        revision: &str,
+        stamp: &str,
+    ) -> CircuitEvent {
+        CircuitEvent::ResultFileMissing {
+            node_id: node_id.into(),
+            attempt,
+            result_path: "C:/runs/run-42/classify-attempt1.result.md".into(),
+            stamp: stamp.into(),
+            revision: revision.into(),
+            input_stamp: "1:0".into(),
+        }
+    }
+
+    fn delivered(node_id: &str) -> CircuitEvent {
+        CircuitEvent::ContinuationDelivered {
+            node_id: node_id.into(),
+            attempt: 1,
+        }
+    }
+
+    /// Production keeps the transcript revision across turns that add nothing
+    /// to the report; the lifecycle stamp is what changes. Each new turn that
+    /// still lacks the file must spend a reminder, then exhaust the step.
+    #[test]
+    fn reminders_follow_each_new_turn_even_when_the_report_revision_is_unchanged() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+
+        let first = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+        assert_eq!(first.effects.len(), 1, "reminder 1 is sent");
+        advance(&mut run, &delivered("classify"));
+
+        let second = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s2"));
+        assert_eq!(
+            second.effects.len(),
+            1,
+            "a new turn with the same report is reminded again"
+        );
+        assert_eq!(
+            run.context.get("node.classify.result_reminders.1"),
+            Some("2")
+        );
+        advance(&mut run, &delivered("classify"));
+
+        let third = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s3"));
+        assert!(third.effects.is_empty());
+        assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+        assert_eq!(
+            run.step("classify").unwrap().error.as_deref(),
+            Some("Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md after 2 reminders. Ask it to save the result, or inspect its report.")
+        );
+    }
+
+    /// The same observation seen again while the reminder is in flight or
+    /// already delivered is one unanswered turn, not a new one.
+    #[test]
+    fn the_same_observation_after_a_delivered_reminder_is_ignored() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+        advance(&mut run, &delivered("classify"));
+
+        let again = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+        assert!(again.effects.is_empty());
+        assert!(again.step_writes.is_empty());
+        assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+        assert_eq!(
+            run.context.get("node.classify.result_reminders.1"),
+            Some("1")
+        );
+    }
+
+    /// An undeliverable reminder changes nothing about the turn, so observing
+    /// the same turn again must end the step instead of looping on it.
+    #[test]
+    fn an_undeliverable_reminder_is_not_retried_for_the_same_observation() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+        advance(
+            &mut run,
+            &CircuitEvent::ContinuationObsolete {
+                node_id: "classify".into(),
+                attempt: 1,
+            },
+        );
+
+        let again = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+        assert!(again.effects.is_empty(), "no second reminder is sent");
+        assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+        let error = run.step("classify").unwrap().error.clone().unwrap();
+        assert!(
+            error.contains("could not be delivered"),
+            "unexpected reason: {error}"
+        );
+    }
+
+    fn reminder_run() -> RunView {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        run
+    }
+
+    #[test]
+    fn result_reminder_decision_ignores_runs_steps_and_attempts_that_are_not_waiting() {
+        let mut run = reminder_run();
+        let decide = |run: &RunView, node: &str, attempt: i32| {
+            run.result_reminder_decision(node, attempt, "r1", "s1")
+        };
+        assert_eq!(
+            decide(&run, "classify", 1),
+            ResultReminderDecision::Remind(1)
+        );
+        assert_eq!(decide(&run, "nope", 1), ResultReminderDecision::Ignore);
+        assert_eq!(decide(&run, "classify", 2), ResultReminderDecision::Ignore);
+
+        run.context
+            .set("node.classify.continuation.delivery", "claimed");
+        assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+        run.context
+            .set("node.classify.continuation.delivery", "delivered");
+
+        run.step_mut("classify").unwrap().status = StepStatus::Unverified;
+        assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+        run.step_mut("classify").unwrap().status = StepStatus::Running;
+
+        run.state = RunState::Paused;
+        assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+    }
+
+    #[test]
+    fn result_reminder_decision_treats_the_recorded_observation_as_already_seen() {
+        let mut run = reminder_run();
+        run.context
+            .set("node.classify.result_reminder_revision", "r1");
+        run.context.set("node.classify.result_reminder_stamp", "s1");
+
+        run.context
+            .set("node.classify.continuation.delivery", "delivered");
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::Ignore,
+            "the same observation after a delivered reminder is not a new turn"
+        );
+
+        run.context
+            .set("node.classify.continuation.delivery", "obsolete");
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::Exhausted,
+            "an undeliverable reminder cannot be retried for the same observation"
+        );
+
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s2"),
+            ResultReminderDecision::Remind(1),
+            "a new turn (new stamp) is a new observation"
+        );
+    }
+
+    #[test]
+    fn result_reminder_decision_counts_reminders_and_refuses_borrowed_agents() {
+        let mut run = reminder_run();
+        run.context.set("node.classify.result_reminders.1", "1");
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::Remind(2)
+        );
+
+        run.context.set("node.classify.result_reminders.1", "2");
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::Exhausted
+        );
+        run.context
+            .set("node.classify.result_reminder_revision", "r1");
+        run.context.set("node.classify.result_reminder_stamp", "s1");
+        run.context
+            .set("node.classify.continuation.delivery", "delivered");
+        assert_eq!(
+            run.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::Ignore,
+            "a spent step is not exhausted again for an observation already answered"
+        );
+
+        let mut borrowed = reminder_run();
+        borrowed.context.set("source.agent_id", "900");
+        assert_eq!(
+            borrowed.result_reminder_decision("classify", 1, "r1", "s1"),
+            ResultReminderDecision::NotOwned
         );
     }
 
