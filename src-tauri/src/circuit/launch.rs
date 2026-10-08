@@ -108,20 +108,18 @@ pub(crate) fn normalize_for_match(s: &str) -> String {
 /// # Long prefills anchor on their tail, not their head
 ///
 /// The leading fragment is only *drawn* while the composer shows the start of
-/// the staged text. Claude Code's input box scrolls, and once a prefill is
-/// longer than the box it keeps the text nearest the cursor — its tail — in
-/// view and scrolls the head out of frame. Head-anchoring such a prefill waits
-/// for a marker the harness will never draw, so the watcher burns
-/// [`WATCH_TIMEOUT`] and leaves a perfectly good prompt staged but unsubmitted
-/// (run 393: the Circuit PR reviewer's review policy, delivery line, and
-/// `BUILDMESH_REVIEW_V1` contract together are ~1.5 KB, comfortably past the
-/// limit, and a human had to press Enter for every review round).
+/// the staged text. A harness input box scrolls, so once a prefill is longer
+/// than the box it keeps the text nearest the cursor — its tail — in view and
+/// scrolls the head out of frame. Head-anchoring such a prefill waits for a
+/// marker the harness will never draw, so the watcher burns [`WATCH_TIMEOUT`]
+/// and leaves a staged prompt unsubmitted.
 ///
-/// `circuit::delivery` already hit this for PTY pastes and settled on the tail
-/// for the same reason — a composer that scrolls keeps the tail in view
-/// ([`TAIL_ANCHOR_CHARS`], issue #2061/#2108). This helper applies that one
-/// policy to the prefill path so both transports anchor on the span that is
-/// actually rendered.
+/// `circuit::delivery` applies the same span to PTY pastes for the same reason
+/// (issue #2061/#2108). The two paths keep the constants shared rather than the
+/// policy: there, whether a long draft can be confirmed by text at all is
+/// adapter-declared, because a harness that collapses long drafts to its own
+/// paste marker can only be confirmed by that marker. The prefill path has no
+/// adapter-declared policy, so every prefill past the limit anchors on its tail.
 pub(crate) fn marker_hint_for_prefill(prefill: &str) -> String {
     let normalized = normalize_for_match(prefill);
     let chars = normalized.chars().count();
@@ -315,7 +313,7 @@ mod tests {
     /// A prefill longer than the composer can draw scrolls: the head leaves
     /// the frame and only the tail stays visible. The marker must therefore
     /// come from the tail, or the watcher waits out `WATCH_TIMEOUT` for a
-    /// marker the harness never paints (run 393's reviewer prompt).
+    /// marker the harness never paints.
     #[test]
     fn marker_hint_for_prefill_anchors_on_the_tail_of_a_long_prefill() {
         let long = "word ".repeat(100);
@@ -336,9 +334,10 @@ mod tests {
         );
     }
 
-    /// The regression itself: the real Circuit PR reviewer prompt is ~1.5 KB,
-    /// so a head-anchored watcher waits for a marker Claude Code scrolls out
-    /// of its input box. Its marker must be the tail, and that tail must be
+    /// The regression itself, pinned to a real prompt rather than a synthetic
+    /// string: the Circuit PR reviewer prompt is ~1.5 KB, well past the limit,
+    /// so a head-anchored watcher waits for a marker the harness scrolls out of
+    /// its input box. Its marker must be the tail, and that tail must be
     /// reachable in a tail-only echo of the drawn input box.
     #[test]
     fn circuit_reviewer_prefill_marker_survives_a_scrolled_input_box() {

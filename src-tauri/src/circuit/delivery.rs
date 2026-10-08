@@ -38,8 +38,10 @@ pub(crate) const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// `normalize_for_match`, not in display columns.
 ///
 /// Shared with [`crate::circuit::launch`]: a composer that scrolls keeps the
-/// tail of the staged text in view whether that text arrived as a PTY paste
-/// or as a startup prefill, so both delivery paths anchor on the same span.
+/// tail of the staged text in view, so both delivery paths anchor their long
+/// drafts on this span. They share the cutoff and the width, not the policy —
+/// whether a long draft can be confirmed by text at all stays adapter-declared
+/// here, while the prefill path has no adapter-declared policy.
 pub(crate) const TAIL_ANCHOR_CHARS: usize = 64;
 /// Bound ambiguous reconstruction per output snapshot. Exhaustion leaves the
 /// paste unconfirmed; it never authorizes Enter or extends the readiness budget.
