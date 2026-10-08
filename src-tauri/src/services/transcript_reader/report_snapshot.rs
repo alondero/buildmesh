@@ -21,6 +21,12 @@ enum ReportSource {
         session_id: String,
         rows: Vec<(String, serde_json::Value)>,
     },
+    ResultFile {
+        transcript: Option<Box<ReportSnapshot>>,
+        path: PathBuf,
+        length: u64,
+        modified: std::time::SystemTime,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +41,49 @@ pub(crate) struct ReportSnapshot {
 }
 
 impl ReportSnapshot {
+    /// Anchor a result to the already admitted turn. File-backed turns also
+    /// retain their transcript guard; receipt-backed turns keep their input fence.
+    pub(crate) fn read_result_file(
+        path: &Path,
+        turn_revision: &str,
+        published_at_ms: i64,
+        transcript: Option<&Self>,
+    ) -> std::io::Result<Option<Self>> {
+        use sha2::{Digest, Sha256};
+        let metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let Some(text) = crate::circuit::handoff::read_result(path)? else {
+            return Ok(None);
+        };
+        let snapshot = Self {
+            revision: format!(
+                "{}:result:{:x}",
+                turn_revision,
+                Sha256::digest(text.as_bytes())
+            ),
+            text: crate::secret_scrubber::SecretScrubber::scrub(&text),
+            published_at_ms,
+            turn_finished: transcript.is_some_and(|report| report.turn_finished),
+            source: ReportSource::ResultFile {
+                transcript: transcript.cloned().map(Box::new),
+                path: path.into(),
+                length: metadata.len(),
+                modified: metadata.modified()?,
+            },
+        };
+        if snapshot.is_current() {
+            Ok(Some(snapshot))
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "result file or transcript changed while reading the report",
+            ))
+        }
+    }
+
     pub(crate) fn is_current(&self) -> bool {
         match &self.source {
             ReportSource::File {
@@ -51,6 +100,17 @@ impl ReportSnapshot {
             } => {
                 read_opencode_message_rows(path, session_id, OPENCODE_DIGEST_WINDOW).as_ref()
                     == Some(rows)
+            }
+            ReportSource::ResultFile {
+                transcript,
+                path,
+                length,
+                modified,
+            } => {
+                transcript.as_ref().is_none_or(|report| report.is_current())
+                    && fs::metadata(path).is_ok_and(|metadata| {
+                        metadata.len() == *length && metadata.modified().ok() == Some(*modified)
+                    })
             }
         }
     }
@@ -562,6 +622,329 @@ mod tests {
             }),
         };
         (run, event)
+    }
+
+    #[test]
+    fn circuit_result_file_handoff_binds_the_report_that_is_classified() {
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("publish.jsonl");
+        fs::write(&transcript, format!("{}\n", serde_json::json!({
+            "type": "assistant", "timestamp": "2026-10-08T12:25:20Z",
+            "message": {"id": "publish", "role": "assistant", "content": [{
+                "type": "text", "text": "Published and verified. Pull request: https://example.com/pull/2140"
+            }]}
+        }))).unwrap();
+        let result = dir.path().join("publish-attempt1.result.md");
+        let report = "# Publish report\n\nPull request: https://example.com/pull/2140\n\nBUILDMESH_HANDOFF_V1: READY\n";
+        let snapshot = read_file(&transcript, TranscriptFormat::ClaudeCode).unwrap();
+        let (mut run, _) = classified_run(snapshot.clone());
+        run.context.set("source.review_preset", "1");
+        let agent = AgentNode {
+            id: 900,
+            status: SessionStatus::Ready,
+            cli_session_id: Some("session".into()),
+            ..Default::default()
+        };
+        let prepare = || {
+            readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:ready"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone()),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        // A directory exists but cannot be read as a result file on either
+        // Windows or Unix, deterministically exercising the I/O-error path.
+        fs::create_dir(&result).unwrap();
+        let original = prepare();
+        let (candidate, missing) =
+            original.with_result_file(&result, run.step("await_source").unwrap());
+        assert!(missing);
+        assert_eq!(candidate.output, snapshot.text);
+        assert_eq!(candidate.binding.report_revision, snapshot.revision);
+        assert_eq!(
+            candidate.binding.owner.report_revision.as_deref(),
+            Some(snapshot.revision.as_str())
+        );
+        assert_eq!(candidate.binding.owner.step_id, "await_source");
+        assert_eq!(candidate.binding.owner.attempt, 1);
+        assert_eq!(
+            candidate.binding.input_guard.report_guard.as_ref(),
+            Some(&snapshot)
+        );
+        fs::remove_dir(&result).unwrap();
+        for content in [None, Some(" \n\t")] {
+            if let Some(content) = content {
+                fs::write(&result, content).unwrap();
+            }
+            let (candidate, missing) =
+                prepare().with_result_file(&result, run.step("await_source").unwrap());
+            assert!(missing);
+            assert_eq!(candidate.output, snapshot.text);
+            assert_eq!(candidate.binding.report_revision, snapshot.revision);
+        }
+        fs::write(&result, report).unwrap();
+        let candidate = prepare();
+        let (candidate, missing) =
+            candidate.with_result_file(&result, run.step("await_source").unwrap());
+        assert!(!missing);
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::TurnClassified {
+                node_id: "await_source".into(),
+                classification: Some(crate::circuit::evaluator::Classification::Completed),
+                output: Some(candidate.output),
+                binding: Some(candidate.binding),
+            },
+        );
+        assert_eq!(
+            run.step("await_source").unwrap().status,
+            StepStatus::Completed
+        );
+        assert_eq!(run.context.get("source.output"), Some(report));
+        assert!(!transition.classifications[0].lifecycle_verified);
+        let guard = transition
+            .input_guard
+            .as_ref()
+            .unwrap()
+            .report_guard
+            .as_ref()
+            .unwrap();
+        assert!(guard.is_current());
+        fs::write(&result, "A changed publication report\n").unwrap();
+        assert!(!guard.is_current(), "result changes must invalidate commit");
+        let error = crate::db::circuit::evidence::commit_transition(
+            run.run_id,
+            Some("completed"),
+            &run.context.to_json().unwrap(),
+            &[],
+            crate::db::circuit::evidence::EvidenceWrite {
+                input_guard: transition.input_guard.as_ref(),
+                classifications: &transition.classifications,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Agent report changed before evidence commit"));
+    }
+
+    #[test]
+    fn circuit_result_file_report_retains_transcript_freshness_and_versions_result_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("report.jsonl");
+        let record = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant", "timestamp": "2026-10-08T12:25:20Z",
+                "message": {"id": "publish", "role": "assistant", "content": [{
+                    "type": "text", "text": "Published and verified."
+                }]}
+            })
+        );
+        fs::write(&transcript, &record).unwrap();
+        let snapshot = read_file(&transcript, TranscriptFormat::ClaudeCode).unwrap();
+        let result = dir.path().join("publish-attempt1.result.md");
+        fs::write(&result, "Original result\nBUILDMESH_HANDOFF_V1: READY\n").unwrap();
+        let original = ReportSnapshot::read_result_file(
+            &result,
+            &snapshot.revision,
+            snapshot.published_at_ms,
+            Some(&snapshot),
+        )
+        .unwrap()
+        .unwrap();
+        fs::write(
+            &result,
+            "Updated publication result\nBUILDMESH_HANDOFF_V1: READY\n",
+        )
+        .unwrap();
+        let updated = ReportSnapshot::read_result_file(
+            &result,
+            &snapshot.revision,
+            snapshot.published_at_ms,
+            Some(&snapshot),
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(original.revision, updated.revision);
+        assert_eq!(updated.published_at_ms, snapshot.published_at_ms);
+        assert_eq!(updated.turn_finished, snapshot.turn_finished);
+        assert!(updated.is_current());
+        fs::write(
+            &transcript,
+            format!(
+                "{record}{}\n",
+                serde_json::json!({
+                    "type": "user", "timestamp": "2026-10-08T12:26:00Z",
+                    "message": {"role": "user", "content": "More work"}
+                })
+            ),
+        )
+        .unwrap();
+        assert!(
+            !updated.is_current(),
+            "new transcript activity must invalidate the result"
+        );
+        assert_eq!(
+            ReportSnapshot::read_result_file(
+                &result,
+                &snapshot.revision,
+                snapshot.published_at_ms,
+                Some(&snapshot)
+            )
+            .unwrap_err()
+            .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let error = crate::db::circuit::evidence::commit_transition(
+            42,
+            Some("completed"),
+            "{}",
+            &[],
+            crate::db::circuit::evidence::EvidenceWrite {
+                input_guard: Some(&ObservationInputFence {
+                    transcript_guard: None,
+                    report_guard: Some(updated),
+                    agent_node_id: 900,
+                    input_stamp: "1:0".into(),
+                    observed_at_ms: snapshot.published_at_ms,
+                    session_id: "session".into(),
+                    session_incarnation: "100".into(),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Agent report changed before evidence commit"));
+    }
+
+    #[test]
+    fn circuit_result_file_handoff_binds_native_receipts_and_borrowed_owners() {
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("seed.jsonl");
+        fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "assistant", "timestamp": "2026-10-08T12:25:20Z",
+                    "message": {"id": "seed", "role": "assistant", "content": [{
+                        "type": "text", "text": "Native report"
+                    }]}
+                })
+            ),
+        )
+        .unwrap();
+        let seed = read_file(&transcript, TranscriptFormat::ClaudeCode).unwrap();
+        for owner in ["await_source", "producer"] {
+            let (mut run, _) = classified_run(seed.clone());
+            if owner == "producer" {
+                run.graph.nodes.push(CircuitNode {
+                    id: owner.into(),
+                    kind: CircuitNodeKind::SpawnAgentNode {
+                        prompt: "Produce report".into(),
+                        name: None,
+                        provider: None,
+                        model: None,
+                        effort: None,
+                        extra_args: None,
+                        timeout_seconds: None,
+                    },
+                });
+                run.graph.edges.push(CircuitEdge {
+                    from: owner.into(),
+                    to: "await_source".into(),
+                    condition: Default::default(),
+                });
+                run.steps.push(StepView {
+                    node_id: owner.into(),
+                    status: StepStatus::Running,
+                    attempt: 1,
+                    outcome: None,
+                    error: None,
+                    agent_node_id: Some(900),
+                });
+            }
+            let native = crate::circuit::test_support::record_report_evidence(
+                &mut run,
+                owner,
+                "Native report",
+            );
+            let agent = AgentNode {
+                id: 900,
+                status: SessionStatus::Ready,
+                cli_session_id: native.owner.session_id.clone(),
+                ..Default::default()
+            };
+            let candidate = readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:ready"),
+                Ok(native.input_guard.input_stamp.clone()),
+                Err(ReportReadError::Unsupported),
+            )
+            .unwrap()
+            .expect("native receipt is admitted without a report reader");
+            assert!(candidate.binding.input_guard.report_guard.is_none());
+            assert_eq!(candidate.binding.owner.step_id, owner);
+            let result = dir.path().join(format!("{owner}.result.md"));
+            let report = "Full result report\nBUILDMESH_HANDOFF_V1: READY\n";
+            fs::write(&result, report).unwrap();
+            let (candidate, missing) =
+                candidate.with_result_file(&result, run.step("await_source").unwrap());
+            assert!(!missing);
+            let transition = advance(
+                &mut run,
+                &CircuitEvent::TurnClassified {
+                    node_id: "await_source".into(),
+                    classification: Some(crate::circuit::evaluator::Classification::Completed),
+                    output: Some(candidate.output),
+                    binding: Some(candidate.binding),
+                },
+            );
+            assert_eq!(
+                run.step("await_source").unwrap().status,
+                StepStatus::Completed
+            );
+            assert_eq!(run.context.get("source.output"), Some(report));
+            assert!(!transition.classifications[0].lifecycle_verified);
+            let receipt: WorkEvidence = serde_json::from_str(
+                run.context
+                    .get(&format!("node.{owner}.evidence.1"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(receipt.identity.unwrap().step_id, owner);
+            fs::remove_file(&result).unwrap();
+            let error = crate::db::circuit::evidence::commit_transition(
+                run.run_id,
+                Some("completed"),
+                &run.context.to_json().unwrap(),
+                &[],
+                crate::db::circuit::evidence::EvidenceWrite {
+                    input_guard: transition.input_guard.as_ref(),
+                    classifications: &transition.classifications,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("Agent report changed before evidence commit"));
+        }
     }
 
     #[test]

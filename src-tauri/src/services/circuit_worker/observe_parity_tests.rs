@@ -19,7 +19,7 @@ pub(super) struct Script {
     lookup_error: bool,
     ack: Option<bool>,
     alive: bool,
-    turn: Option<ClassifiedTurn>,
+    pub(super) turn: Option<ClassifiedTurn>,
     observed: bool,
     approvals: Vec<String>,
     calls: Vec<&'static str>,

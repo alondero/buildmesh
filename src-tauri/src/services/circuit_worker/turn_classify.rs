@@ -30,19 +30,94 @@ pub(super) struct MissingResult {
     pub input_stamp: String,
 }
 
-/// The report to interpret for a turn that owes a result file: the file's text
-/// once it is written, otherwise the transcript report. The flag is `true` when
-/// the file is missing, blank or unreadable.
-fn report_from_result_file(
-    transcript_output: String,
-    result: std::io::Result<Option<String>>,
-) -> (String, bool) {
-    match result {
-        Ok(Some(text)) => (text, false),
-        Ok(None) => (transcript_output, true),
-        Err(error) => {
-            tracing::warn!("circuits: could not read the agent's result file: {error}");
-            (transcript_output, true)
+impl readiness::Candidate {
+    /// Finish interpretation against the current assistant turn. The live
+    /// observation is deferred until a continuation actually needs it.
+    fn into_classified_turn(
+        self,
+        view: &RunView,
+        node_id: &str,
+        classification: Option<crate::circuit::evaluator::Classification>,
+        readiness: ReviewerReadiness,
+        stamp: Option<String>,
+        observe_turn: impl FnOnce() -> (Option<String>, bool),
+    ) -> ClassifiedTurn {
+        use crate::circuit::evaluator::Classification;
+        let mut classification = classification.filter(|value| {
+            *value != Classification::Continue
+                || matches!(
+                    view.graph.node(node_id).map(|node| &node.kind),
+                    Some(
+                        CircuitNodeKind::LlmTurnClassifier { .. }
+                            | CircuitNodeKind::AwaitAgentTurn { .. }
+                    )
+                )
+        });
+        let continuation = if classification == Some(Classification::Continue) {
+            let (revision, alive) = observe_turn();
+            let fresh = revision.as_deref() == Some(self.turn_revision.as_str()) && alive;
+            if !fresh {
+                classification = Some(Classification::Working);
+            }
+            fresh
+                .then(|| {
+                    stamp.map(|stamp| {
+                        (
+                            stamp,
+                            self.turn_revision,
+                            self.binding.input_guard.input_stamp.clone(),
+                        )
+                    })
+                })
+                .flatten()
+        } else {
+            None
+        };
+        ClassifiedTurn {
+            classifier_error: None,
+            observation_blocker: None,
+            agent_node_id: self.binding.input_guard.agent_node_id,
+            classification,
+            output: self.output,
+            continuation,
+            waiting_for_a_finished_turn: readiness.parks(),
+            binding: Some(self.binding),
+            missing_result: None,
+        }
+    }
+
+    pub(crate) fn with_result_file(
+        mut self,
+        path: &std::path::Path,
+        gate: &StepView,
+    ) -> (Self, bool) {
+        use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
+        match ReportSnapshot::read_result_file(
+            path,
+            &self.binding.report_revision,
+            self.binding.input_guard.observed_at_ms,
+            self.binding.input_guard.report_guard.as_ref(),
+        ) {
+            Ok(Some(report)) => {
+                self.output = report.text.clone();
+                self.binding.report_revision = report.revision.clone();
+                self.binding.owner.report_revision = Some(report.revision.clone());
+                // A native receipt can be borrowed from an upstream spawn.
+                // This new result is a report handoff at the current gate;
+                // the receipt itself keeps its original owner and identity.
+                self.binding.owner.step_id = gate.node_id.clone();
+                self.binding.owner.attempt = gate.attempt;
+                self.binding.input_guard.report_guard = Some(report);
+                (self, false)
+            }
+            Ok(None) => (self, true),
+            Err(error) => {
+                tracing::warn!(
+                    "circuits: could not bind result file {}: {error}",
+                    path.display()
+                );
+                (self, true)
+            }
         }
     }
 }
@@ -111,31 +186,17 @@ pub(super) fn classify_step_turn(
             })
         }
     };
-    let readiness::Candidate {
-        binding,
-        mut output,
-        status,
-    } = candidate;
-    let mut missing_path = None;
-    if let Some(path) = crate::circuit::handoff::expected_result(active.run.id, agent_node_id) {
-        let (report, missing) =
-            report_from_result_file(output, crate::circuit::handoff::read_result(&path));
-        output = report;
-        if missing {
-            tracing::info!(
-                "circuits: run {} step {node_id} agent {agent_node_id}: result file {} is missing or blank; keeping the transcript report",
-                active.run.id,
-                path.display()
-            );
-            missing_path = Some(path);
-        } else {
-            tracing::info!(
-                "circuits: run {} step {node_id} agent {agent_node_id}: interpreting the result file {}",
-                active.run.id,
-                path.display()
-            );
-        }
-    }
+    let (candidate, missing_path) = if let Some(path) =
+        crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
+    {
+        let (candidate, missing) = candidate.with_result_file(&path, step);
+        (candidate, missing.then_some(path))
+    } else {
+        (candidate, None)
+    };
+    let binding = &candidate.binding;
+    let output = &candidate.output;
+    let status = candidate.status;
     let superseded = || {
         stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
             || crate::agent::process::PROCESS_REGISTRY
@@ -172,10 +233,10 @@ pub(super) fn classify_step_turn(
             observation_blocker: None,
             agent_node_id,
             classification: None,
-            output,
+            output: candidate.output,
             continuation: None,
             waiting_for_a_finished_turn: false,
-            binding: Some(binding),
+            binding: Some(candidate.binding),
             missing_result: Some(missing_result),
         });
     }
@@ -185,7 +246,7 @@ pub(super) fn classify_step_turn(
         .get(&format!("node.{node_id}.evaluated_report_revision"))
         .is_some_and(|previous| previous != binding.report_revision);
     if !changed_revision
-        && !should_classify_report(view, node_id, status, &output, since_evaluation_ms)
+        && !should_classify_report(view, node_id, status, output, since_evaluation_ms)
     {
         return None;
     }
@@ -207,64 +268,30 @@ pub(super) fn classify_step_turn(
             }
         }
     };
-    let readiness = reviewer_readiness(view, node_id, status, &output, classify);
+    let readiness = reviewer_readiness(view, node_id, status, output, classify);
     evaluator::note_evaluation(agent_node_id);
     let classification = match readiness {
         ReviewerReadiness::Working | ReviewerReadiness::Unavailable => None,
         ReviewerReadiness::Reportable => {
-            classify_gate_report(view, node_id, status, &output, classify)
+            classify_gate_report(view, node_id, status, output, classify)
         }
     };
     if superseded() {
         return None;
     }
-    let mut classification = classification.filter(|value| {
-        *value != evaluator::Classification::Continue
-            || matches!(
-                view.graph.node(node_id).map(|node| &node.kind),
-                Some(
-                    CircuitNodeKind::LlmTurnClassifier { .. }
-                        | CircuitNodeKind::AwaitAgentTurn { .. }
-                )
+    let mut classified =
+        candidate.into_classified_turn(view, node_id, classification, readiness, stamp, || {
+            (
+                crate::coordinator::enrichment::assistant_report(&agent)
+                    .map(|report| report.revision),
+                crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id),
             )
-    });
-    let continuation = if classification == Some(evaluator::Classification::Continue) {
-        let revision =
-            crate::coordinator::enrichment::assistant_report(&agent).map(|report| report.revision);
-        let fresh = revision.as_deref() == Some(binding.report_revision.as_str())
-            && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id);
-        if !fresh {
-            classification = Some(evaluator::Classification::Working);
-        }
-        fresh
-            .then(|| {
-                stamp.map(|stamp| {
-                    (
-                        stamp,
-                        binding.report_revision.clone(),
-                        binding.input_guard.input_stamp.clone(),
-                    )
-                })
-            })
-            .flatten()
-    } else {
-        None
-    };
-    tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {classification:?}", active.run.id);
-    Some(ClassifiedTurn {
-        classifier_error: classification
-            .is_none()
-            .then(|| classifier_error.into_inner())
-            .flatten(),
-        observation_blocker: None,
-        agent_node_id,
-        classification,
-        output,
-        continuation,
-        waiting_for_a_finished_turn: readiness.parks(),
-        binding: Some(binding),
-        missing_result: None,
-    })
+        });
+    if classified.classification.is_none() {
+        classified.classifier_error = classifier_error.into_inner();
+    }
+    tracing::info!("circuits: bound report classification for run {} step {node_id} agent {agent_node_id}: {:?}", active.run.id, classified.classification);
+    Some(classified)
 }
 
 pub(super) fn awaits_review_turn(view: &RunView, node_id: &str) -> bool {
@@ -1098,6 +1125,140 @@ pub(super) fn observe_gates_with(
 }
 
 #[cfg(test)]
+mod result_continuation_tests {
+    use super::*;
+    use crate::circuit::evaluator::Classification;
+    use crate::services::circuit_worker::observe_parity_tests::{spawn, view, Script};
+    use crate::services::transcript_reader::report_snapshot::ReportReadError;
+
+    #[test]
+    fn circuit_result_file_continue_emits_the_assistant_revision_and_rejects_stale_turns() {
+        let directory = tempfile::tempdir().unwrap();
+        let result = directory.path().join("publish.result.md");
+        let report = "The task still needs one change; continue implementing it.";
+        std::fs::write(&result, report).unwrap();
+        for kind in [
+            CircuitNodeKind::AwaitAgentTurn {
+                target_node_id: None,
+            },
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+        ] {
+            let mut run = view(kind, RunState::Running, StepStatus::Running, Some(42));
+            run.graph.nodes.push(crate::circuit::model::CircuitNode {
+                id: "producer".into(),
+                kind: spawn(),
+            });
+            run.graph.edges.push(crate::circuit::model::CircuitEdge {
+                from: "producer".into(),
+                to: "step".into(),
+                condition: Default::default(),
+            });
+            run.steps.push(StepView {
+                node_id: "producer".into(),
+                status: StepStatus::Completed,
+                attempt: 1,
+                agent_node_id: Some(42),
+                outcome: None,
+                error: None,
+            });
+            let native = crate::circuit::test_support::record_report_evidence(
+                &mut run,
+                "step",
+                "The assistant yielded a different summary.",
+            );
+            let agent = crate::models::AgentNode {
+                id: 42,
+                status: SessionStatus::Ready,
+                cli_session_id: native.owner.session_id.clone(),
+                ..Default::default()
+            };
+            let prepare = || {
+                readiness::prepare(
+                    &run,
+                    "step",
+                    &agent,
+                    Some("100:ready"),
+                    Ok(native.input_guard.input_stamp.clone()),
+                    Err(ReportReadError::Unsupported),
+                )
+                .unwrap()
+                .unwrap()
+                .with_result_file(&result, run.step("step").unwrap())
+            };
+            let (bound, missing) = prepare();
+            assert!(!missing);
+            assert_ne!(bound.binding.report_revision, native.report_revision);
+            for (revision, alive, expected) in [
+                (
+                    Some(native.report_revision.clone()),
+                    true,
+                    Classification::Continue,
+                ),
+                (
+                    Some("newer-assistant-report".into()),
+                    true,
+                    Classification::Working,
+                ),
+                (None, true, Classification::Working),
+                (
+                    Some(native.report_revision.clone()),
+                    false,
+                    Classification::Working,
+                ),
+                (
+                    Some(bound.binding.report_revision.clone()),
+                    true,
+                    Classification::Working,
+                ),
+            ] {
+                let (candidate, missing) = prepare();
+                assert!(!missing);
+                let classification = classify_gate_report(
+                    &run,
+                    "step",
+                    candidate.status,
+                    &candidate.output,
+                    |prompt| {
+                        assert!(prompt.contains(report));
+                        Some(Classification::Continue)
+                    },
+                );
+                let turn = candidate.into_classified_turn(
+                    &run,
+                    "step",
+                    classification,
+                    ReviewerReadiness::Reportable,
+                    Some("100:ready".into()),
+                    || (revision, alive),
+                );
+                let mut source = Script::default();
+                source.turn = Some(turn);
+                let mut events = Vec::new();
+                observe_gates_with(&run, &mut events, &mut source);
+                if expected == Classification::Continue {
+                    assert_eq!(events.len(), 2);
+                    assert!(matches!(&events[0], CircuitEvent::ContinuationObserved {
+                        node_id, attempt: 1, stamp, revision, input_stamp,
+                    } if node_id == "step" && stamp == "100:ready"
+                        && revision == &native.report_revision
+                        && input_stamp == &native.input_guard.input_stamp));
+                } else {
+                    assert_eq!(events.len(), 1, "stale or dead turns cannot continue");
+                }
+                assert!(
+                    matches!(events.last().unwrap(), CircuitEvent::TurnClassified {
+                    node_id, classification: Some(value), output: Some(output), binding: Some(binding),
+                } if node_id == "step" && *value == expected && output == report
+                    && binding.report_revision == bound.binding.report_revision)
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod classifier_selection_tests {
     use super::classifier_provider;
 
@@ -1122,40 +1283,5 @@ mod classifier_selection_tests {
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
         preferences.default_provider = Some("opencode".into());
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
-    }
-}
-
-#[cfg(test)]
-mod result_file_tests {
-    use super::report_from_result_file;
-
-    #[test]
-    fn a_written_result_file_replaces_the_transcript_report() {
-        let (output, missing) = report_from_result_file(
-            "transcript report".into(),
-            Ok(Some("final report\nBUILDMESH_HANDOFF_V1: READY".into())),
-        );
-        assert_eq!(output, "final report\nBUILDMESH_HANDOFF_V1: READY");
-        assert!(!missing);
-    }
-
-    #[test]
-    fn a_missing_result_file_keeps_the_transcript_report_and_is_missing() {
-        let (output, missing) = report_from_result_file("transcript report".into(), Ok(None));
-        assert_eq!(output, "transcript report");
-        assert!(missing);
-    }
-
-    #[test]
-    fn an_unreadable_result_file_keeps_the_transcript_report_and_is_missing() {
-        let (output, missing) = report_from_result_file(
-            "transcript report".into(),
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "file is locked",
-            )),
-        );
-        assert_eq!(output, "transcript report");
-        assert!(missing);
     }
 }
