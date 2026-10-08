@@ -659,6 +659,26 @@ mod tests {
             .unwrap()
             .unwrap()
         };
+        // A directory exists but cannot be read as a result file on either
+        // Windows or Unix, deterministically exercising the I/O-error path.
+        fs::create_dir(&result).unwrap();
+        let original = prepare();
+        let (candidate, missing) =
+            original.with_result_file(&result, run.step("await_source").unwrap());
+        assert!(missing);
+        assert_eq!(candidate.output, snapshot.text);
+        assert_eq!(candidate.binding.report_revision, snapshot.revision);
+        assert_eq!(
+            candidate.binding.owner.report_revision.as_deref(),
+            Some(snapshot.revision.as_str())
+        );
+        assert_eq!(candidate.binding.owner.step_id, "await_source");
+        assert_eq!(candidate.binding.owner.attempt, 1);
+        assert_eq!(
+            candidate.binding.input_guard.report_guard.as_ref(),
+            Some(&snapshot)
+        );
+        fs::remove_dir(&result).unwrap();
         for content in [None, Some(" \n\t")] {
             if let Some(content) = content {
                 fs::write(&result, content).unwrap();
