@@ -21,6 +21,7 @@ pub(crate) use intent::{
 };
 mod launch;
 mod orchestrator;
+mod preflight;
 mod prepare;
 mod provision;
 mod reader;
@@ -51,6 +52,8 @@ mod command_tests;
 mod launch_tests;
 #[cfg(test)]
 mod orchestrator_tests;
+#[cfg(test)]
+mod preflight_tests;
 #[cfg(test)]
 mod prepare_tests;
 #[cfg(test)]

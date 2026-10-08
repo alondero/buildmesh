@@ -218,6 +218,22 @@ impl PreparedLaunchRouting {
             Self::Environment { executable, .. } => executable.as_deref(),
         }
     }
+
+    /// The runtime this routing will spawn *into*, for the variants that pin
+    /// one themselves.
+    ///
+    /// `CodexProxy` selected its install during prepare (its npm shim lives
+    /// under a specific `CODEX_HOME`, and the launch may target a different
+    /// distro than the mesh path implies), so the spawn-path preflight must
+    /// check the binary on *that* runtime. `Native` / `Environment` inherit
+    /// the mesh path's runtime, which is why they return `None` rather than
+    /// guessing — a guessed runtime would silently exempt them.
+    pub fn pinned_runtime(&self) -> Option<crate::models::EnvType> {
+        match self {
+            Self::CodexProxy { runtime, .. } => Some(*runtime),
+            Self::Native { .. } | Self::Environment { .. } => None,
+        }
+    }
 }
 
 pub fn prepare(
@@ -282,7 +298,7 @@ pub fn prepare(
 /// same binary [`super::command::build_spawn_command_prepared`] hands to
 /// `spawn_environment::wrap` when no override is present. Used for the
 /// spawn-time re-resolution, so discovery and spawning consult the same name.
-fn recipe_binary_for(
+pub(crate) fn recipe_binary_for(
     provider: Provider,
     env_type: crate::models::EnvType,
 ) -> &'static str {
