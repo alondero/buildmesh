@@ -27,8 +27,7 @@ const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
 const RENDERED_PASTE_TOTAL_BUDGET: Duration = Duration::from_secs(90);
 /// Complete visible text is useful for short drafts. Longer drafts may be
 /// collapsed or scrolled out of the TUI; unless the harness's adapter
-/// declares [`PasteGatePolicy::RenderedWithTailAnchor`] they require the
-/// harness's paste marker.
+/// declares tail-anchor support they require the harness's paste marker.
 const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// A harness that draws a mid-size paste in full collapses only the largest
 /// into a marker (Muse probed in a real PTY: 839 chars drawn, 1,509
@@ -38,6 +37,9 @@ const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// out the whole budget for a marker Muse never printed. Counted after
 /// `normalize_for_match`, not in display columns.
 const TAIL_ANCHOR_CHARS: usize = 64;
+/// Bound ambiguous reconstruction per output snapshot. Exhaustion leaves the
+/// paste unconfirmed; it never authorizes Enter or extends the readiness budget.
+const MAX_PASTE_MATCH_STATES: usize = 16_384;
 
 /// After an Enter keystroke, PTY output must appear within this window for
 /// the submit to count as acknowledged.
@@ -149,7 +151,18 @@ fn stage_prompt_write(
     expected_input: Option<&str>,
 ) -> Result<Option<(Option<String>, PromptReadiness)>, String> {
     ensure_prompt_target_alive(registry, node_id)?;
-    let readiness = paste_readiness(node_id, text)?;
+    let mut readiness = paste_readiness(node_id, text)?;
+    let payload = match &mut readiness.paste {
+        PasteReadiness::RenderedMultiline {
+            split_marker_prompt: Some(prompt),
+            ..
+        } => {
+            // Codex sanitizes each burst separately. Transform the body before
+            // the PTY write so a split CSI cannot change what the proof counts.
+            injection_payload(&std::mem::take(&mut prompt.composer_text))
+        }
+        _ => injection_payload(text),
+    };
     let guarded = if let Some(expected) = expected_input {
         // `Ok(None)` is only ever "the guard was lost" — the draft now belongs
         // to someone else. Backpressure arrives as an `Err` and is retried by
@@ -157,7 +170,7 @@ fn stage_prompt_write(
         // be misread as lost draft ownership and silently discard the prompt
         // (issue #1530).
         let Some(next) = retry_backpressured(|| {
-            registry.write_bytes_if_current(node_id, injection_payload(text).as_bytes(), expected)
+            registry.write_bytes_if_current(node_id, payload.as_bytes(), expected)
         })?
         else {
             return Ok(None);
@@ -165,7 +178,7 @@ fn stage_prompt_write(
         Some(next)
     } else {
         retry_backpressured(|| {
-            match registry.write_bytes(node_id, injection_payload(text).as_bytes()) {
+            match registry.write_bytes(node_id, payload.as_bytes()) {
                 Ok(outcome) if outcome.is_accepted() => Ok(()),
                 // A closed queue is terminal, so it must not consume the retry
                 // budget: retrying a dead writer is pure latency before the same
@@ -254,6 +267,7 @@ enum PasteReadiness {
         chars: usize,
         normalized_chars: usize,
         content: String,
+        split_marker_prompt: Option<RenderedPastePrompt>,
         output_cursor: u64,
     },
 }
@@ -278,11 +292,24 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
     }
     let policy = adapter.paste_gate_policy();
     if text.contains('\n') && !matches!(policy, PasteGatePolicy::Generic) {
-        let content = crate::circuit::launch::normalize_for_match(text);
+        let split_marker_prompt = (policy == PasteGatePolicy::RenderedWithSplitMarker)
+            .then(|| RenderedPastePrompt::new(text));
+        let (chars, normalized_chars, content) = match &split_marker_prompt {
+            Some(prompt) => {
+                let chars = prompt.text.offsets.len() - 1;
+                (chars, chars, prompt.text.normalized.clone())
+            }
+            None => (
+                text.chars().count(),
+                text.replace("\r\n", "\n").chars().count(),
+                crate::circuit::launch::normalize_for_match(text),
+            ),
+        };
         readiness.paste = PasteReadiness::RenderedMultiline {
-            chars: text.chars().count(),
-            normalized_chars: text.replace("\r\n", "\n").chars().count(),
+            chars,
+            normalized_chars,
             content: visible_paste_proof(policy, content),
+            split_marker_prompt,
             output_cursor: evaluator::output_cursor(node_id)
                 .ok_or_else(|| format!("node {node_id} has no PTY output buffer"))?,
         };
@@ -302,7 +329,10 @@ fn visible_paste_proof(policy: PasteGatePolicy, normalized: String) -> String {
     if chars <= VISIBLE_PASTE_TEXT_LIMIT {
         return normalized;
     }
-    if policy != PasteGatePolicy::RenderedWithTailAnchor {
+    if !matches!(
+        policy,
+        PasteGatePolicy::RenderedWithTailAnchor | PasteGatePolicy::RenderedWithSplitMarker
+    ) {
         return String::new();
     }
     let skip = chars.saturating_sub(TAIL_ANCHOR_CHARS);
@@ -322,6 +352,283 @@ fn rendered_paste_visible(
         || compact.contains(&format!("[PastedContent{normalized_chars}chars]"))
         || (!content.is_empty()
             && crate::circuit::launch::normalize_for_match(output).contains(content))
+}
+
+#[derive(Debug)]
+struct RenderedPastePrompt {
+    text: CountedPasteText,
+    composer_text: String,
+}
+
+// Codex 0.160.1 apply_paste normalizes newlines, then sanitize_user_text
+// removes CSI sequences and controls. Its marker counts the resulting text.
+fn codex_composer_text(prompt: &str) -> String {
+    let prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    let mut chars = prompt.chars().peekable();
+    let mut sanitized = String::with_capacity(prompt.len());
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.next_if_eq(&'[').is_some() {
+            // An unfinished CSI consumes the rest, matching the composer.
+            let _ = chars.by_ref().find(|ch| ('@'..='~').contains(ch));
+        } else if matches!(ch, '\n' | '\t') || !ch.is_control() {
+            sanitized.push(ch);
+        }
+    }
+    sanitized
+}
+
+#[derive(Debug)]
+struct CountedPasteText {
+    normalized: String,
+    // Map original Unicode-character boundaries to normalized byte offsets.
+    // Ignored whitespace/punctuation may give several boundaries one offset.
+    offsets: Vec<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct RenderedPasteMarker {
+    chars: usize,
+    ordinal: usize,
+}
+
+impl RenderedPasteMarker {
+    fn interpretations(self, after: &str) -> Vec<(Self, &str)> {
+        let mut interpretations = vec![(self, after)];
+        // '#42' may be actual inline prompt text, so defer interpreting an
+        // external ordinal until the expected text resolves the ambiguity.
+        if self.ordinal == 1 && after.starts_with('#') {
+            let digits = after[1..].bytes().take_while(u8::is_ascii_digit).count();
+            for boundary in 1..=digits {
+                match after[1..1 + boundary].parse::<usize>() {
+                    Ok(ordinal) if ordinal >= 2 => {
+                        interpretations.push((Self { ordinal, ..self }, &after[1 + boundary..]));
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        interpretations
+    }
+}
+
+struct PasteMatchState {
+    index: usize,
+    start: usize,
+    used: Vec<RenderedPasteMarker>,
+}
+
+struct PasteMatchBudget {
+    deadline: Instant,
+    remaining_states: usize,
+}
+
+impl PasteMatchBudget {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            remaining_states: MAX_PASTE_MATCH_STATES,
+        }
+    }
+
+    fn within_deadline(&self) -> bool {
+        Instant::now() < self.deadline
+    }
+
+    fn queue_state(&mut self) -> bool {
+        if self.remaining_states == 0 || !self.within_deadline() {
+            return false;
+        }
+        self.remaining_states -= 1;
+        true
+    }
+}
+
+impl CountedPasteText {
+    fn new(text: &str) -> Self {
+        let mut normalized = String::new();
+        let mut offsets = vec![0];
+        let mut buffer = [0; 4];
+        for ch in text.chars() {
+            normalized.push_str(&crate::circuit::launch::normalize_for_match(
+                ch.encode_utf8(&mut buffer),
+            ));
+            offsets.push(normalized.len());
+        }
+        Self {
+            normalized,
+            offsets,
+        }
+    }
+
+    fn matches_segments(
+        &self,
+        markers: &[RenderedPasteMarker],
+        inline: &[String],
+        budget: &mut PasteMatchBudget,
+    ) -> bool {
+        let total = self.offsets.len() - 1;
+        for last in (0..markers.len()).rev() {
+            // A burst may be followed by more inline text. Ignore subsequent
+            // redraw chrome only after the expected ending has been matched.
+            let mut states = Vec::new();
+            let mut seen = std::collections::HashMap::new();
+            for (marker, after) in markers[last].interpretations(&inline[last + 1]) {
+                for end in 0..=total {
+                    if !budget.within_deadline() {
+                        return false;
+                    }
+                    let tail = &self.normalized[self.offsets[end]..];
+                    if (end != total && tail.is_empty()) || !after.starts_with(tail) {
+                        continue;
+                    }
+                    if let Some(start) = end.checked_sub(marker.chars) {
+                        if !budget.queue_state() {
+                            return false;
+                        }
+                        states.push(PasteMatchState {
+                            index: last,
+                            start,
+                            used: if markers[..last]
+                                .iter()
+                                .any(|earlier| earlier.chars == marker.chars)
+                            {
+                                vec![marker]
+                            } else {
+                                Vec::new()
+                            },
+                        });
+                    }
+                }
+            }
+            while let Some(PasteMatchState { index, start, used }) = states.pop() {
+                if !budget.within_deadline() {
+                    return false;
+                }
+                // At one normalized offset, a larger raw boundary admits all
+                // earlier boundaries available to a smaller one. Keep only
+                // that dominating state; retain zero separately for full count.
+                let key = (index, self.offsets[start], start == 0, used.clone());
+                if seen.get(&key).is_some_and(|&largest| largest >= start) {
+                    continue;
+                }
+                seen.insert(key, start);
+                let prefix = &self.normalized[..self.offsets[start]];
+                if start == 0 || (!prefix.is_empty() && inline[index].ends_with(prefix)) {
+                    return true;
+                }
+                if index == 0 {
+                    continue;
+                }
+                for (marker, between) in markers[index - 1].interpretations(&inline[index]) {
+                    // Fresh output can redraw one placeholder several times.
+                    // Each count/ordinal identifies one burst, not more text.
+                    if used
+                        .iter()
+                        .any(|later| later.chars == marker.chars && later.ordinal <= marker.ordinal)
+                        || !prefix.ends_with(between)
+                    {
+                        continue;
+                    }
+                    // The text between adjacent markers must be the expected
+                    // segment. Explore only boundaries differing in characters
+                    // that normalization removes, never arbitrary count slack.
+                    let offset = prefix.len() - between.len();
+                    let boundaries = &self.offsets[..=start];
+                    let first = boundaries.partition_point(|&value| value < offset);
+                    let after = boundaries.partition_point(|&value| value <= offset);
+                    let mut starts = Vec::new();
+                    for end in first..after {
+                        if !budget.within_deadline() {
+                            return false;
+                        }
+                        if let Some(start) = end.checked_sub(marker.chars) {
+                            if starts.last().is_some_and(|&previous| {
+                                previous != 0 && self.offsets[previous] == self.offsets[start]
+                            }) {
+                                *starts.last_mut().unwrap() = start;
+                            } else {
+                                starts.push(start);
+                            }
+                        }
+                    }
+                    for start in starts {
+                        if !budget.queue_state() {
+                            return false;
+                        }
+                        // Only the smallest later ordinal matters, and only
+                        // for counts that can still recur earlier. Otherwise
+                        // numeric-label alternatives create useless histories.
+                        let earlier = &markers[..index - 1];
+                        let mut used = used.clone();
+                        used.retain(|later| {
+                            later.chars != marker.chars
+                                && earlier.iter().any(|previous| previous.chars == later.chars)
+                        });
+                        if earlier
+                            .iter()
+                            .any(|previous| previous.chars == marker.chars)
+                        {
+                            used.push(marker);
+                        }
+                        used.sort_unstable_by_key(|marker| marker.chars);
+                        states.push(PasteMatchState {
+                            index: index - 1,
+                            start,
+                            used,
+                        });
+                    }
+                }
+            }
+        }
+        false
+    }
+}
+
+impl RenderedPastePrompt {
+    fn new(prompt: &str) -> Self {
+        let composer_text = codex_composer_text(prompt);
+        Self {
+            text: CountedPasteText::new(&composer_text),
+            composer_text,
+        }
+    }
+
+    fn visible(&self, output: &str, deadline: Instant) -> bool {
+        self.visible_with_budget(output, &mut PasteMatchBudget::new(deadline))
+    }
+
+    fn visible_with_budget(&self, output: &str, budget: &mut PasteMatchBudget) -> bool {
+        static MARKER: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+            // Codex puts duplicate-size ordinals after the closing bracket.
+            regex::Regex::new(r"\[PastedContent([0-9]+)chars\]").unwrap()
+        });
+        let compact: String = output.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut markers = Vec::new();
+        let mut inline = Vec::new();
+        let mut previous_end = 0;
+        for marker in MARKER.captures_iter(&compact) {
+            let Ok(chars) = marker[1].parse::<usize>() else {
+                return false;
+            };
+            if chars == 0 {
+                return false;
+            }
+            let range = marker.get(0).unwrap().range();
+            inline.push(crate::circuit::launch::normalize_for_match(
+                &compact[previous_end..range.start],
+            ));
+            markers.push(RenderedPasteMarker { chars, ordinal: 1 });
+            previous_end = range.end;
+        }
+        if markers.is_empty() {
+            return false;
+        }
+        inline.push(crate::circuit::launch::normalize_for_match(
+            &compact[previous_end..],
+        ));
+        self.text.matches_segments(&markers, &inline, budget)
+    }
 }
 
 /// Wait for the staged paste to land at an idle input box without writing input.
@@ -355,6 +662,7 @@ fn settle_after_paste(
         chars,
         normalized_chars,
         content,
+        split_marker_prompt,
         output_cursor,
         ..
     } = readiness
@@ -371,12 +679,11 @@ fn settle_after_paste(
             // Latch a complete echo before later redraws evict it from the
             // bounded tail. Once latched, only the quiet clock is consulted.
             if !paste_seen {
-                paste_seen = rendered_paste_visible(
-                    &evaluator::cleaned_output_since(node_id, *output_cursor),
-                    *chars,
-                    *normalized_chars,
-                    content,
-                );
+                let output = evaluator::cleaned_output_since(node_id, *output_cursor);
+                paste_seen = rendered_paste_visible(&output, *chars, *normalized_chars, content)
+                    || split_marker_prompt
+                        .as_ref()
+                        .is_some_and(|prompt| prompt.visible(&output, deadline));
             }
             if paste_seen
                 && evaluator::millis_since_last_output(node_id)
@@ -754,6 +1061,7 @@ mod tests {
             chars: 9407,
             normalized_chars: 9407,
             content: String::new(),
+            split_marker_prompt: None,
             output_cursor: evaluator::output_cursor(id).unwrap(),
         };
         let registry_for_wait = Arc::clone(&registry);
@@ -801,6 +1109,7 @@ mod tests {
             chars: 9407,
             normalized_chars: 9407,
             content: String::new(),
+            split_marker_prompt: None,
             output_cursor: evaluator::output_cursor(id).unwrap(),
         };
         let error = settle_after_paste(
@@ -904,7 +1213,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             writes.recv_timeout(Duration::from_secs(1)).unwrap(),
-            injection_payload(prompt).into_bytes()
+            injection_payload("review the change\nwith context").into_bytes()
         );
         let PasteReadiness::RenderedMultiline {
             chars,
@@ -916,7 +1225,7 @@ mod tests {
         else {
             panic!("proxied Codex must use the rendered paste gate");
         };
-        assert_eq!((chars, normalized_chars), (31, 30));
+        assert_eq!((chars, normalized_chars), (30, 30));
         assert!(!rendered_paste_visible(
             &evaluator::cleaned_output_since(proxied_id, output_cursor),
             chars,
@@ -1349,6 +1658,587 @@ mod tests {
     }
 
     #[test]
+    fn codex_split_marker_paste_submits_with_one_separate_enter() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-split-marker");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = format!(
+            "Please review this example change.\n{}\nFinish with APPROVE or REQUEST_CHANGES.",
+            "Explain each finding carefully using the provided context. ".repeat(90)
+        );
+        assert_eq!(prompt.chars().count(), 5385);
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            injection_payload(&prompt).into_bytes()
+        );
+        // Codex 0.160.1, native Windows ConPTY at 79 columns: the first 119
+        // characters are inline; only the remaining 5266 are collapsed.
+        evaluator::on_output(id, concat!(
+            "› Please review this example change.                                             Explain each finding carefully using the provided context. Explain each      \r\n",
+            "  finding care[Pasted Content 5266 chars]                                      \r\n",
+        ));
+        let settled = settle_after_paste(
+            &registry,
+            id,
+            &readiness.paste,
+            guard.as_deref(),
+            Duration::from_secs(3),
+        );
+        assert!(settled.expect("the complete mixed inline/collapsed Codex paste must become ready"));
+        let submitting = Arc::clone(&registry);
+        let submit = std::thread::spawn(move || {
+            press_enter_until_output_guarded(&submitting, id, guard, Duration::from_secs(2), None)
+        });
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), b"\r");
+        evaluator::on_output(id, "task started");
+        assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_two_burst_paste_submits_with_one_separate_enter() {
+        let _db = crate::db::test_support::isolated();
+        for (case, separator) in ["0123456789", "#42!", "#2!"].into_iter().enumerate() {
+            let id = codex_worker_node(&format!("codex-two-burst-{case}"));
+            let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+            evaluator::register(id);
+            let prompt = format!(
+                "Review this change\n{}{separator}{}",
+                "x".repeat(1001),
+                "y".repeat(1001)
+            );
+            let expected = registry.input_stamp(id).unwrap();
+            let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+                injection_payload(&prompt).into_bytes()
+            );
+            evaluator::on_output(id, &format!("› Review this change [Pasted Content 1001 chars]{separator}[Pasted Content 1001 chars] #2"));
+            assert!(settle_after_paste(
+                &registry,
+                id,
+                &readiness.paste,
+                guard.as_deref(),
+                Duration::from_secs(3)
+            )
+            .unwrap());
+            let submitting = Arc::clone(&registry);
+            let submit = std::thread::spawn(move || {
+                press_enter_until_output_guarded(
+                    &submitting,
+                    id,
+                    guard,
+                    Duration::from_secs(2),
+                    None,
+                )
+            });
+            assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), b"\r");
+            evaluator::on_output(id, "task started");
+            assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+            assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            evaluator::unregister(id);
+            registry.kill_session(id);
+        }
+    }
+
+    #[test]
+    fn codex_control_sequence_paste_submits_with_one_separate_enter() {
+        let _db = crate::db::test_support::isolated();
+        for (case, prompt, expected_prompt, raw_chars, composer_chars) in [
+            (
+                "middle",
+                format!("Review this change\n{}\x1b[31mtail", "x".repeat(1000)),
+                format!("Review this change\n{}tail", "x".repeat(1000)),
+                1028,
+                1023,
+            ),
+            (
+                "trailing",
+                format!("Review this change\n{}\x1b[31m", "x".repeat(1001)),
+                format!("Review this change\n{}", "x".repeat(1001)),
+                1025,
+                1020,
+            ),
+            (
+                "unfinished",
+                format!(
+                    "Review this change\n{}\x1b[3{}",
+                    "x".repeat(1001),
+                    "界".repeat(1001)
+                ),
+                format!("Review this change\n{}", "x".repeat(1001)),
+                2024,
+                1020,
+            ),
+        ] {
+            let id = codex_worker_node(&format!("codex-control-sequence-{case}"));
+            let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+            evaluator::register(id);
+            assert_eq!(prompt.chars().count(), raw_chars);
+            let expected = registry.input_stamp(id).unwrap();
+            let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+                .unwrap()
+                .unwrap();
+            // Assert the literal canonical body, not only its counted proof.
+            // No CSI fragment can now reach a later Codex paste burst.
+            assert_eq!(
+                writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+                injection_payload(&expected_prompt).into_bytes()
+            );
+            let PasteReadiness::RenderedMultiline {
+                chars,
+                normalized_chars,
+                content,
+                split_marker_prompt,
+                ..
+            } = &readiness.paste
+            else {
+                panic!("Codex must use the rendered paste gate");
+            };
+            assert_eq!(
+                (*chars, *normalized_chars),
+                (composer_chars, composer_chars)
+            );
+            assert!(split_marker_prompt
+                .as_ref()
+                .unwrap()
+                .composer_text
+                .is_empty());
+            assert!(!rendered_paste_visible(
+                &format!("[Pasted Content {raw_chars} chars]"),
+                *chars,
+                *normalized_chars,
+                content
+            ));
+            evaluator::on_output(id, &format!("[Pasted Content {composer_chars} chars]"));
+            let settled = settle_after_paste(
+                &registry,
+                id,
+                &readiness.paste,
+                guard.as_deref(),
+                Duration::from_secs(3),
+            );
+            assert!(settled.expect("a complete sanitized Codex paste must become ready"));
+            let submitting = Arc::clone(&registry);
+            let submit = std::thread::spawn(move || {
+                press_enter_until_output_guarded(
+                    &submitting,
+                    id,
+                    guard,
+                    Duration::from_secs(2),
+                    None,
+                )
+            });
+            assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), b"\r");
+            evaluator::on_output(id, "task started");
+            assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+            assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+            evaluator::unregister(id);
+            registry.kill_session(id);
+        }
+    }
+
+    #[test]
+    fn codex_split_marker_requires_the_matching_complete_prefix_and_suffix_count() {
+        let prompt = format!("Review this change\n{}", "x".repeat(1000));
+        for output in [
+            "› Review this change [Pasted Content 1000 chars]",
+            "› Review this change [Pasted Content\r\n1000 chars] #2",
+        ] {
+            assert!(rendered_split_paste_visible(output, &prompt), "{output:?}");
+            assert!(
+                rendered_split_paste_visible(output, &prompt.replace('\n', "\r\n")),
+                "CRLF input: {output:?}"
+            );
+        }
+        for output in [
+            "[Pasted Content 1000 chars]",
+            "› Review a different change [Pasted Content 1000 chars]",
+            "› Review this [Pasted Content 1000 chars]",
+            "› Review this change [Pasted Content 999 chars]",
+            "› Review this change [Pasted Content 1002 chars]",
+            "› Review this change [Pasted Content 2000 chars]",
+            "› Review this change [Pasted Content 0 chars]",
+            "› Review this change [Pasted Content 1000 chars",
+        ] {
+            assert!(!rendered_split_paste_visible(output, &prompt), "{output:?}");
+        }
+        let unicode_prompt = format!("Résumé change\n{}", "é".repeat(1000));
+        assert!(rendered_split_paste_visible(
+            "› Résumé change [Pasted Content 1000 chars]",
+            &unicode_prompt
+        ));
+        assert!(!rendered_split_paste_visible(
+            "› Résumé change [Pasted Content 2000 chars]",
+            &unicode_prompt
+        ));
+        let long_prefix = format!("Review this change\n{}\nFinish uniquely", "x".repeat(1000));
+        assert!(
+            !rendered_split_paste_visible(
+                &format!(
+                    "› Review this change {}[Pasted Content 100 chars]",
+                    "x".repeat(64)
+                ),
+                &long_prefix
+            ),
+            "a repeated prefix fragment and smaller paste must not prove the whole draft"
+        );
+    }
+
+    fn rendered_split_paste_visible(output: &str, prompt: &str) -> bool {
+        RenderedPastePrompt::new(prompt)
+            .visible(output, Instant::now() + RENDERED_PASTE_TOTAL_BUDGET)
+    }
+
+    #[test]
+    fn codex_composer_sanitization_preserves_the_pinned_count_contract() {
+        for (input, expected) in [
+            ("\x1b[31mred\x1b[0m\0\x7f", "red"),
+            ("a\tb\r\nc\rd\n", "a\tb\nc\nd\n"),
+            ("a\u{009b}31mb\u{0085}c", "a31mbc"),
+            ("left\x1b]0;title\x07right", "left]0;titleright"),
+            ("left\x1bXright\x1b", "leftXright"),
+            ("left\x1b[31", "left"),
+            ("left\x1b[\r\n12", "left"),
+            ("İé界\u{200e}", "İé界\u{200e}"),
+        ] {
+            assert_eq!(codex_composer_text(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn codex_sanitized_segments_require_the_composer_count() {
+        let prompt = format!(
+            "\x1b[31mReview\0 this\x7f change\x1b[0m\r\n{}\x1b[32m\t{}\u{009f}\rtail",
+            "x".repeat(1001),
+            "é".repeat(1001)
+        );
+        assert_eq!(prompt.chars().count(), 2045);
+        assert_eq!(codex_composer_text(&prompt).chars().count(), 2027);
+        let complete = "› Review this change [Pasted Content 1001 chars]\t[Pasted Content 1001 chars] #2\ntail";
+        assert!(rendered_split_paste_visible(complete, &prompt));
+        for wrong in [
+            complete.replacen("1001", "1000", 1),
+            complete.replace("1001 chars] #2", "2002 chars] #2"),
+            complete.replace("Review this", "Review31m this"),
+        ] {
+            assert!(!rendered_split_paste_visible(&wrong, &prompt), "{wrong:?}");
+        }
+        let color_prompt = format!("Review this change\n{}\x1b[31mtail", "x".repeat(1000));
+        assert!(rendered_split_paste_visible(
+            "[Pasted Content 1023 chars]",
+            &color_prompt
+        ));
+        assert!(!rendered_split_paste_visible(
+            "[Pasted Content 1028 chars]",
+            &color_prompt
+        ));
+    }
+
+    #[test]
+    fn codex_sanitized_inline_paste_uses_the_composer_text() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-sanitized-inline");
+        let (registry, _) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = "\x1b[31mReview this change\r\nwith context\x1b[0m\0\x7f";
+        let PasteReadiness::RenderedMultiline {
+            chars,
+            normalized_chars,
+            content,
+            ..
+        } = paste_readiness(id, prompt).unwrap().paste
+        else {
+            panic!("Codex must use the rendered paste gate");
+        };
+        assert_eq!((chars, normalized_chars), (31, 31));
+        assert_eq!(content, "reviewthischangewithcontext");
+        assert!(rendered_paste_visible(
+            "› Review this change\nwith context",
+            chars,
+            normalized_chars,
+            &content
+        ));
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_multi_burst_counts_require_all_intervening_text() {
+        let prompt = format!(
+            "Review this change\n{}0123456789{}",
+            "x".repeat(500),
+            "y".repeat(500)
+        );
+        let complete = "› Review this change [Pasted Content 500 chars]0123456789[Pasted Content 500 chars] #2";
+        assert!(rendered_split_paste_visible(complete, &prompt));
+        assert!(rendered_split_paste_visible(
+            complete,
+            &prompt.replace('\n', "\r\n")
+        ));
+        for output in [
+            "› Review this change [Pasted Content 500 chars]0123456789",
+            "› Review this change [Pasted Content 500 chars]0123456789[Pasted Content 499 chars]",
+            "› Review this change [Pasted Content 500 chars]0123456789[Pasted Content 501 chars]",
+            "› Review this change [Pasted Content 500 chars]0123456788[Pasted Content 500 chars] #2",
+            "› Review this change [Pasted Content 500 chars][Pasted Content 500 chars] #2",
+            "› Review this change 0123456789[Pasted Content 500 chars]",
+            "› Review this [Pasted Content 500 chars]0123456789[Pasted Content 500 chars] #2",
+            "› Review this change [Pasted Content 500 chars]0123456789[Pasted Content 500 chars",
+        ] {
+            assert!(!rendered_split_paste_visible(output, &prompt), "{output:?}");
+        }
+        let with_tail = format!("{prompt}\nFinish uniquely");
+        assert!(rendered_split_paste_visible(
+            &format!("{complete}\n  Finish uniquely\n  esc to cancel"),
+            &with_tail
+        ));
+        assert!(!rendered_split_paste_visible(
+            &format!("{complete}\n  Finish unique"),
+            &with_tail
+        ));
+        let all_collapsed = format!("{}\n{}", "é".repeat(499), "界".repeat(500));
+        assert!(rendered_split_paste_visible(
+            "› [Pasted Content 500 chars][Pasted Content 500 chars] #2",
+            &all_collapsed
+        ));
+        assert!(!rendered_split_paste_visible(
+            "› [Pasted Content 1001 chars][Pasted Content 1001 chars] #2",
+            &all_collapsed
+        ));
+        let three = format!("{prompt}{}", "z".repeat(500));
+        assert!(rendered_split_paste_visible(
+            &format!("{complete}[Pasted Content 500 chars] #3"),
+            &three
+        ));
+    }
+
+    #[test]
+    fn codex_marker_count_survives_an_omitted_inline_newline() {
+        let prompt = format!(
+            "Please review this example change.\n{}\nFinish with APPROVE or REQUEST_CHANGES.",
+            "Explain each finding carefully using the provided context. ".repeat(90)
+        );
+        // Native 0.160.1 submission trace: LF at character 34 is absent from
+        // the inline text, while the collapsed suffix still counts 5242.
+        let inline = concat!(
+            "Please review this example change.Explain each finding carefully using the ",
+            "provided context. Explain each finding carefully using the provided"
+        );
+        assert_eq!(prompt.chars().count(), 5385);
+        assert_eq!(inline.chars().count(), 142);
+        assert_eq!(prompt.chars().skip(143).count(), 5242);
+        assert_eq!(
+            crate::circuit::launch::normalize_for_match(inline),
+            crate::circuit::launch::normalize_for_match(
+                &prompt.chars().take(143).collect::<String>()
+            )
+        );
+        assert!(rendered_split_paste_visible(
+            &format!("› {inline}[Pasted\r\n  Content 5242 chars]"),
+            &prompt
+        ));
+        // Moving the boundary across a visible letter must fail. A boundary
+        // differing only by invisible whitespace is indistinguishable in a TUI.
+        assert!(!rendered_split_paste_visible(
+            &format!("› {inline}[Pasted Content 5240 chars]"),
+            &prompt
+        ));
+    }
+
+    #[test]
+    fn codex_multi_burst_counts_normalize_hidden_crlf_and_count_unicode_chars() {
+        let prompt = format!(
+            "Review this change\r\n{}\r\nİssue #42!{}\r\nFinish uniquely",
+            "é".repeat(1000),
+            "界".repeat(1001)
+        );
+        let frame = "› Review this change [Pasted Content 1001 chars]İssue #42![Pasted Content 1001 chars] #2\r\n  Finish uniquely\r\n  esc to cancel";
+        assert!(rendered_split_paste_visible(frame, &prompt));
+        assert!(!rendered_split_paste_visible(
+            &frame.replace("1001 chars", "2002 chars"),
+            &prompt
+        ));
+        assert!(!rendered_split_paste_visible(
+            &frame.replace("İssue #42!", "İssue #43!"),
+            &prompt
+        ));
+    }
+
+    #[test]
+    fn codex_repeated_marker_redraws_do_not_count_as_new_bursts() {
+        let prompt = format!("{}\n{}", "x".repeat(1000), "y".repeat(1001));
+        for repeated in [
+            "› [Pasted Content 1001 chars][Pasted Content 1001 chars]",
+            "› [Pasted Content 1001 chars] #2[Pasted Content 1001 chars] #2",
+            "› [Pasted Content 1001 chars][Pasted Content 1001 chars] #0",
+        ] {
+            assert!(
+                !rendered_split_paste_visible(repeated, &prompt),
+                "{repeated:?}"
+            );
+        }
+        assert!(rendered_split_paste_visible(
+            "› [Pasted Content 1001 chars][Pasted Content 1001 chars] #2",
+            &prompt
+        ));
+        let ambiguous = format!(
+            "Review this change\n{}#2{}",
+            "x".repeat(1001),
+            "y".repeat(999)
+        );
+        assert!(!rendered_split_paste_visible(
+            "› Review this change [Pasted Content 1001 chars]#2[Pasted Content 1001 chars]",
+            &ambiguous
+        ));
+    }
+
+    #[test]
+    fn codex_inline_digits_after_an_ordinal_remain_prompt_text() {
+        let prompt = format!(
+            "Review this change\n{}{}42{}",
+            "x".repeat(1001),
+            "y".repeat(1001),
+            "z".repeat(1001)
+        );
+        assert!(rendered_split_paste_visible("› Review this change [Pasted Content 1001 chars][Pasted Content 1001 chars] #242[Pasted Content 1001 chars] #3", &prompt));
+    }
+
+    #[test]
+    fn codex_rejected_bursts_with_long_ignored_segments_do_not_branch_repeatedly() {
+        let prompt = format!("{}\n{}Unique ending", "h".repeat(6000), " ".repeat(6000));
+        let output = "› Wrong heading [Pasted Content 1001 chars][Pasted Content 1001 chars] #2[Pasted Content 1001 chars] #3[Pasted Content 1001 chars] #4[Pasted Content 1001 chars] #5Unique ending";
+        assert!(!rendered_split_paste_visible(output, &prompt));
+    }
+
+    #[test]
+    fn codex_rejected_distinct_bursts_discard_irrelevant_ordinal_histories() {
+        let prompt = format!("{}\n", "2".repeat(50_000));
+        let mut output = String::from("Wrong heading ");
+        for count in 1001..=1030 {
+            output.push_str(&format!("[Pasted Content {count} chars]#22"));
+        }
+        assert!(!rendered_split_paste_visible(&output, &prompt));
+    }
+
+    #[test]
+    fn codex_recurring_numeric_ambiguities_exhaust_a_bounded_search() {
+        let prompt = format!("{}\n", "2".repeat(80_000));
+        let mut output = String::from("Wrong heading ");
+        for _ in 0..2 {
+            for count in 1001..=1030 {
+                output.push_str(&format!("[Pasted Content {count} chars]#22"));
+            }
+        }
+        let mut budget = PasteMatchBudget::new(Instant::now() + RENDERED_PASTE_TOTAL_BUDGET);
+        assert!(!RenderedPastePrompt::new(&prompt).visible_with_budget(&output, &mut budget));
+        assert_eq!(
+            budget.remaining_states, 0,
+            "ambiguous paths must stop at the search limit"
+        );
+    }
+
+    #[test]
+    fn codex_partial_burst_redraws_exhaust_readiness_without_enter() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-partial-burst-redraw");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = format!(
+            "Review this change\n{}{}",
+            "x".repeat(1001),
+            "y".repeat(1001)
+        );
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            injection_payload(&prompt).into_bytes()
+        );
+        evaluator::on_output(id, "› Review this change [Pasted Content 1001 chars]");
+        evaluator::on_output(id, "\x1b[8;3H[Pasted Content 1001 chars]");
+        // Let the real quiet fence open: otherwise a faulty proof could still
+        // time out and leave this negative regression green.
+        std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
+        assert!(settle_after_paste(
+            &registry,
+            id,
+            &readiness.paste,
+            guard.as_deref(),
+            Duration::from_millis(1)
+        )
+        .is_err());
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_split_marker_rejects_stale_output_and_changed_input() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-split-marker-fences");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = format!("Review this change\n{}", "x".repeat(1000));
+        let frame = "› Review this change [Pasted Content 1000 chars]";
+        evaluator::on_output(id, frame);
+        // The stale frame must already satisfy quiet readiness; otherwise
+        // the timeout could pass even if delivery accidentally reused it.
+        std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            injection_payload(&prompt).into_bytes()
+        );
+        assert!(
+            settle_after_paste(
+                &registry,
+                id,
+                &readiness.paste,
+                guard.as_deref(),
+                Duration::from_millis(1)
+            )
+            .is_err(),
+            "an earlier matching composer must not prove the new paste"
+        );
+        evaluator::on_output(id, frame);
+        registry.write_bytes(id, b"user correction").unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            b"user correction"
+        );
+        assert!(!settle_after_paste(
+            &registry,
+            id,
+            &readiness.paste,
+            guard.as_deref(),
+            Duration::from_secs(1)
+        )
+        .unwrap());
+        assert_eq!(
+            writes.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty),
+            "lost ownership must not send Enter or repeat the paste"
+        );
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
     fn codex_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
         let _db = crate::db::test_support::isolated();
         let id = codex_worker_node("codex-midsize-paste");
@@ -1461,7 +2351,9 @@ mod tests {
         ];
         assert_eq!(policies.len(), 14, "one row per harness adapter");
         for (name, policy) in policies {
-            let expected = if *name == "codex" || *name == "muse" {
+            let expected = if *name == "codex" {
+                PasteGatePolicy::RenderedWithSplitMarker
+            } else if *name == "muse" {
                 PasteGatePolicy::RenderedWithTailAnchor
             } else {
                 PasteGatePolicy::Generic
@@ -1663,6 +2555,7 @@ mod tests {
                 chars: 100,
                 normalized_chars: 100,
                 content: String::new(),
+                split_marker_prompt: None,
                 output_cursor: evaluator::output_cursor(id).unwrap(),
             },
             receipt: None,

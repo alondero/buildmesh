@@ -388,10 +388,13 @@ pub enum PasteGatePolicy {
     RenderedMarkerOnly,
     /// As `RenderedMarkerOnly`, but a draft past the full-text limit is also
     /// confirmed by its trailing anchor characters: the harness draws
-    /// mid-size pastes inline instead of collapsing them (Muse, and Codex
-    /// per the partial 0.160.0 frame in #2061), so demanding a marker would
-    /// stall exactly like Muse run 343.
+    /// mid-size pastes inline instead of collapsing them (Muse), so
+    /// demanding a marker would stall exactly like Muse run 343.
     RenderedWithTailAnchor,
+    /// As `RenderedWithTailAnchor`, but Windows input can become several
+    /// paste bursts (Codex). Confirm the sequence of inline text and counted
+    /// markers against the expected prompt, independent of burst boundaries.
+    RenderedWithSplitMarker,
 }
 
 /// Behaviour an agent provider must declare.
