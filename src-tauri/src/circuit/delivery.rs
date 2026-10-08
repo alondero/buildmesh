@@ -36,7 +36,11 @@ pub(crate) const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// confirmed by its last 64 normalized characters instead. Run 343 waited
 /// out the whole budget for a marker Muse never printed. Counted after
 /// `normalize_for_match`, not in display columns.
-const TAIL_ANCHOR_CHARS: usize = 64;
+///
+/// Shared with [`crate::circuit::launch`]: a composer that scrolls keeps the
+/// tail of the staged text in view whether that text arrived as a PTY paste
+/// or as a startup prefill, so both delivery paths anchor on the same span.
+pub(crate) const TAIL_ANCHOR_CHARS: usize = 64;
 /// Bound ambiguous reconstruction per output snapshot. Exhaustion leaves the
 /// paste unconfirmed; it never authorizes Enter or extends the readiness budget.
 const MAX_PASTE_MATCH_STATES: usize = 16_384;
