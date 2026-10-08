@@ -108,19 +108,29 @@ For Windows users with these symptoms:
 
 1. Locate the directory in Repository's **Branches and worktrees** list. Node
    names can differ from directory names after a rename; use the full path.
-2. Download Microsoft Sysinternals Handle from the linked official page. From
-   its extracted directory, run the command below with the affected directory's
-   actual name. Handle visibility depends on process permissions; an empty
-   result does not prove there is no lock.
+2. Download Microsoft Sysinternals Handle from the linked official page. Open
+   PowerShell **as administrator**, as required by its installation instructions.
+   From its extracted directory, run the command below with the affected
+   directory's actual name. An empty result does not prove there is no lock.
 
    ```powershell
    & .\handle64.exe -nobanner 'worktree-directory-name'
    ```
 
 3. Close the matching Explorer tab/window or move the owning terminal out of
-   the held folder. For an abandoned helper, verify its current command and
-   creation time in Task Manager's **Details** view before ending that process.
-   Process identifiers can be reused after a process exits.
+   the held folder. For an abandoned helper, inspect its identity with this
+   read-only PowerShell query, replacing `12345` with the PID reported by Handle:
+
+   ```powershell
+   Get-CimInstance Win32_Process -Filter 'ProcessId = 12345' |
+     Select-Object ProcessId, CreationDate, CommandLine
+   ```
+
+   [Win32_Process](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-process)
+   exposes the creation time and command. After verifying the helper is the
+   intended abandoned process, end its matching PID in Task Manager's **Details**
+   view. Recheck the query if intervention is delayed, because process identifiers
+   can be reused after a process exits.
 4. Retry removal through Repository, or restart Buildmesh after releasing the
    handles. Repository deletion uses the same removal primitive, so it cannot
    bypass a remaining lock. That path removes the Worktree; branches are managed
