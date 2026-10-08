@@ -178,10 +178,7 @@ impl RunView {
             if self.has_human_wait(&step.node_id) {
                 return Some(B::HumanResponseRequired);
             }
-            if let Some(json) = self
-                .context
-                .get(&format!("node.{}.lifecycle_blocker", step.node_id))
-            {
+            if let Some(json) = self.context.lifecycle_blocker(&step.node_id) {
                 match serde_json::from_str::<B>(json) {
                     Ok(blocker) => return Some(blocker),
                     Err(_) => return Some(B::EvidenceConflict),
