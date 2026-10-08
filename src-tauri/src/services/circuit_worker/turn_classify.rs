@@ -21,6 +21,25 @@ pub(super) struct ClassifiedTurn {
     pub(super) missing_result: Option<MissingResult>,
 }
 
+impl ClassifiedTurn {
+    pub(super) fn deferred(
+        agent_node_id: i64,
+        blocker: crate::circuit::observation::CircuitObservationBlocker,
+    ) -> Self {
+        Self {
+            classifier_error: None,
+            observation_blocker: Some(blocker),
+            agent_node_id,
+            classification: None,
+            binding: None,
+            output: String::new(),
+            continuation: None,
+            waiting_for_a_finished_turn: false,
+            missing_result: None,
+        }
+    }
+}
+
 /// What the reminder needs: where the agent must save its result, and the
 /// turn, report and input the reminder is fenced to.
 pub(super) struct MissingResult {
@@ -90,7 +109,7 @@ impl readiness::Candidate {
         mut self,
         path: &std::path::Path,
         gate: &StepView,
-    ) -> (Self, bool) {
+    ) -> Result<(Self, bool), crate::circuit::observation::CircuitObservationBlocker> {
         use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
         match ReportSnapshot::read_result_file(
             path,
@@ -108,15 +127,22 @@ impl readiness::Candidate {
                 self.binding.owner.step_id = gate.node_id.clone();
                 self.binding.owner.attempt = gate.attempt;
                 self.binding.input_guard.report_guard = Some(report);
-                (self, false)
+                Ok((self, false))
             }
-            Ok(None) => (self, true),
+            Ok(None) => Ok((self, true)),
             Err(error) => {
                 tracing::warn!(
                     "circuits: could not bind result file {}: {error}",
                     path.display()
                 );
-                (self, true)
+                Err(
+                    crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
+                        reason: format!(
+                            "could not read the result file {}: {error}",
+                            path.display()
+                        ),
+                    },
+                )
             }
         }
     }
@@ -172,24 +198,15 @@ pub(super) fn classify_step_turn(
     ) {
         Ok(Some(candidate)) => candidate,
         Ok(None) => return None,
-        Err(blocker) => {
-            return Some(ClassifiedTurn {
-                classifier_error: None,
-                observation_blocker: Some(blocker),
-                agent_node_id,
-                classification: None,
-                binding: None,
-                output: String::new(),
-                continuation: None,
-                waiting_for_a_finished_turn: false,
-                missing_result: None,
-            })
-        }
+        Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
     };
     let (candidate, missing_path) = if let Some(path) =
         crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
     {
-        let (candidate, missing) = candidate.with_result_file(&path, step);
+        let (candidate, missing) = match candidate.with_result_file(&path, step) {
+            Ok(result) => result,
+            Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
+        };
         (candidate, missing.then_some(path))
     } else {
         (candidate, None)
@@ -1186,6 +1203,7 @@ mod result_continuation_tests {
                 .unwrap()
                 .unwrap()
                 .with_result_file(&result, run.step("step").unwrap())
+                .unwrap()
             };
             let (bound, missing) = prepare();
             assert!(!missing);
@@ -1239,6 +1257,44 @@ mod result_continuation_tests {
                 observe_gates_with(&run, &mut events, &mut source);
                 if expected == Classification::Continue {
                     assert_eq!(events.len(), 2);
+                    let mut continued = run.clone();
+                    let effects: Vec<_> = events
+                        .iter()
+                        .flat_map(|event| advance(&mut continued, event).effects)
+                        .collect();
+                    let can_prompt = matches!(
+                        run.graph.node("step").unwrap().kind,
+                        CircuitNodeKind::LlmTurnClassifier { .. }
+                    );
+                    assert_eq!(
+                        effects.iter().any(|effect| matches!(
+                            effect,
+                            crate::circuit::stepper::Effect::ContinueAgentTurn {
+                                target_agent_id: 42,
+                                ..
+                            }
+                        )),
+                        can_prompt,
+                        "only classifier gates automatically prompt owned agents"
+                    );
+                    assert!(continuation_is_current(
+                        &continued,
+                        "step",
+                        42,
+                        SessionStatus::Ready,
+                        true,
+                        Some("100:ready"),
+                        Some(&native.report_revision)
+                    ));
+                    assert!(!continuation_is_current(
+                        &continued,
+                        "step",
+                        42,
+                        SessionStatus::Ready,
+                        true,
+                        Some("100:ready"),
+                        Some(&bound.binding.report_revision)
+                    ));
                     assert!(matches!(&events[0], CircuitEvent::ContinuationObserved {
                         node_id, attempt: 1, stamp, revision, input_stamp,
                     } if node_id == "step" && stamp == "100:ready"

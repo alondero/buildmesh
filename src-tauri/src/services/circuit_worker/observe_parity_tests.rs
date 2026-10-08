@@ -520,3 +520,115 @@ fn a_finished_turn_missing_its_result_file_is_reminded_and_never_classified() {
     super::turn_classify::observe_gates_with(&view, &mut events, &mut script);
     assert!(!script.calls.contains(&"blocked"));
 }
+
+#[test]
+fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_report() {
+    use super::readiness;
+    use super::turn_classify::observe_gates_with;
+    use crate::circuit::observation::CircuitObservationBlocker;
+    use crate::services::transcript_reader::report_snapshot::ReportReadError;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("result.md");
+    std::fs::create_dir(&path).unwrap();
+    let mut run = view(
+        CircuitNodeKind::AwaitAgentTurn {
+            target_node_id: None,
+        },
+        RunState::Running,
+        StepStatus::Running,
+        Some(42),
+    );
+    run.graph.nodes.push(CircuitNode {
+        id: "producer".into(),
+        kind: spawn(),
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "producer".into(),
+        to: "step".into(),
+        condition: Default::default(),
+    });
+    run.steps.push(StepView {
+        node_id: "producer".into(),
+        status: StepStatus::Completed,
+        attempt: 1,
+        agent_node_id: Some(42),
+        outcome: None,
+        error: None,
+    });
+    run.graph.nodes.push(CircuitNode {
+        id: "done".into(),
+        kind: CircuitNodeKind::Notify {
+            message: "done".into(),
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "step".into(),
+        to: "done".into(),
+        condition: EdgeCondition::OnOutcome(crate::circuit::model::StepOutcome::Completed),
+    });
+    let native = crate::circuit::test_support::record_report_evidence(
+        &mut run,
+        "step",
+        "A shorter transcript summary",
+    );
+    let agent = crate::models::AgentNode {
+        id: 42,
+        status: SessionStatus::Ready,
+        cli_session_id: native.owner.session_id.clone(),
+        ..Default::default()
+    };
+    let prepare = |run: &RunView| {
+        readiness::prepare(
+            run,
+            "step",
+            &agent,
+            Some("100:ready"),
+            Ok(native.input_guard.input_stamp.clone()),
+            Err(ReportReadError::Unsupported),
+        )
+        .unwrap()
+        .unwrap()
+    };
+    for _ in 0..3 {
+        let Err(blocker) = prepare(&run).with_result_file(&path, run.step("step").unwrap()) else {
+            panic!("an unreadable result must defer observation");
+        };
+        let mut script = Script {
+            turn: Some(ClassifiedTurn::deferred(42, blocker)),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        observe_gates_with(&run, &mut events, &mut script);
+        assert!(
+            matches!(events.as_slice(), [CircuitEvent::ObservationDeferred {
+            node_id, attempt: 1, agent_node_id: 42,
+            blocker: CircuitObservationBlocker::ReportUnavailable { .. },
+        }] if node_id == "step")
+        );
+        let transition = advance(&mut run, &events[0]);
+        assert!(transition.effects.is_empty());
+        assert_eq!(run.step("step").unwrap().status, StepStatus::Unverified);
+        assert_eq!(run.context.get("node.step.result_reminders.1"), None);
+        assert!(!script.calls.contains(&"blocked"));
+    }
+    std::fs::remove_dir(&path).unwrap();
+    let report = "Full completed result\nBUILDMESH_HANDOFF_V1: READY\n";
+    std::fs::write(&path, report).unwrap();
+    let (candidate, missing) = prepare(&run)
+        .with_result_file(&path, run.step("step").unwrap())
+        .unwrap();
+    assert!(!missing);
+    advance(
+        &mut run,
+        &CircuitEvent::TurnClassified {
+            node_id: "step".into(),
+            classification: Some(Classification::Completed),
+            output: Some(candidate.output),
+            binding: Some(candidate.binding),
+        },
+    );
+    assert_eq!(run.step("step").unwrap().status, StepStatus::Completed);
+    assert_eq!(run.context.get("node.producer.output"), Some(report));
+    assert_eq!(run.context.get("node.step.result_reminders.1"), None);
+}
