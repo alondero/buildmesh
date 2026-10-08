@@ -202,7 +202,9 @@ impl BackgroundLaunch {
         let executable = match &self.executable {
             Some(path) => path.clone(),
             None if matches!(recipe.binary, "claude" | "claude.exe") => crate::session_naming::resolve_claude_binary_in(claude)?,
-            None => which::which(recipe.binary).map_err(|_| format!("{} binary not found; install the selected harness or set its executable in Settings", recipe.binary))?,
+            None => crate::agent::detection::resolve_spawn_binary(recipe.binary)
+                .or_else(|| which::which(recipe.binary).ok())
+                .ok_or_else(|| format!("{} binary not found; install the selected harness or set its executable in Settings", recipe.binary))?,
         };
         let mut cmd = super::spawn_environment::background_command(&recipe, Some(&executable));
         cmd.current_dir(directory);

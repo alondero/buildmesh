@@ -1,10 +1,14 @@
 //! Startup auto-detection of installed agent harnesses (PRD #534 / issue #536).
 //!
-//! On launch we scan the system `PATH` (plus a few standard config dirs) for the
-//! CLI binaries that back our harnesses, and turn each *present* tool into a
-//! dynamic [`HarnessProfile`]. Only detected executables become profiles, so an
-//! absent tool (e.g. Codex on a machine that never installed it) never clutters
-//! the launch menu.
+//! On launch we scan the system `PATH` -- plus the npm prefix bins,
+//! user-managed shell bin dirs (`~/.local/bin`, Homebrew, Node manager shims)
+//! and a few standard config dirs -- for the CLI binaries that back our
+//! harnesses, and turn each *present* tool into a dynamic [`HarnessProfile`].
+//! Only detected tools become profiles, so an absent tool (e.g. Codex on a
+//! machine that never installed it) never clutters the launch menu. Each
+//! binary-found profile records its resolved absolute path
+//! (`HarnessProfile::executable`) so a GUI-launched app spawns the same path
+//! discovery found, instead of a bare stem on a restricted process `PATH`.
 //!
 //! The scan is a dep-free, in-process `stat` sweep — no `which`/`where`
 //! subprocess and no new crates — so its startup cost is a few hundred cached
@@ -171,18 +175,40 @@ fn wsl_probed(tool: &Detectable) -> bool {
     !WSL_EXCLUDED.contains(&tool.id)
 }
 
-/// True if `binary` (plus any of `exts`) exists in one of the `path_dirs`.
+/// First `path_dirs` entry holding `binary` (plus any of `exts`), or `None`.
 /// `exts` always includes the empty string (the exact stem, e.g. a `claude`
 /// shell script); on Windows it also carries the `PATHEXT` entries.
-fn binary_on_path(
+///
+/// The returned absolute path is what a GUI-launched app (Finder/Dock on
+/// macOS, Start Menu on Windows) must spawn: its process `PATH` omits the
+/// user-managed directories a terminal login shell adds, so a bare stem
+/// would fail at spawn time even though detection found it. Callers record
+/// this path on the profile (`HarnessProfile::executable`) and the spawn
+/// path prefers it over the bare stem.
+///
+/// On Windows an extensionless match for a bare stem is skipped: global npm
+/// installs leave an unrunnable POSIX shell script beside the real shim, and
+/// neither PowerShell (`& '...\npm\codex'`) nor `CreateProcess` can
+/// execute it. Only the listed executable extensions (`PATHEXT` in
+/// production) are consulted unless the stem already names an explicit
+/// extension (e.g. the `claude.exe` recipe on Windows). A list of exactly
+/// `[""]` -- the Unix rule and the unit-test seam -- still matches exact
+/// names, so platform-agnostic tests keep their meaning on every runner.
+fn resolve_binary_on_path(
     binary: &str,
     path_dirs: &[PathBuf],
     exts: &[&str],
     exists: &dyn Fn(&Path) -> bool,
-) -> bool {
-    path_dirs.iter().any(|dir| {
+) -> Option<PathBuf> {
+    let bare_stem = Path::new(binary).extension().is_none();
+    let skip_bare = cfg!(windows) && bare_stem && exts.iter().any(|ext| !ext.is_empty());
+    path_dirs.iter().find_map(|dir| {
         exts.iter()
-            .any(|ext| exists(&dir.join(format!("{binary}{ext}"))))
+            .filter(|ext| !skip_bare || !ext.is_empty())
+            .find_map(|ext| {
+                let candidate = dir.join(format!("{binary}{ext}"));
+                exists(&candidate).then_some(candidate)
+            })
     })
 }
 
@@ -190,7 +216,10 @@ fn binary_on_path(
 ///
 /// A harness is detected when any of its binary stems is found on `PATH`, or
 /// when one of its home-relative config dirs exists. `exists` is the filesystem
-/// probe (real `Path::exists` in production, a fake in tests).
+/// probe (real `Path::exists` in production, a fake in tests). When a binary
+/// stem is found, its resolved absolute path is recorded on the profile's
+/// `executable` so the spawn path need not re-derive it; config-dir-only
+/// detections keep `executable: None` and the spawn re-resolves the stem.
 pub fn detect_profiles(
     path_dirs: &[PathBuf],
     exts: &[&str],
@@ -199,19 +228,18 @@ pub fn detect_profiles(
 ) -> Vec<HarnessProfile> {
     DETECTABLE
         .iter()
-        .filter(|d| {
-            let on_path = d
+        .filter_map(|d| {
+            let executable = d
                 .binaries
                 .iter()
-                .any(|b| binary_on_path(b, path_dirs, exts, exists));
+                .find_map(|b| resolve_binary_on_path(b, path_dirs, exts, exists));
             let has_config = home.is_some_and(|h| d.config_dirs.iter().any(|c| exists(&h.join(c))));
-            on_path || has_config
-        })
-        .map(|d| HarnessProfile {
-            id: d.id.to_string(),
-            name: d.name.to_string(),
-            harness: d.harness.to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            (executable.is_some() || has_config).then(|| HarnessProfile {
+                id: d.id.to_string(),
+                name: d.name.to_string(),
+                harness: d.harness.to_string(),
+                runtime: None, wsl_distro: None, executable,
+            })
         })
         .collect()
 }
@@ -260,19 +288,127 @@ fn standard_npm_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
+/// User-managed binary directories a terminal login shell sees but a
+/// GUI-launched app (Finder/Dock on macOS, Start Menu on Windows) typically
+/// does not. The interactive shell on the reporter's Mac carried
+/// `~/.local/bin` and a Node manager shim dir while the GUI process PATH was
+/// empty; a harness installed in one of these locations is picker-visible
+/// (via its config dir) yet unspawnable by bare stem.
+fn supplemental_user_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".volta").join("bin"));
+    }
+    if cfg!(not(windows)) {
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+    }
+    dirs
+}
+
+/// Active Node version-manager shims under `~/.nvm/versions/node/*/bin`. The
+/// version directory name is release-dependent, so every present `*/bin` is
+/// probed rather than a single fixed path. Filesystem errors (missing dir,
+/// unreadable entries) yield no entries -- detection simply falls back to the
+/// remaining search path. Entries are sorted newest-version-first:
+/// `read_dir` order is filesystem-dependent, and an unsorted traversal
+/// would resolve non-deterministically when several Node versions carry
+/// different global CLIs.
+fn nvm_bin_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else { return Vec::new() };
+    let versions = home.join(".nvm").join("versions").join("node");
+    let Ok(entries) = std::fs::read_dir(&versions) else { return Vec::new() };
+    let mut bins: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path().join("bin"))
+        .filter(|bin| bin.is_dir())
+        .collect();
+    bins.sort_by_key(|b| std::cmp::Reverse(nvm_version_key(b)));
+    bins
+}
+
+/// Numeric sort key for an NVM `.../node/<version>/bin` path, parsed from
+/// the `v<major>.<minor>.<patch>` directory name. Unparseable names key as
+/// `0.0.0` and sink behind every real release.
+fn nvm_version_key(bin: &Path) -> (u64, u64, u64) {
+    let version = bin
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .map(|name| name.to_string_lossy());
+    let mut parts = version
+        .as_deref()
+        .unwrap_or_default()
+        .trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0));
+    (
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+    )
+}
+
+/// Full executable search path: the process `PATH` plus every supplemental
+/// location detection probes. Shared by [`detect_installed_profiles`] and
+/// [`resolve_spawn_binary`] so discovery and spawning resolve the same stem
+/// to the same absolute path.
+fn enriched_search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = home_dir();
+    for extra in standard_npm_bin_dirs(home.as_deref())
+        .into_iter()
+        .chain(supplemental_user_bin_dirs(home.as_deref()))
+        .chain(nvm_bin_dirs(home.as_deref()))
+    {
+        if !dirs.contains(&extra) {
+            dirs.push(extra);
+        }
+    }
+    dirs
+}
+
+/// Resolve `binary` to an absolute path through the enriched search path
+/// (process `PATH` + npm prefix bins + user-managed bin dirs + NVM shims).
+///
+/// Spawn-time counterpart to detection: when a profile carries no resolved
+/// `executable` (config-dir-only install, custom profile, or a binary that
+/// appeared after startup), the spawn path calls this instead of relying on
+/// the GUI process `PATH` alone. Returns `None` when the stem is not found,
+/// in which case the caller keeps the bare stem so the spawn error names the
+/// missing CLI rather than failing earlier with a different message.
+///
+/// Cline's `CLINE_BIN_PATH` override and `%APPDATA%` node_modules walk are
+/// honoured first, mirroring [`detect_installed_profiles`].
+pub fn resolve_spawn_binary(binary: &str) -> Option<PathBuf> {
+    if binary == "cline" {
+        if let Some(resolved) = crate::agent::provider::adapters::cline::resolve_install(
+            std::env::var("CLINE_BIN_PATH").ok().as_deref(),
+            std::env::var_os("APPDATA").map(PathBuf::from).as_deref(),
+            &|path| path.exists(),
+        ) {
+            return Some(resolved);
+        }
+    }
+    let exts = path_exts();
+    let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
+    resolve_binary_on_path(binary, &enriched_search_dirs(), &ext_refs, &|p| p.exists())
+}
+
+/// Resolve the first found stem in `binaries` through [`resolve_spawn_binary`].
+pub fn resolve_spawn_executable(binaries: &[&str]) -> Option<PathBuf> {
+    binaries.iter().find_map(|b| resolve_spawn_binary(b))
+}
+
 /// Real-filesystem entry point: scan `PATH`/`PATHEXT`, standard npm bin locations,
 /// and the home config dirs for installed harnesses. Called once at startup from
 /// `lib.rs` `setup()`.
 pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
-    let mut path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut path_dirs = enriched_search_dirs();
     let home = home_dir();
-    for npm_dir in standard_npm_bin_dirs(home.as_deref()) {
-        if !path_dirs.contains(&npm_dir) {
-            path_dirs.push(npm_dir);
-        }
-    }
     let exts = path_exts();
     let ext_refs: Vec<&str> = exts.iter().map(String::as_str).collect();
     // npm's Windows prefix also contains extensionless POSIX shims. They
@@ -303,9 +439,8 @@ pub fn detect_installed_profiles() -> Vec<HarnessProfile> {
         &|path| path.exists(),
     );
     if let Some(cline_path) = cline_install {
-        let cline_override_active = std::env::var_os("CLINE_BIN_PATH").is_some();
         for list in [&mut profiles, &mut executable_profiles] {
-            apply_resolved_cline_executable(list, &cline_path, cline_override_active);
+            apply_resolved_cline_executable(list, &cline_path);
         }
     }
     if cfg!(windows) {
@@ -356,29 +491,24 @@ fn is_automatic_profile(p: &HarnessProfile) -> bool {
 }
 
 /// Apply the Cline resolver's resolved absolute path onto the profile
-/// lists returned by `detect_profiles` (issue #1773 review).
+/// lists returned by `detect_profiles` (issue #1773 review, review round 1).
 ///
-/// The generic sweep may already have produced a `cline` row — via the
-/// `~/.cline` config-dir probe or a `cline` stem on `PATH` — but with
-/// `executable: None`. We don't want to skip the resolver result in that
-/// case (the resolved path is the only piece of state the sweep didn't
-/// have), so the helper either updates the existing row's `executable`
-/// or pushes a fresh row when no entry exists yet.
-///
-/// `override_active` is `true` when `CLINE_BIN_PATH` was set; the spec
-/// says the env override wins unconditionally, so the helper overwrites
-/// an existing path even if it was already set. Without the override,
-/// the helper only fills in a missing path — it never clobbers an
-/// already-resolved one.
+/// The generic sweep may already have produced a `cline` row with its own
+/// recording — via a `cline` stem on `PATH` or an npm-prefix shim. The
+/// resolver encodes the documented precedence (`CLINE_BIN_PATH` first, then
+/// the npm shim, then the `node_modules` platform binary), so its answer
+/// wins over the sweep's whenever it resolves; a generic sweep recording
+/// must never shadow it (on Windows the sweep could otherwise leave the
+/// row pointed at an unrunnable extensionless shim). Without a resolver
+/// result the sweep's recording (or the config-dir row's `None`) stands.
+/// The helper either updates the existing row's `executable` or pushes a
+/// fresh row when no entry exists yet.
 fn apply_resolved_cline_executable(
     list: &mut Vec<HarnessProfile>,
     cline_path: &std::path::Path,
-    override_active: bool,
 ) {
     if let Some(existing) = list.iter_mut().find(|p| p.id == "cline") {
-        if override_active || existing.executable.is_none() {
-            existing.executable = Some(cline_path.to_path_buf());
-        }
+        existing.executable = Some(cline_path.to_path_buf());
     } else {
         list.push(HarnessProfile {
             id: "cline".into(),
@@ -1162,6 +1292,11 @@ mod tests {
 
         let ids: Vec<_> = profiles.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, vec!["codex"], "only the on-disk binary is detected");
+        assert_eq!(
+            profiles[0].executable.as_deref(),
+            Some(bin_dir.join("codex").as_path()),
+            "the detected profile must carry the resolved path the spawn uses"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1192,7 +1327,7 @@ mod tests {
     fn apply_resolved_cline_executable_patches_existing_profile() {
         let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
         let mut list = vec![cline_profile("cline", None)];
-        super::apply_resolved_cline_executable(&mut list, &resolved, false);
+        super::apply_resolved_cline_executable(&mut list, &resolved);
         assert_eq!(
             list.len(),
             1,
@@ -1201,34 +1336,34 @@ mod tests {
         assert_eq!(list[0].executable.as_deref(), Some(resolved.as_path()));
     }
 
-    /// Issue #1773 review — `CLINE_BIN_PATH` wins unconditionally, even
-    /// when the existing profile already had a previously-resolved
-    /// path (the spec is unambiguous: the env override always wins).
-    /// Without the override, an existing path is left alone — the
-    /// resolver is only consulted when there's a path to record.
+    /// Review round 1 — the resolver's documented order puts `CLINE_BIN_PATH`
+    /// first, so an override answer replaces any earlier recording, including
+    /// a previously-resolved path.
     #[test]
-    fn apply_resolved_cline_executable_always_overwrites_when_override_active() {
+    fn apply_resolved_cline_executable_replaces_stale_path() {
         let prior = PathBuf::from("/old/path/cline.exe");
         let override_path = PathBuf::from("/Users/me/bin/cline");
         let mut list = vec![cline_profile("cline", Some(prior.clone()))];
-        super::apply_resolved_cline_executable(&mut list, &override_path, true);
+        super::apply_resolved_cline_executable(&mut list, &override_path);
         assert_eq!(list[0].executable.as_deref(), Some(override_path.as_path()));
     }
 
+    /// Review round 1 — a generic sweep recording (e.g. a `PATH` binary)
+    /// must not shadow the resolver's documented-precedence answer.
     #[test]
-    fn apply_resolved_cline_executable_preserves_existing_when_no_override() {
-        let prior = PathBuf::from("/old/path/cline.exe");
-        let fresh = PathBuf::from("/new/path/cline.exe");
-        let mut list = vec![cline_profile("cline", Some(prior.clone()))];
-        super::apply_resolved_cline_executable(&mut list, &fresh, false);
-        assert_eq!(list[0].executable.as_deref(), Some(prior.as_path()));
+    fn apply_resolved_cline_executable_prefers_resolver_over_sweep() {
+        let sweep = PathBuf::from("/usr/local/bin/cline");
+        let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
+        let mut list = vec![cline_profile("cline", Some(sweep))];
+        super::apply_resolved_cline_executable(&mut list, &resolved);
+        assert_eq!(list[0].executable.as_deref(), Some(resolved.as_path()));
     }
 
     #[test]
     fn apply_resolved_cline_executable_pushes_when_id_absent() {
         let resolved = PathBuf::from("/Users/me/.npm/cline.cmd");
         let mut list: Vec<HarnessProfile> = vec![];
-        super::apply_resolved_cline_executable(&mut list, &resolved, false);
+        super::apply_resolved_cline_executable(&mut list, &resolved);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "cline");
         assert_eq!(list[0].executable.as_deref(), Some(resolved.as_path()));
@@ -1285,6 +1420,126 @@ mod tests {
             cline_row.executable.as_deref(),
             Some(resolved.as_path()),
             "the Windows-runtime variant must carry the resolved executable"
+        );
+    }
+
+    /// Picker-visible-but-spawn-fails regression: the detected profile must
+    /// carry the resolved absolute executable path, so a GUI-launched app
+    /// (restricted process PATH) spawns the discovered binary instead of a
+    /// bare stem its PATH cannot resolve.
+    #[test]
+    fn detected_binary_records_resolved_executable() {
+        let path_dirs = dirs(&["/usr/local/bin", "/usr/bin"]);
+        let exists = fake_fs(&["/usr/local/bin/claude"]);
+        let profiles = detect_profiles(&path_dirs, &[""], None, &exists);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(
+            profiles[0].executable.as_deref(),
+            Some(std::path::Path::new("/usr/local/bin/claude"))
+        );
+    }
+
+    /// A `~/.local/bin` install invisible to the GUI process PATH is found
+    /// once the supplemental user bin dirs join the search path -- the macOS
+    /// `~/.local/bin` half of the picker-visible-but-spawn-fails report.
+    #[test]
+    fn supplemental_user_bin_dirs_cover_gui_missing_cli_dirs() {
+        let home = PathBuf::from("/home/me");
+        let mut path_dirs = dirs(&["/usr/bin"]);
+        path_dirs.extend(super::supplemental_user_bin_dirs(Some(&home)));
+        assert!(
+            path_dirs.iter().any(|d| d == &home.join(".local").join("bin")),
+            "~/.local/bin must be on the enriched search path"
+        );
+        let exists = fake_fs(&["/home/me/.local/bin/claude"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(
+            profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            vec!["claude"]
+        );
+        assert_eq!(
+            profiles[0].executable.as_deref(),
+            Some(std::path::Path::new("/home/me/.local/bin/claude"))
+        );
+    }
+
+    /// Config-dir-only installs still surface in the picker but carry no
+    /// executable -- the spawn path re-resolves the bare stem at launch.
+    #[test]
+    fn config_dir_only_leaves_executable_unset() {
+        let path_dirs = dirs(&["/usr/bin"]);
+        let home = PathBuf::from("/home/me");
+        let exists = fake_fs(&["/home/me/.claude"]);
+        let profiles = detect_profiles(&path_dirs, &[""], Some(&home), &exists);
+        assert_eq!(profiles.len(), 1);
+        assert!(profiles[0].executable.is_none());
+    }
+
+    /// NVM-managed Node shims (`~/.nvm/versions/node/*/bin`) join the search
+    /// path -- the NVM half of the report. Hermetic over a real temp home
+    /// keyed on the process id, mirroring
+    /// `detect_profiles_against_a_real_temp_filesystem`.
+    #[test]
+    fn nvm_shim_bins_join_the_search_path() {
+        let root = std::env::temp_dir().join(format!("bm-nvm-test-{}", std::process::id()));
+        let shim = root.join(".nvm").join("versions").join("node").join("v22.0.0").join("bin");
+        std::fs::create_dir_all(&shim).unwrap();
+        let found = super::nvm_bin_dirs(Some(&root));
+        assert_eq!(found, vec![shim]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Multiple NVM versions resolve newest-first: `read_dir` order is
+    /// filesystem-dependent, so entries are sorted by version descending for
+    /// deterministic resolution. Hermetic temp home with its own
+    /// process-keyed root (see `nvm_shim_bins_join_the_search_path`).
+    #[test]
+    fn nvm_shim_bins_order_newest_version_first() {
+        let root = std::env::temp_dir().join(format!("bm-nvm-order-test-{}", std::process::id()));
+        for version in ["v18.20.0", "v22.11.0", "v20.18.0"] {
+            std::fs::create_dir_all(
+                root.join(".nvm").join("versions").join("node").join(version).join("bin"),
+            )
+            .unwrap();
+        }
+        let found = super::nvm_bin_dirs(Some(&root));
+        let versions: Vec<_> = found
+            .iter()
+            .filter_map(|bin| {
+                bin.parent()
+                    .and_then(|dir| dir.file_name())
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        assert_eq!(versions, vec!["v22.11.0", "v20.18.0", "v18.20.0"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Windows npm-prefix regression (review round 1): the prefix holds an
+    /// unrunnable extensionless POSIX script beside the real shim. Given both
+    /// `codex` and `codex.cmd`, resolution must select `codex.cmd` --
+    /// neither PowerShell (`& '...\npm\codex'`) nor `CreateProcess` can
+    /// run the extensionless file.
+    #[test]
+    #[cfg(windows)]
+    fn windows_npm_prefix_prefers_cmd_over_extensionless_shim() {
+        let path_dirs = dirs(&["C:/Users/me/AppData/Roaming/npm"]);
+        let exists = fake_fs(&[
+            "C:/Users/me/AppData/Roaming/npm/codex",
+            "C:/Users/me/AppData/Roaming/npm/codex.cmd",
+        ]);
+        let profiles = detect_profiles(&path_dirs, &["", ".EXE", ".CMD"], None, &exists);
+        assert_eq!(profiles.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["codex"]);
+        // The recorded path echoes the matched extension's own casing,
+        // joined with the platform separator -- compare against the same
+        // join rather than a hardcoded string.
+        assert_eq!(
+            profiles[0].executable.as_deref(),
+            Some(
+                PathBuf::from("C:/Users/me/AppData/Roaming/npm")
+                    .join("codex.CMD")
+                    .as_path()
+            )
         );
     }
 }

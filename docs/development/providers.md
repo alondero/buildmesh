@@ -293,6 +293,26 @@ The Claude-backed family does not declare its own value at all:
 `src-tauri/src/agent/provider/mod.rs`, which pins `Direct`, so a new
 Claude-backed adapter inherits the right shell instead of restating it.
 
+The binary the shell invokes is the absolute path discovery resolved, not a
+bare stem. A GUI-launched app (Finder/Dock on macOS, Start Menu on Windows)
+inherits a restricted process `PATH` that omits user-managed directories
+(`~/.local/bin`, Homebrew, Node manager shims, npm prefix bins), so spawning
+`claude` by name fails even when the picker offered it. Detection
+(`src-tauri/src/agent/detection.rs`) therefore searches those directories in
+addition to `PATH` and records the resolved path on
+`HarnessProfile.executable`. The launch router
+(`agent::launch_routing::prepare` and `prepare_snapshot`) threads that path
+onto the routing (both `Native` and `Environment`), and re-resolves the
+adapter's recipe stem through the same enriched search at spawn time when the
+profile carries none (config-dir-only installs, custom profiles).
+`agent::spawn::command::build_spawn_command_prepared` consumes the routing's
+resolved path without further lookup, keeping command composition pure and
+unit-testable. On Windows only `PATHEXT` extensions resolve a bare stem, so an
+unrunnable extensionless npm shim is never recorded. WSL guests and
+Windows-interop spawns are exempt from host-side resolution: the guest login
+shell (WSL) or the Windows side (interop) resolves the stem in its own
+runtime, since a host-resolved Linux path is not valid input to PowerShell.
+
 ## Saved Spawn Configurations
 
 `preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
