@@ -91,7 +91,11 @@ test('the legs check out full history, because a unit test reads the release tag
   // `git describe --abbrev=0 --tags`. The suite used to run in the job that
   // had `fetch-depth: 0`; a leg that checks out shallow has no tags and that
   // test fails. The first split run of this matrix proved it.
-  assert.match(jobBlock('quality-tests'), /actions\/checkout@v7\n {8}with:\n {10}fetch-depth: 0/);
+  //
+  // The checkout ref is matched loosely because it is SHA-pinned (issue #1541)
+  // and re-pinned as upstream releases; what this test owns is that a checkout
+  // with `fetch-depth: 0` exists, not which commit it names.
+  assert.match(jobBlock('quality-tests'), /actions\/checkout@\S+[^\n]*\n {8}with:\n {10}fetch-depth: 0/);
 });
 
 test('a matrix line the parser does not understand fails loudly instead of dropping a leg', () => {

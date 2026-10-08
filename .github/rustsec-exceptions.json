@@ -1,0 +1,135 @@
+{
+  "$comment": [
+    "Reviewed RustSec exceptions for the Buildmesh Rust dependency tree (issue #1541).",
+    "",
+    "`cargo audit` treats unmaintained/unsound/yanked advisories as warnings rather than",
+    "vulnerabilities, and this repository's policy is that a warning must be either fixed or",
+    "reviewed here. Every entry carries an owner, a rationale, and a `reviewBy` date; the",
+    "`check-rust-advisories.mjs` gate fails an entry whose review date has passed, so an",
+    "exception cannot become permanent by neglect.",
+    "",
+    "A `vulnerabilities` advisory (a real vulnerability, not a maintenance warning) is never",
+    "listed here: those must be fixed, which is why rustls RUSTSEC-2026-0285 was resolved in",
+    "the same change that introduced this file."
+  ],
+  "advisories": [
+    {
+      "id": "RUSTSEC-2026-0183",
+      "crate": "git2",
+      "version": "0.20.4",
+      "kind": "unsound",
+      "owner": "maintainers",
+      "rationale": "libgit2 Remote::list() can trigger undefined behaviour. The vulnerable path is libgit2's remote-list API, which Buildmesh does not call: it uses git2 for local repository, worktree and status operations only, and has no remote-fetch surface. Tracked for the next git2/libgit2 release that fixes it.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2026-0184",
+      "crate": "git2",
+      "version": "0.20.4",
+      "kind": "unsound",
+      "owner": "maintainers",
+      "rationale": "Signature created from a buffer-created BlameHunk has undefined behaviour. Buildmesh reads blame output for display only and never constructs a Signature from a BlameHunk, so the unsound path is unreachable from application code.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2024-0429",
+      "crate": "glib",
+      "version": "0.18.5",
+      "kind": "unsound",
+      "owner": "maintainers (transitive, GTK3 runtime)",
+      "rationale": "Unsound Iterator/DoubleEndedIterator impls in glib::VariantStrIter. glib is pulled in transitively by the GTK3 stack Tauri links on Linux; Buildmesh does not call VariantStrIter, and the crate cannot be upgraded without a Tauri GTK4 migration.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2017-0008",
+      "crate": "serial",
+      "version": "0.4.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, via portable-pty)",
+      "rationale": "The `serial` crate is unmaintained but is a test-serialisation helper used transitively by portable-pty's own tests, not by Buildmesh code. It is a build-time-only dependency of the PTY layer with no attacker-controlled input.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2024-0320",
+      "crate": "yaml-rust",
+      "version": "0.4.5",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, via syntect)",
+      "rationale": "yaml-rust is unmaintained and is pulled in by syntect, which Buildmesh uses for syntax highlighting of diffs and transcripts. It parses theme files that ship inside the repository, not user-supplied YAML, and syntect has no unmaintained replacement with a maintained API surface.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0141",
+      "crate": "bincode",
+      "version": "1.3.3",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive)",
+      "rationale": "bincode 1.x is unmaintained. It is reached transitively through Tauri and tauri-plugin-updater. The app's own persisted state uses SQLite and JSON, not bincode, so the unmaintained crate is not on a path this repository controls; a major-version bump belongs to the Tauri upgrade.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2024-0370",
+      "crate": "proc-macro-error",
+      "version": "1.0.4",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "proc-macro-error is unmaintained and is a build-time-only macro helper in the transitive graph. It cannot affect a shipped artifact's run-time behaviour.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0081",
+      "crate": "unic-char-property",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "Part of the unmaintained `unic-*` 0.9 family reached through a transitive dependency's proc-macro chain. These crates compile to Unicode tables at build time and have no run-time attack surface.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0075",
+      "crate": "unic-char-range",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "Part of the unmaintained `unic-*` 0.9 family; see RUSTSEC-2025-0081. Build-time table generation, no run-time attack surface.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0080",
+      "crate": "unic-common",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "Part of the unmaintained `unic-*` 0.9 family; see RUSTSEC-2025-0081. Build-time table generation, no run-time attack surface.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0100",
+      "crate": "unic-ucd-ident",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "Part of the unmaintained `unic-*` 0.9 family; see RUSTSEC-2025-0081. Build-time table generation, no run-time attack surface.",
+      "reviewBy": "2027-01-15"
+    },
+    {
+      "id": "RUSTSEC-2025-0098",
+      "crate": "unic-ucd-version",
+      "version": "0.9.0",
+      "kind": "unmaintained",
+      "owner": "maintainers (transitive, build-time)",
+      "rationale": "Part of the unmaintained `unic-*` 0.9 family; see RUSTSEC-2025-0081. Build-time table generation, no run-time attack surface.",
+      "reviewBy": "2027-01-15"
+    }
+  ],
+  "yanked": [
+    {
+      "crate": "libssh2-sys",
+      "version": "0.3.2",
+      "kind": "yanked",
+      "owner": "maintainers (transitive, via git2)",
+      "rationale": "libssh2-sys 0.3.2 was yanked upstream. It is vendored-by-crate into the build by libgit2-sys and is only linked for git operations; the yanked version has no known security advisory, only an upstream build-stability concern. Recorded so the warning is reviewed rather than ignored by default.",
+      "reviewBy": "2027-01-15"
+    }
+  ]
+}
