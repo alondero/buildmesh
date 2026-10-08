@@ -138,11 +138,14 @@ review/diff text, avoiding CLI argument parsing of diff lines such as `+ ...`.
 For a multiline Codex prompt, including one using a proxied Codex provider,
 Buildmesh waits until Codex renders the pasted content in its input box and the
 redraw settles before sending Enter. The wait captures an output position before
-the PTY write, accepts Codex's normalized line-ending count, and confirms a
-long prompt by its completed paste marker or — like Muse — by the end of the
-prompt drawn in full, because both harnesses draw mid-size pastes inline and
-collapse only the largest into a marker (issue #2061; Codex per a partial
-0.160.0 frame, a clean live capture still outstanding). Which confirmation a
+the PTY write and accepts Codex's normalized line-ending count. A long prompt
+can be confirmed by a whole-prompt marker, its visible ending when drawn in
+full, or a sequence of inline segments and markers whose individual burst
+counts account for the expected prompt. Native Codex 0.160.1 on Windows
+rendered an inline prefix followed by a collapsed suffix; source and
+regressions also cover several bursts, including duplicate-size marker
+ordinals. See [Codex paste confirmation](../learning/codex-paste-confirmation.md)
+for the captured frames, count convention and evidence limits. Which confirmation a
 harness uses is declared by its adapter (`paste_gate_policy`), not by name
 checks in delivery. A startup
 redraw alone cannot acknowledge the

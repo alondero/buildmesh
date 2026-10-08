@@ -47,11 +47,14 @@ generation.
 ## Operator and test fences
 
 Multiline Codex and Muse prompt delivery waits for a complete matching paste
-echo (a marker, full visible text for short drafts, or the draft's tail for
-mid-size pastes drawn inline) and one second of quiet
-output before sending Enter. Marker matching ignores terminal padding and line
-breaks while retaining the exact character
-count and closing bracket. Which confirmation applies is declared per harness
+echo and one second of quiet output before sending Enter. Both adapters
+permit whole-prompt markers, full visible text for short drafts, and the
+draft's tail for longer pastes drawn inline. Codex also permits sequences of
+inline segments and markers: each marker counts its own collapsed burst,
+and the segments and counts must account for the expected prompt. Matching
+ignores terminal padding and line breaks while retaining each marker's
+Unicode-character count and closing bracket, including Codex's duplicate-size
+ordinals. Which confirmation applies is declared per harness
 by its adapter (`paste_gate_policy`), not by harness-name checks in delivery.
 
 Muse Code 1.3.0 draws a mid-size paste in full in its input box and only
@@ -59,13 +62,13 @@ collapses larger ones to the marker. Probing a real Windows ConPTY on 2026-10-05
 showed 600 and 839 raw characters drawn in full and 1,509 collapsed to
 `[Pasted Content 1509 chars]`; the exact collapse point (characters or lines)
 is unmeasured, so the gate deliberately encodes none — marker or tail confirms
-at any size. Codex 0.160.0 showed the same shape in a partial 79x57 frame (a
-~600-character paste drawn inline with no marker), so Codex takes the same
-tail rule; a collapsed draft carries no visible tail, so only its marker can
-confirm it. The Codex frame in the regression is synthetic (full draft text in
-redraw chrome, no marker) because a clean live capture was blocked by a
-hooks-review dialog — it pins the rendering shape the rule relies on, and a
-byte-exact live capture is still outstanding. For either harness, a draft past
+at any size. Codex's fully inline mid-size regression remains synthetic,
+based on a partial 0.160.0 frame. Native 0.160.1 captures establish the
+large-paste shapes: a whole-prompt marker and an inline prefix followed by a
+collapsed suffix. Several bursts are covered by source-backed synthetic
+regressions. The [Codex paste confirmation](../learning/codex-paste-confirmation.md)
+record explains Unicode counts, newline normalization, the observed omitted
+inline newline, and the limits of that evidence. For either harness, a draft past
 the full-text limit (measured after
 normalization, like the matcher) is therefore also confirmed by its last 64
 letters and digits appearing in output received after the write. The paste is
