@@ -307,6 +307,17 @@ The step displays the classifier's last error and stops automatic inference
 after five failures. Once authentication or configuration is restored, choose
 **Recheck evidence**. A restart or new report does not reset the exhausted budget.
 
+## A Circuit leaves its prompt in the Codex input box
+
+Update Buildmesh to a build with split-paste confirmation. On Windows, Codex can
+render the start of a large prompt inline and show a **Pasted Content** marker
+for the rest. Older builds expected that marker to count the entire prompt and
+waited out the submission budget without sending Enter.
+
+For an already staged prompt, inspect the input box before submitting it manually
+or retrying the step, so the same prompt is not sent twice. New deliveries confirm
+the inline prefix and remaining count before sending Enter separately.
+
 ## MiniMax Code attaches the wrong conversation or never captures one
 
 Buildmesh routes MiniMax callbacks using the native conversation id and workspace,

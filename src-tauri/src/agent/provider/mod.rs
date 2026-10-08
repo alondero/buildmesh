@@ -392,6 +392,10 @@ pub enum PasteGatePolicy {
     /// per the partial 0.160.0 frame in #2061), so demanding a marker would
     /// stall exactly like Muse run 343.
     RenderedWithTailAnchor,
+    /// As `RenderedWithTailAnchor`, but a Windows paste burst may leave an
+    /// inline prefix and collapse only the remaining suffix into a marker.
+    /// Confirm that marker against the expected prefix and remaining count.
+    RenderedWithSplitMarker,
 }
 
 /// Behaviour an agent provider must declare.

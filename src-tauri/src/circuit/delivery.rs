@@ -27,8 +27,7 @@ const PASTE_SETTLE_DEADLINE: Duration = Duration::from_secs(15);
 const RENDERED_PASTE_TOTAL_BUDGET: Duration = Duration::from_secs(90);
 /// Complete visible text is useful for short drafts. Longer drafts may be
 /// collapsed or scrolled out of the TUI; unless the harness's adapter
-/// declares [`PasteGatePolicy::RenderedWithTailAnchor`] they require the
-/// harness's paste marker.
+/// declares tail-anchor support they require the harness's paste marker.
 const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// A harness that draws a mid-size paste in full collapses only the largest
 /// into a marker (Muse probed in a real PTY: 839 chars drawn, 1,509
@@ -254,6 +253,7 @@ enum PasteReadiness {
         chars: usize,
         normalized_chars: usize,
         content: String,
+        split_marker_prompt: Option<String>,
         output_cursor: u64,
     },
 }
@@ -283,6 +283,8 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
             chars: text.chars().count(),
             normalized_chars: text.replace("\r\n", "\n").chars().count(),
             content: visible_paste_proof(policy, content),
+            split_marker_prompt: (policy == PasteGatePolicy::RenderedWithSplitMarker)
+                .then(|| text.to_string()),
             output_cursor: evaluator::output_cursor(node_id)
                 .ok_or_else(|| format!("node {node_id} has no PTY output buffer"))?,
         };
@@ -302,7 +304,10 @@ fn visible_paste_proof(policy: PasteGatePolicy, normalized: String) -> String {
     if chars <= VISIBLE_PASTE_TEXT_LIMIT {
         return normalized;
     }
-    if policy != PasteGatePolicy::RenderedWithTailAnchor {
+    if !matches!(
+        policy,
+        PasteGatePolicy::RenderedWithTailAnchor | PasteGatePolicy::RenderedWithSplitMarker
+    ) {
         return String::new();
     }
     let skip = chars.saturating_sub(TAIL_ANCHOR_CHARS);
@@ -322,6 +327,42 @@ fn rendered_paste_visible(
         || compact.contains(&format!("[PastedContent{normalized_chars}chars]"))
         || (!content.is_empty()
             && crate::circuit::launch::normalize_for_match(output).contains(content))
+}
+
+fn rendered_split_paste_visible(output: &str, prompt: &str) -> bool {
+    static MARKER: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\[PastedContent([0-9]+)chars(?:#[0-9]+)?\]").unwrap()
+    });
+    let compact: String = output.chars().filter(|c| !c.is_whitespace()).collect();
+    let normalized_prompt = prompt.replace("\r\n", "\n");
+    for marker in MARKER.captures_iter(&compact) {
+        let Ok(suffix_chars) = marker[1].parse::<usize>() else {
+            continue;
+        };
+        if suffix_chars == 0 {
+            continue;
+        }
+        for text in [prompt, normalized_prompt.as_str()] {
+            let total_chars = text.chars().count();
+            if suffix_chars >= total_chars {
+                continue;
+            }
+            // The marker's count identifies the split point. Require the
+            // expected inline prefix immediately before it; accepting any
+            // smaller marker would acknowledge an incomplete or other paste.
+            let prefix: String = text.chars().take(total_chars - suffix_chars).collect();
+            let proof = crate::circuit::launch::normalize_for_match(&prefix);
+            if !proof.is_empty()
+                && crate::circuit::launch::normalize_for_match(
+                    &compact[..marker.get(0).unwrap().start()],
+                )
+                .ends_with(&proof)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Wait for the staged paste to land at an idle input box without writing input.
@@ -355,6 +396,7 @@ fn settle_after_paste(
         chars,
         normalized_chars,
         content,
+        split_marker_prompt,
         output_cursor,
         ..
     } = readiness
@@ -371,12 +413,11 @@ fn settle_after_paste(
             // Latch a complete echo before later redraws evict it from the
             // bounded tail. Once latched, only the quiet clock is consulted.
             if !paste_seen {
-                paste_seen = rendered_paste_visible(
-                    &evaluator::cleaned_output_since(node_id, *output_cursor),
-                    *chars,
-                    *normalized_chars,
-                    content,
-                );
+                let output = evaluator::cleaned_output_since(node_id, *output_cursor);
+                paste_seen = rendered_paste_visible(&output, *chars, *normalized_chars, content)
+                    || split_marker_prompt
+                        .as_deref()
+                        .is_some_and(|prompt| rendered_split_paste_visible(&output, prompt));
             }
             if paste_seen
                 && evaluator::millis_since_last_output(node_id)
@@ -754,6 +795,7 @@ mod tests {
             chars: 9407,
             normalized_chars: 9407,
             content: String::new(),
+            split_marker_prompt: None,
             output_cursor: evaluator::output_cursor(id).unwrap(),
         };
         let registry_for_wait = Arc::clone(&registry);
@@ -801,6 +843,7 @@ mod tests {
             chars: 9407,
             normalized_chars: 9407,
             content: String::new(),
+            split_marker_prompt: None,
             output_cursor: evaluator::output_cursor(id).unwrap(),
         };
         let error = settle_after_paste(
@@ -1349,6 +1392,152 @@ mod tests {
     }
 
     #[test]
+    fn codex_split_marker_paste_submits_with_one_separate_enter() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-split-marker");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = format!(
+            "Please review this example change.\n{}\nFinish with APPROVE or REQUEST_CHANGES.",
+            "Explain each finding carefully using the provided context. ".repeat(90)
+        );
+        assert_eq!(prompt.chars().count(), 5385);
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            injection_payload(&prompt).into_bytes()
+        );
+        // Codex 0.160.1, native Windows ConPTY at 79 columns: the first 119
+        // characters are inline; only the remaining 5266 are collapsed.
+        evaluator::on_output(id, concat!(
+            "› Please review this example change.                                             Explain each finding carefully using the provided context. Explain each      \r\n",
+            "  finding care[Pasted Content 5266 chars]                                      \r\n",
+        ));
+        let settled = settle_after_paste(
+            &registry,
+            id,
+            &readiness.paste,
+            guard.as_deref(),
+            Duration::from_secs(3),
+        );
+        assert!(settled.expect("the complete mixed inline/collapsed Codex paste must become ready"));
+        let submitting = Arc::clone(&registry);
+        let submit = std::thread::spawn(move || {
+            press_enter_until_output_guarded(&submitting, id, guard, Duration::from_secs(2), None)
+        });
+        assert_eq!(writes.recv_timeout(Duration::from_secs(1)).unwrap(), b"\r");
+        evaluator::on_output(id, "task started");
+        assert_eq!(submit.join().unwrap().unwrap(), Some(1));
+        assert_eq!(writes.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
+    fn codex_split_marker_requires_the_matching_complete_prefix_and_suffix_count() {
+        let prompt = format!("Review this change\n{}", "x".repeat(1000));
+        for output in [
+            "› Review this change [Pasted Content 1000 chars]",
+            "› Review this change [Pasted Content\r\n1000 chars #2]",
+        ] {
+            assert!(rendered_split_paste_visible(output, &prompt), "{output:?}");
+            assert!(
+                rendered_split_paste_visible(output, &prompt.replace('\n', "\r\n")),
+                "CRLF input: {output:?}"
+            );
+        }
+        for output in [
+            "[Pasted Content 1000 chars]",
+            "› Review a different change [Pasted Content 1000 chars]",
+            "› Review this [Pasted Content 1000 chars]",
+            "› Review this change [Pasted Content 999 chars]",
+            "› Review this change [Pasted Content 1002 chars]",
+            "› Review this change [Pasted Content 2000 chars]",
+            "› Review this change [Pasted Content 0 chars]",
+            "› Review this change [Pasted Content 1000 chars",
+        ] {
+            assert!(!rendered_split_paste_visible(output, &prompt), "{output:?}");
+        }
+        let unicode_prompt = format!("Résumé change\n{}", "é".repeat(1000));
+        assert!(rendered_split_paste_visible(
+            "› Résumé change [Pasted Content 1000 chars]",
+            &unicode_prompt
+        ));
+        assert!(!rendered_split_paste_visible(
+            "› Résumé change [Pasted Content 2000 chars]",
+            &unicode_prompt
+        ));
+        let long_prefix = format!("Review this change\n{}\nFinish uniquely", "x".repeat(1000));
+        assert!(
+            !rendered_split_paste_visible(
+                &format!(
+                    "› Review this change {}[Pasted Content 100 chars]",
+                    "x".repeat(64)
+                ),
+                &long_prefix
+            ),
+            "a repeated prefix fragment and smaller paste must not prove the whole draft"
+        );
+    }
+
+    #[test]
+    fn codex_split_marker_rejects_stale_output_and_changed_input() {
+        let _db = crate::db::test_support::isolated();
+        let id = codex_worker_node("codex-split-marker-fences");
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+        let prompt = format!("Review this change\n{}", "x".repeat(1000));
+        let frame = "› Review this change [Pasted Content 1000 chars]";
+        evaluator::on_output(id, frame);
+        // The stale frame must already satisfy quiet readiness; otherwise
+        // the timeout could pass even if delivery accidentally reused it.
+        std::thread::sleep(Duration::from_millis(PASTE_SETTLE_QUIET_MS as u64));
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, readiness) = stage_prompt_write(&registry, id, &prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            injection_payload(&prompt).into_bytes()
+        );
+        assert!(
+            settle_after_paste(
+                &registry,
+                id,
+                &readiness.paste,
+                guard.as_deref(),
+                Duration::from_millis(1)
+            )
+            .is_err(),
+            "an earlier matching composer must not prove the new paste"
+        );
+        evaluator::on_output(id, frame);
+        registry.write_bytes(id, b"user correction").unwrap();
+        assert_eq!(
+            writes.recv_timeout(Duration::from_secs(1)).unwrap(),
+            b"user correction"
+        );
+        assert!(!settle_after_paste(
+            &registry,
+            id,
+            &readiness.paste,
+            guard.as_deref(),
+            Duration::from_secs(1)
+        )
+        .unwrap());
+        assert_eq!(
+            writes.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty),
+            "lost ownership must not send Enter or repeat the paste"
+        );
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
     fn codex_midsize_paste_rendered_in_full_is_confirmed_by_its_tail() {
         let _db = crate::db::test_support::isolated();
         let id = codex_worker_node("codex-midsize-paste");
@@ -1461,7 +1650,9 @@ mod tests {
         ];
         assert_eq!(policies.len(), 14, "one row per harness adapter");
         for (name, policy) in policies {
-            let expected = if *name == "codex" || *name == "muse" {
+            let expected = if *name == "codex" {
+                PasteGatePolicy::RenderedWithSplitMarker
+            } else if *name == "muse" {
                 PasteGatePolicy::RenderedWithTailAnchor
             } else {
                 PasteGatePolicy::Generic
@@ -1663,6 +1854,7 @@ mod tests {
                 chars: 100,
                 normalized_chars: 100,
                 content: String::new(),
+                split_marker_prompt: None,
                 output_cursor: evaluator::output_cursor(id).unwrap(),
             },
             receipt: None,

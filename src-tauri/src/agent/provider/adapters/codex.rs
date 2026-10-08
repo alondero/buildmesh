@@ -1598,14 +1598,11 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
-    /// Issue #2061: a partial 79x57 Windows ConPTY frame from Codex 0.160.0
-    /// showed a ~600-character multiline paste drawn inline with no paste
-    /// marker, so Codex takes the same tail-anchor rule as Muse rather than
-    /// waiting out the readiness budget for a marker it never prints (the
-    /// run 343 stall). Marker-confirmed drafts are unaffected: a collapsed
-    /// paste carries no visible tail, so only its marker can confirm it.
+    /// Codex draws mid-size pastes inline and can collapse just the suffix
+    /// of a larger Windows paste burst. Its marker counts that suffix, not
+    /// the complete prompt, so readiness must also match the inline prefix.
     fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
-        crate::agent::provider::PasteGatePolicy::RenderedWithTailAnchor
+        crate::agent::provider::PasteGatePolicy::RenderedWithSplitMarker
     }
 
     fn background_recipe(
