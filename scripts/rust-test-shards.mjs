@@ -33,6 +33,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readShards, repoRoot } from './ci/rust-shards.mjs';
+import { rustFailures } from './harness-test-failures.mjs';
 
 const crateDir = path.join(repoRoot, 'src-tauri');
 
@@ -105,14 +106,24 @@ if (!lib) {
   process.exit(1);
 }
 
+// The build script stages ConPTY; report a missing runtime before tests run.
+if (process.platform === 'win32') {
+  const runtime = path.dirname(lib.executable);
+  const missing = ['conpty.dll', 'x64/OpenConsole.exe', 'arm64/OpenConsole.exe', 'x86/OpenConsole.exe'].filter(file => !fs.existsSync(path.join(runtime, file)));
+  if (missing.length) {
+    console.error(`BLOCKED: Windows ConPTY runtime is not staged beside Rust test binaries: ${missing.join(', ')}. Run node scripts/prepare-conpty.mjs ${process.arch === 'arm64' ? 'aarch64' : process.arch === 'ia32' ? 'x86' : 'x86_64'} "${path.dirname(runtime)}".`);
+    process.exit(2);
+  }
+}
+
 // Every process runs its tests at libtest's default (multi-threaded) count:
 // the per-test database seam makes that safe (issue #2048).
 const jobs = [
-  ...readShards().map(({ label, args }) => ({ label, command: lib.executable, args: args.split(/\s+/).filter(Boolean), env: testEnv })),
+  ...readShards().map(({ label, args }) => ({ label, command: lib.executable, args: args.split(/\s+/).filter(Boolean), env: testEnv, target: { kind: 'lib' } })),
   ...executables
     .filter((target) => target !== lib)
-    .map((target) => ({ label: `${target.kinds.join('+')}:${target.name}`, command: target.executable, args: [], env: testEnv })),
-  { label: 'doc', command: 'cargo', args: ['test', '--locked', '--doc'] },
+    .map((target) => ({ label: `${target.kinds.join('+')}:${target.name}`, command: target.executable, args: [], env: testEnv, target: { kind: target.kinds.includes('test') ? 'test' : target.kinds[0], name: target.name } })),
+  { label: 'doc', command: 'cargo', args: ['test', '--locked', '--doc'], target: { kind: 'doc', name: lib.name } },
 ];
 
 // The longest jobs (doctests, then the `services` shard) set the suite's
@@ -126,10 +137,21 @@ const results = [];
 await Promise.all(
   Array.from({ length: Math.min(slots, queue.length) }, async () => {
     for (let job = queue.shift(); job; job = queue.shift()) {
-      results.push(await run(job.label, job.command, job.args, { env: job.env }));
+      results.push({ ...await run(job.label, job.command, job.args, { env: job.env }), target: job.target });
     }
   }),
 );
+
+if (process.env.BUILDMESH_TEST_REPORT) {
+  const failures = results.flatMap(result => result.code === 0 ? [] : rustFailures(result.output, result.target));
+  const count = results.reduce((sum, result) => sum + [...result.output.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed/g)].reduce((total, match) => total + Number(match[1]), 0), 0);
+  const unattributed = results.some(result => {
+    if (result.code === 0) return false;
+    const failedCount = [...result.output.matchAll(/test result: FAILED\. \d+ passed; (\d+) failed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+    return !failedCount || rustFailures(result.output, result.target).length !== failedCount;
+  });
+  fs.writeFileSync(process.env.BUILDMESH_TEST_REPORT, JSON.stringify({ failures, count, unattributed }));
+}
 
 let failed = null;
 for (const result of results) {
@@ -145,7 +167,7 @@ for (const result of results) {
 
 if (failed) {
   console.error(`\nRust tests failed: ${results.filter((result) => result.code !== 0).map((result) => result.label).join(', ')}`);
-  console.error('Concurrency suites assert a mechanism instead of a wall-clock budget (#2049), but subprocess suites still use bounds tied to real budgets and can stall under CPU contention. If you suspect contention, rerun one process at a time with BUILDMESH_RUST_TEST_JOBS=1 before attributing the failure.');
+  console.error('npm run verify names these failures and reruns each exact test alone once. Inspect its receipt for FAIL or FLAKY outcomes.');
   process.exit(failed.code || 1);
 }
 console.log(`\nRust tests passed in ${jobs.length} processes, ${slots} at a time.`);

@@ -154,10 +154,8 @@ The Rust test gate compiles once, then runs the CI shards, integration
 binaries and doctests up to four processes at a time; each process runs its
 own tests multi-threaded, which is safe because every DB-backed test installs
 a private database for its own thread (issue #2048). The concurrency suites
-assert a mechanism instead of a wall-clock budget (#2049); subprocess suites
-still use bounds tied to real budgets and can fail under CPU contention, so
-set `BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before
-attributing such a failure.
+assert a mechanism instead of a wall-clock budget (#2049). Verification
+reruns failing tests alone as described below.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
@@ -195,6 +193,7 @@ the production bundle budget check the wrong artifact.
 |---|---|---|
 | PASS | Every required gate passed, including executed tests | 0 |
 | FAIL | Compiler, assertion, lint, drift or source-change failure; inspect the log and repair | 1 |
+| FLAKY | Failed in the suite, passed alone; unlisted tests block completion | 1 |
 | BLOCKED | A known prerequisite or command is unavailable; repair the environment or hand off with the reason | 2 |
 | TIMEOUT | Deadline exceeded; inspect for code hangs and resource contention before retrying | 124 |
 
@@ -209,6 +208,42 @@ the result. Passing gates are reused across runs until the inputs they read chan
 keyed on each gate's input set, environment identity, and task ID. Gates with no
 explicit ignores read the whole tree. Completion continues to require that every planned
 gate has a PASS record in the receipt for the current tree.
+
+### Named test failures and isolation
+
+Frontend tests use Vitest JSON; Rust shards record cargo/libtest failure ids and
+their library, binary, integration or doctest target. Verify and `harness wait`
+print up to ten names; the receipt retains every failure and the original log.
+Once both lanes have drained, verify reruns each failed test once, sequentially:
+one Vitest file with an escaped, anchored test-name pattern and one worker (the
+Node API constrains discovery because CLI file filters match substrings), or the exact
+Cargo test in its original target with `--test-threads=1`. Each failure stores
+its rerun command, log, executed count, exit code and duration. Neither the full
+suite nor other gates run again to diagnose a failure.
+
+A repeat failure stays FAIL. An isolated pass is FLAKY. Missing executables and
+deadlines stay BLOCKED and TIMEOUT; zero executed tests, unreadable reports,
+file setup failures and unhandled runtime errors cannot produce an accepted
+flake. Collection/setup failures still name the failed file. Git is checked
+before product test gates. On Windows, Rust compilation checks network access
+to the pinned ConPTY package when its archive is absent from the worktree cache;
+an unavailable download is BLOCKED before Cargo builds. Cached archives do not
+require network access. The Windows Rust runner checks
+the staged ConPTY runtime after compilation, before starting test processes.
+The ConPTY unit test builds its own fixture, and the version test reads local
+Git tags; neither requires a blanket network or installed-runtime exemption.
+
+[`scripts/known-flakes.json`](../../scripts/known-flakes.json) maps exact ids to
+open issue numbers. Vitest ids are `relative/file > full test name`; Rust library
+ids are fully qualified names, and other targets use `kind:target > test name`.
+The known-flakes gate and agent-infra tests validate that linked issues are open
+GitHub issues. An unavailable issue check is BLOCKED; a closed issue fails
+validation. Only listed tests that actually pass alone allow subsequent gates
+and `finish` to proceed. The gate row remains FLAKY with the issue link, while
+the overall receipt is PASS if every gate is acceptable. These rows are never
+cached. Persistent failures remain blocking even when listed. For an unlisted
+flake, file an issue with both logs and add its exact id rather than retrying the
+whole suite or changing an unrelated test.
 
 `finish` launches no tests. It requires all planned gates, current source,
 one current evidence entry per criterion, a current independent review entry,

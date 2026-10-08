@@ -2,6 +2,7 @@ import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, 
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gatePassed } from './harness-test-failures.mjs';
 
 export const DEFAULT_HEAVY_GATE_LIMIT = 2;
 
@@ -26,7 +27,7 @@ export async function runPlan(gates, { execute, onResult = () => {} }) {
   let stopped = false;
   const settle = row => {
     onResult(row);
-    if (row.outcome !== 'PASS') stopped = true;
+    if (!gatePassed(row)) stopped = true;
   };
   for (const gate of gates.filter(item => !item.lane)) {
     if (stopped) break;
@@ -48,7 +49,7 @@ export async function runPlan(gates, { execute, onResult = () => {} }) {
         for (const id of gate.after ?? []) {
           const dependency = finished.get(id);
           // An unknown id is not in this plan (scope narrowed), so nothing to wait for.
-          if (dependency && (await dependency.promise)?.outcome !== 'PASS') blocked = true;
+          if (dependency && !gatePassed(await dependency.promise)) blocked = true;
         }
         if (blocked || stopped) return;
         const row = await execute(gate, () => stopped);
@@ -57,7 +58,7 @@ export async function runPlan(gates, { execute, onResult = () => {} }) {
         if (!row) return;
         settle(row);
         finished.get(gate.id).resolve(row);
-        if (row.outcome !== 'PASS') return;
+        if (!gatePassed(row)) return;
       }
     } finally {
       // Release dependants of every gate this lane never completed.
