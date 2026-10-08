@@ -68,7 +68,7 @@ test('doctest failures remain named and FAIL without an unsupported isolation at
   const fixture = repo(t);
   fixture.put('src-tauri/Cargo.toml', '[package]\nname="doc-fixture"\nversion="0.1.0"\nedition="2021"\n');
   fixture.put('src-tauri/src/lib.rs', '/// ```\n/// assert!(false);\n/// ```\npub fn f() {}\n/// ```\n/// assert!(true);\n/// ```\npub fn g() {}\n');
-  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base);
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base, [], { CARGO_TERM_COLOR: 'always' });
   assert.equal(row.outcome, 'FAIL');
   assert.match(row.failures[0].name, /lib.rs - f \(line 1\)/);
   assert.equal(row.failures[0].target.kind, 'doc');

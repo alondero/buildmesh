@@ -72,10 +72,11 @@ export function readTestReport(root, kind, path, output) {
   if (kind === 'vitest') return report ? vitestReport(root, report, output) : { failures: [], count: 0, unattributed: true };
   if (report) return report;
   // Also support a plain cargo test gate. The shard runner supplies target metadata.
-  const doc = output.match(/^\s*Doc-tests (\S+)/m);
-  const failures = doc ? [...rustFailures(output.slice(0, doc.index)), ...rustFailures(output.slice(doc.index), { kind: 'doc', name: doc[1] })] : rustFailures(output);
-  const failed = [...output.matchAll(/test result: FAILED\. \d+ passed; (\d+) failed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
-  const count = [...output.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+  const text = stripVTControlCharacters(output);
+  const doc = text.match(/^\s*Doc-tests (\S+)/m);
+  const failures = doc ? [...rustFailures(text.slice(0, doc.index)), ...rustFailures(text.slice(doc.index), { kind: 'doc', name: doc[1] })] : rustFailures(text);
+  const failed = [...text.matchAll(/test result: FAILED\. \d+ passed; (\d+) failed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+  const count = [...text.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
   return { failures, count, unattributed: !failed || failed !== failures.length };
 }
 
