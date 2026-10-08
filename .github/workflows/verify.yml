@@ -174,9 +174,7 @@ jobs:
         run: node scripts/check-action-pins.mjs --verify
 
       - name: Check npm dependencies against the advisory policy
-        run: |
-          node scripts/check-npm-audit.mjs --omit=dev
-          node scripts/check-npm-audit.mjs
+        run: node scripts/check-npm-audit.mjs
 
       - name: Check Rust dependencies against the RustSec policy
         run: node scripts/check-rust-advisories.mjs

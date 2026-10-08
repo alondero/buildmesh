@@ -3,22 +3,29 @@
 //
 // The policy is deliberately two-tiered rather than "fail everything":
 //
-//   * Production dependencies (`--omit=dev`) are the shipped surface. A moderate
-//     or worse advisory there fails the gate. These packages are what the
-//     packaged application loads at run time, so a known vulnerability there is
-//     a real exposure to users, not a theoretical one.
+//   * Production dependencies are the shipped surface. A moderate or worse
+//     advisory there fails the gate. These packages are what the packaged
+//     application loads at run time, so a known vulnerability there is a real
+//     exposure to users, not a theoretical one.
 //   * Development dependencies fail only on `high` or `critical`. A dev-only
 //     advisory is not in a shipped artifact, but a build-time package can still
-//     execute attacker-controlled input (a malicious tarball's install scripts,
-//     a vulnerable parser fed a crafted fixture), so high and critical are
-//     still treated as failures. `low` and `moderate` dev-only advisories are
-//     reported, not failed, because failing them trains people to reach for
-//     `--audit-level=0`.
+//     execute attacker-influenced input (install scripts, a parser fed a crafted
+//     fixture), so high and critical are still failures. `low` and `moderate`
+//     dev-only advisories are reported, not failed, because failing them trains
+//     people to reach for `--audit-level=0`.
+//
+// HOW dev-only status is decided: not from the report. npm's `audit --json`
+// output carries no `dev` flag on either the vulnerability or its `via` entries
+// (verified against npm 11: the keys are name/severity/isDirect/via/effects/
+// range/nodes/fixAvailable). A gate that guesses would silently apply the
+// stricter production threshold to everything and quietly contradict its own
+// documented policy. So npm is asked twice and the difference is the answer:
+// `audit --omit=dev` reports exactly the advisories that affect the production
+// tree, so a package present only in the unfiltered report is dev-only.
 //
 // This is not a substitute for Dependabot's security updates or GitHub's
 // vulnerability alerts; it is the gate that turns those notifications into a
-// red pull request before merge. See docs/development/supply-chain.md for the
-// full policy and the exception process.
+// red pull request before merge. See docs/development/supply-chain.md.
 //
 // Exit codes: 0 clean, 1 policy failure, 2 the audit could not be run.
 
@@ -40,62 +47,100 @@ export function meetsThreshold(severity, threshold) {
 }
 
 /**
- * Decide which advisories breach the policy.
+ * Flatten an `npm audit --json` report into comparable entries.
  *
- * npm's JSON report is a flat `advisories` map (npm 6/7 shape) or a `vulnerabilities`
- * object keyed by package name (npm 8+ shape); both are handled so the gate does
- * not silently pass everything if npm changes format — an unrecognised shape is
- * an error, not a clean bill of health.
+ * Both the npm 8+ `vulnerabilities` object and the npm 6/7 `advisories` map are
+ * handled. An unrecognised shape returns `recognised: false` rather than an
+ * empty list, so a format change fails the gate instead of passing it.
  */
-export function evaluateReport(report) {
+export function parseReport(report) {
   const entries = [];
-  if (report && report.vulnerabilities && typeof report.vulnerabilities === 'object') {
+  if (report && typeof report.vulnerabilities === 'object') {
     for (const [name, vulnerability] of Object.entries(report.vulnerabilities)) {
       if (!vulnerability || typeof vulnerability !== 'object') continue;
+      const via = Array.isArray(vulnerability.via) ? vulnerability.via : [];
       entries.push({
         name,
         severity: vulnerability.severity ?? 'info',
         direct: Boolean(vulnerability.isDirect),
-        via: Array.isArray(vulnerability.via) ? vulnerability.via : [],
+        // `via` is a list of advisory objects, or (when the advisory is only
+        // reachable through another package) plain package-name strings.
+        titles: via
+          .map((item) => (typeof item === 'string' ? item : item?.title))
+          .filter(Boolean),
         range: typeof vulnerability.range === 'string' ? vulnerability.range : '',
       });
     }
-  } else if (report && report.advisories && typeof report.advisories === 'object') {
+    return { recognised: true, entries };
+  }
+  if (report && typeof report.advisories === 'object') {
     for (const [id, advisory] of Object.entries(report.advisories)) {
       if (!advisory || typeof advisory !== 'object') continue;
       entries.push({
         name: advisory.module_name ?? id,
         severity: advisory.severity ?? 'info',
         direct: Boolean(advisory.is_direct),
-        via: [advisory.title ?? id],
+        titles: [advisory.title ?? id].filter(Boolean),
         range: advisory.vulnerable_versions ?? '',
       });
     }
-  } else {
-    return { recognised: false, failures: [], advisories: [] };
+    return { recognised: true, entries };
   }
+  return { recognised: false, entries: [] };
+}
 
-  // `dev` comes from the `via` entries npm v7+ emits for dev-only trees; a
-  // vulnerability with no explicit `dev` flag is treated as production, which is
-  // the conservative direction.
+/**
+ * Apply the two-tier policy.
+ *
+ * `devOnlyNames` is the set of packages npm reported in the unfiltered audit but
+ * not in `audit --omit=dev`. Anything in it gets the dev threshold; everything
+ * else — including a package npm could not classify — gets the production
+ * threshold, which is the conservative direction.
+ */
+export function evaluateEntries(entries, { devOnlyNames = new Set() } = {}) {
   const failures = [];
   for (const entry of entries) {
-    const devOnly = entry.via.some(
-      (item) => item && typeof item === 'object' && item.source !== undefined && item.dev === true,
-    );
+    const devOnly = devOnlyNames.has(entry.name);
     const threshold = devOnly ? DEVELOPMENT_THRESHOLD : PRODUCTION_THRESHOLD;
-    if (meetsThreshold(entry.severity, threshold)) {
-      failures.push({
-        ...entry,
-        threshold,
-        scope: devOnly ? 'dev' : 'production',
-        reason: devOnly
-          ? `dev-only advisory at or above ${DEVELOPMENT_THRESHOLD}`
-          : `production advisory at or above ${PRODUCTION_THRESHOLD}`,
-      });
-    }
+    if (!meetsThreshold(entry.severity, threshold)) continue;
+    failures.push({
+      ...entry,
+      threshold,
+      scope: devOnly ? 'dev' : 'production',
+      reason: devOnly
+        ? `dev-only advisory at or above ${DEVELOPMENT_THRESHOLD}`
+        : `production advisory at or above ${PRODUCTION_THRESHOLD}`,
+    });
   }
-  return { recognised: true, failures, advisories: entries };
+  return failures;
+}
+
+/**
+ * Combine the two reports into a policy decision.
+ *
+ * Both reports are required unless `productionOnly` is set, in which case the
+ * single production report is authoritative and nothing can be classified as
+ * dev-only (correctly, since dev dependencies were excluded).
+ */
+export function evaluateReports(fullReport, productionReport) {
+  const full = parseReport(fullReport);
+  if (!full.recognised) return { recognised: false, failures: [], entries: [] };
+  if (!productionReport) {
+    // Production-only mode: npm already told us everything here is production.
+    return { recognised: true, failures: evaluateEntries(full.entries), entries: full.entries };
+  }
+  const production = parseReport(productionReport);
+  if (!production.recognised) return { recognised: false, failures: [], entries: [] };
+  const productionNames = new Set(production.entries.map((entry) => entry.name));
+  const devOnlyNames = new Set(
+    full.entries.filter((entry) => !productionNames.has(entry.name)).map((entry) => entry.name),
+  );
+  return {
+    recognised: true,
+    failures: evaluateEntries(full.entries, { devOnlyNames }),
+    entries: full.entries,
+    devOnlyNames,
+  };
 }
 
 /** Run `npm audit --json` and return the parsed report. */
@@ -122,7 +167,7 @@ export function runAudit({ cwd = repoRoot, productionOnly = false } = {}) {
     if (isWindows) {
       // `npm.cmd` is a batch file, which execFile cannot spawn directly (EINVAL),
       // and passing it as a single command string does not resolve it either.
-      // Spawning through `cmd /c` with a *file* argument (not a command line)
+      // Spawning through `cmd /c` with file arguments (not a command line)
       // avoids both shell quoting and Node's shell-argument deprecation warning
       // (DEP0190); the arguments are literal flags chosen by this script.
       execFile(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm.cmd', ...args], options, done);
@@ -132,14 +177,27 @@ export function runAudit({ cwd = repoRoot, productionOnly = false } = {}) {
   });
 }
 
+function describe(failure) {
+  const titles = failure.titles.length > 0 ? failure.titles.join('; ') : '(no advisory title)';
+  return `  [${failure.severity}] ${failure.name} (${failure.scope}): ${failure.reason}`
+    + `${failure.range ? ` — vulnerable: ${failure.range}` : ''}\n      ${titles}`;
+}
+
 export async function check({ productionOnly = false } = {}) {
-  let report;
+  let fullReport;
+  let productionReport = null;
   try {
-    report = await runAudit({ productionOnly });
+    fullReport = await runAudit({ productionOnly });
+    if (!productionOnly) {
+      // The second run is what makes the dev/production split observable; see the
+      // header comment for why npm's own output cannot answer it.
+      productionReport = await runAudit({ productionOnly: true });
+    }
   } catch (error) {
     return { code: 2, message: error.message };
   }
-  const { recognised, failures, advisories } = evaluateReport(report);
+
+  const { recognised, failures, entries, devOnlyNames } = evaluateReports(fullReport, productionReport);
   if (!recognised) {
     return {
       code: 2,
@@ -148,29 +206,27 @@ export async function check({ productionOnly = false } = {}) {
         + 'an unreadable audit is not a clean audit.',
     };
   }
+
+  const scopeNote = productionOnly ? ' (production dependencies only)' : '';
   if (failures.length === 0) {
-    const belowThreshold = advisories.filter((advisory) => !failures.includes(advisory));
-    const note = belowThreshold.length > 0
-      ? ` ${belowThreshold.length} advisory/advisories are below the policy thresholds and are reported only.`
+    const devOnly = [...(devOnlyNames ?? [])];
+    const reported = devOnly.length > 0
+      ? ` ${devOnly.length} dev-only advisory/advisories are below the ${DEVELOPMENT_THRESHOLD} threshold and are reported only.`
       : '';
     return {
       code: 0,
-      message: `npm audit found no advisory at or above policy thresholds${productionOnly ? ' (production dependencies only)' : ''}.${note}`,
-      belowThreshold,
+      message: `npm audit found no advisory at or above policy thresholds${scopeNote}.${reported}`,
+      entries,
     };
   }
-  const lines = failures.map(
-    (failure) =>
-      `  [${failure.severity}] ${failure.name} (${failure.scope}): ${failure.reason}${failure.range ? ` — vulnerable: ${failure.range}` : ''}`,
-  );
+
   return {
     code: 1,
     message:
-      `npm audit found ${failures.length} advisory/advisories that breach policy${productionOnly ? ' (production dependencies only)' : ''}:\n`
-      + `${lines.join('\n')}\n\n`
-      + 'Fix them (`npm audit fix`) or, if an advisory genuinely cannot be fixed yet, record it in\n'
-      + '.github/dependency-audit-exceptions.json with an owner, rationale and review date —\n'
-      + 'see docs/development/supply-chain.md.',
+      `npm audit found ${failures.length} advisory/advisories that breach policy${scopeNote}:\n`
+      + `${failures.map(describe).join('\n')}\n\n`
+      + 'Fix them with `npm audit fix`, or upgrade the dependency deliberately.\n'
+      + 'See docs/development/supply-chain.md for the policy and how an exception is recorded.',
     failures,
   };
 }

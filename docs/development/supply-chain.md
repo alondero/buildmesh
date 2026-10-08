@@ -119,10 +119,38 @@ explaining why. Nothing currently does.
 
 Dev-only `low` and `moderate` advisories are **reported, not failed**. Failing
 them is what pushes people toward `--audit-level=0` or `--force`, which
-disables the gate entirely. Both scopes are run in CI.
+disables the gate entirely.
+
+### How dev-only status is determined
+
+Not from the report. `npm audit --json` carries **no `dev` flag** on either a
+vulnerability or its `via` entries — verified against npm 11, where the keys are
+`name`, `severity`, `isDirect`, `via`, `effects`, `range`, `nodes`,
+`fixAvailable`. A gate that guessed here would silently apply the stricter
+production threshold to every advisory and quietly contradict its own policy.
+
+So npm is asked twice and the difference is the answer: `npm audit --omit=dev`
+reports exactly the advisories affecting the production tree, so a package
+present only in the unfiltered report is dev-only. One `npm run check:audit`
+invocation performs both runs and applies both tiers.
+
+`tests/fixtures/npm-audit-vulnerable.json` is real captured npm output from a
+throwaway project with a vulnerable production dependency (`lodash` 4.17.15)
+and a vulnerable dev-only one (`minimist` 0.0.8), so the tiering is tested
+against the shape npm actually emits.
 
 An advisory report shape the gate does not recognise is a **failure**, not a
 clean result: an unreadable audit is not a clean audit.
+
+### Exceptions
+
+There are none. Unlike the RustSec gate below, `check-npm-audit.mjs` has no
+allowlist: an npm advisory is fixed with `npm audit fix` or a deliberate
+upgrade. This is a real asymmetry, not an oversight, and it is acceptable
+because npm advisories in the production tree have a fix path in essentially
+every case, whereas the Rust warnings that remain are largely unfixable
+transitive crates. If an npm advisory ever needs a time-bound exception, add
+the allowlist then — rather than shipping an unused mechanism now.
 
 ## RustSec advisory policy
 
@@ -209,8 +237,8 @@ The three gates need no arguments and no network beyond the audit itself:
 
 ```powershell
 npm run check:actions      # pins, with SHA resolution (needs gh)
-npm run check:audit        # npm, both scopes
-npm run check:audit:prod   # npm, production only
+npm run check:audit        # npm, both tiers (runs the audit twice by design)
+npm run check:audit:prod   # npm, production dependencies only
 npm run check:audit:rust   # RustSec policy (needs cargo-audit)
 ```
 

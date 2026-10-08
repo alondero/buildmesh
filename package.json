@@ -25,7 +25,7 @@
     "check:readme": "node scripts/check-readme-drift.mjs",
     "check:rust-shards": "node scripts/check-rust-shard-coverage.mjs",
     "check:actions": "node scripts/check-action-pins.mjs --verify",
-    "check:audit": "node scripts/check-npm-audit.mjs && node scripts/check-npm-audit.mjs --omit=dev",
+    "check:audit": "node scripts/check-npm-audit.mjs",
     "check:audit:prod": "node scripts/check-npm-audit.mjs --omit=dev",
     "check:audit:rust": "node scripts/check-rust-advisories.mjs",
     "check:docs": "node scripts/check-docs.mjs",

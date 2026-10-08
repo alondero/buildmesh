@@ -21,7 +21,7 @@ import {
   verifyShas,
   FULL_SHA,
 } from '../../scripts/check-action-pins.mjs';
-import { evaluateReport, meetsThreshold, SEVERITIES } from '../../scripts/check-npm-audit.mjs';
+import { evaluateEntries, evaluateReports, meetsThreshold, SEVERITIES } from '../../scripts/check-npm-audit.mjs';
 import {
   evaluateFindings,
   loadExceptions,
@@ -169,61 +169,74 @@ test('npm audit: severity ordering is the npm order, not alphabetical', () => {
   assert.ok(meetsThreshold('critical', 'low'));
 });
 
+// The fixture below is real `npm audit --json` output, captured from a throwaway
+// project with a vulnerable production dependency (lodash 4.17.15) and a
+// vulnerable dev-only one (minimist 0.0.8). It replaced hand-written fixtures
+// that asserted a `dev` flag npm does not emit at all — those passed while the
+// gate silently treated every advisory as production.
+const vulnerableFixture = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'tests', 'fixtures', 'npm-audit-vulnerable.json'), 'utf8'),
+);
+
+test('npm audit: the captured fixture really does span both scopes', () => {
+  // If a future npm stopped reporting a package under --omit=dev, the fixture
+  // would stop exercising the dev branch and the tiering tests below would pass
+  // vacuously. This asserts the fixture still has the shape it was captured for.
+  const full = Object.keys(vulnerableFixture.full.vulnerabilities);
+  const production = Object.keys(vulnerableFixture.production.vulnerabilities);
+  assert.ok(full.includes('lodash') && production.includes('lodash'), 'lodash must be production');
+  assert.ok(full.includes('minimist') && !production.includes('minimist'), 'minimist must be dev-only');
+});
+
 test('npm audit: a production high-severity advisory fails the gate', () => {
-  const report = {
-    vulnerabilities: {
-      leftpad: {
-        name: 'leftpad',
-        severity: 'high',
-        isDirect: true,
-        range: '<1.3.0',
-        via: [{ source: 1, name: 'leftpad', title: 'Prototype pollution', dev: false }],
-      },
-    },
-  };
-  const { recognised, failures } = evaluateReport(report);
+  const { recognised, failures } = evaluateReports(vulnerableFixture.full, vulnerableFixture.production);
   assert.ok(recognised);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].scope, 'production');
-  assert.equal(failures[0].name, 'leftpad');
+  const lodash = failures.find((failure) => failure.name === 'lodash');
+  assert.ok(lodash, 'the production advisory must be reported');
+  assert.equal(lodash.scope, 'production');
+  assert.ok(lodash.titles.length > 0, 'the advisory title is surfaced, not just the name');
+});
+
+test('npm audit: a dev-only advisory is classified dev from the two-report difference', () => {
+  // This is the assertion that would have caught the bug: minimist is dev-only,
+  // and the only way to know that is that `audit --omit=dev` did not report it.
+  const { devOnlyNames } = evaluateReports(vulnerableFixture.full, vulnerableFixture.production);
+  assert.ok(devOnlyNames.has('minimist'));
+  assert.ok(!devOnlyNames.has('lodash'));
 });
 
 test('npm audit: a dev-only moderate advisory is reported but does not fail', () => {
   // The whole point of the two-tier policy: dev-only exposure differs from
-  // shipped runtime exposure, so it must not block a merge.
-  const report = {
-    vulnerabilities: {
-      browserslist: {
-        name: 'browserslist',
-        severity: 'moderate',
-        isDirect: false,
-        range: '<4.28.9',
-        via: [{ source: 1, name: 'browserslist', title: 'ReDoS', dev: true }],
-      },
-    },
-  };
-  const { failures, advisories } = evaluateReport(report);
-  assert.equal(failures.length, 0);
-  assert.equal(advisories.length, 1, 'the advisory is still surfaced, not silently dropped');
+  // shipped runtime exposure, so it must not block a merge. Lower the captured
+  // dev-only severity to `moderate` and it must fall below the dev threshold.
+  const full = structuredClone(vulnerableFixture.full);
+  const production = structuredClone(vulnerableFixture.production);
+  full.vulnerabilities.minimist.severity = 'moderate';
+  const { failures } = evaluateReports(full, production);
+  assert.equal(failures.filter((failure) => failure.name === 'minimist').length, 0);
+  // It is still classified dev-only, so this is "reported, not failed" rather
+  // than "silently dropped".
+  assert.equal(failures.filter((failure) => failure.name === 'lodash').length, 1);
 });
 
 test('npm audit: a dev-only high advisory does fail', () => {
   // Dev tooling executes attacker-influenced input (install scripts, parsers fed
   // crafted fixtures), so dev-only high is still treated as a failure.
-  const report = {
-    vulnerabilities: {
-      undici: {
-        name: 'undici',
-        severity: 'high',
-        isDirect: false,
-        range: '<7.30.0',
-        via: [{ source: 1, name: 'undici', title: 'DoS', dev: true }],
-      },
-    },
-  };
-  const { failures } = evaluateReport(report);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].scope, 'dev');
+  const full = structuredClone(vulnerableFixture.full);
+  const production = structuredClone(vulnerableFixture.production);
+  full.vulnerabilities.minimist.severity = 'high';
+  const { failures } = evaluateReports(full, production);
+  const minimist = failures.find((failure) => failure.name === 'minimist');
+  assert.ok(minimist, 'a dev-only high advisory must fail');
+  assert.equal(minimist.scope, 'dev');
+});
+
+test('npm audit: production-only mode cannot misclassify a dev advisory as dev-only', () => {
+  // With `--omit=dev` npm has already excluded dev dependencies, so nothing may
+  // be classified as dev-only and the stricter production threshold applies.
+  const { devOnlyNames, failures } = evaluateReports(vulnerableFixture.production, null);
+  assert.deepEqual([...(devOnlyNames ?? [])], []);
+  assert.equal(failures.length, 1, 'only the production advisory is present at all');
 });
 
 test('npm audit: the npm 6 advisories-map shape is also understood', () => {
@@ -232,7 +245,7 @@ test('npm audit: the npm 6 advisories-map shape is also understood', () => {
       42: { module_name: 'lodash', severity: 'critical', is_direct: true, vulnerable_versions: '<4.17.21' },
     },
   };
-  const { recognised, failures } = evaluateReport(report);
+  const { recognised, failures } = evaluateReports(report, null);
   assert.ok(recognised);
   assert.equal(failures.length, 1);
   assert.equal(failures[0].name, 'lodash');
@@ -241,17 +254,26 @@ test('npm audit: the npm 6 advisories-map shape is also understood', () => {
 test('npm audit: an unrecognised report shape is not a clean bill of health', () => {
   // The important negative: if npm changes its output, the gate must fail loudly
   // rather than read zero advisories in a format it does not understand.
-  const { recognised, failures } = evaluateReport({ metadata: { vulnerabilities: 0 } });
+  const { recognised, failures } = evaluateReports({ metadata: { vulnerabilities: 0 } }, null);
   assert.equal(recognised, false);
   assert.equal(failures.length, 0);
 });
 
+test('npm audit: a package npm could not classify is held to the production threshold', () => {
+  // When nothing marks a package dev-only, the conservative assumption is that
+  // it ships. A moderate advisory must fail rather than slip through on the
+  // dev threshold.
+  const entries = [{ name: 'mystery', severity: 'moderate', direct: true, titles: ['x'], range: '' }];
+  assert.equal(evaluateEntries(entries).length, 1);
+  assert.equal(evaluateEntries(entries, { devOnlyNames: new Set(['mystery']) }).length, 0);
+});
+
 test('npm audit: production dependencies are clean at this commit', () => {
   const lock = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package-lock.json'), 'utf8'));
-  const vulnerable = Object.entries(lock.packages ?? {}).filter(([, entry]) => entry.dev === true);
+  const devOnly = Object.entries(lock.packages ?? {}).filter(([, entry]) => entry.dev === true);
   // Sanity-check the fixture the production gate depends on: the advisory that
   // issue #1541 recorded was dev-only, and stayed dev-only.
-  assert.ok(vulnerable.length > 0, 'expected dev-only packages in the lockfile');
+  assert.ok(devOnly.length > 0, 'expected dev-only packages in the lockfile');
   const knownFixed = ['brace-expansion', 'source-map-js', 'undici'];
   for (const name of knownFixed) {
     const entry = lock.packages[`node_modules/${name}`];
