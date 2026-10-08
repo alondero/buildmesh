@@ -72,30 +72,45 @@ export function readTestReport(root, kind, path, output) {
   if (kind === 'vitest') return report ? vitestReport(root, report, output) : { failures: [], count: 0, unattributed: true };
   if (report) return report;
   // Also support a plain cargo test gate. The shard runner supplies target metadata.
-  const failures = rustFailures(output);
+  const doc = output.match(/^\s*Doc-tests (\S+)/m);
+  const failures = doc ? [...rustFailures(output.slice(0, doc.index)), ...rustFailures(output.slice(doc.index), { kind: 'doc', name: doc[1] })] : rustFailures(output);
   const failed = [...output.matchAll(/test result: FAILED\. \d+ passed; (\d+) failed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
-  return { failures, count: 0, unattributed: !failed || failed !== failures.length };
+  const count = [...output.matchAll(/test result: (?:ok|FAILED)\. (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+  return { failures, count, unattributed: !failed || failed !== failures.length };
 }
 
 const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function isolatedCommand(test, kind, reportPath) {
   if (kind === 'vitest') return ['node', 'scripts/harness-vitest-isolate.mjs', test.file, `^${escapeRegex(test.name)}$`, reportPath];
   const { kind: targetKind, name } = test.target;
-  const target = targetKind === 'lib' || targetKind === 'doc' ? [`--${targetKind}`] : [`--${targetKind}`, name];
+  if (targetKind === 'doc') throw new Error('Doctest isolation unavailable; no reliable exact selector.');
+  const target = targetKind === 'lib' ? ['--lib'] : [`--${targetKind}`, name];
   return ['cargo', 'test', '--locked', ...target, test.name, '--', '--exact', '--test-threads=1'];
 }
 
-export async function isolateTests(root, original, run, entries = knownFlakes(root)) {
+// A shared budget starts at the first diagnosis, after both product lanes drain.
+export async function isolateTests(root, original, run, entries = knownFlakes(root), budget = {}) {
+  const now = budget.now ?? Date.now;
+  budget.deadline ??= now() + 10 * 60 * 1000;
   const failures = [];
   for (const test of original.failures) {
+    if (test.target?.kind === 'doc') {
+      failures.push({ ...test, outcome: 'FAIL', reason: 'Doctest isolation unavailable: rustdoc cannot reliably select one exact test; see the original log.' });
+      continue;
+    }
     if (!test.name) {
       failures.push({ ...test, outcome: 'FAIL', reason: 'File collection/setup failed; no exact test selector is available.' });
       continue;
     }
-    const rerun = await run(test);
+    const remainingMs = budget.deadline - now();
+    if (remainingMs <= 0) {
+      failures.push({ ...test, outcome: 'TIMEOUT', reason: 'Total isolated-rerun budget exhausted; test was not isolated.' });
+      continue;
+    }
+    const rerun = await run(test, remainingMs);
     const passed = rerun.exitCode === 0 && rerun.count > 0 && rerun.matched !== false;
     const outcome = passed ? 'FLAKY' : rerun.exitCode === 124 ? 'TIMEOUT' : rerun.exitCode === 127 ? 'BLOCKED' : 'FAIL';
-    failures.push({ ...test, outcome, ...(passed && Object.hasOwn(entries, test.id) ? { issue: entries[test.id] } : {}), rerun });
+    failures.push({ ...test, outcome, ...(rerun.reason ? { reason: rerun.reason } : {}), ...(passed && Object.hasOwn(entries, test.id) ? { issue: entries[test.id] } : {}), rerun });
   }
   const outcome = original.unattributed || failures.some(test => test.outcome === 'FAIL') ? 'FAIL'
     : failures.find(test => test.outcome === 'TIMEOUT' || test.outcome === 'BLOCKED')?.outcome ?? 'FLAKY';
@@ -103,11 +118,11 @@ export async function isolateTests(root, original, run, entries = knownFlakes(ro
   return { ...row, reason: outcome === 'FLAKY' ? (gatePassed(row)
     ? 'Known flakes passed alone; linked open issues permit completion.'
     : 'Tests passed alone. File an issue and add exact ids to scripts/known-flakes.json; unlisted flakes block finish.')
-    : original.unattributed ? 'Additional suite/runtime failures remain; see the original log.' : 'Isolated rerun did not pass; see each test rerun log.' };
+    : original.unattributed ? 'Additional suite/runtime failures remain; see the original log.' : failures.find(test => test.reason)?.reason ?? 'Isolated rerun did not pass; see each test rerun log.' };
 }
 
 export function failureLines(row, limit = 10) {
-  const lines = (row.failures ?? []).slice(0, limit).map(test => `  ${test.outcome ?? 'FAIL'} ${test.id}${test.issue ? ` https://github.com/alondero/buildmesh/issues/${test.issue}` : ''}${test.rerun?.log ? ` (rerun: ${test.rerun.log})` : ''}`);
+  const lines = (row.failures ?? []).slice(0, limit).map(test => `  ${test.outcome ?? 'FAIL'} ${test.id}${test.issue ? ` https://github.com/alondero/buildmesh/issues/${test.issue}` : ''}${test.reason ? `: ${test.reason}` : ''}${test.rerun?.log ? ` (rerun: ${test.rerun.log})` : ''}`);
   if (row.failures?.length > limit) lines.push(`  (+${row.failures.length - limit} more failing tests in the receipt)`);
   return lines;
 }

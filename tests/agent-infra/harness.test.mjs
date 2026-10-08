@@ -55,6 +55,53 @@ test('known flakes reference open GitHub issues and reject closed issues or PRs'
   await assert.rejects(validateFlakeIssues({ test: 1 }, async () => ({ state: 'open', pull_request: {} })), /open issue/);
 });
 
+test('closed known-flake issues surface their exact validation error in the gate row', async t => {
+  const fixture = repo(t);
+  fixture.put('scripts/known-flakes.json', '{"test":1410}');
+  fixture.put('closed-issue.cjs', "globalThis.fetch = async () => ({ ok: true, json: async () => ({ state: 'closed' }) });");
+  const row = await runGate(fixture.cwd, { id: 'known-flakes', command: ['node', script, 'gate', 'flakes'], minutes: 1 }, fixture.base, [], { NODE_OPTIONS: `--require="${join(fixture.cwd, 'closed-issue.cjs').replaceAll('\\', '/')}"` });
+  assert.equal(row.outcome, 'FAIL');
+  assert.match(row.reason, /Known-flake issue #1410 must be an open issue/, readFileSync(row.log, 'utf8'));
+});
+
+test('doctest failures remain named and FAIL without an unsupported isolation attempt', async t => {
+  const fixture = repo(t);
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname="doc-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  fixture.put('src-tauri/src/lib.rs', '/// ```\n/// assert!(false);\n/// ```\npub fn f() {}\n/// ```\n/// assert!(true);\n/// ```\npub fn g() {}\n');
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base);
+  assert.equal(row.outcome, 'FAIL');
+  assert.match(row.failures[0].name, /lib.rs - f \(line 1\)/);
+  assert.equal(row.failures[0].target.kind, 'doc');
+  assert.equal(row.count, 1);
+  assert.equal(row.failures[0].rerun, undefined);
+  assert.match(row.reason, /Doctest isolation unavailable/);
+});
+
+test('isolation shares a total deadline across gates and leaves remaining failures TIMEOUT', async t => {
+  const fixture = repo(t);
+  let clock = 0;
+  const budget = { deadline: 100, now: () => clock };
+  const failures = [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }, { id: 'c', name: 'c' }];
+  const remaining = [];
+  const run = async (_test, remainingMs) => { remaining.push(remainingMs); clock += 60; return { exitCode: 0, count: 1 }; };
+  const row = await isolateTests(fixture.cwd, { failures }, run, {}, budget);
+  assert.deepEqual(remaining, [100, 40]);
+  assert.equal(row.outcome, 'TIMEOUT');
+  assert.equal(row.failures[2].outcome, 'TIMEOUT');
+  assert.equal(row.failures[2].rerun, undefined);
+  assert.match(row.reason, /budget exhausted.*not isolated/);
+  const next = await isolateTests(fixture.cwd, { failures: [failures[0]] }, run, {}, budget);
+  assert.equal(next.outcome, 'TIMEOUT');
+  assert.equal(remaining.length, 2);
+});
+
+test('product runner and shared failure parser edits select product verification', () => {
+  for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs']) {
+    const ids = planGates([path]).map(gate => gate.id);
+    for (const id of ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift', 'frontend-build', 'bundle', 'frontend-tests', 'browser-smoke']) assert.ok(ids.includes(id), `${path}: ${id}`);
+  }
+});
+
 test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
   const fixture = repo(t);
   const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });
@@ -110,8 +157,43 @@ test('real Cargo gate names a suite failure and reruns just that library test', 
   const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base);
   assert.equal(row.outcome, 'FLAKY', JSON.stringify(row));
   assert.equal(row.failures[0].id, 'transient');
+  assert.equal(row.count, 1);
   assert.equal(row.failures[0].rerun.count, 1);
   assert.deepEqual(row.failures[0].rerun.command.slice(1), ['test', '--locked', '--lib', 'transient', '--', '--exact', '--test-threads=1']);
+});
+
+test('duplicate Vitest names report ambiguity even when both isolated matches pass', async t => {
+  const fixture = repo(t);
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+  fixture.put('tests/duplicate.test.js', "import { test, expect } from 'vitest'; test('same', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); }); test('same', () => {});");
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
+  assert.equal(row.outcome, 'FAIL');
+  assert.equal(row.failures[0].rerun.exitCode, 0);
+  assert.equal(row.failures[0].rerun.count, 2);
+  assert.match(row.reason, /Ambiguous test name.*2 matches/);
+  assert.match(row.failures[0].reason, /Ambiguous test name/);
+});
+
+test('evaluation accepts a listed isolated pass and still rejects an unlisted flake', t => {
+  const fixture = repo(t);
+  fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+  fixture.put('tests/evaluate.test.js', "import { test, expect } from 'vitest'; test('alone', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); });");
+  fixture.put('scripts/harness-corpus.json', JSON.stringify([{ id: 'listed', boundary: 'fixture Vitest', gate: { command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest' } }]));
+  fixture.put('scripts/known-flakes.json', '{"tests/evaluate.test.js > alone":1833}');
+  const listed = fixture.cli('evaluate', '--case', 'listed');
+  assert.equal(listed.status, 0, listed.stdout + listed.stderr);
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/evaluation.json')));
+  assert.equal(receipt.outcome, 'PASS');
+  assert.equal(receipt.results[0].outcome, 'FLAKY');
+  fixture.put('scripts/known-flakes.json', '{}');
+  assert.equal(fixture.cli('evaluate', '--case', 'listed').status, 1);
 });
 
 test('the Rust shard runner records targets and reruns library and integration failures separately', async t => {
@@ -190,7 +272,14 @@ test('isolated', async () => {
       { id: 'other', lane: 'rust', minutes: 1, command: ['node', '-e', "const fs=require('fs'); fs.mkdirSync('.harness',{recursive:true}); fs.writeFileSync('.harness/other-started','yes'); const timer=setInterval(()=>{if(fs.existsSync('.harness/failed')){clearInterval(timer);fs.writeFileSync('.harness/other-finished','yes');}},10);"] },
       { id: 'after', lane: 'frontend', minutes: 1, command: ['node', '-e', "require('fs').writeFileSync('.harness/after','yes')"] },
     ];
-    const receipt = await verify(fixture.cwd, { base: fixture.base, plan });
+    const printed = [];
+    const originalLog = console.log;
+    let receipt;
+    try {
+      console.log = (...args) => printed.push(args.join(' '));
+      receipt = await verify(fixture.cwd, { base: fixture.base, plan });
+    } finally { console.log = originalLog; }
+    assert.match(printed.join('\n'), /FAIL frontend-tests \(0 passed\)/);
     assert.equal(receipt.outcome, listed ? 'PASS' : 'FLAKY');
     const row = receipt.gates.find(item => item.id === 'frontend-tests');
     assert.equal(row.outcome, 'FLAKY');

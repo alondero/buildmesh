@@ -107,7 +107,7 @@ export function touchedFormatDiffs(output, paths) {
 }
 
 export function isHarnessPath(path) {
-  return /^(?:scripts\/harness(?:-plan|-lanes|-test-failures|-vitest-isolate)?\.mjs|scripts\/known-flakes\.json|scripts\/rust-test-shards\.mjs|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
+  return /^(?:scripts\/harness(?:-plan|-lanes|-vitest-isolate)?\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
 }
 
 export function executedTests(kind, output) {

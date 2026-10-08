@@ -265,7 +265,7 @@ async function preflight(root, gate, extraEnv) {
   }
   return null;
 }
-export async function runGate(root, gate, base, paths = [], extraEnv = {}, { deferIsolation = false } = {}) {
+export async function runGate(root, gate, base, paths = [], extraEnv = {}, { deferIsolation = false, isolationBudget = {} } = {}) {
   mkdirSync(statePath(root, 'logs'), { recursive: true });
   const log = statePath(root, `logs/${Date.now()}-${gate.id}.log`);
   const started = Date.now();
@@ -290,28 +290,30 @@ export async function runGate(root, gate, base, paths = [], extraEnv = {}, { def
     }
   }
   const row = { id: gate.id, command: gate.command, durationMs: Date.now() - started, log: existsSync(log) ? log : null, ...result };
-  if (!deferIsolation && row.failures?.length) await diagnoseGate(root, gate, row, base, extraEnv);
+  if (!deferIsolation && row.failures?.length) await diagnoseGate(root, gate, row, base, extraEnv, isolationBudget);
   return row;
 }
-async function diagnoseGate(root, gate, row, base, extraEnv = {}) {
+async function diagnoseGate(root, gate, row, base, extraEnv = {}, isolationBudget = {}) {
   const started = Date.now();
-  const result = await isolateTests(root, row, async test => {
+  const result = await isolateTests(root, row, async (test, remainingMs) => {
     const log = `${row.log}.rerun-${row.failures.indexOf(test) + 1}.log`;
     const reportPath = `${log}.json`;
     const command = commandFor(root, { command: isolatedCommand(test, gate.tests, reportPath) }, base);
     const env = { ...process.env, ...extraEnv, NODE_ENV: 'test', NO_COLOR: '1', RUST_TEST_THREADS: '1', VITEST_MAX_WORKERS: '1' };
     for (const key of ['FORCE_COLOR', 'BUILDMESH_PREFILL', 'NODE_TEST_CONTEXT', 'BUILDMESH_TEST_REPORT']) delete env[key];
     const began = Date.now();
-    const exitCode = await runGuarded({ minutes: Math.min(gate.minutes, 5), killGraceSeconds: 2, log, label: `${gate.id}: ${test.id}`, command, cwd: gate.tests === 'rust' ? join(root, 'src-tauri') : root, env, output: () => {} });
+    const exitCode = await runGuarded({ minutes: Math.min(gate.minutes, 5, remainingMs / 60000), killGraceSeconds: 2, log, label: `${gate.id}: ${test.id}`, command, cwd: gate.tests === 'rust' ? join(root, 'src-tauri') : root, env, output: () => {} });
     const output = readFileSync(log, 'utf8');
     if (gate.tests === 'vitest') {
       const report = readTestReport(root, 'vitest', reportPath, output);
-      const matches = report.report?.testResults?.filter(suite => resolve(root, suite.name) === resolve(root, test.file)).flatMap(suite => suite.assertionResults ?? []).filter(item => item.fullName === test.name && item.status === 'passed') ?? [];
-      return { command, log, exitCode, durationMs: Date.now() - began, count: report.count, matched: matches.length === 1 && report.count === 1 && !report.unattributed };
+      const matches = report.report?.testResults?.filter(suite => resolve(root, suite.name) === resolve(root, test.file)).flatMap(suite => suite.assertionResults ?? []).filter(item => item.fullName === test.name) ?? [];
+      const reason = matches.length > 1 ? `Ambiguous test name: ${matches.length} matches in the original file; cannot isolate one test.` : null;
+      return { command, log, exitCode, durationMs: Date.now() - began, count: report.count, matched: matches.length === 1 && matches[0].status === 'passed' && report.count === 1 && !report.unattributed, ...(reason ? { reason } : {}) };
     }
     return { command, log, exitCode, durationMs: Date.now() - began, count: executedTests('rust', output) };
-  });
+  }, knownFlakes(root), isolationBudget);
   Object.assign(row, result);
+  row.diagnosed = true;
   row.durationMs += Date.now() - started;
 }
 function classify(gate, code, output, paths) {
@@ -320,6 +322,8 @@ function classify(gate, code, output, paths) {
   if (code === 2 && (gate.id === 'known-flakes' || gate.tests === 'rust')) {
     const blocked = output.match(/^BLOCKED: (.+)$/m);
     if (blocked) return { outcome: 'BLOCKED', reason: blocked[1] };
+    const invalidFlake = gate.id === 'known-flakes' && output.match(/^Known-flake issue #\d+ must be an open issue\.\r?$/m);
+    if (invalidFlake) return { outcome: 'FAIL', reason: invalidFlake[0].trim() };
   }
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
@@ -395,9 +399,10 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   const reportRow = row => {
     if (!receipt.gates.includes(row)) receipt.gates.push(row);
     saveJson(statePath(root, 'receipt.json'), receipt);
-    console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+    console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} ${row.outcome === 'PASS' ? 'tests' : 'passed'})` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
     for (const line of failureLines(row)) console.log(line);
   };
+  const isolationBudget = {};
   for (;;) {
     await runPlan(gates, {
       execute: (gate, stopped) => receipt.gates.find(row => row.id === gate.id) ?? execute(gate, stopped),
@@ -413,8 +418,8 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
     });
     // runPlan has drained both lanes. Isolated reruns cannot compete with a
     // still-running suite, and the suite itself is never repeated here.
-    for (const row of receipt.gates.filter(item => item.outcome === 'FAIL' && item.failures?.length && !item.failures[0].rerun)) {
-      await diagnoseGate(root, gates.find(gate => gate.id === row.id), row, base);
+    for (const row of receipt.gates.filter(item => item.outcome === 'FAIL' && item.failures?.length && !item.diagnosed)) {
+      await diagnoseGate(root, gates.find(gate => gate.id === row.id), row, base, {}, isolationBudget);
       event(root, { type: 'gate-diagnosis', taskId: receipt.taskId, ...row });
       reportRow(row);
     }
@@ -444,14 +449,15 @@ async function evaluate(root, selected) {
   const base = git(root, 'rev-parse', 'HEAD').trim();
   const before = fingerprint(root, base);
   const results = [];
+  const isolationBudget = {};
   for (const row of cases) {
-    const result = row.gate ? await runGate(root, { minutes: 10, ...row.gate, id: row.id }, base)
+    const result = row.gate ? await runGate(root, { minutes: 10, ...row.gate, id: row.id }, base, [], {}, { isolationBudget })
       : { id: row.id, outcome: 'BLOCKED', reason: row.gap };
     results.push({ ...result, boundary: row.boundary, remaining: row.remaining });
     event(root, { type: 'evaluation', ...results.at(-1) });
     console.log(`${result.outcome} ${row.id}: ${row.boundary}${result.reason ? `; ${result.reason}` : ''}`);
   }
-  const receipt = { results, tree: before, outcome: results.some(row => row.outcome === 'FAIL') ? 'FAIL' : results.find(row => row.outcome !== 'PASS')?.outcome ?? 'PASS' };
+  const receipt = { results, tree: before, outcome: results.some(row => row.outcome === 'FAIL') ? 'FAIL' : results.find(row => !gatePassed(row))?.outcome ?? 'PASS' };
   if (fingerprint(root, base) !== before) { receipt.outcome = 'FAIL'; receipt.reason = 'Source changed during evaluation.'; }
   saveJson(statePath(root, 'evaluation.json'), receipt);
   return receipt;

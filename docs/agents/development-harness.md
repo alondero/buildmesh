@@ -217,29 +217,42 @@ print up to ten names; the receipt retains every failure and the original log.
 Once both lanes have drained, verify reruns each failed test once, sequentially:
 one Vitest file with an escaped, anchored test-name pattern and one worker (the
 Node API constrains discovery because CLI file filters match substrings), or the exact
-Cargo test in its original target with `--test-threads=1`. Each failure stores
-its rerun command, log, executed count, exit code and duration. Neither the full
+Cargo library, binary or integration test in its original target with
+`--test-threads=1`. Doctest failures remain named and FAIL with an explicit
+"Doctest isolation unavailable" reason: rustdoc does not reliably select one
+exact doctest on Windows. Each attempted rerun stores its command, log, executed
+count, exit code and duration. Reruns have a five-minute individual limit and
+a shared ten-minute deadline starting at the first diagnosis. Each rerun is
+limited to the remaining budget; after exhaustion, remaining tests are TIMEOUT
+and explicitly reported as not isolated. Neither the full
 suite nor other gates run again to diagnose a failure.
 
 A repeat failure stays FAIL. An isolated pass is FLAKY. Missing executables and
 deadlines stay BLOCKED and TIMEOUT; zero executed tests, unreadable reports,
-file setup failures and unhandled runtime errors cannot produce an accepted
-flake. Collection/setup failures still name the failed file. Git is checked
+ambiguous duplicate names, file setup failures and unhandled runtime errors
+cannot produce an accepted flake. Collection/setup failures still name the
+failed file. Git is checked
 before product test gates. On Windows, Rust compilation checks network access
 to the pinned ConPTY package when its archive is absent from the worktree cache;
 an unavailable download is BLOCKED before Cargo builds. Cached archives do not
 require network access. The Windows Rust runner checks
 the staged ConPTY runtime after compilation, before starting test processes.
-The ConPTY unit test builds its own fixture, and the version test reads local
-Git tags; neither requires a blanket network or installed-runtime exemption.
+The [ConPTY unit test](../../tests/unit/conpty-runtime.test.ts) builds its own
+fixture. The separate [app-version test](../../tests/unit/app-version.test.ts)
+compares app manifests with local Git tags. Neither requires a blanket network
+or installed-runtime exemption.
 
 [`scripts/known-flakes.json`](../../scripts/known-flakes.json) maps exact ids to
 open issue numbers. Vitest ids are `relative/file > full test name`; Rust library
 ids are fully qualified names, and other targets use `kind:target > test name`.
 The known-flakes gate and agent-infra tests validate that linked issues are open
-GitHub issues. An unavailable issue check is BLOCKED; a closed issue fails
-validation. Only listed tests that actually pass alone allow subsequent gates
-and `finish` to proceed. The gate row remains FLAKY with the issue link, while
+GitHub issues. Every verify, including docs-only plans, performs this fresh
+check before product gates; the result is never cached. Set `GH_TOKEN` or
+`GITHUB_TOKEN` to authenticate and avoid the lower unauthenticated API limit.
+Offline access or API rate limiting makes the check BLOCKED and stops the
+entire verification plan. A closed issue fails validation and names the issue
+in the gate reason. Only listed tests that actually pass alone allow subsequent
+gates and `finish` to proceed. The gate row remains FLAKY with the issue link, while
 the overall receipt is PASS if every gate is acceptable. These rows are never
 cached. Persistent failures remain blocking even when listed. For an unlisted
 flake, file an issue with both logs and add its exact id rather than retrying the
