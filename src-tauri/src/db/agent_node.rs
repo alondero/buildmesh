@@ -170,18 +170,40 @@ mod lifecycle_snapshot_tests {
     };
 
     #[test]
-    fn missing_agent_lifecycle_fails_closed_as_evidence_conflict() {
+    fn missing_agent_lifecycle_fails_closed_as_unavailable_lifecycle_evidence() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
 
         let blocker = circuit_lifecycle_blocker_inner(&conn, 404).unwrap();
         assert_eq!(
             blocker,
-            Some(crate::circuit::observation::CircuitObservationBlocker::EvidenceConflict)
+            Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable)
         );
         assert_eq!(
             blocker.unwrap().message(),
-            "Agent or lifecycle evidence is unavailable or inconsistent. Inspect the agent record and evidence; repair the underlying issue before retrying or recording completion."
+            "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion."
+        );
+    }
+
+    #[test]
+    fn unreadable_agent_lifecycle_fails_closed_as_unavailable_lifecycle_evidence() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,lifecycle_snapshot)
+             VALUES (1,1,'node','C:/mesh','running','{unreadable')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable)
         );
     }
 
@@ -739,7 +761,7 @@ pub(crate) fn circuit_lifecycle_blocker_inner(
         .optional()?
     else {
         return Ok(Some(
-            crate::circuit::observation::CircuitObservationBlocker::EvidenceConflict,
+            crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
         ));
     };
     let Some(snapshot) = snapshot else {
@@ -752,7 +774,7 @@ pub(crate) fn circuit_lifecycle_blocker_inner(
         Ok(lifecycle) => lifecycle,
         Err(_) => {
             return Ok(Some(
-                crate::circuit::observation::CircuitObservationBlocker::EvidenceConflict,
+                crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
             ));
         }
     };

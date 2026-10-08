@@ -18,6 +18,7 @@ pub enum CircuitObservationBlocker {
     ReportSuperseded,
     KnownWorkOutstanding,
     HumanResponseRequired,
+    LifecycleEvidenceUnavailable,
     EvidenceConflict,
 }
 
@@ -33,7 +34,8 @@ impl CircuitObservationBlocker {
             Self::ReportSuperseded => "The available report precedes the current session or assigned prompt. Waiting for a fresh report from this turn.".into(),
             Self::KnownWorkOutstanding => "The harness reports unfinished child or background work. Waiting for its completion evidence.".into(),
             Self::HumanResponseRequired => "The harness has an unresolved question or permission request. Respond in the agent session; a completion report cannot answer it.".into(),
-            Self::EvidenceConflict => "Agent or lifecycle evidence is unavailable or inconsistent. Inspect the agent record and evidence; repair the underlying issue before retrying or recording completion.".into(),
+            Self::LifecycleEvidenceUnavailable => "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion.".into(),
+            Self::EvidenceConflict => "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.".into(),
         }
     }
 }

@@ -273,8 +273,23 @@ it('shows unsupported ownership and the evidence deadline without promising live
   expect(screen.getByText(/do not establish live delivery/)).toBeTruthy();
 });
 
-it('explains when lifecycle evidence conflicts or cannot be read', async () => {
-  const message = 'Lifecycle evidence conflicts or cannot be read, so Buildmesh cannot verify this step. Inspect the agent record and evidence; if the agent was removed, pause or cancel the Circuit before continuing.';
+it('explains when lifecycle evidence is unavailable', async () => {
+  const message = "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion.";
+  vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [], checkpoints: [], coverage: [{
+    node_id: 'verdict', attempt: 1, platform: 'windows host / windows launch', deadline_ms: null,
+    waits_active: true, human_waits: [], observation_blocker: { kind: 'lifecycle_evidence_unavailable' },
+    capabilities: { harness: 'claude_code', foreground: 'Lifecycle callback', owned_work: 'Unavailable',
+      final_report: 'Transcript', reconciliation: 'Bounded report read', yielded_budget_ms: 60000,
+      active_budget_ms: 7200000 },
+  }] });
+  const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
+  fireEvent.click(container.querySelector('summary')!);
+  fireEvent.click(await screen.findByText('Current harness observation capabilities'));
+  expect(screen.getByText(message)).toBeTruthy();
+});
+
+it('gives session observation conflicts evidence-focused guidance', async () => {
+  const message = 'Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.';
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [], checkpoints: [], coverage: [{
     node_id: 'verdict', attempt: 1, platform: 'windows host / windows launch', deadline_ms: null,
     waits_active: true, human_waits: [], observation_blocker: { kind: 'evidence_conflict' },
@@ -286,6 +301,7 @@ it('explains when lifecycle evidence conflicts or cannot be read', async () => {
   fireEvent.click(container.querySelector('summary')!);
   fireEvent.click(await screen.findByText('Current harness observation capabilities'));
   expect(screen.getByText(message)).toBeTruthy();
+  expect(screen.queryByText(/agent was removed/)).toBeNull();
 });
 
 

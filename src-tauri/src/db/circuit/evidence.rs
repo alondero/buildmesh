@@ -4202,7 +4202,7 @@ mod tests {
         assert_eq!(verdict.platform, "Agent record unavailable");
         assert_eq!(
             verdict.observation_blocker,
-            Some(CircuitObservationBlocker::EvidenceConflict)
+            Some(CircuitObservationBlocker::LifecycleEvidenceUnavailable)
         );
     }
 

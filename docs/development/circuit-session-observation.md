@@ -57,16 +57,21 @@ but process-only status writes do not release a negative lifecycle veto. Only a
 new settled lifecycle report can replace that report. WorkResumed and
 TurnCompleted are settled reports that release the veto; ProcessIdle,
 ProcessRunning and other process projections do not. An unreadable snapshot is
-treated as conflicting evidence and fails closed. Report preflight, transactional
-classification commit, watchdog recovery and operator completion attestation all
+treated as unavailable lifecycle evidence and fails closed. Report preflight,
+transactional classification commit, watchdog recovery and operator completion attestation all
 apply this policy; the commit paths re-read under the database writer. Child-work
 receipts remain writable so they can resolve separate durable child evidence,
-but they do not clear a lifecycle veto.
+but they do not clear a lifecycle veto. The last harness lifecycle report also
+survives a Buildmesh process restart; a restart or process reconciliation alone
+does not prove that a request or background task was settled.
 
-A missing agent row also fails closed as `EvidenceConflict`: it cannot prove that
-the last harness request was settled. The Circuit evidence view names the missing
-agent record, and an operator must repair the record or pause/cancel the run
-before recording completion.
+A missing agent row or unreadable lifecycle report fails closed as
+`LifecycleEvidenceUnavailable`: it cannot prove that the last harness request
+was settled. The Circuit evidence view names the missing or inconsistent
+lifecycle evidence, and an operator must repair the record/report or pause/cancel
+the run before recording completion. `EvidenceConflict` is reserved for session
+observation conflicts such as inconsistent identity, foreground, or owned-work
+evidence; its guidance directs operators to inspect and recheck those observations.
 
 Known background work keeps an active step Running and appears in the Circuit's
 current harness observation details as “Waiting for background work”. It has no

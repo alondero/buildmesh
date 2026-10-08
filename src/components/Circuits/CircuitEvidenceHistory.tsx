@@ -288,8 +288,11 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
             {item.observation_blocker?.kind === 'human_response_required' && <p>
               The harness has a pending question or permission request. Respond in that session; completion attestation remains unavailable until a fresh lifecycle report clears the request.
             </p>}
+            {item.observation_blocker?.kind === 'lifecycle_evidence_unavailable' && <p>
+              The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion.
+            </p>}
             {item.observation_blocker?.kind === 'evidence_conflict' && <p>
-              Lifecycle evidence conflicts or cannot be read, so Buildmesh cannot verify this step. Inspect the agent record and evidence; if the agent was removed, pause or cancel the Circuit before continuing.
+              Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.
             </p>}
             {item.human_waits.filter((wait) => wait.resolved_at_ms === null).map((wait, index) => <div key={index}>
               <p>{item.waits_active ? 'Awaiting' : 'Retained wait:'} {wait.wait_kind.replace(/_/g, ' ')}{item.waits_active ? ' \u00b7 No automatic timeout' : ' \u00b7 Run is not waiting'}</p>

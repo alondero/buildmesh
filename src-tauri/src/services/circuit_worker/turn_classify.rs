@@ -55,7 +55,7 @@ pub(super) fn classify_step_turn(
     let input = crate::agent::process::PROCESS_REGISTRY.input_stamp_result(agent_node_id);
     let snapshot = crate::coordinator::enrichment::circuit_report_snapshot(&agent);
     let lifecycle_blocker = db::agent_node::circuit_lifecycle_blocker(agent_node_id).unwrap_or(
-        Some(crate::circuit::observation::CircuitObservationBlocker::EvidenceConflict),
+        Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable),
     );
     let candidate = match readiness::prepare_with_lifecycle_veto(
         view,

@@ -181,7 +181,7 @@ impl RunView {
             if let Some(json) = self.context.lifecycle_blocker(&step.node_id) {
                 match serde_json::from_str::<B>(json) {
                     Ok(blocker) => return Some(blocker),
-                    Err(_) => return Some(B::EvidenceConflict),
+                    Err(_) => return Some(B::LifecycleEvidenceUnavailable),
                 }
             }
             if let Some(json) = self
@@ -3444,6 +3444,30 @@ mod tests {
         );
         assert!(transition.classifications.is_empty());
         assert!(transition.effects.is_empty());
+    }
+
+    #[test]
+    fn work_evidence_conflicts_keep_session_observation_guidance() {
+        use super::super::observation::{CircuitObservationBlocker, WorkEvidence};
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+        run.context.set(
+            "node.spawn.evidence.1",
+            serde_json::to_string(&WorkEvidence {
+                conflicted: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+
+        let blocker = run.report_blocker("spawn").unwrap();
+        assert_eq!(blocker, CircuitObservationBlocker::EvidenceConflict);
+        assert_eq!(
+            blocker.message(),
+            "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict."
+        );
     }
 
     #[test]
