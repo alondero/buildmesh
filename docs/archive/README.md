@@ -38,12 +38,6 @@ Inside a moved document, its relative links need re-aiming — everything shifts
 one directory deeper. `npm run check:docs` verifies every local link and anchor,
 so it will find them.
 
-## Investigation index
-
-- [Worktree cleanup investigation, 2026-10-08](2026-10/worktree-cleanup-investigation-2026-10-08.md)
-  records Windows folder-lock evidence, repeated-warning causes and proposed
-  recovery controls. It is a historical observation, not a current contract.
-
 ## Vocabulary note
 
 - **`Product-Vision-PRD.md`** — Written when the product was still branded "Conductor"
