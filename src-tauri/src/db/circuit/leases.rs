@@ -683,14 +683,15 @@ pub(crate) fn archive_circuit_agent_inner(
 ///   sweep's compaction tier below). The retained set is bounded: one chain per
 ///   lineage, ending at the newest generation per recovery Circuit.
 ///
-/// `?1` is the retention window in days.
+/// `?1` is the cutoff timestamp: the sweep reads the clock once and every
+/// statement compares against that same value.
 const SWEEPABLE_RUNS: &str = "\
     SELECT id FROM autopilot_circuit_runs r \
       WHERE r.state IN ('completed', 'failed') \
         AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                         JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                         WHERE s.run_id = r.id AND l.cleanup_requested = 1) \
-        AND r.updated_at < datetime('now', '-' || ?1 || ' days') \
+        AND r.updated_at < ?1 \
         AND (r.trigger_identity LIKE 'interval:%' OR r.trigger_identity LIKE 'manual:%') \
         AND r.created_at < (SELECT MAX(created_at) FROM autopilot_circuit_runs n \
                              WHERE n.circuit_id = r.circuit_id) \
@@ -719,6 +720,25 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     conn: &Connection,
     days: i64,
 ) -> SqlResult<(usize, usize)> {
+    // One reading of the clock for the whole sweep. SQLite's 'now' is stable
+    // only within a single statement, so evaluating it per statement let a
+    // sweep that crossed a second boundary apply different cutoffs to the child
+    // tables and to the runs themselves.
+    let cutoff: String = conn.query_row(
+        "SELECT datetime('now', '-' || ?1 || ' days')",
+        params![days],
+        |row| row.get(0),
+    )?;
+    prune_terminal_circuit_runs_before_inner(conn, &cutoff)
+}
+
+/// The sweep against an explicit cutoff: rows with `updated_at < cutoff` are
+/// eligible, and a row stamped exactly at `cutoff` is kept. Taking the instant
+/// as an input makes that boundary testable without racing the wall clock.
+pub(crate) fn prune_terminal_circuit_runs_before_inner(
+    conn: &Connection,
+    cutoff: &str,
+) -> SqlResult<(usize, usize)> {
     for table in [
         "circuit_run_history",
         "circuit_effects",
@@ -727,19 +747,19 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     ] {
         conn.execute(
             &format!("DELETE FROM {table} WHERE run_id IN ({SWEEPABLE_RUNS})"),
-            params![days],
+            params![cutoff],
         )?;
         conn.execute(
             &format!(
                 "DELETE FROM {table} WHERE run_id IN (
             SELECT id FROM autopilot_circuit_runs r WHERE r.state IN ('completed','failed')
-            AND r.updated_at < datetime('now', '-' || ?1 || ' days')
+            AND r.updated_at < ?1
             AND r.trigger_identity NOT LIKE 'interval:%' AND r.trigger_identity NOT LIKE 'manual:%'
             AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s
                 JOIN agent_node_lifecycle_leases l ON l.node_id=s.agent_node_id
                 WHERE s.run_id=r.id AND l.cleanup_requested=1))"
             ),
-            params![days],
+            params![cutoff],
         )?;
     }
     // Steps first: the schema declares ON DELETE CASCADE, but enforcement rides
@@ -749,11 +769,11 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
     // run leak for a step leak.
     conn.execute(
         &format!("DELETE FROM autopilot_circuit_run_steps WHERE run_id IN ({SWEEPABLE_RUNS})"),
-        params![days],
+        params![cutoff],
     )?;
     let deleted = conn.execute(
         &format!("DELETE FROM autopilot_circuit_runs WHERE id IN ({SWEEPABLE_RUNS})"),
-        params![days],
+        params![cutoff],
     )?;
 
     // Stable-identity rows stay forever as dedupe tombstones, but the issue/PR
@@ -769,11 +789,11 @@ pub(crate) fn prune_terminal_circuit_runs_older_than_inner(
             AND NOT EXISTS (SELECT 1 FROM autopilot_circuit_run_steps s \
                             JOIN agent_node_lifecycle_leases l ON l.node_id = s.agent_node_id \
                             WHERE s.run_id = autopilot_circuit_runs.id AND l.cleanup_requested = 1) \
-            AND updated_at < datetime('now', '-' || ?1 || ' days') \
+            AND updated_at < ?1 \
             AND trigger_identity NOT LIKE 'interval:%' \
             AND trigger_identity NOT LIKE 'manual:%' \
             AND context_json <> '{}'",
-        params![days],
+        params![cutoff],
     )?;
 
     Ok((deleted, compacted))

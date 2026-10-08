@@ -8,7 +8,7 @@ use crate::pty::PtyRegistry;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -153,6 +153,12 @@ struct BuildRunProcess {
     /// wedged reader (issue #1532 teardown contract; mirrors
     /// `AgentProcess::reader_handle`).
     reader_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Set by `teardown_inc` when the reader did not exit within the join
+    /// watchdog and was detached. A wedged reader is an expected outcome once
+    /// the pty master is closed, but a *teardown that ordered its locks wrongly*
+    /// also shows up as this flag, which is how the deadlock regression test
+    /// observes it without timing the call.
+    reader_join_timed_out: AtomicBool,
 }
 
 /// Thread-safe registry for build/run processes. Mirrors the
@@ -467,9 +473,10 @@ fn teardown_inc(process: &BuildRunProcess, join: JoinPolicy) {
                 .take()
             {
                 // A detached build-run reader is an expected outcome once
-                // the pty master is closed, so the outcome is not inspected
-                // here.
-                let _ = join_with_timeout(handle, std::time::Duration::from_secs(2));
+                // the pty master is closed, so it is recorded, not an error.
+                if !join_with_timeout(handle, std::time::Duration::from_secs(2)) {
+                    process.reader_join_timed_out.store(true, Ordering::Release);
+                }
             }
         }
         JoinPolicy::Drop => {
@@ -678,6 +685,7 @@ fn build_run_blocking(node_id: i64, mode: BuildRunMode, app: AppHandle) -> Resul
         master: Mutex::new(Some(pair.master)),
         writer: Mutex::new(writer),
         reader_handle: Mutex::new(None),
+        reader_join_timed_out: AtomicBool::new(false),
     };
     let (generation, arc) = BUILD_RUN_REGISTRY.insert(node_id, process);
 
@@ -1059,6 +1067,7 @@ mod tests {
             master: Mutex::new(None),
             writer: Mutex::new(Box::new(Cursor::new(Vec::new()))),
             reader_handle: Mutex::new(None),
+            reader_join_timed_out: AtomicBool::new(false),
         }
     }
 
@@ -1261,7 +1270,7 @@ mod tests {
     #[test]
     fn kill_session_does_not_deadlock_with_concurrent_reaper() {
         use std::sync::Arc as StdArc;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let registry = StdArc::new(BuildRunRegistry::new());
         let node_id = -915_1544;
@@ -1286,17 +1295,21 @@ mod tests {
         *arc.reader_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(reader_handle);
 
         // Race the reader — start kill_session while the reader is
-        // actively trying to reap. With the old outer Mutex, this would
-        // take ~2 s for `join_with_timeout` to give up. The fix (no
-        // outer Mutex) lets kill_session complete in milliseconds.
-        let started = Instant::now();
+        // actively trying to reap. With the old outer Mutex, the join
+        // would sit on the reader until `join_with_timeout` gave up
+        // (2 s) and detached it. The fix (no outer Mutex) lets the
+        // reader finish and the join succeed.
+        //
+        // Assert the mechanism, not the stopwatch: a wall-clock bound
+        // (500 ms) failed on a loaded machine at 988 ms with no deadlock
+        // at all. The flag is set only when the watchdog had to detach
+        // the reader, which is exactly the deadlock's signature.
         let _ = registry.kill_session(node_id);
-        let elapsed = started.elapsed();
 
         assert!(
-            elapsed < Duration::from_millis(500),
+            !arc.reader_join_timed_out.load(Ordering::Acquire),
             "kill_session must not deadlock with a concurrent reader: \
-             elapsed = {elapsed:?} (would be ~2s under the old outer-Mutex bug)"
+             the join watchdog gave up and detached the reader"
         );
     }
 

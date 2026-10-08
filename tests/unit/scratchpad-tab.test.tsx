@@ -26,7 +26,7 @@
  * `act` block.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, act, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -36,6 +36,7 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
 import { openProbeDestination } from './helpers/openProbeDestination';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 
 function makeMesh(id: number, name: string): Mesh {
   return {
@@ -94,6 +95,10 @@ function mockBackend() {
     }
   });
 }
+
+// ProbePanel loads its tabs through React.lazy; see preloadProbeTabs for why the
+// chunks are loaded up front (the fake-timer tests below query synchronously).
+beforeAll(preloadProbeTabs, 60_000);
 
 beforeEach(() => {
   // The production IPC cache is per mesh and survives tab mounts. Each test

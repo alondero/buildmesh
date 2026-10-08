@@ -17,7 +17,8 @@
  * would have to know the tab's internal structure.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -245,6 +246,9 @@ beforeEach(() => {
   seedAgentNodes([]);
   useUIStore.setState({ probeOpen: false, probeTab: 'files', activeDiffFile: null });
 });
+
+// Load the lazy Probe tab chunks up front so rendering a tab does not wait on disk.
+beforeAll(preloadProbeTabs, 60_000);
 
 describe('RepositoryTab (issue #1460)', () => {
   it('renders the tab body when clicked (no longer the "coming soon" placeholder)', async () => {

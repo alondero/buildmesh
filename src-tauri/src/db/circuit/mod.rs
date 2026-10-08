@@ -32,8 +32,9 @@ pub(crate) use leases::{
     claim_circuit_agent_spawn_inner, clear_finished_circuit_cleanup_inner,
     count_active_circuit_agent_nodes_total_inner, count_retained_circuit_agent_nodes_total_inner,
     failed_circuit_agents_for_cleanup_inner, list_circuit_agent_ownerships_inner,
-    prune_terminal_circuit_runs_older_than_inner, release_circuit_agent_cleanup_inner,
-    release_circuit_agent_spawn_inner, reserve_circuit_agent_slots_locked,
+    prune_terminal_circuit_runs_before_inner, prune_terminal_circuit_runs_older_than_inner,
+    release_circuit_agent_cleanup_inner, release_circuit_agent_spawn_inner,
+    reserve_circuit_agent_slots_locked,
 };
 
 #[cfg(test)]

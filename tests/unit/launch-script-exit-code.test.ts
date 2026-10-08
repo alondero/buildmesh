@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterAll, beforeAll, describe, it, expect } from "vitest";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -41,11 +41,11 @@ const read = (path: string) => readFileSync(resolve(REPO_ROOT, path), "utf8");
 const stripComments = (src: string) =>
   src.replace(/<#[\s\S]*?#>/g, "").replace(/^\s*#.*$/gm, "");
 
-// Every test below spawns a PowerShell process, so each one must carry this
-// timeout. It is not optional: the FIRST probe on a cold Linux runner pays
-// pwsh's startup cost and exceeded vitest's 5s default, failing CI in
-// "reads a readable file" while every later (warm) probe passed. Pass it as the
-// last argument of each behavioural `it` - do not rely on the default.
+// Budget for a PowerShell process. The behavioural cases share ONE process
+// (see the suite below), whose `beforeAll` carries this timeout: the FIRST start
+// on a cold Linux runner pays pwsh's startup cost and exceeded vitest's 5s
+// default, and on a busy machine a start is slower still (#2123). Do not add a
+// per-case process: each one is another start that can be slow.
 const POWERSHELL_TIMEOUT_MS = 60_000;
 
 /**
@@ -163,131 +163,99 @@ describe("launcher exit-code contract (issue #2043)", () => {
 
   describe.skipIf(PS === null)("Read-LogFile / Compare-LogGrowth behaviour", () => {
     /**
-     * Dot-sources the REAL helper from the repo - no text extraction, so the
-     * proofs cannot drift from the shipped file - and reports each property as a
-     * `KEY=value` line for the assertions below.
+     * Every case runs in ONE PowerShell process. A process per case paid
+     * PowerShell's start-up (about 1-2 s idle, far more when the machine is
+     * busy) seven times, and under load a single start exceeded its budget
+     * (`spawnSync powershell.exe ETIMEDOUT`, #2123). One start leaves one thing
+     * that can be slow, and each case is still isolated: its own directory and a
+     * try/catch, so a failing case cannot abort or mask the others.
+     *
+     * The REAL helper is dot-sourced from the repo - no text extraction, so the
+     * proofs cannot drift from the shipped file - and each case reports its
+     * properties as `KEY=value` lines for the assertions below.
      */
-    const runProbe = (body: (dir: string) => string[]) => {
-      const dir = mkdtempSync(resolve(tmpdir(), "bm-launcher-"));
-      try {
-        const probe = resolve(dir, "probe.ps1");
-        const commonPath = resolve(REPO_ROOT, COMMON).replace(/'/g, "''");
-        writeFileSync(
-          probe,
-          [
-            "$ErrorActionPreference = 'Stop'",
-            `. '${commonPath}'`,
-            "function Say([string]$k, $v) { Write-Output ($k + '=' + $v) }",
-            ...body(dir),
-          ].join("\n") + "\n",
-          "utf8",
-        );
-        return execFileSync(PS!, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", probe], {
-          encoding: "utf8",
-          timeout: POWERSHELL_TIMEOUT_MS,
-        });
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    };
-
-    const field = (out: string, key: string) =>
-      new RegExp(`^${key}=(.*)$`, "m").exec(out)?.[1]?.trim();
-
-    it("reads a readable file", () => {
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'readable.log'`,
-        `Set-Content -LiteralPath $p -Value @('alpha','beta')`,
-        `$r = Read-LogFile $p`,
-        `Say 'Readable' $r.Readable`,
-        `Say 'Count' $r.Lines.Count`,
-        `Say 'First' $r.Lines[0]`,
-      ]);
-      expect(field(out, "Readable")).toBe("True");
-      expect(field(out, "Count")).toBe("2");
-      expect(field(out, "First")).toBe("alpha");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it("treats a missing file as zero lines, not as unreadable", () => {
-      // The app may not have created the log yet. Reporting this as unreadable
-      // would skip the check on a perfectly normal first launch.
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'never-created.log'`,
-        `$r = Read-LogFile $p`,
-        `Say 'Readable' $r.Readable`,
-        `Say 'Count' $r.Lines.Count`,
-      ]);
-      expect(field(out, "Readable")).toBe("True");
-      expect(field(out, "Count")).toBe("0");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it("reports growth when the file gained lines", () => {
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'growing.log'`,
-        `Set-Content -LiteralPath $p -Value @('one')`,
-        `$before = Read-LogFile $p`,
-        `Add-Content -LiteralPath $p -Value @('two')`,
-        `$g = Compare-LogGrowth -Path $p -Before $before`,
-        `Say 'Checked' $g.Checked`,
-        `Say 'Grew' $g.Grew`,
-        `Say 'Count' $g.Lines.Count`,
-      ]);
-      expect(field(out, "Checked")).toBe("True");
-      expect(field(out, "Grew")).toBe("True");
-      expect(field(out, "Count")).toBe("2");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it("reports no growth when the file is unchanged", () => {
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'steady.log'`,
-        `Set-Content -LiteralPath $p -Value @('one')`,
-        `$before = Read-LogFile $p`,
-        `$g = Compare-LogGrowth -Path $p -Before $before`,
-        `Say 'Checked' $g.Checked`,
-        `Say 'Grew' $g.Grew`,
-      ]);
-      expect(field(out, "Checked")).toBe("True");
-      expect(field(out, "Grew")).toBe("False");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it("does not false-panic when the baseline read failed", () => {
-      // Regression for #2043: an unreadable baseline must never make every
-      // existing line look new.
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'baseline.log'`,
-        `Set-Content -LiteralPath $p -Value @('one','two','three')`,
-        `$g = Compare-LogGrowth -Path $p -Before ([pscustomobject]@{ Readable = $false; Lines = @() })`,
-        `Say 'Checked' $g.Checked`,
-        `Say 'Grew' $g.Grew`,
-      ]);
-      expect(field(out, "Checked")).toBe("False");
-      expect(field(out, "Grew")).toBe("False");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it("does not silently pass when the post-launch read failed", () => {
-      // Regression for #158: collapsing an unreadable read to 0 lines makes
-      // `0 -gt N` false and reports a clean launch after a real panic. The
-      // result must be unchecked, which is the state the launchers skip.
-      // A directory stands in for an unreadable target on every platform.
-      const out = runProbe((dir) => [
-        `$p = Join-Path '${dir}' 'unreadable.log'`,
-        `Set-Content -LiteralPath $p -Value @('one','two')`,
-        `$before = Read-LogFile $p`,
-        `Remove-Item -LiteralPath $p -Force`,
-        `New-Item -ItemType Directory -Path $p -Force | Out-Null`,
-        `$g = Compare-LogGrowth -Path $p -Before $before`,
-        `Say 'Checked' $g.Checked`,
-        `Say 'Grew' $g.Grew`,
-      ]);
-      expect(field(out, "Checked")).toBe("False");
-      expect(field(out, "Grew")).toBe("False");
-    }, POWERSHELL_TIMEOUT_MS);
-
-    it.runIf(process.platform === "win32")(
-      "reports unreadable (and never throws) for an exclusively-locked file",
-      () => {
+    type Case = { name: string; body: (dir: string) => string[]; windowsOnly?: boolean };
+    const CASES: Case[] = [
+      {
+        name: "readable",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'readable.log'`,
+          `Set-Content -LiteralPath $p -Value @('alpha','beta')`,
+          `$r = Read-LogFile $p`,
+          `Say 'Readable' $r.Readable`,
+          `Say 'Count' $r.Lines.Count`,
+          `Say 'First' $r.Lines[0]`,
+        ],
+      },
+      {
+        // The app may not have created the log yet. Reporting this as unreadable
+        // would skip the check on a perfectly normal first launch.
+        name: "missing",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'never-created.log'`,
+          `$r = Read-LogFile $p`,
+          `Say 'Readable' $r.Readable`,
+          `Say 'Count' $r.Lines.Count`,
+        ],
+      },
+      {
+        name: "grew",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'growing.log'`,
+          `Set-Content -LiteralPath $p -Value @('one')`,
+          `$before = Read-LogFile $p`,
+          `Add-Content -LiteralPath $p -Value @('two')`,
+          `$g = Compare-LogGrowth -Path $p -Before $before`,
+          `Say 'Checked' $g.Checked`,
+          `Say 'Grew' $g.Grew`,
+          `Say 'Count' $g.Lines.Count`,
+        ],
+      },
+      {
+        name: "steady",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'steady.log'`,
+          `Set-Content -LiteralPath $p -Value @('one')`,
+          `$before = Read-LogFile $p`,
+          `$g = Compare-LogGrowth -Path $p -Before $before`,
+          `Say 'Checked' $g.Checked`,
+          `Say 'Grew' $g.Grew`,
+        ],
+      },
+      {
+        // Regression for #2043: an unreadable baseline must never make every
+        // existing line look new.
+        name: "baseline-unreadable",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'baseline.log'`,
+          `Set-Content -LiteralPath $p -Value @('one','two','three')`,
+          `$g = Compare-LogGrowth -Path $p -Before ([pscustomobject]@{ Readable = $false; Lines = @() })`,
+          `Say 'Checked' $g.Checked`,
+          `Say 'Grew' $g.Grew`,
+        ],
+      },
+      {
+        // Regression for #158: collapsing an unreadable read to 0 lines makes
+        // `0 -gt N` false and reports a clean launch after a real panic. The
+        // result must be unchecked, which is the state the launchers skip.
+        // A directory stands in for an unreadable target on every platform.
+        name: "current-unreadable",
+        body: (dir) => [
+          `$p = Join-Path '${dir}' 'unreadable.log'`,
+          `Set-Content -LiteralPath $p -Value @('one','two')`,
+          `$before = Read-LogFile $p`,
+          `Remove-Item -LiteralPath $p -Force`,
+          `New-Item -ItemType Directory -Path $p -Force | Out-Null`,
+          `$g = Compare-LogGrowth -Path $p -Before $before`,
+          `Say 'Checked' $g.Checked`,
+          `Say 'Grew' $g.Grew`,
+        ],
+      },
+      {
         // The real reproduction: the app holds buildmesh.log open for writing.
-        const out = runProbe((dir) => [
+        name: "locked",
+        windowsOnly: true,
+        body: (dir) => [
           `$p = Join-Path '${dir}' 'locked.log'`,
           `Set-Content -LiteralPath $p -Value @('alpha')`,
           `$lock = [System.IO.File]::Open($p, 'Open', 'ReadWrite', 'None')`,
@@ -296,11 +264,108 @@ describe("launcher exit-code contract (issue #2043)", () => {
           `  Say 'Readable' $r.Readable`,
           `  Say 'Count' $r.Lines.Count`,
           `} finally { $lock.Dispose() }`,
-        ]);
+        ],
+      },
+    ];
+
+    let outputs = new Map<string, string>();
+    let workDir = "";
+
+    beforeAll(() => {
+      workDir = mkdtempSync(resolve(tmpdir(), "bm-launcher-"));
+      const commonPath = resolve(REPO_ROOT, COMMON).replace(/'/g, "''");
+      const script = [
+        "$ErrorActionPreference = 'Stop'",
+        `. '${commonPath}'`,
+        "function Say([string]$k, $v) { Write-Output ($k + '=' + $v) }",
+        ...CASES.filter((c) => !c.windowsOnly || process.platform === "win32").flatMap((c) => {
+          const dir = resolve(workDir, c.name);
+          return [
+            `Write-Output '@@case ${c.name}'`,
+            "try {",
+            `  New-Item -ItemType Directory -Path '${dir}' -Force | Out-Null`,
+            ...c.body(dir).map((line) => `  ${line}`),
+            "} catch { Write-Output ('ERROR=' + $_.Exception.Message) }",
+          ];
+        }),
+      ].join("\n");
+      const probe = resolve(workDir, "probe.ps1");
+      writeFileSync(probe, script + "\n", "utf8");
+      const out = execFileSync(PS!, ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", probe], {
+        encoding: "utf8",
+        timeout: POWERSHELL_TIMEOUT_MS,
+      });
+      outputs = new Map(
+        out
+          .split(/^@@case /m)
+          .slice(1)
+          .map((chunk) => {
+            const [name, ...rest] = chunk.split(/\r?\n/);
+            return [name.trim(), rest.join("\n")] as [string, string];
+          }),
+      );
+    }, POWERSHELL_TIMEOUT_MS);
+
+    afterAll(() => {
+      if (workDir) rmSync(workDir, { recursive: true, force: true });
+    });
+
+    /** A case that threw reports ERROR=..., which must fail loudly, not as a missing field. */
+    const outputOf = (name: string) => {
+      const out = outputs.get(name);
+      expect(out, `case ${name} produced no output`).toBeDefined();
+      expect(out, `case ${name} threw inside PowerShell`).not.toMatch(/^ERROR=/m);
+      return out!;
+    };
+
+    const field = (out: string, key: string) =>
+      new RegExp(`^${key}=(.*)$`, "m").exec(out)?.[1]?.trim();
+
+    it("reads a readable file", () => {
+      const out = outputOf("readable");
+      expect(field(out, "Readable")).toBe("True");
+      expect(field(out, "Count")).toBe("2");
+      expect(field(out, "First")).toBe("alpha");
+    });
+
+    it("treats a missing file as zero lines, not as unreadable", () => {
+      const out = outputOf("missing");
+      expect(field(out, "Readable")).toBe("True");
+      expect(field(out, "Count")).toBe("0");
+    });
+
+    it("reports growth when the file gained lines", () => {
+      const out = outputOf("grew");
+      expect(field(out, "Checked")).toBe("True");
+      expect(field(out, "Grew")).toBe("True");
+      expect(field(out, "Count")).toBe("2");
+    });
+
+    it("reports no growth when the file is unchanged", () => {
+      const out = outputOf("steady");
+      expect(field(out, "Checked")).toBe("True");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it("does not false-panic when the baseline read failed", () => {
+      const out = outputOf("baseline-unreadable");
+      expect(field(out, "Checked")).toBe("False");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it("does not silently pass when the post-launch read failed", () => {
+      const out = outputOf("current-unreadable");
+      expect(field(out, "Checked")).toBe("False");
+      expect(field(out, "Grew")).toBe("False");
+    });
+
+    it.runIf(process.platform === "win32")(
+      "reports unreadable (and never throws) for an exclusively-locked file",
+      () => {
+        const out = outputOf("locked");
         expect(field(out, "Readable")).toBe("False");
         expect(field(out, "Count")).toBe("0");
       },
-      POWERSHELL_TIMEOUT_MS,
     );
   });
 });

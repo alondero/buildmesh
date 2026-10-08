@@ -10,7 +10,8 @@
  * these fixtures is caught at compile time.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { render, screen, waitFor, fireEvent, act, configure } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -223,6 +224,9 @@ beforeEach(() => {
     activeCircuitEditorId: null,
   });
 });
+
+// Load the lazy Probe tab chunks up front so rendering a tab does not wait on disk.
+beforeAll(preloadProbeTabs, 60_000);
 
 describe('CircuitsProbeTab', () => {
   it('exposes the built-in Review Blueprint before it has any runs', async () => {

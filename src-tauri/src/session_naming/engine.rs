@@ -185,7 +185,9 @@ pub(super) fn prepare_rename_with(
     node_id: i64,
     resolve_launch: impl FnOnce() -> Result<NamingLaunch, String>,
 ) -> Result<Option<(RenameTrigger, NamingLaunch)>, String> {
-    let Some(trigger) = should_trigger_rename(repo, node_id) else { return Ok(None); };
+    let Some(trigger) = should_trigger_rename(repo, node_id) else {
+        return Ok(None);
+    };
     let launch = match resolve_launch() {
         Ok(launch) => launch,
         Err(error) => {
@@ -215,10 +217,15 @@ pub(super) fn on_turn_with(repo: Arc<dyn SessionNamingRepository>, node_id: i64,
         return;
     };
 
-    let (trigger, backend_env) = match prepare_rename_with(&*repo, node_id, || naming_backend_env(&user_naming_provider)) {
+    let (trigger, backend_env) = match prepare_rename_with(&*repo, node_id, || {
+        naming_backend_env(&user_naming_provider)
+    }) {
         Ok(Some(prepared)) => prepared,
         Ok(None) => return,
-        Err(error) => { tracing::warn!("session_naming: {error}"); return; }
+        Err(error) => {
+            tracing::warn!("session_naming: {error}");
+            return;
+        }
     };
     let RenameTrigger { buffer } = trigger;
 
@@ -440,7 +447,7 @@ pub(super) fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 /// sticky 3-attempt lockout (the toast: "Couldn't auto-name node …").
 ///
 /// Resolution order, matching `where.exe`:
-/// 1. `which::which("claude")` — walks the process `PATH` honouring
+/// 1. `which::which_in("claude", PATH)` — walks the given `PATH` honouring
 ///    `PATHEXT`. Returns the absolute path of the first hit, mirroring
 ///    the same lookup the regular Claude Code spawn relies on.
 /// 2. **Well-known install fallback** — probes the standard install
@@ -455,18 +462,46 @@ pub(super) fn maybe_dump_rename_buffer(node_id: i64, raw: &str, cleaned: &str) {
 ///    the user at Settings → Auto-naming (which `App.tsx`'s toast
 ///    already references) instead of a generic OS ENOENT string.
 ///
-/// Pure and side-effect-free: reads env via `std::env::var`, never
-/// mutates it. `pub(crate)` so a future test in a sibling module can
-/// exercise the well-known-fallback arm against a stubbed `USERPROFILE`
-/// without going through a real spawn.
-pub(crate) fn resolve_claude_binary() -> Result<std::path::PathBuf, String> {
-    if let Ok(p) = which::which("claude") {
+/// Pure and side-effect-free: the lookup inputs arrive as a [`ClaudeSearch`]
+/// (production callers build one with [`ClaudeSearch::from_process_env`]), so
+/// a test can exercise the well-known-fallback arm against stubbed values
+/// without going through a real spawn or touching the process environment.
+/// The three inputs the Claude lookup reads. Passing them explicitly lets a
+/// test model "stale PATH, no install" without rewriting the process-wide
+/// `PATH`: on Windows every other test thread that spawns `git`, `node` or
+/// `powershell.exe` resolves it through that same variable, so a rewritten
+/// `PATH` makes them fail with "program not found" (issue #2109).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ClaudeSearch {
+    pub(crate) path: Option<std::ffi::OsString>,
+    pub(crate) userprofile: Option<String>,
+    pub(crate) appdata: Option<String>,
+}
+
+impl ClaudeSearch {
+    pub(crate) fn from_process_env() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            userprofile: std::env::var("USERPROFILE").ok(),
+            appdata: std::env::var("APPDATA").ok(),
+        }
+    }
+}
+
+pub(crate) fn resolve_claude_binary_in(
+    search: &ClaudeSearch,
+) -> Result<std::path::PathBuf, String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let found = search
+        .path
+        .as_deref()
+        .and_then(|path| which::which_in("claude", Some(path), cwd).ok());
+    if let Some(p) = found {
         return Ok(p);
     }
-    if let Some(p) = resolve_from_windows_install_paths(
-        std::env::var("USERPROFILE").ok().as_deref(),
-        std::env::var("APPDATA").ok().as_deref(),
-    ) {
+    if let Some(p) =
+        resolve_from_windows_install_paths(search.userprofile.as_deref(), search.appdata.as_deref())
+    {
         return Ok(p);
     }
     Err("claude binary not found on PATH or in well-known install \
@@ -563,8 +598,8 @@ pub(crate) type NamingLaunch = crate::agent::background::BackgroundLaunch;
 
 pub(crate) fn naming_backend_env(provider: &str) -> Result<NamingLaunch, String> {
     let prefs = crate::preferences::load()?;
-    let plan = crate::preferences::launch_configurations::resolve(
-        &prefs, provider, &Default::default())?;
+    let plan =
+        crate::preferences::launch_configurations::resolve(&prefs, provider, &Default::default())?;
     naming_backend_env_from_plan(plan, &prefs)
 }
 
@@ -574,7 +609,11 @@ pub(crate) fn naming_backend_env_from_plan(
 ) -> Result<NamingLaunch, String> {
     let legacy_haiku = plan.route.is_none() && plan.harness.harness == "anthropic";
     let mut launch = crate::agent::background::resolve_plan(plan, prefs)?;
-    if legacy_haiku { launch.env.extend(naming_backend_env_with("anthropic", |_| Vec::new())); }
+    if legacy_haiku {
+        launch
+            .env
+            .extend(naming_backend_env_with("anthropic", |_| Vec::new()));
+    }
     Ok(launch)
 }
 
@@ -603,14 +642,16 @@ pub(super) async fn summarize_and_rename_with(
     let full_input = format!("{}\n\nTerminal log to summarize:\n{}", prompt, clean_buffer);
     let directory = tempfile::tempdir().map_err(|e| e.to_string())?;
     let result = directory.path().join("name.txt");
-    let mut cmd: tokio::process::Command =
-        backend_env.command(directory.path(), &result, &full_input)?.into();
+    let mut cmd: tokio::process::Command = backend_env
+        .command(directory.path(), &result, &full_input)?
+        .into();
     // Caller (on_turn_with, line 734) is `tauri::async_runtime::spawn` and this
     // future is wrapped in a 30s `tokio::time::timeout` (line below) — both
     // cancel the awaiter, not the child, so without this flag a claude leak
     // accumulates up to MAX_RENAME_ATTEMPTS times per node (gh688).
     cmd.kill_on_drop(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::process::CommandExt;
         cmd.as_std_mut().process_group(0);
     }
@@ -621,7 +662,9 @@ pub(super) async fn summarize_and_rename_with(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn CLI: {}", e))?;
-    let _process_guard = child.id().map(crate::agent::background::BackgroundProcessGuard::new);
+    let _process_guard = child
+        .id()
+        .map(crate::agent::background::BackgroundProcessGuard::new);
 
     let output = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         if let Some(mut stdin) = child.stdin.take() {
@@ -640,15 +683,25 @@ pub(super) async fn summarize_and_rename_with(
     .map_err(|_| "CLI timed out after 30s".to_string())??;
 
     if !output.status.success() {
-        let diagnostic = if output.stderr.is_empty() { &output.stdout } else { &output.stderr };
+        let diagnostic = if output.stderr.is_empty() {
+            &output.stdout
+        } else {
+            &output.stderr
+        };
         return Err(format!(
             "CLI exited with status {}: {}",
             output.status,
-            crate::secret_scrubber::SecretScrubber::scrub(&String::from_utf8_lossy(diagnostic)).chars().take(2000).collect::<String>()
+            crate::secret_scrubber::SecretScrubber::scrub(&String::from_utf8_lossy(diagnostic))
+                .chars()
+                .take(2000)
+                .collect::<String>()
         ));
     }
 
-    let raw = backend_env.final_output(String::from_utf8_lossy(&output.stdout).into_owned(), &result)?;
+    let raw = backend_env.final_output(
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        &result,
+    )?;
     let slug = slug_with_retry(&raw)?;
     Ok(slug)
 }
