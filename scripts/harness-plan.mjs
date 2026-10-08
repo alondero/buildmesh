@@ -57,6 +57,7 @@ export function planGates(paths, { full = false } = {}) {
   node('docs', ['scripts/check-docs.mjs', '--base', '$BASE']);
   node('readme', ['scripts/check-readme-drift.mjs']);
   node('process-spawns', ['scripts/check-process-spawn-discipline.mjs']);
+  node('known-flakes', ['scripts/harness.mjs', 'gate', 'flakes']);
   npm('agent-tests', 'test:agent', { tests: 'node', ignores: NODE_CHECK_IGNORES });
   npm('docs-tests', 'test:docs', { tests: 'node' });
   npm('readme-tests', 'test:readme', { tests: 'node' });
@@ -87,9 +88,8 @@ export function planGates(paths, { full = false } = {}) {
     // touched files fail, and the remaining count stays visible.
     cargo('rust-format', ['fmt', '--all', '--check'], { touchedFormat: true });
     cargo('rust-clippy', ['clippy', '--locked', '--all-targets', '--message-format=json'], { warnings: true, after: built });
-    // All targets include the desktop binary (compile smoke). Tests stay
-    // serial within a process (process-global DB, see CLAUDE.md), but the CI
-    // shards run as concurrent processes so the suite is not single-core.
+    // All targets include the desktop binary (compile smoke); isolated failures
+    // are rerun after both lanes drain.
     gates.push({ id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], minutes: 30, rust: true, tests: 'rust', ignores: RUST_IGNORES, lane: 'rust', heavy: true, after: built });
     node('binding-drift', ['scripts/harness.mjs', 'gate', 'bindings'], { ignores: RUST_IGNORES, lane: 'rust' });
   }
@@ -107,14 +107,14 @@ export function touchedFormatDiffs(output, paths) {
 }
 
 export function isHarnessPath(path) {
-  return /^(?:scripts\/harness(?:-plan|-lanes)?\.mjs|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
+  return /^(?:scripts\/harness(?:-plan|-lanes|-vitest-isolate)?\.mjs|scripts\/known-flakes\.json|scripts\/harness-corpus\.json|scripts\/ci\/run-guarded\.mjs|tests\/agent-infra\/|\.claude\/|\.agents\/|\.github\/PULL_REQUEST_TEMPLATE\.md$)/.test(path);
 }
 
 export function executedTests(kind, output) {
   output = stripVTControlCharacters(output);
   if (kind === 'node') return Number(output.match(/(?:#|ℹ)\s+pass (\d+)/)?.[1] ?? 0);
   if (kind === 'android') return Number(output.match(/Android tests: (\d+) passed/)?.[1] ?? 0);
-  if (kind === 'vitest') return Number(output.match(/Tests\s+(\d+) passed/)?.[1] ?? 0);
+  if (kind === 'vitest') return Number(output.match(/Tests\s+(?:\d+ failed\s*\|\s*)?(\d+) passed/)?.[1] ?? 0);
   if (kind === 'playwright') return Number(output.match(/(\d+) passed(?:\s|\()/)?.[1] ?? 0);
   if (kind === 'rust') return [...output.matchAll(/test result: ok\. (\d+) passed/g)].reduce((sum, match) => sum + Number(match[1]), 0);
   return null;

@@ -1,16 +1,297 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { changedPaths, completion, fingerprint, runGate, scopePaths, verify, waitForVerify } from '../../scripts/harness.mjs';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from '../../scripts/harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan, slotHolders } from '../../scripts/harness-lanes.mjs';
+import { conptyPrerequisite, gatePassed, isolatedCommand, isolateTests, knownFlakes, rustFailures, validateFlakeIssues, vitestReport } from '../../scripts/harness-test-failures.mjs';
+import { VERSION as CONPTY_VERSION } from '../../scripts/prepare-conpty.mjs';
 
 const script = fileURLToPath(new URL('../../scripts/harness.mjs', import.meta.url));
 const root = fileURLToPath(new URL('../../', import.meta.url));
+
+test('Vitest JSON and cargo failure blocks name exact tests without panic prose', () => {
+  const report = vitestReport(root, { numPassedTests: 8, numFailedTests: 1, testResults: [{ name: join(root, 'tests/unit/example.test.ts'), status: 'failed', assertionResults: [{ fullName: 'suite a + (b)', status: 'failed' }] }] });
+  assert.deepEqual(report.failures, [{ id: 'tests/unit/example.test.ts > suite a + (b)', file: 'tests/unit/example.test.ts', name: 'suite a + (b)' }]);
+  assert.equal(report.unattributed, false);
+  assert.equal(report.count, 8);
+  const cargo = 'running 2 tests\ntest db::broken ... FAILED\n\nfailures:\n\n---- db::broken stdout ----\n    misleading panic detail\n\nfailures:\n\n    db::broken\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored;\n';
+  assert.deepEqual(rustFailures(cargo), [{ id: 'db::broken', name: 'db::broken', target: { kind: 'lib' } }]);
+  assert.equal(rustFailures(cargo, { kind: 'test', name: 'integration' })[0].id, 'test:integration > db::broken');
+  assert.deepEqual(isolatedCommand(report.failures[0], 'vitest', 'report.json'), ['node', 'scripts/harness-vitest-isolate.mjs', 'tests/unit/example.test.ts', '^suite a \\+ \\(b\\)$', 'report.json']);
+  assert.deepEqual(isolatedCommand(rustFailures(cargo)[0], 'rust'), ['cargo', 'test', '--locked', '--lib', 'db::broken', '--', '--exact', '--test-threads=1']);
+});
+
+test('isolated passes distinguish listed flakes, unlisted flakes and persistent failures', async t => {
+  const fixture = repo(t);
+  const failures = [{ id: 'rust::known', name: 'rust::known' }, { id: 'rust::new', name: 'rust::new' }];
+  let calls = 0;
+  const run = async () => { calls += 1; return { exitCode: 0, count: 1, log: 'isolated.log' }; };
+  const listed = await isolateTests(fixture.cwd, { failures: [failures[0]] }, run, { 'rust::known': 1833 });
+  assert.equal(listed.outcome, 'FLAKY');
+  assert.equal(listed.failures[0].issue, 1833);
+  assert.equal(gatePassed(listed), true);
+  const unlisted = await isolateTests(fixture.cwd, { failures }, run, { 'rust::known': 1833 });
+  assert.equal(unlisted.outcome, 'FLAKY');
+  assert.equal(gatePassed(unlisted), false);
+  assert.match(unlisted.reason, /File an issue/);
+  assert.equal(calls, 3);
+  for (const rerun of [{ exitCode: 1, count: 0 }, { exitCode: 0, count: 0 }, { exitCode: 0, count: 1, matched: false }, { exitCode: 124, count: 0 }, { exitCode: 127, count: 0 }]) {
+    const row = await isolateTests(fixture.cwd, { failures: [failures[0]] }, async () => rerun, { 'rust::known': 1833 });
+    assert.equal(row.outcome, rerun.exitCode === 124 ? 'TIMEOUT' : rerun.exitCode === 127 ? 'BLOCKED' : 'FAIL');
+    assert.equal(gatePassed(row), false);
+  }
+  assert.equal((await isolateTests(fixture.cwd, { failures, unattributed: true }, run, {})).outcome, 'FAIL');
+});
+
+test('known flakes reference open GitHub issues and reject closed issues or PRs', async () => {
+  const entries = knownFlakes(root);
+  await validateFlakeIssues(entries);
+  await assert.rejects(validateFlakeIssues({ test: 1 }, async () => ({ state: 'closed' })), /open issue/);
+  await assert.rejects(validateFlakeIssues({ test: 1 }, async () => ({ state: 'open', pull_request: {} })), /open issue/);
+});
+
+test('closed known-flake issues surface their exact validation error in the gate row', async t => {
+  const fixture = repo(t);
+  fixture.put('scripts/known-flakes.json', '{"test":1410}');
+  fixture.put('closed-issue.cjs', "globalThis.fetch = async () => ({ ok: true, json: async () => ({ state: 'closed' }) });");
+  const row = await runGate(fixture.cwd, { id: 'known-flakes', command: ['node', script, 'gate', 'flakes'], minutes: 1 }, fixture.base, [], { NODE_OPTIONS: `--require="${join(fixture.cwd, 'closed-issue.cjs').replaceAll('\\', '/')}"` });
+  assert.equal(row.outcome, 'FAIL');
+  assert.match(row.reason, /Known-flake issue #1410 must be an open issue/, readFileSync(row.log, 'utf8'));
+});
+
+test('doctest failures remain named and FAIL without an unsupported isolation attempt', async t => {
+  const fixture = repo(t);
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname="doc-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  fixture.put('src-tauri/src/lib.rs', '/// ```\n/// assert!(false);\n/// ```\npub fn f() {}\n/// ```\n/// assert!(true);\n/// ```\npub fn g() {}\n');
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test', '--doc'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base, [], { CARGO_TERM_COLOR: 'always' });
+  assert.equal(row.outcome, 'FAIL');
+  assert.match(row.failures[0].name, /lib.rs - f \(line 1\)/);
+  assert.equal(row.failures[0].target.kind, 'doc');
+  assert.equal(row.count, 1);
+  assert.equal(row.failures[0].rerun, undefined);
+  assert.match(row.reason, /Doctest isolation unavailable/);
+});
+
+test('isolation shares a total deadline across gates and leaves remaining failures TIMEOUT', async t => {
+  const fixture = repo(t);
+  let clock = 0;
+  const budget = { deadline: 100, now: () => clock };
+  const failures = [{ id: 'a', name: 'a' }, { id: 'b', name: 'b' }, { id: 'c', name: 'c' }];
+  const remaining = [];
+  const run = async (_test, remainingMs) => { remaining.push(remainingMs); clock += 60; return { exitCode: 0, count: 1 }; };
+  const row = await isolateTests(fixture.cwd, { failures }, run, {}, budget);
+  assert.deepEqual(remaining, [100, 40]);
+  assert.equal(row.outcome, 'TIMEOUT');
+  assert.equal(row.failures[2].outcome, 'TIMEOUT');
+  assert.equal(row.failures[2].rerun, undefined);
+  assert.match(row.reason, /budget exhausted.*not isolated/);
+  const next = await isolateTests(fixture.cwd, { failures: [failures[0]] }, run, {}, budget);
+  assert.equal(next.outcome, 'TIMEOUT');
+  assert.equal(remaining.length, 2);
+});
+
+test('product runner and shared failure parser edits select product verification', () => {
+  for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs']) {
+    const ids = planGates([path]).map(gate => gate.id);
+    for (const id of ['rust-format', 'rust-clippy', 'rust-tests', 'binding-drift', 'frontend-build', 'bundle', 'frontend-tests', 'browser-smoke']) assert.ok(ids.includes(id), `${path}: ${id}`);
+  }
+});
+
+test('uncached ConPTY checks its network prerequisite before compilation; cached packages work offline', async t => {
+  const fixture = repo(t);
+  const unavailable = await conptyPrerequisite(fixture.cwd, async () => { throw new Error('offline'); });
+  assert.match(unavailable, /not cached.*unreachable/);
+  assert.match(await conptyPrerequisite(fixture.cwd, async () => ({ ok: false, status: 503 })), /HTTP 503/);
+  assert.equal(await conptyPrerequisite(fixture.cwd, async () => ({ ok: true })), null);
+  fixture.put(`src-tauri/target/conpty/${CONPTY_VERSION}/package.zip`, 'cached fixture');
+  assert.equal(await conptyPrerequisite(fixture.cwd, async () => { throw new Error('must not contact network'); }), null);
+});
+
+test('real Vitest gate records one exact isolated rerun and keeps unhandled errors red', async t => {
+  const fixture = repo(t);
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node", passWithNoTests: false } };');
+  fixture.put('tests/isolation.test.js', `import { test, expect } from 'vitest';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+test('one + (exact)', () => { mkdirSync('.harness', {recursive:true}); const seen=existsSync('.harness/seen'); writeFileSync('.harness/seen','yes'); expect(seen).toBe(true); });
+test('one + (exact) sibling', () => { throw new Error('persistent sibling'); });
+`);
+  const gate = { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 };
+  const row = await runGate(fixture.cwd, gate, fixture.base);
+  assert.equal(row.outcome, 'FAIL', JSON.stringify(row));
+  assert.deepEqual(row.failures.map(test => test.outcome), ['FLAKY', 'FAIL']);
+  assert.ok(row.failures[0].rerun.command.includes('^one \\+ \\(exact\\)$'));
+  assert.equal(row.failures[0].rerun.count, 1);
+  assert.equal(row.failures[1].rerun.count, 0);
+  fixture.put('tests/isolation.test.js', "import { test } from 'vitest'; test('runtime error', () => { Promise.reject(new Error('unhandled rejection')); });");
+  const runtime = await runGate(fixture.cwd, gate, fixture.base);
+  assert.equal(runtime.outcome, 'FAIL');
+  assert.equal(runtime.unattributed, true);
+  assert.deepEqual(runtime.failures, []);
+  fixture.put('tests/isolation.test.js', "throw new Error('collection failure');");
+  const collection = await runGate(fixture.cwd, gate, fixture.base);
+  assert.equal(collection.outcome, 'FAIL');
+  assert.equal(collection.failures[0].id, 'tests/isolation.test.js');
+  assert.equal(collection.failures[0].rerun, undefined);
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.*"], environment: "node" } };');
+  fixture.put('tests/isolation.test.js', "import { test, expect } from 'vitest'; test.skipIf(process.env.VITEST_MAX_WORKERS === '1')('same name', () => { expect(false).toBe(true); });");
+  fixture.put('tests/isolation.test.jsx', "import { test, expect } from 'vitest'; test('same name', () => { expect(true).toBe(true); });");
+  const skipped = await runGate(fixture.cwd, gate, fixture.base);
+  assert.equal(skipped.outcome, 'FAIL');
+  assert.equal(skipped.failures[0].rerun.count, 0);
+  assert.match(readFileSync(skipped.failures[0].rerun.log, 'utf8'), /1 skipped/);
+  assert.doesNotMatch(readFileSync(skipped.failures[0].rerun.log, 'utf8'), /isolation.test.jsx/);
+});
+
+test('real Cargo gate names a suite failure and reruns just that library test', async t => {
+  const fixture = repo(t);
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname="harness-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  fixture.put('src-tauri/src/lib.rs', '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--exact")); }\n#[test] fn sibling() {}\n');
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', command: ['cargo', 'test'], cwd: 'src-tauri', tests: 'rust', minutes: 1 }, fixture.base);
+  assert.equal(row.outcome, 'FLAKY', JSON.stringify(row));
+  assert.equal(row.failures[0].id, 'transient');
+  assert.equal(row.count, 1);
+  assert.equal(row.failures[0].rerun.count, 1);
+  assert.deepEqual(row.failures[0].rerun.command.slice(1), ['test', '--locked', '--lib', 'transient', '--', '--exact', '--test-threads=1']);
+});
+
+test('duplicate Vitest names report ambiguity even when both isolated matches pass', async t => {
+  const fixture = repo(t);
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+  fixture.put('tests/duplicate.test.js', "import { test, expect } from 'vitest'; test('same', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); }); test('same', () => {});");
+  const row = await runGate(fixture.cwd, { id: 'frontend-tests', command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest', minutes: 1 }, fixture.base);
+  assert.equal(row.outcome, 'FAIL');
+  assert.equal(row.failures[0].rerun.exitCode, 0);
+  assert.equal(row.failures[0].rerun.count, 2);
+  assert.match(row.reason, /Ambiguous test name.*2 matches/);
+  assert.match(row.failures[0].reason, /Ambiguous test name/);
+});
+
+test('evaluation accepts a listed isolated pass and still rejects an unlisted flake', t => {
+  const fixture = repo(t);
+  fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
+  symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+  fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+  fixture.put('package.json', '{"type":"module"}');
+  fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+  fixture.put('tests/evaluate.test.js', "import { test, expect } from 'vitest'; test('alone', () => { expect(process.env.VITEST_MAX_WORKERS).toBe('1'); });");
+  fixture.put('scripts/harness-corpus.json', JSON.stringify([{ id: 'listed', boundary: 'fixture Vitest', gate: { command: ['node', 'node_modules/vitest/vitest.mjs', 'run'], tests: 'vitest' } }]));
+  fixture.put('scripts/known-flakes.json', '{"tests/evaluate.test.js > alone":1833}');
+  const listed = fixture.cli('evaluate', '--case', 'listed');
+  assert.equal(listed.status, 0, listed.stdout + listed.stderr);
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/evaluation.json')));
+  assert.equal(receipt.outcome, 'PASS');
+  assert.equal(receipt.results[0].outcome, 'FLAKY');
+  fixture.put('scripts/known-flakes.json', '{}');
+  assert.equal(fixture.cli('evaluate', '--case', 'listed').status, 1);
+});
+
+test('the Rust shard runner records targets and reruns library and integration failures separately', async t => {
+  const fixture = repo(t);
+  for (const path of ['scripts/rust-test-shards.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/rust-shards.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  fixture.put('.github/workflows/verify.yml', 'jobs:\n  rust-tests:\n    strategy:\n      matrix:\n        shard:\n          - label: fixture\n            args: ""\n    steps:\n');
+  fixture.put('src-tauri/Cargo.toml', '[package]\nname="harness-fixture"\nversion="0.1.0"\nedition="2021"\n');
+  const tests = '#[test] fn transient() { assert!(std::env::args().any(|arg| arg == "--exact")); }\n#[test] fn sibling() {}\n';
+  fixture.put('src-tauri/src/lib.rs', tests);
+  fixture.put('src-tauri/tests/contract.rs', tests);
+  fixture.put('src-tauri/Cargo.lock', 'version = 4\n[[package]]\nname = "harness-fixture"\nversion = "0.1.0"\n');
+  // This std-only crate does not load ConPTY; stage placeholder assets to
+  // exercise the runner's prerequisite seam separately from Tauri packaging.
+  for (const asset of ['conpty.dll', 'x64/OpenConsole.exe', 'arm64/OpenConsole.exe', 'x86/OpenConsole.exe']) fixture.put(`src-tauri/target/debug/deps/${asset}`, 'fixture');
+  const gate = { id: 'rust-tests', command: ['node', 'scripts/rust-test-shards.mjs'], tests: 'rust', minutes: 1 };
+  const extraEnv = { CARGO_TARGET_DIR: join(fixture.cwd, 'src-tauri/target') };
+  const row = await runGate(fixture.cwd, gate, fixture.base, [], extraEnv);
+  assert.equal(row.outcome, 'FLAKY', `${JSON.stringify(row)}\n${readFileSync(row.log, 'utf8')}`);
+  assert.deepEqual(row.failures.map(test => test.id).sort(), ['test:contract > transient', 'transient']);
+  assert.ok(row.failures.every(test => test.rerun.count === 1));
+  const integration = row.failures.find(test => test.target.kind === 'test');
+  assert.deepEqual(integration.rerun.command.slice(1), ['test', '--locked', '--test', 'contract', 'transient', '--', '--exact', '--test-threads=1']);
+  if (process.platform === 'win32') {
+    unlinkSync(join(fixture.cwd, 'src-tauri/target/debug/deps/conpty.dll'));
+    const blocked = await runGate(fixture.cwd, gate, fixture.base, [], extraEnv);
+    assert.equal(blocked.outcome, 'BLOCKED');
+    assert.match(blocked.reason, /ConPTY runtime is not staged.*conpty.dll/);
+  }
+});
+
+test('test prerequisite checks report missing Git as BLOCKED before launching the command', async t => {
+  const fixture = repo(t);
+  const row = await runGate(fixture.cwd, { id: 'rust-tests', tests: 'rust', command: ['node', '-e', 'throw new Error("must not start")'], minutes: 1 }, fixture.base, [], { PATH: fixture.cwd });
+  assert.equal(row.outcome, 'BLOCKED');
+  assert.match(row.reason, /Git is unavailable on PATH/);
+  assert.equal(row.log, null);
+});
+
+test('completion allows only listed isolated passes and wait prints the names', async t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  passingReceipt(fixture, task);
+  const receipt = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+  const row = receipt.gates.find(gate => gate.id === 'frontend-tests');
+  row.outcome = 'FLAKY';
+  row.failures = [{ id: 'tests/test.ts > known', outcome: 'FLAKY', issue: 1833, rerun: { count: 1, exitCode: 0 } }];
+  fixture.put('.harness/receipt.json', JSON.stringify({ ...receipt, finishedAt: new Date().toISOString(), durationMs: 100 }));
+  assert.equal(fixture.cli('finish').status, 0);
+  const summary = await waitForVerify(fixture.cwd, { graceMs: 0 });
+  assert.match(summary.lines.join('\n'), /FLAKY tests\/test.ts > known.*issues\/1833/);
+  delete row.failures[0].issue;
+  fixture.put('.harness/receipt.json', JSON.stringify({ ...receipt, outcome: 'FLAKY' }));
+  assert.equal(fixture.cli('finish').status, 1);
+});
+
+test('verify drains both lanes before isolation and resumes only for listed flakes', async t => {
+  for (const listed of [true, false]) {
+    const fixture = repo(t);
+    fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
+    symlinkSync(join(root, 'node_modules'), join(fixture.cwd, 'node_modules'), 'junction');
+    fixture.put('scripts/harness-vitest-isolate.mjs', readFileSync(join(root, 'scripts/harness-vitest-isolate.mjs')));
+    fixture.put('package.json', '{"type":"module"}');
+    fixture.put('vitest.config.mjs', 'export default { test: { include: ["tests/*.test.js"], environment: "node" } };');
+    fixture.put('tests/lane.test.js', `import { test, expect } from 'vitest';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+test('isolated', async () => {
+  mkdirSync('.harness', {recursive:true});
+  if (existsSync('.harness/failed')) { expect(existsSync('.harness/other-finished')).toBe(true); return; }
+  await new Promise(resolve => { const timer=setInterval(() => { if(existsSync('.harness/other-started')) { clearInterval(timer); resolve(); } }, 10); });
+  writeFileSync('.harness/failed','yes'); throw new Error('suite-only failure');
+});`);
+    fixture.put('scripts/known-flakes.json', JSON.stringify(listed ? { 'tests/lane.test.js > isolated': 1833 } : {}));
+    const plan = () => [
+      { id: 'frontend-tests', lane: 'frontend', tests: 'vitest', minutes: 1, command: ['node', 'node_modules/vitest/vitest.mjs', 'run'] },
+      { id: 'other', lane: 'rust', minutes: 1, command: ['node', '-e', "const fs=require('fs'); fs.mkdirSync('.harness',{recursive:true}); fs.writeFileSync('.harness/other-started','yes'); const timer=setInterval(()=>{if(fs.existsSync('.harness/failed')){clearInterval(timer);fs.writeFileSync('.harness/other-finished','yes');}},10);"] },
+      { id: 'after', lane: 'frontend', minutes: 1, command: ['node', '-e', "require('fs').writeFileSync('.harness/after','yes')"] },
+    ];
+    const printed = [];
+    const originalLog = console.log;
+    let receipt;
+    try {
+      console.log = (...args) => printed.push(args.join(' '));
+      receipt = await verify(fixture.cwd, { base: fixture.base, plan });
+    } finally { console.log = originalLog; }
+    assert.match(printed.join('\n'), /FAIL frontend-tests \(0 passed\)/);
+    assert.equal(receipt.outcome, listed ? 'PASS' : 'FLAKY');
+    const row = receipt.gates.find(item => item.id === 'frontend-tests');
+    assert.equal(row.outcome, 'FLAKY');
+    assert.equal(row.failures[0].rerun.count, 1);
+    assert.equal(existsSync(join(fixture.cwd, '.harness/after')), listed);
+    const stored = JSON.parse(readFileSync(join(fixture.cwd, '.harness/receipt.json')));
+    assert.deepEqual(stored.gates.find(item => item.id === row.id).failures, row.failures);
+    assert.match((await waitForVerify(fixture.cwd, { graceMs: 0 })).lines.join('\n'), /FLAKY tests\/lane.test.js > isolated/);
+    const cache = JSON.parse(readFileSync(join(fixture.cwd, '.harness/gate-cache.json')));
+    assert.equal(cache.gates['frontend-tests'], undefined);
+  }
+});
 function repo(t) {
   const cwd = mkdtempSync(join(tmpdir(), 'buildmesh-harness-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
@@ -271,7 +552,7 @@ test('canonical verification rejects a source mutation even when every child che
   const fixture = repo(t);
   // Stand-in executables keep this a process/orchestration regression, without
   // coupling it to a full Tauri or frontend installation.
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -628,7 +909,7 @@ test('wait never reports a stale or missing result as success', async t => {
 });
 test('verify queues a heavy gate behind held machine-wide slots and runs it once one frees', async t => {
   const fixture = repo(t);
-  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
+  for (const path of ['scripts/harness.mjs', 'scripts/harness-plan.mjs', 'scripts/harness-lanes.mjs', 'scripts/harness-test-failures.mjs', 'scripts/ci/run-guarded.mjs', 'scripts/ci/changed-scope.mjs']) fixture.put(path, readFileSync(join(root, path)));
   for (const path of ['scripts/check-agent-diff.mjs', 'scripts/check-docs.mjs', 'scripts/check-readme-drift.mjs', 'scripts/check-process-spawn-discipline.mjs']) fixture.put(path, 'process.exit(0);\n');
   fixture.put('.gitignore', '.harness/\n.task.json\nnode_modules/\n');
   fixture.put('node_modules/eslint/package.json', '{"version":"fixture"}');
@@ -835,7 +1116,7 @@ test('the real plan reuses frontend gates after a Rust-only edit and docs-only e
   for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'docs-tests', 'agent-tests']) assert.ok(rustOnly.includes(id), id);
 
   const docsOnly = rerun('docs/agents/development-harness.md');
-  assert.deepEqual(docsOnly, ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'docs-tests', 'readme-tests']);
+  assert.deepEqual(docsOnly, ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests', 'readme-tests']);
 
   // Frontend edits re-run the Rust gates: Rust tests read src/ and embed the built mobile bundle.
   const frontendEdit = rerun('src/App.tsx');
@@ -861,7 +1142,7 @@ test('Vitest keeps re-running for the src-tauri files it reads, and every Rust g
   assert.equal(new Set(rustInputs).size, 1, 'binding-drift must never be reused while rust-tests re-runs');
   assert.ok(rustInputs[0] !== undefined);
   // Gates the audit did not cover keep reading the whole tree.
-  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'docs-tests', 'readme-tests']) assert.equal(byId[id].ignores, undefined, id);
+  for (const id of ['whitespace', 'staged-content', 'agent-rules', 'docs', 'readme', 'process-spawns', 'known-flakes', 'docs-tests', 'readme-tests']) assert.equal(byId[id].ignores, undefined, id);
 });
 
 test('new Vitest references to src-tauri are audited against the frontend-tests input list', () => {
