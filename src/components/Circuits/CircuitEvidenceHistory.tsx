@@ -282,6 +282,12 @@ export function CircuitEvidenceHistory({ runId, updatedAt, nodeLabel }: {
             <p>Final report: {item.capabilities.final_report}</p>
             <p>Reconciliation: {item.capabilities.reconciliation}</p>
             {item.deadline_ms !== null && <p>Evidence deadline: {new Date(item.deadline_ms).toISOString()}</p>}
+            {item.observation_blocker?.kind === 'known_work_outstanding' && <p>
+              Waiting for background work. The step stays running until the harness reports a fresh lifecycle transition. If the task finished without a callback, inspect the session and trigger a fresh harness status report; otherwise pause or cancel the Circuit and resolve the agent before starting a new attempt.
+            </p>}
+            {item.observation_blocker?.kind === 'human_response_required' && <p>
+              The harness has a pending question or permission request. Respond in that session; completion attestation remains unavailable until a fresh lifecycle report clears the request.
+            </p>}
             {item.human_waits.filter((wait) => wait.resolved_at_ms === null).map((wait, index) => <div key={index}>
               <p>{item.waits_active ? 'Awaiting' : 'Retained wait:'} {wait.wait_kind.replace(/_/g, ' ')}{item.waits_active ? ' \u00b7 No automatic timeout' : ' \u00b7 Run is not waiting'}</p>
               <p>Source: {wait.source} · Observed: {new Date(wait.observed_at_ms).toISOString()}</p>

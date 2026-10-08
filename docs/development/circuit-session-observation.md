@@ -48,19 +48,37 @@ claiming complete native ownership coverage. Known unfinished work, evidence
 conflicts and actual requests remain blockers. Review approval and external
 merge requirements remain separate.
 
-The shared `circuit::report_admission` policy also consumes the current persisted
-node lifecycle snapshot as negative evidence: explicit questions and permissions
-block report handoff, and BackgroundRunning blocks it as known outstanding work.
-Generic InputRequired is not a structured request. Report preflight, transactional
-classification commit and watchdog recovery apply this policy; the latter two
-re-read under the database writer so a newly delivered blocker cannot be bypassed.
-Observation receipts remain writable while blocked. A later valid lifecycle
-transition can release this snapshot veto, but cannot resolve separate durable
-request/child evidence or authorize completion by itself.
+The shared `circuit::report_admission` policy reads the last persisted harness
+lifecycle report as negative evidence: explicit questions and permissions block
+report handoff, and BackgroundRunning blocks it as known outstanding work.
+Generic InputRequired is not a structured request. The positive status projection
+still rejects snapshots whose timestamp or status no longer matches the node row,
+but process-only status writes do not release a negative lifecycle veto. Only a
+new settled lifecycle report can replace that report. WorkResumed and
+TurnCompleted are settled reports that release the veto; ProcessIdle,
+ProcessRunning and other process projections do not. An unreadable snapshot is
+treated as conflicting evidence and fails closed. Report preflight, transactional
+classification commit, watchdog recovery and operator completion attestation all
+apply this policy; the commit paths re-read under the database writer. Child-work
+receipts remain writable so they can resolve separate durable child evidence,
+but they do not clear a lifecycle veto.
 
-The [six-harness reliability audit](../archive/2026-10/circuit-harness-reliability-audit.md)
-records the capability gaps and qualification requirements. Historical signal health
-and fixture tests do not establish a 99% autonomous Circuit completion rate.
+Known background work keeps an active step Running and appears in the Circuit's
+current harness observation details as “Waiting for background work”. It has no
+timeout or automatic release: if background work finishes without a lifecycle
+callback, inspect the harness session and trigger a fresh status report. If the
+harness cannot report again, pause or cancel the Circuit and resolve the agent
+before starting a new attempt. A Completed attestation is unavailable while the
+last lifecycle report still says a question, permission or background task is
+outstanding.
+
+The [October 2026 six-harness reliability audit](../archive/2026-10/circuit-harness-reliability-audit.md)
+is historical context. Current qualification gaps remain: there is no 30-session
+live soak across the six target harnesses, no measured per-harness callback
+delivery rate, and no evidence establishing a 99% autonomous Circuit completion
+rate. Qualification metrics are tracked in #2127; consolidating harness-owned
+observation strategies and diagnostics is tracked in #2128. Historical signal
+health and fixture tests cannot establish that target.
 
 Terminal input attribution is streaming: focus notifications and cursor-position
 responses do not change the input generation or invent a draft, including when

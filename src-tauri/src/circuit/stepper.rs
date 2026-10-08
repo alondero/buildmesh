@@ -180,6 +180,15 @@ impl RunView {
             }
             if let Some(json) = self
                 .context
+                .get(&format!("node.{}.lifecycle_blocker", step.node_id))
+            {
+                match serde_json::from_str::<B>(json) {
+                    Ok(blocker) => return Some(blocker),
+                    Err(_) => return Some(B::EvidenceConflict),
+                }
+            }
+            if let Some(json) = self
+                .context
                 .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
             {
                 let Ok(evidence) = serde_json::from_str::<super::observation::WorkEvidence>(json)
@@ -1165,10 +1174,16 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                 run.context.set(&key, encoded);
                 t.context_changed = true;
             }
-            if run.step(node_id).is_some_and(|step| {
-                step.status != StepStatus::Unverified
-                    || step.error.as_deref() != Some(reason.as_str())
-            }) {
+            let waiting_for_background = matches!(
+                blocker,
+                super::observation::CircuitObservationBlocker::KnownWorkOutstanding
+            );
+            if !waiting_for_background
+                && run.step(node_id).is_some_and(|step| {
+                    step.status != StepStatus::Unverified
+                        || step.error.as_deref() != Some(reason.as_str())
+                })
+            {
                 unverify_step(run, &mut t, node_id, reason);
             }
         }
@@ -3404,6 +3419,34 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("question or permission"));
+    }
+
+    #[test]
+    fn known_background_work_keeps_the_step_running_with_an_explicit_blocker() {
+        use super::super::observation::CircuitObservationBlocker;
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::ObservationDeferred {
+                node_id: "spawn".into(),
+                attempt: 1,
+                agent_node_id: 900,
+                blocker: CircuitObservationBlocker::KnownWorkOutstanding,
+            },
+        );
+
+        assert_eq!(run.step("spawn").unwrap().status, StepStatus::Running);
+        assert_eq!(run.step("spawn").unwrap().error, None);
+        assert_eq!(
+            run.context.get("node.spawn.observation_blocker"),
+            Some(r#"{"kind":"known_work_outstanding"}"#)
+        );
+        assert!(transition.classifications.is_empty());
+        assert!(transition.effects.is_empty());
     }
 
     #[test]

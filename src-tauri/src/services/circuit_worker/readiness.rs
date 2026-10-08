@@ -21,12 +21,32 @@ pub(crate) fn prepare(
     input: Result<String, InputUnavailable>,
     report: Result<ReportSnapshot, ReportReadError>,
 ) -> Result<Option<Candidate>, Blocker> {
+    let lifecycle_blocker =
+        crate::circuit::report_admission::lifecycle_blocker(agent.lifecycle.as_ref());
+    prepare_with_lifecycle_veto(
+        view,
+        node_id,
+        agent,
+        stamp,
+        input,
+        report,
+        lifecycle_blocker,
+    )
+}
+
+pub(crate) fn prepare_with_lifecycle_veto(
+    view: &RunView,
+    node_id: &str,
+    agent: &crate::models::AgentNode,
+    stamp: Option<&str>,
+    input: Result<String, InputUnavailable>,
+    report: Result<ReportSnapshot, ReportReadError>,
+    lifecycle_blocker: Option<Blocker>,
+) -> Result<Option<Candidate>, Blocker> {
     if let Some(blocker) = view.report_blocker(node_id) {
         return Err(blocker);
     }
-    if let Some(blocker) =
-        crate::circuit::report_admission::lifecycle_blocker(agent.lifecycle.as_ref())
-    {
+    if let Some(blocker) = lifecycle_blocker {
         return Err(blocker);
     }
     let Some(step) = view.step(node_id) else {

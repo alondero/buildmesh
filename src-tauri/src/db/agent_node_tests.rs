@@ -272,6 +272,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn circuit_recovery_treats_a_deleted_agent_as_a_quiet_noop() {
+        let (conn, fence) = circuit_recovery_fixture();
+        conn.execute("DELETE FROM agent_nodes WHERE id=77", [])
+            .unwrap();
+        let mut payload = recovery_payload(SessionStatus::Ready);
+
+        assert!(!crate::db::agent_node::recover_circuit_agent_turn_inner(
+            &conn,
+            &fence,
+            "100:2000-01-01T00:00:00Z",
+            &mut payload,
+        )
+        .unwrap());
+    }
+
     fn insert_node(conn: &Connection, status: &str) -> i64 {
         conn.execute(
             "INSERT INTO agent_nodes (status) VALUES (?1)",

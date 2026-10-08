@@ -197,7 +197,7 @@ pub(super) fn recovery_view(
     };
     let steps =
         super::ledger::list_circuit_run_steps_inner(db, run.id).map_err(|e| e.to_string())?;
-    Ok(RunView {
+    let mut view = RunView {
         run_id: run.id,
         graph: run_graph(db, run.id)?,
         state: RunState::from_db_str(&run.state),
@@ -213,7 +213,23 @@ pub(super) fn recovery_view(
                 agent_node_id: step.agent_node_id,
             })
             .collect(),
-    })
+    };
+    for step in view.steps.clone() {
+        let agent_id = step
+            .agent_node_id
+            .or_else(|| view.resolve_target_agent(&step.node_id));
+        if let Some(agent_id) = agent_id {
+            if let Some(blocker) =
+                crate::db::agent_node::circuit_lifecycle_blocker_inner(db, agent_id)
+                    .map_err(|error| error.to_string())?
+            {
+                let encoded = serde_json::to_string(&blocker).map_err(|error| error.to_string())?;
+                view.context
+                    .set(&format!("node.{}.lifecycle_blocker", step.node_id), encoded);
+            }
+        }
+    }
+    Ok(view)
 }
 
 /// What a person may record against one Unverified step. Shared by the history
@@ -243,7 +259,7 @@ fn checkpoint_actions(
                 if has_target {
                     actions.insert(0, CheckpointAction::Recheck);
                 }
-            } else {
+            } else if !view.report_has_known_blockers(&step.node_id) {
                 actions.insert(0, CheckpointAction::Completed);
             }
             if not_performed {
@@ -308,13 +324,20 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                             &agent,
                         ),
                         deadline_ms,
-                        observation_blocker: (step.status == "unverified")
-                            .then(|| {
-                                context
-                                    .get(&format!("node.{}.observation_blocker", step.node_id))
-                                    .and_then(|json| serde_json::from_str(json).ok())
+                        observation_blocker: view
+                            .context
+                            .get(&format!("node.{}.lifecycle_blocker", step.node_id))
+                            .or_else(|| {
+                                (step.status == "unverified")
+                                    .then(|| {
+                                        context.get(&format!(
+                                            "node.{}.observation_blocker",
+                                            step.node_id
+                                        ))
+                                    })
+                                    .flatten()
                             })
-                            .flatten(),
+                            .and_then(|json| serde_json::from_str(json).ok()),
                         waits_active: run.state == "running"
                             && !matches!(
                                 step.status.as_str(),
@@ -1581,13 +1604,12 @@ pub(crate) fn commit_transition_locked(
             ));
         }
         // Requests and background work can arrive while interpretation runs.
-        // Recheck under the writer transaction, but do not block observation
-        // receipts themselves: those are how outstanding work gets resolved.
+        // Recheck under the writer transaction. Receipt-only writes remain
+        // allowed so child evidence can be reconciled; only a classification
+        // can hand off a report, and its lifecycle veto is checked here.
         if !evidence.classifications.is_empty() {
-            let agent =
-                crate::db::agent_node::get_agent_node_by_id_inner(&tx, guard.agent_node_id)?;
             if let Some(blocker) =
-                crate::circuit::report_admission::lifecycle_blocker(agent.lifecycle.as_ref())
+                crate::db::agent_node::circuit_lifecycle_blocker_inner(&tx, guard.agent_node_id)?
             {
                 return Err(observation_freshness_rejection(&blocker.message()));
             }
@@ -3123,7 +3145,7 @@ mod tests {
     }
 
     #[test]
-    fn report_commit_rechecks_lifecycle_blockers_after_classification() {
+    fn report_commit_rejects_lifecycle_blockers_present_at_commit() {
         use crate::agent::session_lifecycle::{
             HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
         };
@@ -3168,12 +3190,17 @@ mod tests {
             ),
             (LifecycleKind::BackgroundRunning, SessionStatus::Running),
         ] {
+            // Classification has already produced a candidate. A harness
+            // lifecycle callback can then arrive before the writer transaction;
+            // it must veto the candidate even if a process status write makes
+            // the positive lifecycle projection stale in the meantime.
             let mut payload =
                 LifecycleChangedPayload::new(9, kind, status, &HookSignalDetail::default(), "");
             assert!(
                 crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut payload, &[])
                     .unwrap()
             );
+            crate::db::agent_node::update_agent_node_status_inner(&db, 9, status).unwrap();
             let result = commit_transition_locked(
                 &mut db,
                 1,
@@ -3908,6 +3935,9 @@ mod tests {
 
     #[test]
     fn feedback_attestation_respects_current_requests_without_requiring_review_approval() {
+        use crate::agent::session_lifecycle::{
+            HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+        };
         use crate::circuit::{context::CircuitContext, model::CircuitGraph};
         let mut db = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&db).unwrap();
@@ -3951,6 +3981,65 @@ mod tests {
             [context.to_json().unwrap()],
         )
         .unwrap();
+
+        let mut question = LifecycleChangedPayload::new(
+            9,
+            LifecycleKind::QuestionRequested,
+            crate::models::SessionStatus::AwaitingInput,
+            &HookSignalDetail::default(),
+            "Approve this permission request",
+        );
+        assert!(
+            crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut question, &[]).unwrap()
+        );
+        let evidence_view = evidence_view_inner(&db, 1).unwrap();
+        assert!(!evidence_view.checkpoints[0]
+            .actions
+            .iter()
+            .any(|action| matches!(action, CheckpointAction::Completed)));
+        assert!(
+            record_outcome_locked(&mut db, &request).is_err(),
+            "a lifecycle-only question must suppress the Completed attestation"
+        );
+        crate::db::agent_node::update_agent_node_status_inner(
+            &db,
+            9,
+            crate::models::SessionStatus::AwaitingInput,
+        )
+        .unwrap();
+        assert!(
+            record_outcome_locked(&mut db, &request).is_err(),
+            "an unrelated process status write cannot release the attestation veto"
+        );
+
+        let mut background = LifecycleChangedPayload::new(
+            9,
+            LifecycleKind::BackgroundRunning,
+            crate::models::SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "background task still active",
+        );
+        assert!(
+            crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut background, &[]).unwrap()
+        );
+        let evidence_view = evidence_view_inner(&db, 1).unwrap();
+        assert_eq!(
+            evidence_view.coverage[0].observation_blocker,
+            Some(crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding),
+            "the running background veto must be visible in the operator evidence view"
+        );
+        assert!(record_outcome_locked(&mut db, &request).is_err());
+
+        let mut resumed = LifecycleChangedPayload::new(
+            9,
+            LifecycleKind::WorkResumed,
+            crate::models::SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "The operator responded to the request",
+        );
+        assert!(
+            crate::db::agent_node::commit_agent_lifecycle_inner(&db, &mut resumed, &[]).unwrap()
+        );
         record_outcome_locked(&mut db, &request).unwrap();
         let steps = super::super::ledger::list_circuit_run_steps_inner(&db, 1).unwrap();
         assert_eq!(
