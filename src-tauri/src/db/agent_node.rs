@@ -170,6 +170,22 @@ mod lifecycle_snapshot_tests {
     };
 
     #[test]
+    fn missing_agent_lifecycle_fails_closed_as_evidence_conflict() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+
+        let blocker = circuit_lifecycle_blocker_inner(&conn, 404).unwrap();
+        assert_eq!(
+            blocker,
+            Some(crate::circuit::observation::CircuitObservationBlocker::EvidenceConflict)
+        );
+        assert_eq!(
+            blocker.unwrap().message(),
+            "Agent or lifecycle evidence is unavailable or inconsistent. Inspect the agent record and evidence; repair the underlying issue before retrying or recording completion."
+        );
+    }
+
+    #[test]
     fn observation_round_trips_and_process_transition_invalidates_it() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();

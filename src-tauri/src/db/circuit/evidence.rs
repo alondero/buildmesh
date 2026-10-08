@@ -310,56 +310,57 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                 .agent_node_id
                 .or_else(|| view.resolve_target_agent(&step.node_id))
             {
-                if let Some(agent) = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id)
+                let agent = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id)
                     .optional()
-                    .map_err(|e| e.to_string())?
-                {
-                    let deadline_ms = view.evidence_deadline_ms(&step.node_id);
-                    coverage.push(CircuitStepObservationCoverage {
-                        node_id: step.node_id.clone(),
-                        attempt: step.attempt,
-                        platform: format!("{} host / {} launch", std::env::consts::OS, agent.env),
-                        capabilities: crate::services::circuit_worker::observer_policy::for_agent(
-                            &agent,
+                    .map_err(|e| e.to_string())?;
+                let (platform, capabilities) = match agent {
+                    Some(agent) => (
+                        format!("{} host / {} launch", std::env::consts::OS, agent.env),
+                        crate::services::circuit_worker::observer_policy::for_agent(&agent),
+                    ),
+                    None => (
+                        "Agent record unavailable".to_string(),
+                        crate::services::circuit_worker::observer_policy::for_provider(
+                            "missing-agent",
                         ),
-                        deadline_ms,
-                        observation_blocker: view
-                            .context
-                            .lifecycle_blocker(&step.node_id)
-                            .or_else(|| {
-                                (step.status == "unverified")
-                                    .then(|| {
-                                        context.get(&format!(
-                                            "node.{}.observation_blocker",
-                                            step.node_id
-                                        ))
-                                    })
-                                    .flatten()
-                            })
-                            .and_then(|json| serde_json::from_str(json).ok()),
-                        waits_active: run.state == "running"
-                            && !matches!(
-                                step.status.as_str(),
-                                "completed" | "failed" | "cancelled"
-                            ),
-                        human_waits: context
-                            .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
-                            .and_then(|json| {
-                                serde_json::from_str::<crate::circuit::observation::WorkEvidence>(
-                                    json,
-                                )
+                    ),
+                };
+                let deadline_ms = view.evidence_deadline_ms(&step.node_id);
+                coverage.push(CircuitStepObservationCoverage {
+                    node_id: step.node_id.clone(),
+                    attempt: step.attempt,
+                    platform,
+                    capabilities,
+                    deadline_ms,
+                    observation_blocker: view
+                        .context
+                        .lifecycle_blocker(&step.node_id)
+                        .or_else(|| {
+                            (step.status == "unverified")
+                                .then(|| {
+                                    context
+                                        .get(&format!("node.{}.observation_blocker", step.node_id))
+                                })
+                                .flatten()
+                        })
+                        .and_then(|json| serde_json::from_str(json).ok()),
+                    waits_active: run.state == "running"
+                        && !matches!(step.status.as_str(), "completed" | "failed" | "cancelled"),
+                    human_waits: context
+                        .get(&format!("node.{}.evidence.{}", step.node_id, step.attempt))
+                        .and_then(|json| {
+                            serde_json::from_str::<crate::circuit::observation::WorkEvidence>(json)
                                 .ok()
-                            })
-                            .map(|evidence| {
-                                evidence
-                                    .human_waits
-                                    .into_iter()
-                                    .filter(|wait| wait.source != "agent_status_projection")
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                    });
-                }
+                        })
+                        .map(|evidence| {
+                            evidence
+                                .human_waits
+                                .into_iter()
+                                .filter(|wait| wait.source != "agent_status_projection")
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                });
             }
             if run.state != "running" || step.status != "unverified" {
                 continue;
@@ -4087,7 +4088,7 @@ mod tests {
             INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
                 VALUES(1,'reviewer',1,'completed',10),
                       (1,'verdict',1,'unverified',10),
-                      (1,'await_fixes',1,'unverified',9);",
+                      (1,'await_source',1,'unverified',9);",
         )
         .unwrap();
         let graph = CircuitGraph::agent_review(None, None, 3);
@@ -4121,7 +4122,7 @@ mod tests {
 
         let request = CheckpointRequest {
             run_id: 1,
-            node_id: "await_fixes".into(),
+            node_id: "await_source".into(),
             attempt: 1,
             expected_revision: 0,
             action: CheckpointAction::Completed,
@@ -4158,6 +4159,51 @@ mod tests {
             .unwrap();
         let view = recovery_view(&db, &stored).unwrap();
         assert_eq!(view.report_blocker("verdict"), None);
+    }
+
+    #[test]
+    fn deleted_agent_stays_visible_as_a_fail_closed_evidence_blocker() {
+        use crate::circuit::observation::CircuitObservationBlocker;
+        use crate::circuit::{context::CircuitContext, model::CircuitGraph};
+
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch(
+            "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+            INSERT INTO agent_nodes(id,mesh_id,name,path) VALUES(9,1,'source','/repo');
+            INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+            INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state,source_agent_node_id)
+                VALUES(1,1,1,'running',9);
+            INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+                VALUES(1,'reviewer',1,'completed',404),
+                      (1,'verdict',1,'unverified',404);",
+        )
+        .unwrap();
+        let graph = CircuitGraph::agent_review(None, None, 3);
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [graph.to_json().unwrap()],
+        )
+        .unwrap();
+        let mut context = CircuitContext::default();
+        context.set("source.agent_id", "9");
+        db.execute(
+            "UPDATE autopilot_circuit_runs SET context_json=?1",
+            [context.to_json().unwrap()],
+        )
+        .unwrap();
+
+        let evidence = evidence_view_inner(&db, 1).unwrap();
+        let verdict = evidence
+            .coverage
+            .iter()
+            .find(|item| item.node_id == "verdict")
+            .expect("the missing reviewer still needs an operator-visible explanation");
+        assert_eq!(verdict.platform, "Agent record unavailable");
+        assert_eq!(
+            verdict.observation_blocker,
+            Some(CircuitObservationBlocker::EvidenceConflict)
+        );
     }
 
     #[test]

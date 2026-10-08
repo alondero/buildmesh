@@ -63,6 +63,11 @@ apply this policy; the commit paths re-read under the database writer. Child-wor
 receipts remain writable so they can resolve separate durable child evidence,
 but they do not clear a lifecycle veto.
 
+A missing agent row also fails closed as `EvidenceConflict`: it cannot prove that
+the last harness request was settled. The Circuit evidence view names the missing
+agent record, and an operator must repair the record or pause/cancel the run
+before recording completion.
+
 Known background work keeps an active step Running and appears in the Circuit's
 current harness observation details as “Waiting for background work”. It has no
 timeout or automatic release: if background work finishes without a lifecycle
