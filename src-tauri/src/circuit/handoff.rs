@@ -88,7 +88,8 @@ pub(crate) fn result_instruction(result_path: &str) -> String {
     format!(
         "When, and only when, you have completely finished this task (including any delegated or \
          background work), write your final report, ending with the required result line, to the \
-         file {result_path}, overwriting it if it exists. Do not create that file before you are done."
+         file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use \
+         Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
     )
 }
 
@@ -122,8 +123,11 @@ pub(crate) fn write_prompt(path: &Path, text: &str) -> std::io::Result<()> {
 /// `Ok(None)` when the agent has not written a usable result yet (missing or blank).
 pub(crate) fn read_result(path: &Path) -> std::io::Result<Option<String>> {
     match std::fs::read_to_string(path) {
-        Ok(text) if text.trim().is_empty() => Ok(None),
-        Ok(text) => Ok(Some(text)),
+        Ok(text) => {
+            // Windows PowerShell's explicit UTF8 encoding includes a BOM.
+            let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+            Ok((!text.trim().is_empty()).then(|| text.to_owned()))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
@@ -579,7 +583,9 @@ mod tests {
     #[test]
     fn result_instruction_names_the_result_path_and_is_ascii() {
         let text = result_instruction(r"C:\x\a.result.md");
-        assert!(text.contains(r"to the file C:\x\a.result.md, overwriting it if it exists"));
+        assert!(
+            text.contains(r"to the file C:\x\a.result.md using UTF-8, overwriting it if it exists")
+        );
         assert!(text.contains("Do not create that file before you are done."));
         assert!(text.is_ascii());
     }
@@ -834,7 +840,7 @@ mod tests {
         );
         assert!(
             file.ends_with(&format!(
-                "to the file {result_path}, overwriting it if it exists. Do not create that file before you are done."
+                "to the file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
             )),
             "unexpected prompt file: {file}"
         );
@@ -869,7 +875,7 @@ mod tests {
         assert_eq!(
             staged.delivered,
             format!(
-                "Do it.\n\nWhen, and only when, you have completely finished this task (including any delegated or background work), write your final report, ending with the required result line, to the file {result_path}, overwriting it if it exists. Do not create that file before you are done."
+                "Do it.\n\nWhen, and only when, you have completely finished this task (including any delegated or background work), write your final report, ending with the required result line, to the file {result_path} using UTF-8, overwriting it if it exists. In Windows PowerShell, use Set-Content -Encoding UTF8 rather than the default encoding. Do not create that file before you are done."
             )
         );
         // Nothing was written, so no turn can be checked against a file.

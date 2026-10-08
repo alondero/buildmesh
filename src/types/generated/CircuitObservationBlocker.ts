@@ -4,4 +4,4 @@
  * Why interpretation cannot yet drive a Circuit. These are observation
  * failures, not model verdicts or failed external effects.
  */
-export type CircuitObservationBlocker = { "kind": "session_identity_unavailable" } | { "kind": "process_unavailable" } | { "kind": "input_draft" } | { "kind": "input_uncertain" } | { "kind": "input_paste" } | { "kind": "report_unavailable", reason: string, } | { "kind": "report_superseded" } | { "kind": "known_work_outstanding" } | { "kind": "human_response_required" } | { "kind": "lifecycle_evidence_unavailable" } | { "kind": "evidence_conflict" };
+export type CircuitObservationBlocker = { "kind": "session_identity_unavailable" } | { "kind": "process_unavailable" } | { "kind": "input_draft" } | { "kind": "input_uncertain" } | { "kind": "input_paste" } | { "kind": "report_unavailable", reason: string, } | { "kind": "result_file_unavailable", path: string, reason: string, } | { "kind": "report_superseded" } | { "kind": "known_work_outstanding" } | { "kind": "human_response_required" } | { "kind": "lifecycle_evidence_unavailable" } | { "kind": "evidence_conflict" };

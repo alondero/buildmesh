@@ -21,6 +21,25 @@ pub(super) struct ClassifiedTurn {
     pub(super) missing_result: Option<MissingResult>,
 }
 
+impl ClassifiedTurn {
+    pub(super) fn deferred(
+        agent_node_id: i64,
+        blocker: crate::circuit::observation::CircuitObservationBlocker,
+    ) -> Self {
+        Self {
+            classifier_error: None,
+            observation_blocker: Some(blocker),
+            agent_node_id,
+            classification: None,
+            binding: None,
+            output: String::new(),
+            continuation: None,
+            waiting_for_a_finished_turn: false,
+            missing_result: None,
+        }
+    }
+}
+
 /// What the reminder needs: where the agent must save its result, and the
 /// turn, report and input the reminder is fenced to.
 pub(super) struct MissingResult {
@@ -90,7 +109,7 @@ impl readiness::Candidate {
         mut self,
         path: &std::path::Path,
         gate: &StepView,
-    ) -> (Self, bool) {
+    ) -> Result<(Self, bool), crate::circuit::observation::CircuitObservationBlocker> {
         use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
         match ReportSnapshot::read_result_file(
             path,
@@ -108,15 +127,23 @@ impl readiness::Candidate {
                 self.binding.owner.step_id = gate.node_id.clone();
                 self.binding.owner.attempt = gate.attempt;
                 self.binding.input_guard.report_guard = Some(report);
-                (self, false)
+                Ok((self, false))
             }
-            Ok(None) => (self, true),
+            Ok(None) => Ok((self, true)),
+            // Invalid bytes are an agent output-format error, not transient I/O.
+            // Reuse the bounded missing/blank-result repair lifecycle.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok((self, true)),
             Err(error) => {
                 tracing::warn!(
                     "circuits: could not bind result file {}: {error}",
                     path.display()
                 );
-                (self, true)
+                Err(
+                    crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable {
+                        path: path.display().to_string(),
+                        reason: error.to_string(),
+                    },
+                )
             }
         }
     }
@@ -172,24 +199,15 @@ pub(super) fn classify_step_turn(
     ) {
         Ok(Some(candidate)) => candidate,
         Ok(None) => return None,
-        Err(blocker) => {
-            return Some(ClassifiedTurn {
-                classifier_error: None,
-                observation_blocker: Some(blocker),
-                agent_node_id,
-                classification: None,
-                binding: None,
-                output: String::new(),
-                continuation: None,
-                waiting_for_a_finished_turn: false,
-                missing_result: None,
-            })
-        }
+        Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
     };
     let (candidate, missing_path) = if let Some(path) =
         crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
     {
-        let (candidate, missing) = candidate.with_result_file(&path, step);
+        let (candidate, missing) = match candidate.with_result_file(&path, step) {
+            Ok(result) => result,
+            Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
+        };
         (candidate, missing.then_some(path))
     } else {
         (candidate, None)
@@ -1023,6 +1041,13 @@ pub(super) fn observe_gates_with(
                 }) = source.classify(view, step)
                 {
                     if let Some(blocker) = observation_blocker {
+                        if matches!(blocker, crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable { .. })
+                            && view.result_read_failures(&step.node_id, step.attempt, agent_node_id) == Some(2)
+                        {
+                            let issue = view.context.get("issue.number")
+                                .and_then(|number| number.parse::<i64>().ok()).unwrap_or(0);
+                            source.blocked(agent_node_id, issue);
+                        }
                         events.push(CircuitEvent::ObservationDeferred {
                             node_id: step.node_id.clone(),
                             attempt: step.attempt,
@@ -1174,6 +1199,31 @@ mod result_continuation_tests {
                 cli_session_id: native.owner.session_id.clone(),
                 ..Default::default()
             };
+            std::fs::remove_file(&result).unwrap();
+            std::fs::create_dir(&result).unwrap();
+            let candidate = readiness::prepare(
+                &run,
+                "step",
+                &agent,
+                Some("100:ready"),
+                Ok(native.input_guard.input_stamp.clone()),
+                Err(ReportReadError::Unsupported),
+            )
+            .unwrap()
+            .unwrap();
+            let Err(blocker) = candidate.with_result_file(&result, run.step("step").unwrap())
+            else {
+                panic!("directory result must defer");
+            };
+            let mut source = Script::default();
+            source.turn = Some(ClassifiedTurn::deferred(42, blocker));
+            let mut deferred = Vec::new();
+            observe_gates_with(&run, &mut deferred, &mut source);
+            assert_eq!(deferred.len(), 1);
+            assert!(advance(&mut run, &deferred[0]).effects.is_empty());
+            assert_eq!(run.step("step").unwrap().status, StepStatus::Unverified);
+            std::fs::remove_dir(&result).unwrap();
+            std::fs::write(&result, report).unwrap();
             let prepare = || {
                 readiness::prepare(
                     &run,
@@ -1186,6 +1236,7 @@ mod result_continuation_tests {
                 .unwrap()
                 .unwrap()
                 .with_result_file(&result, run.step("step").unwrap())
+                .unwrap()
             };
             let (bound, missing) = prepare();
             assert!(!missing);
@@ -1239,6 +1290,44 @@ mod result_continuation_tests {
                 observe_gates_with(&run, &mut events, &mut source);
                 if expected == Classification::Continue {
                     assert_eq!(events.len(), 2);
+                    let mut continued = run.clone();
+                    let effects: Vec<_> = events
+                        .iter()
+                        .flat_map(|event| advance(&mut continued, event).effects)
+                        .collect();
+                    let can_prompt = matches!(
+                        run.graph.node("step").unwrap().kind,
+                        CircuitNodeKind::LlmTurnClassifier { .. }
+                    );
+                    assert_eq!(
+                        effects.iter().any(|effect| matches!(
+                            effect,
+                            crate::circuit::stepper::Effect::ContinueAgentTurn {
+                                target_agent_id: 42,
+                                ..
+                            }
+                        )),
+                        can_prompt,
+                        "only classifier gates automatically prompt owned agents"
+                    );
+                    assert!(continuation_is_current(
+                        &continued,
+                        "step",
+                        42,
+                        SessionStatus::Ready,
+                        true,
+                        Some("100:ready"),
+                        Some(&native.report_revision)
+                    ));
+                    assert!(!continuation_is_current(
+                        &continued,
+                        "step",
+                        42,
+                        SessionStatus::Ready,
+                        true,
+                        Some("100:ready"),
+                        Some(&bound.binding.report_revision)
+                    ));
                     assert!(matches!(&events[0], CircuitEvent::ContinuationObserved {
                         node_id, attempt: 1, stamp, revision, input_stamp,
                     } if node_id == "step" && stamp == "100:ready"

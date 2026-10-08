@@ -16,6 +16,7 @@ pub(crate) struct Candidate {
     pub(super) turn_revision: String,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(
     view: &RunView,
     node_id: &str,

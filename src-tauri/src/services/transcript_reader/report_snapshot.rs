@@ -659,40 +659,32 @@ mod tests {
             .unwrap()
             .unwrap()
         };
-        // A directory exists but cannot be read as a result file on either
-        // Windows or Unix, deterministically exercising the I/O-error path.
-        fs::create_dir(&result).unwrap();
-        let original = prepare();
-        let (candidate, missing) =
-            original.with_result_file(&result, run.step("await_source").unwrap());
-        assert!(missing);
-        assert_eq!(candidate.output, snapshot.text);
-        assert_eq!(candidate.binding.report_revision, snapshot.revision);
-        assert_eq!(
-            candidate.binding.owner.report_revision.as_deref(),
-            Some(snapshot.revision.as_str())
-        );
-        assert_eq!(candidate.binding.owner.step_id, "await_source");
-        assert_eq!(candidate.binding.owner.attempt, 1);
-        assert_eq!(
-            candidate.binding.input_guard.report_guard.as_ref(),
-            Some(&snapshot)
-        );
-        fs::remove_dir(&result).unwrap();
         for content in [None, Some(" \n\t")] {
             if let Some(content) = content {
                 fs::write(&result, content).unwrap();
             }
-            let (candidate, missing) =
-                prepare().with_result_file(&result, run.step("await_source").unwrap());
+            let (candidate, missing) = prepare()
+                .with_result_file(&result, run.step("await_source").unwrap())
+                .unwrap();
             assert!(missing);
             assert_eq!(candidate.output, snapshot.text);
             assert_eq!(candidate.binding.report_revision, snapshot.revision);
         }
+        // An unreadable path is not evidence that the agent omitted its file.
+        fs::remove_file(&result).unwrap();
+        fs::create_dir(&result).unwrap();
+        let failed_read = prepare().with_result_file(&result, run.step("await_source").unwrap());
+        assert!(
+            matches!(failed_read, Err(crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable { path, reason })
+            if path == result.display().to_string() && !reason.is_empty()),
+            "read errors must defer without spending the missing-result reminder budget"
+        );
+        fs::remove_dir(&result).unwrap();
         fs::write(&result, report).unwrap();
         let candidate = prepare();
-        let (candidate, missing) =
-            candidate.with_result_file(&result, run.step("await_source").unwrap());
+        let (candidate, missing) = candidate
+            .with_result_file(&result, run.step("await_source").unwrap())
+            .unwrap();
         assert!(!missing);
         let transition = advance(
             &mut run,
@@ -903,8 +895,9 @@ mod tests {
             let result = dir.path().join(format!("{owner}.result.md"));
             let report = "Full result report\nBUILDMESH_HANDOFF_V1: READY\n";
             fs::write(&result, report).unwrap();
-            let (candidate, missing) =
-                candidate.with_result_file(&result, run.step("await_source").unwrap());
+            let (candidate, missing) = candidate
+                .with_result_file(&result, run.step("await_source").unwrap())
+                .unwrap();
             assert!(!missing);
             let transition = advance(
                 &mut run,

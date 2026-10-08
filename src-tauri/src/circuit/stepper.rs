@@ -475,6 +475,34 @@ impl RunView {
             .unwrap_or(0)
     }
 
+    /// Durable per-attempt read failures, with the same ownership fence for
+    /// the pure transition and the worker's attention decision.
+    pub fn result_read_failures(
+        &self,
+        node_id: &str,
+        attempt: i32,
+        agent_node_id: i64,
+    ) -> Option<u32> {
+        if self.state != RunState::Running
+            || !self.step(node_id).is_some_and(|step| {
+                step.attempt == attempt
+                    && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
+                    && step
+                        .agent_node_id
+                        .or_else(|| self.resolve_target_agent(node_id))
+                        == Some(agent_node_id)
+            })
+        {
+            return None;
+        }
+        Some(
+            self.context
+                .get(&format!("node.{node_id}.result_read_failures.{attempt}"))
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(0),
+        )
+    }
+
     /// Decide what a finished turn that still owes its result file calls for.
     /// Shared by the stepper and the worker's blocking decision, so both act on
     /// the same rule.
@@ -486,9 +514,14 @@ impl RunView {
         stamp: &str,
     ) -> ResultReminderDecision {
         if self.state != RunState::Running
-            || !self
-                .step(node_id)
-                .is_some_and(|s| s.status == StepStatus::Running && s.attempt == attempt)
+            || !self.step(node_id).is_some_and(|s| {
+                matches!(s.status, StepStatus::Running | StepStatus::Unverified)
+                    && s.attempt == attempt
+            })
+            || self
+                .context
+                .get(&format!("node.{node_id}.result_attention.{attempt}"))
+                == Some("1")
         {
             return ResultReminderDecision::Ignore;
         }
@@ -1030,7 +1063,7 @@ pub enum ResultReminderDecision {
 
 fn result_reminder_prompt(path: &str) -> String {
     format!(
-        "Save your final report, ending with the required result line, to {path} now (overwrite it). Do not redo the work."
+        "Save your final report, ending with the required result line, to {path} now using UTF-8 (overwrite it). The file is missing, blank, or not valid UTF-8. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work."
     )
 }
 
@@ -1283,7 +1316,29 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             }
             let key = format!("node.{node_id}.observation_blocker");
             let encoded = serde_json::to_string(blocker).expect("observation blocker");
-            let reason = blocker.message();
+            let mut reason = blocker.message();
+            if matches!(
+                blocker,
+                super::observation::CircuitObservationBlocker::ResultFileUnavailable { .. }
+            ) {
+                let count = run
+                    .result_read_failures(node_id, *attempt, *agent_node_id)
+                    .expect("validated result read owner")
+                    .saturating_add(1)
+                    .min(3);
+                let key = format!("node.{node_id}.result_read_failures.{attempt}");
+                if run.context.get(&key) != Some(count.to_string().as_str()) {
+                    run.context.set(&key, count.to_string());
+                    t.context_changed = true;
+                }
+                reason = if count < 3 {
+                    format!(
+                        "{reason} Failed read {count} of 3; the next scheduled probe will retry."
+                    )
+                } else {
+                    format!("{reason} Result remains unreadable after 3 failed probes; attention is required. Repair the file to allow observation to recover.")
+                };
+            }
             if run.context.get(&key) != Some(encoded.as_str()) {
                 run.context.set(&key, encoded);
                 t.context_changed = true;
@@ -1322,9 +1377,10 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             input_stamp,
         } => {
             if run.state == RunState::Running
-                && run
-                    .step(node_id)
-                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+                && run.step(node_id).is_some_and(|s| {
+                    matches!(s.status, StepStatus::Running | StepStatus::Unverified)
+                        && s.attempt == *attempt
+                })
             {
                 run.context
                     .set(&format!("node.{node_id}.continuation.stamp"), stamp.clone());
@@ -1417,10 +1473,8 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         &format!("node.{node_id}.result_reminder_stamp"),
                         stamp.clone(),
                     );
-                    run.context.set(
-                        &format!("node.{node_id}.continuation.stamp"),
-                        stamp.clone(),
-                    );
+                    run.context
+                        .set(&format!("node.{node_id}.continuation.stamp"), stamp.clone());
                     run.context.set(
                         &format!("node.{node_id}.continuation.revision"),
                         revision.clone(),
@@ -1429,10 +1483,8 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         &format!("node.{node_id}.continuation.input"),
                         input_stamp.clone(),
                     );
-                    run.context.set(
-                        &format!("node.{node_id}.continuation.delivery"),
-                        "claimed",
-                    );
+                    run.context
+                        .set(&format!("node.{node_id}.continuation.delivery"), "claimed");
                     run.context.set(
                         &format!("node.{node_id}.continuation.attempt"),
                         attempt.to_string(),
@@ -1442,6 +1494,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         "Agent finished without saving its result file; reminder {count} of 2 sent."
                     );
                     if let Some(step) = run.step_mut(node_id) {
+                        step.status = StepStatus::Running;
                         step.error = Some(error.clone());
                     }
                     t.step_writes.push(StepWrite {
@@ -1460,6 +1513,9 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     });
                 }
                 ResultReminderDecision::Exhausted => {
+                    run.context
+                        .set(&format!("node.{node_id}.result_attention.{attempt}"), "1");
+                    t.context_changed = true;
                     let undeliverable = run.result_reminder_observed(node_id, revision, stamp)
                         && run
                             .context
@@ -1476,14 +1532,19 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     };
                     unverify_step(run, &mut t, node_id, reason);
                 }
-                ResultReminderDecision::NotOwned => unverify_step(
+                ResultReminderDecision::NotOwned => {
+                    run.context
+                        .set(&format!("node.{node_id}.result_attention.{attempt}"), "1");
+                    t.context_changed = true;
+                    unverify_step(
                     run,
                     &mut t,
                     node_id,
                     format!(
                         "Agent finished without saving its result file to {result_path}; the agent is not owned by this circuit, so no reminder was sent."
                     ),
-                ),
+                    );
+                }
             }
         }
         CircuitEvent::Triggered => {
@@ -5793,7 +5854,7 @@ mod tests {
             vec![Effect::ContinueAgentTurn {
                 node_id: "classify".into(),
                 target_agent_id: 900,
-                prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now (overwrite it). Do not redo the work.".into(),
+                prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now using UTF-8 (overwrite it). The file is missing, blank, or not valid UTF-8. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work.".into(),
             }]
         );
         assert_eq!(
@@ -5999,6 +6060,11 @@ mod tests {
             .set("node.classify.continuation.delivery", "delivered");
 
         run.step_mut("classify").unwrap().status = StepStatus::Unverified;
+        assert_eq!(
+            decide(&run, "classify", 1),
+            ResultReminderDecision::Remind(1)
+        );
+        run.step_mut("classify").unwrap().status = StepStatus::Completed;
         assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
         run.step_mut("classify").unwrap().status = StepStatus::Running;
 

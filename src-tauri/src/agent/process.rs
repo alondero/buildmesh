@@ -1061,6 +1061,11 @@ pub(crate) mod testing {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    /// Install a live stand-in into a caller-selected registry.
+    pub(crate) fn insert_standin(registry: &AgentProcessRegistry, session_id: i64) {
+        super::tests::insert_trivial_agent(registry, session_id);
+    }
+
     /// A fresh registry holding one live stand-in agent for `session_id`, plus
     /// the receiver for every chunk written to that agent's PTY. The
     /// injected-registry sibling of `http::ws`'s `MockRegistry`, for callers
