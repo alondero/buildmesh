@@ -257,20 +257,13 @@ pub fn prepare(
     // install, custom profile, or a binary that appeared after startup),
     // re-resolve the recipe stem through the same enriched search path at
     // spawn time — changing picker detection alone does not fix the launch.
-    // WSL guests are exempt: the `wsl.exe` wrapper exports the guest user bins
-    // and the guest login shell resolves the stem itself.
-    let executable_override = profile_for_distro
-        .as_ref()
-        .and_then(|profile| profile.executable.clone())
-        .or_else(|| {
-            if resolved.env_type == crate::models::EnvType::Wsl {
-                return None;
-            }
-            crate::agent::detection::resolve_spawn_binary(recipe_binary_for(
-                provider,
-                resolved.env_type,
-            ))
-        });
+    let executable_override = spawn_time_executable(
+        profile_for_distro
+            .as_ref()
+            .and_then(|profile| profile.executable.clone()),
+        provider,
+        resolved.env_type,
+    );
 
     let routing = resolve_routing(spawn_option_id, provider, resolved, executable_override)?;
     // Only the value-only variants are memoised. `CodexProxy` carries a live
@@ -304,6 +297,34 @@ fn recipe_binary_for(
         .adapter()
         .spawn_recipe(platform, env_type)
         .binary
+}
+
+/// Spawn-time executable for a routing: the profile's detection-resolved path,
+/// falling back to a live re-resolution of the recipe stem through the same
+/// enriched search path detection uses.
+///
+/// Guest-side (`Wsl`) spawns resolve the stem inside the guest login shell,
+/// and Windows-side (`WindowsInterop`) spawns resolve Windows-side: a
+/// host-resolved absolute path (e.g. `/mnt/c/...` from translated Windows
+/// `PATH` mounts) is not a valid Windows path and must never reach
+/// PowerShell, so interop drops the override entirely — including a
+/// profile-carried path, which was resolved on the Linux side (review
+/// round 1).
+fn spawn_time_executable(
+    profile_executable: Option<PathBuf>,
+    provider: Provider,
+    env_type: crate::models::EnvType,
+) -> Option<PathBuf> {
+    use crate::models::EnvType;
+    if env_type == EnvType::WindowsInterop {
+        return None;
+    }
+    profile_executable.or_else(|| {
+        if env_type == EnvType::Wsl {
+            return None;
+        }
+        crate::agent::detection::resolve_spawn_binary(recipe_binary_for(provider, env_type))
+    })
 }
 
 /// The uncached body of [`prepare`] — resolved pairing → routing. Split out so
@@ -370,15 +391,8 @@ pub fn prepare_snapshot(
         }
     }
     let provider = Provider::from_db_str(&plan.harness.harness);
-    let executable_override = plan.harness.executable.clone().or_else(|| {
-        if resolved.env_type == crate::models::EnvType::Wsl {
-            return None;
-        }
-        crate::agent::detection::resolve_spawn_binary(recipe_binary_for(
-            provider,
-            resolved.env_type,
-        ))
-    });
+    let executable_override =
+        spawn_time_executable(plan.harness.executable.clone(), provider, resolved.env_type);
     let Some(route) = plan.route.clone() else {
         return Ok(PreparedLaunchRouting::Native { executable: executable_override });
     };
@@ -638,6 +652,29 @@ mod routing_cache_tests {
         assert_eq!(super::recipe_binary_for(Provider::Anthropic, EnvType::Wsl), "claude");
         assert_eq!(super::recipe_binary_for(Provider::Codex, EnvType::Windows), "codex");
         assert_eq!(super::recipe_binary_for(Provider::Cline, EnvType::Windows), "cline");
+    }
+
+    /// Review round 1 — a `WindowsInterop` spawn must never carry a
+    /// host-resolved executable: the Linux-side absolute path is not a valid
+    /// Windows path and PowerShell cannot run it. The profile path here is
+    /// never touched on disk — the interop arm returns before any lookup —
+    /// so the test is hermetic on every host.
+    #[test]
+    fn windows_interop_never_carries_a_host_resolved_executable() {
+        use crate::models::EnvType;
+        let profile = Some(PathBuf::from("/mnt/c/Users/me/.local/bin/claude.exe"));
+        assert_eq!(
+            super::spawn_time_executable(profile.clone(), Provider::Anthropic, EnvType::WindowsInterop),
+            None,
+        );
+        assert_eq!(
+            super::spawn_time_executable(profile.clone(), Provider::Anthropic, EnvType::Wsl),
+            profile,
+        );
+        assert_eq!(
+            super::spawn_time_executable(profile.clone(), Provider::Anthropic, EnvType::Windows),
+            profile,
+        );
     }
 
     fn key(id: &str) -> RoutingCacheKey {

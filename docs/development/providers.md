@@ -300,12 +300,18 @@ inherits a restricted process `PATH` that omits user-managed directories
 `claude` by name fails even when the picker offered it. Detection
 (`src-tauri/src/agent/detection.rs`) therefore searches those directories in
 addition to `PATH` and records the resolved path on
-`HarnessProfile.executable`; the spawn path
-(`agent::spawn::command::build_spawn_command_prepared`) prefers that path,
-and re-resolves the recipe stem through the same enriched search when the
-profile carries none (config-dir-only installs, custom profiles). WSL guests
-are exempt: the `wsl.exe` wrapper already exports the guest user bins, so the
-guest login shell resolves the stem itself.
+`HarnessProfile.executable`. The launch router
+(`agent::launch_routing::prepare` and `prepare_snapshot`) threads that path
+onto the routing (both `Native` and `Environment`), and re-resolves the
+adapter's recipe stem through the same enriched search at spawn time when the
+profile carries none (config-dir-only installs, custom profiles).
+`agent::spawn::command::build_spawn_command_prepared` consumes the routing's
+resolved path without further lookup, keeping command composition pure and
+unit-testable. On Windows only `PATHEXT` extensions resolve a bare stem, so an
+unrunnable extensionless npm shim is never recorded. WSL guests and
+Windows-interop spawns are exempt from host-side resolution: the guest login
+shell (WSL) or the Windows side (interop) resolves the stem in its own
+runtime, since a host-resolved Linux path is not valid input to PowerShell.
 
 ## Saved Spawn Configurations
 
