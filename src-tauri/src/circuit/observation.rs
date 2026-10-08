@@ -18,6 +18,7 @@ pub enum CircuitObservationBlocker {
     ReportSuperseded,
     KnownWorkOutstanding,
     HumanResponseRequired,
+    LifecycleEvidenceUnavailable,
     EvidenceConflict,
 }
 
@@ -33,6 +34,7 @@ impl CircuitObservationBlocker {
             Self::ReportSuperseded => "The available report precedes the current session or assigned prompt. Waiting for a fresh report from this turn.".into(),
             Self::KnownWorkOutstanding => "The harness reports unfinished child or background work. Waiting for its completion evidence.".into(),
             Self::HumanResponseRequired => "The harness has an unresolved question or permission request. Respond in the agent session; a completion report cannot answer it.".into(),
+            Self::LifecycleEvidenceUnavailable => "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion.".into(),
             Self::EvidenceConflict => "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict.".into(),
         }
     }
@@ -74,18 +76,43 @@ pub enum ObservedWorkFact {
     NeedsInput,
     PermissionRequested,
     QuestionRequested,
-    HumanWaitRequested { wait_kind: HumanWaitKind, request_id: String },
-    HumanResponse { wait_kind: HumanWaitKind, request_id: String },
-    ToolResponse { wait_kind: HumanWaitKind, request_id: String },
-    ToolFailed { wait_kind: HumanWaitKind, request_id: String },
+    HumanWaitRequested {
+        wait_kind: HumanWaitKind,
+        request_id: String,
+    },
+    HumanResponse {
+        wait_kind: HumanWaitKind,
+        request_id: String,
+    },
+    ToolResponse {
+        wait_kind: HumanWaitKind,
+        request_id: String,
+    },
+    ToolFailed {
+        wait_kind: HumanWaitKind,
+        request_id: String,
+    },
     ForegroundTerminated,
-    ForegroundReconciled { conflict_id: String },
-    OwnedStarted { work_id: String },
-    OwnedTerminated { work_id: String },
+    ForegroundReconciled {
+        conflict_id: String,
+    },
+    OwnedStarted {
+        work_id: String,
+    },
+    OwnedTerminated {
+        work_id: String,
+    },
     OwnershipCovered,
-    OwnershipUnavailable { reason: String },
-    OwnershipSnapshot { active_work: Vec<String> },
-    AssistantReport { text: String, revision: String },
+    OwnershipUnavailable {
+        reason: String,
+    },
+    OwnershipSnapshot {
+        active_work: Vec<String>,
+    },
+    AssistantReport {
+        text: String,
+        revision: String,
+    },
     AssignedWorkCompleted,
     Unavailable,
 }
@@ -112,13 +139,24 @@ pub struct RecordedObservation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "ReportInterpretation.ts")]
-pub enum ReportInterpretation { Completed, Blocked, Working, Continue, InsufficientEvidence }
+pub enum ReportInterpretation {
+    Completed,
+    Blocked,
+    Working,
+    Continue,
+    InsufficientEvidence,
+}
 
 impl From<Option<crate::circuit::evaluator::Classification>> for ReportInterpretation {
     fn from(value: Option<crate::circuit::evaluator::Classification>) -> Self {
         use crate::circuit::evaluator::Classification as C;
-        match value { Some(C::Completed) => Self::Completed, Some(C::Blocked) => Self::Blocked,
-            Some(C::Working) => Self::Working, Some(C::Continue) => Self::Continue, None => Self::InsufficientEvidence }
+        match value {
+            Some(C::Completed) => Self::Completed,
+            Some(C::Blocked) => Self::Blocked,
+            Some(C::Working) => Self::Working,
+            Some(C::Continue) => Self::Continue,
+            None => Self::InsufficientEvidence,
+        }
     }
 }
 
@@ -157,7 +195,12 @@ pub struct ReportEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "HumanWaitKind.ts")]
-pub enum HumanWaitKind { Input, Permission, Question, ReviewApproval }
+pub enum HumanWaitKind {
+    Input,
+    Permission,
+    Question,
+    ReviewApproval,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitHumanWait.ts")]
@@ -175,12 +218,21 @@ pub struct HumanWait {
 }
 
 impl HumanWait {
-    fn matches_request(&self, kind: HumanWaitKind, request_id: &Option<String>, identity: &ObservationIdentity) -> bool {
-        self.wait_kind == kind && &self.request_id == request_id
-            && self.identity.run_id == identity.run_id && self.identity.step_id == identity.step_id
-            && self.identity.attempt == identity.attempt && self.identity.agent_node_id == identity.agent_node_id
+    fn matches_request(
+        &self,
+        kind: HumanWaitKind,
+        request_id: &Option<String>,
+        identity: &ObservationIdentity,
+    ) -> bool {
+        self.wait_kind == kind
+            && &self.request_id == request_id
+            && self.identity.run_id == identity.run_id
+            && self.identity.step_id == identity.step_id
+            && self.identity.attempt == identity.attempt
+            && self.identity.agent_node_id == identity.agent_node_id
             && self.identity.session_incarnation == identity.session_incarnation
-            && self.identity.session_id == identity.session_id && self.identity.turn_id == identity.turn_id
+            && self.identity.session_id == identity.session_id
+            && self.identity.turn_id == identity.turn_id
     }
 }
 
@@ -205,7 +257,14 @@ pub struct EvidenceConflict {
 
 fn conflict_id(kind: &EvidenceConflictKind, event: &CircuitObservation) -> String {
     use sha2::{Digest, Sha256};
-    let key = serde_json::to_vec(&(&event.source, &event.source_id, &event.identity, event.observed_at_ms, kind)).expect("conflict identity");
+    let key = serde_json::to_vec(&(
+        &event.source,
+        &event.source_id,
+        &event.identity,
+        event.observed_at_ms,
+        kind,
+    ))
+    .expect("conflict identity");
     hex::encode(Sha256::digest(key))
 }
 
@@ -236,11 +295,16 @@ impl WorkEvidence {
     /// Older conflicts lack provenance. Only the exact append-only history
     /// observation that produced their digest can establish it retrospectively.
     pub(crate) fn restore_projection_conflict(&mut self, event: &CircuitObservation) -> bool {
-        if event.source != "agent_status_projection" || event.authoritative { return false; }
+        if event.source != "agent_status_projection" || event.authoritative {
+            return false;
+        }
         let id = conflict_id(&EvidenceConflictKind::Identity, event);
         let mut changed = false;
         for conflict in &mut self.conflicts {
-            if conflict.kind == EvidenceConflictKind::Identity && conflict.id == id && conflict.status_projection.is_none() {
+            if conflict.kind == EvidenceConflictKind::Identity
+                && conflict.id == id
+                && conflict.status_projection.is_none()
+            {
                 conflict.status_projection = Some(true);
                 changed = true;
             }
@@ -250,11 +314,21 @@ impl WorkEvidence {
 
     fn has_only_status_projections(&self) -> bool {
         let projection = "agent_status_projection";
-        self.latest.as_ref().is_some_and(|event| event.source == projection && !event.authoritative)
+        self.latest
+            .as_ref()
+            .is_some_and(|event| event.source == projection && !event.authoritative)
             && !self.sources.is_empty()
-            && self.sources.keys().all(|key| serde_json::from_str::<serde_json::Value>(key)
-                .ok().is_some_and(|value| value.get(0).and_then(|source| source.as_str()) == Some(projection)))
-            && self.source_watermarks.keys().all(|source| source == projection)
+            && self.sources.keys().all(|key| {
+                serde_json::from_str::<serde_json::Value>(key)
+                    .ok()
+                    .is_some_and(|value| {
+                        value.get(0).and_then(|source| source.as_str()) == Some(projection)
+                    })
+            })
+            && self
+                .source_watermarks
+                .keys()
+                .all(|source| source == projection)
             && self.human_waits.is_empty()
             && self.children.is_empty()
             && self.report.is_none()
@@ -263,19 +337,34 @@ impl WorkEvidence {
             && !self.ownership_covered
             && !self.lifecycle_invalidated
             && (!self.conflicted || !self.conflicts.is_empty())
-            && self.conflicts.iter().all(|conflict| conflict.kind == EvidenceConflictKind::Identity && conflict.status_projection == Some(true))
+            && self.conflicts.iter().all(|conflict| {
+                conflict.kind == EvidenceConflictKind::Identity
+                    && conflict.status_projection == Some(true)
+            })
     }
 
     fn record_conflict(&mut self, kind: EvidenceConflictKind, event: &CircuitObservation) {
         // Old persisted booleans carry no resolvable cause. Keep that uncertainty.
         if self.conflicted && self.conflicts.is_empty() {
-            self.conflicts.push(EvidenceConflict { id: "legacy-unknown".into(), kind: EvidenceConflictKind::LegacyUnknown,
-                identity: event.identity.clone(), observed_at_ms: event.observed_at_ms, status_projection: Some(false) });
+            self.conflicts.push(EvidenceConflict {
+                id: "legacy-unknown".into(),
+                kind: EvidenceConflictKind::LegacyUnknown,
+                identity: event.identity.clone(),
+                observed_at_ms: event.observed_at_ms,
+                status_projection: Some(false),
+            });
         }
         let id = conflict_id(&kind, event);
         if !self.conflicts.iter().any(|conflict| conflict.id == id) {
-            self.conflicts.push(EvidenceConflict { id, kind, identity: event.identity.clone(), observed_at_ms: event.observed_at_ms,
-                status_projection: Some(event.source == "agent_status_projection" && !event.authoritative) });
+            self.conflicts.push(EvidenceConflict {
+                id,
+                kind,
+                identity: event.identity.clone(),
+                observed_at_ms: event.observed_at_ms,
+                status_projection: Some(
+                    event.source == "agent_status_projection" && !event.authoritative,
+                ),
+            });
         }
         self.conflicted = true;
     }
@@ -284,7 +373,9 @@ impl WorkEvidence {
         // Old ledgers also contain inferred waits from AwaitingInput, which
         // several harnesses use for ordinary yields. Only a request can wait
         // indefinitely; a status projection has no request to answer.
-        self.human_waits.iter().any(|wait| wait.resolved_at_ms.is_none() && wait.source != "agent_status_projection")
+        self.human_waits
+            .iter()
+            .any(|wait| wait.resolved_at_ms.is_none() && wait.source != "agent_status_projection")
     }
 
     pub fn completion_verified(&self) -> bool {
@@ -389,18 +480,26 @@ impl WorkEvidence {
             // A current DB projection after Resume is not contradictory native
             // evidence. Retire projection-only history (including old workers'
             // identity conflicts); never discard real lifecycle or owned work.
-            if event.source == "agent_status_projection" && !event.authoritative
+            if event.source == "agent_status_projection"
+                && !event.authoritative
                 && self.has_only_status_projections()
-                && self.latest.as_ref().is_some_and(|latest| event.observed_at_ms >= latest.observed_at_ms)
+                && self
+                    .latest
+                    .as_ref()
+                    .is_some_and(|latest| event.observed_at_ms >= latest.observed_at_ms)
             {
                 *self = Self::default();
                 // Do not carry optional tokens from the retired process into
                 // the new projection while its session discovery is pending.
                 identity = expected.clone();
-                identity.session_incarnation = identity.session_incarnation.or_else(|| observed.session_incarnation.clone());
+                identity.session_incarnation = identity
+                    .session_incarnation
+                    .or_else(|| observed.session_incarnation.clone());
                 identity.session_id = identity.session_id.or_else(|| observed.session_id.clone());
                 identity.turn_id = identity.turn_id.or_else(|| observed.turn_id.clone());
-                identity.report_revision = identity.report_revision.or_else(|| observed.report_revision.clone());
+                identity.report_revision = identity
+                    .report_revision
+                    .or_else(|| observed.report_revision.clone());
             } else {
                 self.record_conflict(EvidenceConflictKind::Identity, event);
                 return ObservationDisposition::Conflicting;
@@ -448,7 +547,6 @@ impl WorkEvidence {
             self.assignment_completed = false;
             self.ownership_covered = false;
             self.report = None;
-
         }
         self.identity = Some(identity);
         self.source_watermarks
@@ -472,15 +570,23 @@ impl WorkEvidence {
             ObservedWorkFact::NeedsInput => Some((HumanWaitKind::Input, None)),
             ObservedWorkFact::PermissionRequested => Some((HumanWaitKind::Permission, None)),
             ObservedWorkFact::QuestionRequested => Some((HumanWaitKind::Question, None)),
-            ObservedWorkFact::HumanWaitRequested { wait_kind, request_id } => {
-                Some((*wait_kind, (!request_id.trim().is_empty()).then(|| request_id.clone())))
-            }
+            ObservedWorkFact::HumanWaitRequested {
+                wait_kind,
+                request_id,
+            } => Some((
+                *wait_kind,
+                (!request_id.trim().is_empty()).then(|| request_id.clone()),
+            )),
             _ => None,
         };
-        if let Some((wait_kind, request_id)) = requested.filter(|_| event.source != "agent_status_projection") {
+        if let Some((wait_kind, request_id)) =
+            requested.filter(|_| event.source != "agent_status_projection")
+        {
             let same_agent = |wait: &HumanWait| {
-                wait.identity.run_id == observed.run_id && wait.identity.step_id == observed.step_id
-                    && wait.identity.attempt == observed.attempt && wait.identity.agent_node_id == observed.agent_node_id
+                wait.identity.run_id == observed.run_id
+                    && wait.identity.step_id == observed.step_id
+                    && wait.identity.attempt == observed.attempt
+                    && wait.identity.agent_node_id == observed.agent_node_id
                     && wait.identity.session_incarnation == observed.session_incarnation
                     && wait.identity.session_id == observed.session_id
             };
@@ -488,19 +594,39 @@ impl WorkEvidence {
             // another request. Replace that inference when its native detail
             // arrives, preserving both source observations in history.
             if request_id.is_some() {
-                self.human_waits.retain(|wait| !(same_agent(wait) && wait.source == "agent_status_projection"
-                    && wait.request_id.is_none() && wait.resolved_at_ms.is_none()));
+                self.human_waits.retain(|wait| {
+                    !(same_agent(wait)
+                        && wait.source == "agent_status_projection"
+                        && wait.request_id.is_none()
+                        && wait.resolved_at_ms.is_none())
+                });
             }
             let projection_of_native = event.source == "agent_status_projection"
-                && self.human_waits.iter().any(|wait| same_agent(wait) && wait.request_id.is_some()
-                    && wait.resolved_at_ms.is_none_or(|resolved| resolved >= event.observed_at_ms));
+                && self.human_waits.iter().any(|wait| {
+                    same_agent(wait)
+                        && wait.request_id.is_some()
+                        && wait
+                            .resolved_at_ms
+                            .is_none_or(|resolved| resolved >= event.observed_at_ms)
+                });
             // Missing correlation still records an indefinite wait. A later
             // activity projection cannot manufacture the matching answer.
-            if !projection_of_native && !self.human_waits.iter().any(|wait| wait.matches_request(wait_kind, &request_id, &event.identity)) {
-                self.human_waits.push(HumanWait { wait_kind, request_id,
-                    identity: event.identity.clone(), source: event.source.clone(),
-                    source_id: event.source_id.clone(), observed_at_ms: event.observed_at_ms,
-                    authoritative: event.authoritative, resolved_at_ms: None });
+            if !projection_of_native
+                && !self
+                    .human_waits
+                    .iter()
+                    .any(|wait| wait.matches_request(wait_kind, &request_id, &event.identity))
+            {
+                self.human_waits.push(HumanWait {
+                    wait_kind,
+                    request_id,
+                    identity: event.identity.clone(),
+                    source: event.source.clone(),
+                    source_id: event.source_id.clone(),
+                    observed_at_ms: event.observed_at_ms,
+                    authoritative: event.authoritative,
+                    resolved_at_ms: None,
+                });
             }
         }
         if !event.authoritative
@@ -510,22 +636,41 @@ impl WorkEvidence {
         {
             return ObservationDisposition::ReducedConfidence;
         }
-        if let ObservedWorkFact::HumanResponse { wait_kind, request_id }
-            | ObservedWorkFact::ToolResponse { wait_kind, request_id }
-            | ObservedWorkFact::ToolFailed { wait_kind, request_id } = &event.fact {
-            let tool_response = matches!(event.fact, ObservedWorkFact::ToolResponse { .. } | ObservedWorkFact::ToolFailed { .. });
+        if let ObservedWorkFact::HumanResponse {
+            wait_kind,
+            request_id,
+        }
+        | ObservedWorkFact::ToolResponse {
+            wait_kind,
+            request_id,
+        }
+        | ObservedWorkFact::ToolFailed {
+            wait_kind,
+            request_id,
+        } = &event.fact
+        {
+            let tool_response = matches!(
+                event.fact,
+                ObservedWorkFact::ToolResponse { .. } | ObservedWorkFact::ToolFailed { .. }
+            );
             let mut matched = false;
             for wait in &mut self.human_waits {
                 let kind = if tool_response && wait.wait_kind == HumanWaitKind::Permission {
                     HumanWaitKind::Permission
-                } else { *wait_kind };
+                } else {
+                    *wait_kind
+                };
                 if wait.matches_request(kind, &Some(request_id.clone()), observed)
-                    && !request_id.is_empty() && wait.observed_at_ms <= event.observed_at_ms {
+                    && !request_id.is_empty()
+                    && wait.observed_at_ms <= event.observed_at_ms
+                {
                     wait.resolved_at_ms.get_or_insert(event.observed_at_ms);
                     matched = true;
                 }
             }
-            if !matched { return ObservationDisposition::Rejected; }
+            if !matched {
+                return ObservationDisposition::Rejected;
+            }
         }
         match &event.fact {
             ObservedWorkFact::AssistantReport { text, revision } => {
@@ -539,25 +684,36 @@ impl WorkEvidence {
                     identity.report_revision = Some(revision.clone());
                 }
             }
-            ObservedWorkFact::Working if self.foreground_terminated => self.record_conflict(EvidenceConflictKind::Foreground, event),
+            ObservedWorkFact::Working if self.foreground_terminated => {
+                self.record_conflict(EvidenceConflictKind::Foreground, event)
+            }
             ObservedWorkFact::ForegroundReconciled { conflict_id } => {
-                let Some(index) = self.conflicts.iter().position(|conflict| conflict.id == *conflict_id
-                    && conflict.kind == EvidenceConflictKind::Foreground
-                    && conflict.identity.session_incarnation == observed.session_incarnation
-                    && conflict.identity.session_id == observed.session_id
-                    && conflict.identity.turn_id == observed.turn_id
-                    && conflict.observed_at_ms <= event.observed_at_ms) else { return ObservationDisposition::Rejected; };
+                let Some(index) = self.conflicts.iter().position(|conflict| {
+                    conflict.id == *conflict_id
+                        && conflict.kind == EvidenceConflictKind::Foreground
+                        && conflict.identity.session_incarnation == observed.session_incarnation
+                        && conflict.identity.session_id == observed.session_id
+                        && conflict.identity.turn_id == observed.turn_id
+                        && conflict.observed_at_ms <= event.observed_at_ms
+                }) else {
+                    return ObservationDisposition::Rejected;
+                };
                 self.conflicts.remove(index);
                 self.conflicted = !self.conflicts.is_empty();
                 self.foreground_terminated = true;
-            },
+            }
             ObservedWorkFact::ForegroundTerminated => self.foreground_terminated = true,
             ObservedWorkFact::AssignedWorkCompleted => self.assignment_completed = true,
             ObservedWorkFact::OwnershipCovered => self.ownership_covered = true,
             ObservedWorkFact::OwnershipSnapshot { active_work } => {
                 for id in active_work {
                     if self.children.get(id) == Some(&true) {
-                        self.record_conflict(EvidenceConflictKind::OwnedWork { work_id: id.clone() }, event);
+                        self.record_conflict(
+                            EvidenceConflictKind::OwnedWork {
+                                work_id: id.clone(),
+                            },
+                            event,
+                        );
                     }
                 }
                 for id in active_work {
@@ -567,7 +723,12 @@ impl WorkEvidence {
             }
             ObservedWorkFact::OwnedStarted { work_id } => {
                 if self.children.get(work_id) == Some(&true) {
-                    self.record_conflict(EvidenceConflictKind::OwnedWork { work_id: work_id.clone() }, event);
+                    self.record_conflict(
+                        EvidenceConflictKind::OwnedWork {
+                            work_id: work_id.clone(),
+                        },
+                        event,
+                    );
                 }
                 self.children.entry(work_id.clone()).or_insert(false);
             }
@@ -576,8 +737,14 @@ impl WorkEvidence {
             }
             _ => {}
         }
-        if matches!(event.fact, ObservedWorkFact::ForegroundTerminated | ObservedWorkFact::OwnershipCovered | ObservedWorkFact::OwnershipSnapshot { .. })
-            && self.foreground_terminated && self.ownership_covered {
+        if matches!(
+            event.fact,
+            ObservedWorkFact::ForegroundTerminated
+                | ObservedWorkFact::OwnershipCovered
+                | ObservedWorkFact::OwnershipSnapshot { .. }
+        ) && self.foreground_terminated
+            && self.ownership_covered
+        {
             self.lifecycle_invalidated = false;
         }
         if self.conflicted {
@@ -605,18 +772,30 @@ mod tests {
         restarted.source_id = Some("replacement-projection".into());
         // Reproduce persisted conflicts written by older workers after resume.
         state.record_conflict(EvidenceConflictKind::Identity, &restarted);
-        let mut state: WorkEvidence = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        assert_eq!(state.observe(&restarted.identity, &restarted), ObservationDisposition::ReducedConfidence);
+        let mut state: WorkEvidence =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(
+            state.observe(&restarted.identity, &restarted),
+            ObservationDisposition::ReducedConfidence
+        );
         assert_eq!(state.identity, Some(restarted.identity.clone()));
         assert!(!state.conflicted);
         assert!(!state.lifecycle_verified());
-        assert_eq!(state.observe(&restarted.identity, &projected), ObservationDisposition::Rejected);
+        assert_eq!(
+            state.observe(&restarted.identity, &projected),
+            ObservationDisposition::Rejected
+        );
     }
 
     #[test]
     fn restarted_session_preserves_native_evidence_and_unknown_conflicts() {
-        for fact in [ObservedWorkFact::Working, ObservedWorkFact::PermissionRequested,
-            ObservedWorkFact::OwnedStarted { work_id: "child".into() }] {
+        for fact in [
+            ObservedWorkFact::Working,
+            ObservedWorkFact::PermissionRequested,
+            ObservedWorkFact::OwnedStarted {
+                work_id: "child".into(),
+            },
+        ] {
             let mut state = WorkEvidence::default();
             state.observe(&identity(), &event(fact, 1));
             let mut projected = event(ObservedWorkFact::Working, 2);
@@ -625,7 +804,10 @@ mod tests {
             state.observe(&identity(), &projected);
             projected.identity.session_incarnation = Some("replacement".into());
             projected.observed_at_ms = 3;
-            assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::Conflicting);
+            assert_eq!(
+                state.observe(&projected.identity, &projected),
+                ObservationDisposition::Conflicting
+            );
             assert!(state.conflicted);
         }
     }
@@ -639,11 +821,17 @@ mod tests {
         state.observe(&identity(), &projected);
         let mut request = event(ObservedWorkFact::PermissionRequested, 2);
         request.identity.session_incarnation = Some("replacement".into());
-        assert_eq!(state.observe(&request.identity, &request), ObservationDisposition::Conflicting);
+        assert_eq!(
+            state.observe(&request.identity, &request),
+            ObservationDisposition::Conflicting
+        );
         assert!(!state.restore_projection_conflict(&request));
         projected.identity = request.identity.clone();
         projected.observed_at_ms = 3;
-        assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::Conflicting);
+        assert_eq!(
+            state.observe(&projected.identity, &projected),
+            ObservationDisposition::Conflicting
+        );
         assert_eq!(state.conflicts[0].status_projection, Some(false));
         assert!(state.conflicted);
     }
@@ -659,14 +847,20 @@ mod tests {
         projected.observed_at_ms = 2;
         state.record_conflict(EvidenceConflictKind::Identity, &projected);
         let mut legacy = serde_json::to_value(&state).unwrap();
-        legacy["conflicts"][0].as_object_mut().unwrap().remove("status_projection");
+        legacy["conflicts"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("status_projection");
         let mut state: WorkEvidence = serde_json::from_value(legacy).unwrap();
         assert!(!state.has_only_status_projections());
         let mut wrong = projected.clone();
         wrong.observed_at_ms = 3;
         assert!(!state.restore_projection_conflict(&wrong));
         assert!(state.restore_projection_conflict(&projected));
-        assert_eq!(state.observe(&projected.identity, &projected), ObservationDisposition::ReducedConfidence);
+        assert_eq!(
+            state.observe(&projected.identity, &projected),
+            ObservationDisposition::ReducedConfidence
+        );
         assert!(!state.conflicted);
     }
 
@@ -681,48 +875,130 @@ mod tests {
         assert!(!state.has_human_wait());
         assert!(!state.completion_verified());
 
-        state.observe(&identity(), &event(ObservedWorkFact::PermissionRequested, 2));
-        assert!(state.has_human_wait(), "native requests still require a response");
+        state.observe(
+            &identity(),
+            &event(ObservedWorkFact::PermissionRequested, 2),
+        );
+        assert!(
+            state.has_human_wait(),
+            "native requests still require a response"
+        );
     }
 
     #[test]
     fn circuit_human_wait_response_requires_request_kind_and_full_identity() {
         let mut state = WorkEvidence::default();
-        for (index, wait_kind) in [HumanWaitKind::Permission, HumanWaitKind::Question].into_iter().enumerate() {
-            state.observe(&identity(), &event(ObservedWorkFact::HumanWaitRequested {
-                wait_kind, request_id: "request".into() }, index as i64));
+        for (index, wait_kind) in [HumanWaitKind::Permission, HumanWaitKind::Question]
+            .into_iter()
+            .enumerate()
+        {
+            state.observe(
+                &identity(),
+                &event(
+                    ObservedWorkFact::HumanWaitRequested {
+                        wait_kind,
+                        request_id: "request".into(),
+                    },
+                    index as i64,
+                ),
+            );
         }
-        let mut duplicate = event(ObservedWorkFact::HumanWaitRequested {
-            wait_kind: HumanWaitKind::Permission, request_id: "request".into() }, 1);
+        let mut duplicate = event(
+            ObservedWorkFact::HumanWaitRequested {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "request".into(),
+            },
+            1,
+        );
         duplicate.source_id = Some("different-delivery".into());
         duplicate.identity.report_revision = Some("new-report".into());
         state.observe(&identity(), &duplicate);
-        assert_eq!(state.human_waits.len(), 2, "report revision is not request identity");
+        assert_eq!(
+            state.human_waits.len(),
+            2,
+            "report revision is not request identity"
+        );
         let encoded = serde_json::to_string(&state).unwrap();
         state = serde_json::from_str(&encoded).unwrap();
-        let mut response = event(ObservedWorkFact::HumanResponse {
-            wait_kind: HumanWaitKind::Permission, request_id: "wrong".into() }, 2);
-        assert_eq!(state.observe(&identity(), &response), ObservationDisposition::Rejected);
-        assert_eq!(state.human_waits.iter().filter(|w| w.resolved_at_ms.is_none()).count(), 2);
-        response = event(ObservedWorkFact::HumanResponse {
-            wait_kind: HumanWaitKind::Permission, request_id: "request".into() }, 3);
+        let mut response = event(
+            ObservedWorkFact::HumanResponse {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "wrong".into(),
+            },
+            2,
+        );
+        assert_eq!(
+            state.observe(&identity(), &response),
+            ObservationDisposition::Rejected
+        );
+        assert_eq!(
+            state
+                .human_waits
+                .iter()
+                .filter(|w| w.resolved_at_ms.is_none())
+                .count(),
+            2
+        );
+        response = event(
+            ObservedWorkFact::HumanResponse {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "request".into(),
+            },
+            3,
+        );
         response.authoritative = false;
-        assert_eq!(state.observe(&identity(), &response), ObservationDisposition::ReducedConfidence);
+        assert_eq!(
+            state.observe(&identity(), &response),
+            ObservationDisposition::ReducedConfidence
+        );
         assert!(state.human_waits.iter().all(|w| w.resolved_at_ms.is_none()));
-        response = event(ObservedWorkFact::HumanResponse {
-            wait_kind: HumanWaitKind::Permission, request_id: "request".into() }, 4);
+        response = event(
+            ObservedWorkFact::HumanResponse {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "request".into(),
+            },
+            4,
+        );
         response.identity.session_incarnation = Some("replacement".into());
-        assert_eq!(state.observe(&identity(), &response), ObservationDisposition::Rejected);
-        response = event(ObservedWorkFact::HumanResponse {
-            wait_kind: HumanWaitKind::Permission, request_id: "request".into() }, 5);
-        assert_eq!(state.observe(&identity(), &response), ObservationDisposition::Accepted);
+        assert_eq!(
+            state.observe(&identity(), &response),
+            ObservationDisposition::Rejected
+        );
+        response = event(
+            ObservedWorkFact::HumanResponse {
+                wait_kind: HumanWaitKind::Permission,
+                request_id: "request".into(),
+            },
+            5,
+        );
+        assert_eq!(
+            state.observe(&identity(), &response),
+            ObservationDisposition::Accepted
+        );
         assert_eq!(state.human_waits[0].resolved_at_ms, Some(5));
-        assert!(state.has_human_wait(), "answering permission does not answer the question");
-        assert_eq!(state.observe(&identity(), &response), ObservationDisposition::Duplicate);
-        state.observe(&identity(), &event(ObservedWorkFact::HumanResponse {
-            wait_kind: HumanWaitKind::Question, request_id: "request".into() }, 6));
+        assert!(
+            state.has_human_wait(),
+            "answering permission does not answer the question"
+        );
+        assert_eq!(
+            state.observe(&identity(), &response),
+            ObservationDisposition::Duplicate
+        );
+        state.observe(
+            &identity(),
+            &event(
+                ObservedWorkFact::HumanResponse {
+                    wait_kind: HumanWaitKind::Question,
+                    request_id: "request".into(),
+                },
+                6,
+            ),
+        );
         assert!(!state.has_human_wait());
-        assert!(!state.completion_verified(), "answers never supply lifecycle completion");
+        assert!(
+            !state.completion_verified(),
+            "answers never supply lifecycle completion"
+        );
     }
 
     #[test]
@@ -993,29 +1269,83 @@ mod tests {
     #[test]
     fn circuit_foreground_reconciliation_is_revision_scoped_and_preserves_other_obligations() {
         let mut state = WorkEvidence::default();
-        state.observe(&identity(), &event(ObservedWorkFact::ForegroundTerminated, 1));
+        state.observe(
+            &identity(),
+            &event(ObservedWorkFact::ForegroundTerminated, 1),
+        );
         state.observe(&identity(), &event(ObservedWorkFact::Working, 2));
         let conflict_id = state.conflicts[0].id.clone();
-        state.observe(&identity(), &event(ObservedWorkFact::OwnedTerminated { work_id: "child".into() }, 3));
-        state.observe(&identity(), &event(ObservedWorkFact::OwnedStarted { work_id: "child".into() }, 4));
-        state.observe(&identity(), &event(ObservedWorkFact::HumanWaitRequested { wait_kind: HumanWaitKind::Permission, request_id: "approval".into() }, 5));
+        state.observe(
+            &identity(),
+            &event(
+                ObservedWorkFact::OwnedTerminated {
+                    work_id: "child".into(),
+                },
+                3,
+            ),
+        );
+        state.observe(
+            &identity(),
+            &event(
+                ObservedWorkFact::OwnedStarted {
+                    work_id: "child".into(),
+                },
+                4,
+            ),
+        );
+        state.observe(
+            &identity(),
+            &event(
+                ObservedWorkFact::HumanWaitRequested {
+                    wait_kind: HumanWaitKind::Permission,
+                    request_id: "approval".into(),
+                },
+                5,
+            ),
+        );
         state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-        let mut reply = event(ObservedWorkFact::ForegroundReconciled { conflict_id: conflict_id.clone() }, 6);
+        let mut reply = event(
+            ObservedWorkFact::ForegroundReconciled {
+                conflict_id: conflict_id.clone(),
+            },
+            6,
+        );
         reply.authoritative = false;
-        assert_eq!(state.observe(&identity(), &reply), ObservationDisposition::ReducedConfidence);
-        assert_eq!(state.conflicts.len(),2);
+        assert_eq!(
+            state.observe(&identity(), &reply),
+            ObservationDisposition::ReducedConfidence
+        );
+        assert_eq!(state.conflicts.len(), 2);
         reply.authoritative = true;
         reply.source_id = Some("authoritative-recheck".into());
-        assert_eq!(state.observe(&identity(), &reply), ObservationDisposition::Conflicting);
-        assert_eq!(state.conflicts.len(),1);
-        assert!(matches!(state.conflicts[0].kind, EvidenceConflictKind::OwnedWork { .. }));
+        assert_eq!(
+            state.observe(&identity(), &reply),
+            ObservationDisposition::Conflicting
+        );
+        assert_eq!(state.conflicts.len(), 1);
+        assert!(matches!(
+            state.conflicts[0].kind,
+            EvidenceConflictKind::OwnedWork { .. }
+        ));
         assert!(state.has_human_wait());
         assert!(!state.completion_verified());
-        assert_eq!(state.observe(&identity(), &reply), ObservationDisposition::Duplicate);
+        assert_eq!(
+            state.observe(&identity(), &reply),
+            ObservationDisposition::Duplicate
+        );
         reply.source_id = Some("old-conflict-again".into());
-        assert_eq!(state.observe(&identity(), &reply), ObservationDisposition::Rejected);
-        let mut legacy = WorkEvidence { conflicted: true, ..Default::default() };
-        assert_eq!(legacy.observe(&identity(), &reply), ObservationDisposition::Rejected);
+        assert_eq!(
+            state.observe(&identity(), &reply),
+            ObservationDisposition::Rejected
+        );
+        let mut legacy = WorkEvidence {
+            conflicted: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            legacy.observe(&identity(), &reply),
+            ObservationDisposition::Rejected
+        );
         assert!(legacy.conflicted);
     }
 
