@@ -644,11 +644,17 @@ mod routing_cache_tests {
     /// `recipe_binary_for` must name the same stem the spawn invokes, per
     /// platform — the spawn-time re-resolution consults this name, so a
     /// mismatch would resolve (and launch) a different program than routing
-    /// selected.
+    /// selected. A native (non-`Wsl`, non-interop) env resolves through the
+    /// host recipe by design, so the Anthropic expectation follows the test
+    /// runner's own platform; the `Wsl` arm is host-independent.
     #[test]
     fn recipe_binary_for_returns_the_stem_the_spawn_invokes() {
         use crate::models::EnvType;
-        assert_eq!(super::recipe_binary_for(Provider::Anthropic, EnvType::Windows), "claude.exe");
+        let native_claude = if cfg!(windows) { "claude.exe" } else { "claude" };
+        assert_eq!(
+            super::recipe_binary_for(Provider::Anthropic, EnvType::Windows),
+            native_claude
+        );
         assert_eq!(super::recipe_binary_for(Provider::Anthropic, EnvType::Wsl), "claude");
         assert_eq!(super::recipe_binary_for(Provider::Codex, EnvType::Windows), "codex");
         assert_eq!(super::recipe_binary_for(Provider::Cline, EnvType::Windows), "cline");
