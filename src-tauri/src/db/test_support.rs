@@ -111,6 +111,10 @@ struct Installed {
     /// creator clears `files`, so a thread that merely [`adopt`]ed the
     /// database does not delete a file its creator is still using.
     owner: bool,
+    /// The agent-node id range this database owns, `(first, last)` inclusive.
+    /// Travels with the database so an [`adopt`]ing thread reports the same
+    /// range its creator was given.
+    node_id_range: (i64, i64),
 }
 
 thread_local! {
@@ -128,6 +132,19 @@ static NEXT_ORDINAL: AtomicU64 = AtomicU64::new(0);
 /// which is always the case in production.
 pub(super) fn installed_db() -> Option<&'static super::Database> {
     INSTALLED.with(|slot| slot.borrow().as_ref().map(|installed| installed.db))
+}
+
+/// The agent-node id range this thread's isolated database owns, `(first,
+/// last)` inclusive. `None` when the thread has not installed one.
+///
+/// Every process-global registry keyed by agent-node id — the circuit
+/// evaluator's `NODES` map among them — is safe under parallel tests only
+/// because these ranges are disjoint. A test that renumbers its node outside
+/// the range it was given (issue #2144) opts out of that guarantee without
+/// knowing it, so a fixture that must not collide can assert its node landed
+/// inside the range its own database was given.
+pub fn installed_node_id_range() -> Option<(i64, i64)> {
+    INSTALLED.with(|slot| slot.borrow().as_ref().map(|i| i.node_id_range))
 }
 
 /// A private, in-memory database URI unique to this process and install.
@@ -151,16 +168,19 @@ fn next_database_uri() -> PathBuf {
 /// This mirrors [`super::init`] — same pragmas, same full migration pipeline,
 /// same writer + reader pool shape — so a test sees the same schema and the
 /// same connection semantics it would see in production, minus the file.
-fn open_isolated_at(db_path: &Path) -> SqlResult<&'static super::Database> {
+fn open_isolated_at(db_path: &Path) -> SqlResult<(&'static super::Database, (i64, i64))> {
     let conn = super::open_writer(db_path)?;
     super::apply_connection_pragmas(&conn, false)?;
     super::init_schema(&conn)?;
-    seed_unique_node_ids(&conn)?;
+    let node_id_range = seed_unique_node_ids(&conn)?;
     let readers = super::ReaderPool::open_sized(db_path, TEST_READER_POOL_SIZE)?;
-    Ok(Box::leak(Box::new(super::Database {
-        writer: Mutex::new(conn),
-        readers,
-    })))
+    Ok((
+        Box::leak(Box::new(super::Database {
+            writer: Mutex::new(conn),
+            readers,
+        })),
+        node_id_range,
+    ))
 }
 
 /// Width of the agent-node id range each isolated database owns.
@@ -178,15 +198,21 @@ const NODE_ID_RANGE: i64 = 100_000;
 /// test's `unregister(1)` or `register_circuit(1)` changed what the other
 /// observed. Disjoint ranges make a node id unique across the whole test
 /// process, so a global keyed by it can no longer be shared by accident.
-fn seed_unique_node_ids(conn: &rusqlite::Connection) -> SqlResult<()> {
+///
+/// Returns the range as `(first, last)` inclusive. A fixture that keeps its node
+/// inside the range its own database owns is therefore unique by construction
+/// (issue #2144); one that renumbers its node outside it is not, whatever stride
+/// it picks.
+fn seed_unique_node_ids(conn: &rusqlite::Connection) -> SqlResult<(i64, i64)> {
     static NEXT_RANGE: AtomicU64 = AtomicU64::new(0);
     let range = NEXT_RANGE.fetch_add(1, Ordering::Relaxed) as i64;
+    let base = range * NODE_ID_RANGE;
     conn.execute("DELETE FROM sqlite_sequence WHERE name = 'agent_nodes'", [])?;
     conn.execute(
         "INSERT INTO sqlite_sequence (name, seq) VALUES ('agent_nodes', ?1)",
-        [range * NODE_ID_RANGE],
+        [base],
     )?;
-    Ok(())
+    Ok((base + 1, base + NODE_ID_RANGE))
 }
 
 /// Per-process scratch directory for the file-backed installs of
@@ -337,7 +363,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
         // A nested call inside a shared helper: keep the caller's database.
         Some(current) => IsolatedDbGuard::from(current),
         None => {
-            let db = open_isolated_at(&db_path).unwrap_or_else(|error| {
+            let (db, node_id_range) = open_isolated_at(&db_path).unwrap_or_else(|error| {
                 panic!(
                     "db::test_support: opening the isolated test database at {} failed: {error}; \
                      see db/mod.rs for the canonical init path",
@@ -347,6 +373,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
             let handle = IsolatedDbHandle {
                 db,
                 files: Arc::new(files),
+                node_id_range,
             };
             INSTALLED.with(|slot| {
                 *slot.borrow_mut() = Some(Installed {
@@ -355,6 +382,7 @@ fn install(db_path: PathBuf, files: Vec<PathBuf>) -> IsolatedDbGuard {
                     prefs: install_preferences_dir(),
                     depth: 1,
                     owner: true,
+                    node_id_range,
                 });
             });
             IsolatedDbGuard::from(handle)
@@ -412,6 +440,7 @@ pub fn adopt(handle: &IsolatedDbHandle) -> IsolatedDbGuard {
                     prefs: install_preferences_dir(),
                     depth: 1,
                     owner: false,
+                    node_id_range: handle.node_id_range,
                 });
             });
             IsolatedDbGuard::from(handle)
@@ -431,6 +460,7 @@ fn claim_depth() -> Option<IsolatedDbHandle> {
         Some(IsolatedDbHandle {
             db: installed.db,
             files: Arc::clone(&installed.files),
+            node_id_range: installed.node_id_range,
         })
     })
 }
@@ -446,6 +476,7 @@ fn claim_depth() -> Option<IsolatedDbHandle> {
 pub struct IsolatedDbHandle {
     db: &'static super::Database,
     files: Arc<Vec<PathBuf>>,
+    node_id_range: (i64, i64),
 }
 
 // `adopt` moves a handle into a spawned closure, so this has to hold.

@@ -870,26 +870,6 @@ mod tests {
         assert_eq!(injection_payload("do the thing"), "do the thing");
     }
 
-    /// Move a node this test just created into a process-unique id range.
-    ///
-    /// Every isolated test database restarts its autoincrement ids at 1
-    /// (issue #2048), while the evaluator's node map is process-global and
-    /// keyed by node id. Two delivery tests running in parallel would
-    /// otherwise register the same id and feed each other's PTY output into
-    /// one buffer. Nothing references the node yet — the test created it a
-    /// moment ago — so rewriting the primary key is safe.
-    fn unique_node_id(node_id: i64) -> i64 {
-        static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
-        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) * 1_000_000 + 1;
-        crate::db::write_conn()
-            .execute(
-                "UPDATE agent_nodes SET id = ?1 WHERE id = ?2",
-                rusqlite::params![unique, node_id],
-            )
-            .expect("reserve a process-unique node id");
-        unique
-    }
-
     #[test]
     fn codex_multiline_waits_for_paste_render_before_enter() {
         let _db = crate::db::test_support::isolated();
@@ -913,7 +893,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let id = unique_node_id(node.id);
+        let id = node.id;
         let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
         evaluator::register(id);
         let prompt = format!("feedback\n{}", "x".repeat(9398));
@@ -1171,7 +1151,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let node_id = unique_node_id(node.id);
+        let node_id = node.id;
         evaluator::register(node_id);
 
         assert!(matches!(
@@ -1197,7 +1177,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let proxied_id = unique_node_id(proxied.id);
+        let proxied_id = proxied.id;
         evaluator::register(proxied_id);
         assert!(matches!(
             paste_readiness(proxied_id, "review the change\nwith context")
@@ -1308,7 +1288,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let node_id = unique_node_id(node.id);
+        let node_id = node.id;
         evaluator::register(node_id);
         assert!(matches!(
             paste_readiness(node_id, "Review feedback\nApply the changes")
@@ -1566,6 +1546,81 @@ mod tests {
         evaluator::unregister(id);
     }
 
+    /// #2144: a fixture's node must keep the id range its own database was
+    /// given, which is what makes the id safe to key a process-global
+    /// registry on.
+    ///
+    /// `unique_node_id` renumbered a freshly created node to
+    /// `k * 1_000_000 + 1`, but `db::test_support::isolated` had already been
+    /// handing each database a disjoint 100_000-wide range since #2130, so the
+    /// two id spaces overlapped by construction: the eleventh database's first
+    /// id is `1_000_001`, exactly what the first renumbering handed out. Two
+    /// parallel delivery tests could therefore register one key in the
+    /// evaluator's process-global node map, and whichever finished first ran
+    /// `unregister`, dropping the whole entry — so the survivor's
+    /// `output_cursor` read returned `None`, or a composer frame drawn for one
+    /// draft confirmed (or failed to confirm) the other's. Only the concurrent
+    /// shard runs overlapped enough to hit it, which is why it read as an
+    /// intermittent Muse flake.
+    #[test]
+    fn delivery_fixture_ids_stay_inside_their_own_database_range() {
+        // Both fixture shapes this module uses, so neither can drift back into
+        // renumbering a node the database already gave a unique id.
+        let fixture = |muse: bool, label: String| {
+            std::thread::spawn(move || {
+                let _db = crate::db::test_support::isolated();
+                let range = crate::db::test_support::installed_node_id_range()
+                    .expect("the install owns an agent-node id range");
+                let id = if muse {
+                    muse_publisher_node(&label)
+                } else {
+                    codex_worker_node(&label)
+                };
+                (id, range)
+            })
+        };
+        // Twelve databases: the eleventh is the first whose range reaches a
+        // `k * 1_000_000 + 1` id, so an overlapping renumbering collides here.
+        let mut ids: Vec<i64> = Vec::new();
+        for n in 0..12 {
+            let (id, (first, last)) = fixture(n % 2 == 0, format!("delivery-range-{n}"))
+                .join()
+                .unwrap();
+            assert!(
+                first <= id && id <= last,
+                "fixture {n} holds node {id}, outside the {first}..={last} range its database owns"
+            );
+            ids.push(id);
+        }
+        let mut distinct = ids.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            ids.len(),
+            "two delivery fixtures claimed one node id: {ids:?}"
+        );
+
+        // What a shared key cost, asserted through the evaluator itself:
+        // `unregister` drops the whole entry, so one fixture finishing emptied
+        // every buffer that shared its id, and the survivor's paste gate read
+        // `output_cursor` as `None` (issue #2144).
+        for id in &ids {
+            evaluator::register(*id);
+            evaluator::on_output(*id, "a composer redraw");
+        }
+        evaluator::unregister(ids[0]);
+        for id in &ids[1..] {
+            assert!(
+                evaluator::output_cursor(*id).is_some(),
+                "node {id} lost its PTY output buffer to another fixture's unregister"
+            );
+        }
+        for id in &ids[1..] {
+            evaluator::unregister(*id);
+        }
+    }
+
     /// Stand-in for the #2061 Codex gap: a mid-size multiline draft in the
     /// same size band as run 343's 831-character Muse prompt. A partial frame
     /// from Codex 0.160.0 (79x57 Windows ConPTY) showed a ~600-character paste
@@ -1631,8 +1686,12 @@ mod tests {
         "\x1b[11;1H\x1b[2mesc to cancel · enter to send\x1b[0m",
     );
 
-    /// Create a Codex node in this test's own database and return a
-    /// process-unique id for it (see `unique_node_id`).
+    /// Create a Codex node in this test's own database and return its id.
+    ///
+    /// The id is already unique across the test process: `isolated()` hands
+    /// each database its own `agent_nodes` id range (issue #2130), so a node
+    /// keeps the id its database gave it. Renumbering it into a private range
+    /// is what reintroduced a shared evaluator key (issue #2144).
     fn codex_worker_node(label: &str) -> i64 {
         let path = std::env::temp_dir().join(format!("{}-{}", label, std::process::id()));
         let path = path.to_string_lossy();
@@ -1654,7 +1713,7 @@ mod tests {
             None,
         )
         .unwrap();
-        unique_node_id(node.id)
+        node.id
     }
 
     #[test]

@@ -9,9 +9,10 @@ import { runGuarded } from './ci/run-guarded.mjs';
 import { availableParallelism } from 'node:os';
 import { executedTests, gateReads, planGates, touchedFormatDiffs } from './harness-plan.mjs';
 import { acquireSlot, heavyGateEnv, heavyGateLimit, runPlan } from './harness-lanes.mjs';
+import { conptyPrerequisite, failureLines, gatePassed, isolatedCommand, isolateTests, knownFlakes, readTestReport, validateFlakeIssues } from './harness-test-failures.mjs';
 
 const USAGE = 'harness start --spec <json> | update --spec <json> | status | metrics | verify [--base <commit>] [--full] | wait [--max-seconds <n>] | finish | evaluate [--case <id>] | checkpoint | record-rollback --ref <commit>';
-const EXIT = { PASS: 0, FAIL: 1, BLOCKED: 2, TIMEOUT: 124 };
+const EXIT = { PASS: 0, FAIL: 1, FLAKY: 1, BLOCKED: 2, TIMEOUT: 124 };
 const statePath = (root, name) => join(root, '.harness', name);
 const git = (root, ...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
 const readJson = (path) => existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null;
@@ -217,7 +218,11 @@ function commandFor(root, gate, base) {
   if (gate.command[0] === 'npm') return npmCommand(root, args);
   return [gate.command[0] === 'node' ? process.execPath : gate.command[0], ...args];
 }
-function preflight(root, gate) {
+async function preflight(root, gate, extraEnv) {
+  if (gate.tests === 'vitest' || gate.tests === 'rust') {
+    const probe = spawnSync('git', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000, env: { ...process.env, ...extraEnv } });
+    if (probe.error || probe.status !== 0) return 'Git is unavailable on PATH; these tests spawn Git.';
+  }
   if ((gate.command[0] === 'npm' || gate.browser || gate.command.some(arg => arg.startsWith('node_modules/'))) && !existsSync(join(root, 'node_modules/eslint/package.json'))) return 'node_modules is missing; install with npm ci (or the documented worktree junction).';
   if (gate.rust) {
     const probe = spawnSync('cargo', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
@@ -236,6 +241,8 @@ function preflight(root, gate) {
         const tools = spawnSync('xcrun', ['--find', 'clang'], { encoding: 'utf8', timeout: 5000 });
         if (tools.error || tools.status !== 0) return 'Xcode command-line tools are unavailable; install the Tauri platform prerequisites.';
       } else if (process.platform === 'win32') {
+        const unavailable = await conptyPrerequisite(root);
+        if (unavailable) return unavailable;
         if (compiler.stdout.includes('windows-msvc')) {
           const linker = spawnSync('where.exe', ['link.exe'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
           const installer = join(process.env['ProgramFiles(x86)'] ?? 'C:/Program Files (x86)', 'Microsoft Visual Studio/Installer/vswhere.exe');
@@ -258,28 +265,66 @@ function preflight(root, gate) {
   }
   return null;
 }
-export async function runGate(root, gate, base, paths = [], extraEnv = {}) {
+export async function runGate(root, gate, base, paths = [], extraEnv = {}, { deferIsolation = false, isolationBudget = {} } = {}) {
   mkdirSync(statePath(root, 'logs'), { recursive: true });
   const log = statePath(root, `logs/${Date.now()}-${gate.id}.log`);
   const started = Date.now();
   let result;
-  const unavailable = preflight(root, gate);
+  const unavailable = await preflight(root, gate, extraEnv);
   if (unavailable) result = { outcome: 'BLOCKED', reason: unavailable };
   else {
     const command = commandFor(root, gate, base);
+    const reportPath = `${log}.json`;
+    if (gate.tests === 'vitest') command.push(...(gate.command[0] === 'npm' ? ['--'] : []), '--reporter=default', '--reporter=json', `--outputFile.json=${reportPath}`);
     const nodeEnv = gate.id === 'frontend-build' || gate.id === 'mobile-build' ? 'production' : 'test';
     const env = { ...process.env, NODE_ENV: nodeEnv, NO_COLOR: '1', ...extraEnv };
     delete env.FORCE_COLOR;
     delete env.BUILDMESH_PREFILL;
     delete env.NODE_TEST_CONTEXT;
+    if (gate.tests === 'rust') env.BUILDMESH_TEST_REPORT = reportPath;
     const code = await runGuarded({ minutes: gate.minutes, killGraceSeconds: 2, log, label: gate.id, command, cwd: gate.cwd ? join(root, gate.cwd) : root, env, output: () => {} });
     result = { ...classify(gate, code, readFileSync(log, 'utf8'), paths), exitCode: code };
+    if (result.outcome === 'FAIL' && ['vitest', 'rust'].includes(gate.tests)) {
+      const report = readTestReport(root, gate.tests, reportPath, readFileSync(log, 'utf8'));
+      result = { ...result, failures: report.failures, count: report.count, unattributed: report.unattributed };
+    }
   }
-  return { id: gate.id, command: gate.command, durationMs: Date.now() - started, log: existsSync(log) ? log : null, ...result };
+  const row = { id: gate.id, command: gate.command, durationMs: Date.now() - started, log: existsSync(log) ? log : null, ...result };
+  if (!deferIsolation && row.failures?.length) await diagnoseGate(root, gate, row, base, extraEnv, isolationBudget);
+  return row;
+}
+async function diagnoseGate(root, gate, row, base, extraEnv = {}, isolationBudget = {}) {
+  const started = Date.now();
+  const result = await isolateTests(root, row, async (test, remainingMs) => {
+    const log = `${row.log}.rerun-${row.failures.indexOf(test) + 1}.log`;
+    const reportPath = `${log}.json`;
+    const command = commandFor(root, { command: isolatedCommand(test, gate.tests, reportPath) }, base);
+    const env = { ...process.env, ...extraEnv, NODE_ENV: 'test', NO_COLOR: '1', RUST_TEST_THREADS: '1', VITEST_MAX_WORKERS: '1' };
+    for (const key of ['FORCE_COLOR', 'BUILDMESH_PREFILL', 'NODE_TEST_CONTEXT', 'BUILDMESH_TEST_REPORT']) delete env[key];
+    const began = Date.now();
+    const exitCode = await runGuarded({ minutes: Math.min(gate.minutes, 5, remainingMs / 60000), killGraceSeconds: 2, log, label: `${gate.id}: ${test.id}`, command, cwd: gate.tests === 'rust' ? join(root, 'src-tauri') : root, env, output: () => {} });
+    const output = readFileSync(log, 'utf8');
+    if (gate.tests === 'vitest') {
+      const report = readTestReport(root, 'vitest', reportPath, output);
+      const matches = report.report?.testResults?.filter(suite => resolve(root, suite.name) === resolve(root, test.file)).flatMap(suite => suite.assertionResults ?? []).filter(item => item.fullName === test.name) ?? [];
+      const reason = matches.length > 1 ? `Ambiguous test name: ${matches.length} matches in the original file; cannot isolate one test.` : null;
+      return { command, log, exitCode, durationMs: Date.now() - began, count: report.count, matched: matches.length === 1 && matches[0].status === 'passed' && report.count === 1 && !report.unattributed, ...(reason ? { reason } : {}) };
+    }
+    return { command, log, exitCode, durationMs: Date.now() - began, count: executedTests('rust', output) };
+  }, knownFlakes(root), isolationBudget);
+  Object.assign(row, result);
+  row.diagnosed = true;
+  row.durationMs += Date.now() - started;
 }
 function classify(gate, code, output, paths) {
   if (code === 124) return { outcome: 'TIMEOUT', reason: 'Deadline exceeded; investigate a hang or resource contention before retrying.' };
   if (code === 127) return { outcome: 'BLOCKED', reason: 'The command could not be started.' };
+  if (code === 2 && (gate.id === 'known-flakes' || gate.tests === 'rust')) {
+    const blocked = output.match(/^BLOCKED: (.+)$/m);
+    if (blocked) return { outcome: 'BLOCKED', reason: blocked[1] };
+    const invalidFlake = gate.id === 'known-flakes' && output.match(/^Known-flake issue #\d+ must be an open issue\.\r?$/m);
+    if (invalidFlake) return { outcome: 'FAIL', reason: invalidFlake[0].trim() };
+  }
   if (gate.touchedFormat && code !== 0) {
     const { touched, total } = touchedFormatDiffs(output, paths);
     if (!total) return { outcome: 'FAIL', reason: 'rustfmt failed without reporting a formatting diff. See the gate log.' };
@@ -334,7 +379,7 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
   const execute = async (gate, isStopped) => {
     const inputs = gateInputs(gate, snapshot, identity, tree);
     const cached = cache.gates[gate.id];
-    if (cached?.outcome === 'PASS' && cached.inputs === inputs) {
+    if (gate.id !== 'known-flakes' && cached?.outcome === 'PASS' && cached.inputs === inputs) {
       const log = cached.log && existsSync(cached.log) ? cached.log : null;
       console.log(`PASS ${gate.id} (cached, inputs ${inputs.slice(0, 12)})`);
       return { ...cached, cached: true, log };
@@ -344,31 +389,47 @@ export async function verify(root, { base: requestedBase, full = false, plan = p
       slot = await acquireSlot({ gate: gate.id, root, onQueued: holders => console.log(`QUEUED ${gate.id}: waiting for a heavy-gate slot (limit ${heavyGateLimit()}; held by ${holders.map(held => `${held.gate} in ${held.root}`).join(', ') || 'a process that just exited'})`) });
     }
     try {
-      if (slot && isStopped()) return null;
-      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism())), inputs };
+      if (slot && isStopped?.()) return null;
+      const row = { ...await runGate(root, gate, base, paths, heavyGateEnv(gate, gates, availableParallelism()), { deferIsolation: true }), inputs };
       if (slot?.queuedMs) row.queuedMs = slot.queuedMs;
       event(root, { type: 'gate', taskId: receipt.taskId, attempt: task?.verificationAttempts ?? null, ...row });
       return row;
     } finally { slot?.release(); }
   };
-  await runPlan(gates, {
-    execute,
-    onResult: row => {
-      receipt.gates.push(row);
-      saveJson(statePath(root, 'receipt.json'), receipt);
-      if (row.cached) return;
-      if (row.outcome === 'PASS') {
-        cache.gates[row.id] = row;
-        saveJson(cachePath, cache);
-      }
-      console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} tests)` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
-    },
-  });
+  const reportRow = row => {
+    if (!receipt.gates.includes(row)) receipt.gates.push(row);
+    saveJson(statePath(root, 'receipt.json'), receipt);
+    console.log(`${row.outcome} ${row.id}${row.count != null ? ` (${row.count} ${row.outcome === 'PASS' ? 'tests' : 'passed'})` : ''}${row.reason ? `: ${row.reason}` : ''}${row.outcome !== 'PASS' && row.log ? `\n  ${row.log}` : ''}`);
+    for (const line of failureLines(row)) console.log(line);
+  };
+  const isolationBudget = {};
+  for (;;) {
+    await runPlan(gates, {
+      execute: (gate, stopped) => receipt.gates.find(row => row.id === gate.id) ?? execute(gate, stopped),
+      onResult: row => {
+        if (receipt.gates.includes(row)) return;
+        if (row.cached) { receipt.gates.push(row); saveJson(statePath(root, 'receipt.json'), receipt); return; }
+        if (row.outcome === 'PASS') {
+          cache.gates[row.id] = row;
+          saveJson(cachePath, cache);
+        }
+        reportRow(row);
+      },
+    });
+    // runPlan has drained both lanes. Isolated reruns cannot compete with a
+    // still-running suite, and the suite itself is never repeated here.
+    for (const row of receipt.gates.filter(item => item.outcome === 'FAIL' && item.failures?.length && !item.diagnosed)) {
+      await diagnoseGate(root, gates.find(gate => gate.id === row.id), row, base, {}, isolationBudget);
+      event(root, { type: 'gate-diagnosis', taskId: receipt.taskId, ...row });
+      reportRow(row);
+    }
+    if (receipt.gates.some(row => !gatePassed(row)) || receipt.gates.length === gates.length) break;
+  }
   // Lanes finish in completion order; the receipt reads in plan order.
   receipt.gates.sort((a, b) => gates.findIndex(gate => gate.id === a.id) - gates.findIndex(gate => gate.id === b.id));
   receipt.durationMs = Date.now() - started;
   receipt.finishedAt = new Date().toISOString();
-  receipt.outcome = receipt.gates.find(row => row.outcome !== 'PASS')?.outcome ?? (receipt.gates.length === gates.length ? 'PASS' : 'BLOCKED');
+  receipt.outcome = receipt.gates.find(row => !gatePassed(row))?.outcome ?? (receipt.gates.length === gates.length ? 'PASS' : 'BLOCKED');
   if (fingerprint(root, base) !== tree) {
     receipt.outcome = 'FAIL';
     receipt.reason = 'Source changed during verification, including possible generated binding drift. Inspect the diff and rerun.';
@@ -388,14 +449,15 @@ async function evaluate(root, selected) {
   const base = git(root, 'rev-parse', 'HEAD').trim();
   const before = fingerprint(root, base);
   const results = [];
+  const isolationBudget = {};
   for (const row of cases) {
-    const result = row.gate ? await runGate(root, { minutes: 10, ...row.gate, id: row.id }, base)
+    const result = row.gate ? await runGate(root, { minutes: 10, ...row.gate, id: row.id }, base, [], {}, { isolationBudget })
       : { id: row.id, outcome: 'BLOCKED', reason: row.gap };
     results.push({ ...result, boundary: row.boundary, remaining: row.remaining });
     event(root, { type: 'evaluation', ...results.at(-1) });
     console.log(`${result.outcome} ${row.id}: ${row.boundary}${result.reason ? `; ${result.reason}` : ''}`);
   }
-  const receipt = { results, tree: before, outcome: results.some(row => row.outcome === 'FAIL') ? 'FAIL' : results.find(row => row.outcome !== 'PASS')?.outcome ?? 'PASS' };
+  const receipt = { results, tree: before, outcome: results.some(row => row.outcome === 'FAIL') ? 'FAIL' : results.find(row => !gatePassed(row))?.outcome ?? 'PASS' };
   if (fingerprint(root, base) !== before) { receipt.outcome = 'FAIL'; receipt.reason = 'Source changed during evaluation.'; }
   saveJson(statePath(root, 'evaluation.json'), receipt);
   return receipt;
@@ -426,7 +488,7 @@ export function completion(root) {
   const expected = planGates(scopePaths(root, task.base, changedPaths(root, task.base)), { full: receipt.full });
   if (JSON.stringify(expected) !== JSON.stringify(receipt.gatePlan)) return { outcome: 'BLOCKED', reason: 'Required gate plan changed. Run npm run verify.' };
   if (receipt.outcome !== 'PASS') return { outcome: receipt.outcome, reason: receipt.reason ?? receipt.gates.find(row => row.outcome !== 'PASS')?.reason ?? 'Incomplete verification.' };
-  if (receipt.gates.length !== expected.length || expected.some(gate => !receipt.gates.some(row => row.id === gate.id && row.outcome === 'PASS'))) return { outcome: 'BLOCKED', reason: 'Receipt does not include every required gate.' };
+  if (receipt.gates.length !== expected.length || expected.some(gate => !receipt.gates.some(row => row.id === gate.id && gatePassed(row)))) return { outcome: 'BLOCKED', reason: 'Receipt does not include every required gate.' };
   if (task.evidence.length !== task.criteria.length || task.evidence.some(value => !value.trim()) || task.review?.verdict !== 'APPROVE' || task.review.findings.length || task.evidenceTree !== receipt.tree || task.reviewTree !== receipt.tree || task.blockers.length) return { outcome: 'BLOCKED', reason: 'Record one evidence entry per acceptance criterion, independent APPROVE review with no unresolved findings for this tree, and resolve blockers with harness update.' };
   return { outcome: 'PASS', reason: 'Required gates are current; acceptance and review evidence are recorded.' };
 }
@@ -446,6 +508,12 @@ function receiptSummary(root, held) {
   for (const row of failed.slice(0, MAX_SUMMARY_GATES)) {
     lines.push(`${row.outcome} ${row.id}: ${oneLine(row.reason)}`);
     if (row.log) lines.push(`  ${row.log}`);
+  }
+  let named = 0;
+  for (const row of failed) {
+    if (named === 10) break;
+    lines.push(...failureLines(row, 10 - named));
+    named += Math.min(row.failures?.length ?? 0, 10 - named);
   }
   if (failed.length > MAX_SUMMARY_GATES) lines.push(`(+${failed.length - MAX_SUMMARY_GATES} more nonpassing gates in the receipt)`);
   return { outcome: receipt.outcome, lines };
@@ -486,7 +554,7 @@ function status(root) {
 function metrics(root) {
   const path = statePath(root, 'events.jsonl');
   const events = existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).map(JSON.parse) : [];
-  const outcomes = { PASS: 0, FAIL: 0, BLOCKED: 0, TIMEOUT: 0 };
+  const outcomes = { PASS: 0, FAIL: 0, FLAKY: 0, BLOCKED: 0, TIMEOUT: 0 };
   for (const row of events.filter(row => row.type === 'verification')) outcomes[row.outcome] += 1;
   return {
     verificationOutcomes: outcomes,
@@ -558,7 +626,16 @@ async function hook(root, payload) {
     }
   }
 }
-function internalGate(root, name) {
+async function internalGate(root, name) {
+  if (name === 'flakes') {
+    const entries = knownFlakes(root);
+    try { await validateFlakeIssues(entries); }
+    catch (error) {
+      if (!error.message.includes('must be an open issue')) throw new Error(`BLOCKED: Cannot verify known-flake issues: ${error.message}`);
+      throw error;
+    }
+    return;
+  }
   if (name === 'whitespace') git(root, 'diff', '--check', taskAt(root)?.base ?? process.env.BUILDMESH_VERIFY_BASE, '--');
   else if (name === 'staging') {
     const staged = new Set(git(root, 'diff', '--cached', '--no-renames', '--name-only', '-z', '--').split('\0').filter(Boolean));
@@ -595,7 +672,7 @@ async function main() {
       if (payload && typeof payload === 'object') await hook(root, payload);
       return;
     }
-    if (args[0] === 'gate') { internalGate(root, args[1]); return; }
+    if (args[0] === 'gate') { await internalGate(root, args[1]); return; }
     const options = parse(args);
     if (options.action === 'status') { console.log(JSON.stringify(status(root), null, 2)); return; }
     if (options.action === 'metrics') { console.log(JSON.stringify(metrics(root), null, 2)); return; }
