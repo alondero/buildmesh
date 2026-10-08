@@ -1,29 +1,48 @@
 //! Agent Node management commands
 
 use crate::db;
-use crate::models::AgentNode;
-use crate::services;
 use crate::git::worktree::WorktreeCloseSafety;
+use crate::models::{AgentNode, PendingWorktreeRemoval};
+use crate::services;
+use crate::worktree_blockers::BlockingProcess;
 use serde::Serialize;
 use tauri::{command, Emitter};
 use ts_rs::TS;
 
 /// Payload of the `worktree-cleanup-failed` Tauri event. Emitted by
-/// [`crate::services::agent_node::process_pending_removals`] when the
-/// background-drained worktree delete (issue #613 deferred removal) fails —
-/// the row stays in `pending_worktree_removals` and the user is told via a
-/// toast that it'll be retried on next launch.
+/// [`crate::services::agent_node::process_pending_removals`] when a
+/// background-drained worktree delete (issue #613 deferred removal) fails and
+/// the blocker is new information — the row stays in `pending_worktree_removals`
+/// and the UI opens a dialog offering Copy path / Copy diagnostics / Retry /
+/// Keep worktree (issue #2139).
+///
+/// Carries everything the user needs to act: the node's identity, the full
+/// worktree path, which removal step failed and why (the OS error), how many
+/// attempts have been made, when the last one ran, and when the next automatic
+/// retry may run. The pre-#2139 payload carried only the error string, which is
+/// why the toast could hide both the path and the reason.
 ///
 /// Generated to `src/types/generated/WorktreeCleanupFailedPayload.ts`; the
-/// TS half is imported by `src/App.tsx`. Three fields because the toast
-/// surfaces the node name (the user-facing identity) and the worktree path
-/// (the on-disk artifact) and the error reason (so support can copy/paste).
+/// TS half is imported by `src/App.tsx`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "WorktreeCleanupFailedPayload.ts")]
 pub struct WorktreeCleanupFailedPayload {
     pub node_name: String,
     pub worktree_path: String,
     pub error: String,
+    /// Stable identifier of the removal step that failed (`git::worktree`
+    /// operation vocabulary), e.g. `rename-worktree-to-staging`.
+    pub operation: String,
+    /// Failed attempts so far, including this one.
+    #[ts(as = "i32")]
+    pub attempt_count: i64,
+    /// Epoch milliseconds of the attempt that just failed.
+    #[ts(as = "i32")]
+    pub last_attempt_at: i64,
+    /// Epoch milliseconds before which the drain will not retry (the backoff).
+    /// A user-initiated retry ignores it.
+    #[ts(as = "i32")]
+    pub retry_not_before: i64,
 }
 
 /// Create a new agent node
@@ -58,7 +77,8 @@ pub async fn create_agent_node(
         let configuration = crate::preferences::spawn_configurations::resolve_saved(
             provider.as_deref().unwrap_or("anthropic"),
             configuration_id.as_deref().filter(|s| !s.trim().is_empty()),
-        ).map_err(|error| error.to_string())?;
+        )
+        .map_err(|error| error.to_string())?;
         services::agent_node::create_blocking_configured(
             mesh_id,
             provider.as_deref(),
@@ -91,7 +111,8 @@ pub async fn list_agent_nodes() -> Result<Vec<AgentNode>, String> {
 pub async fn list_agent_history() -> Result<Vec<AgentNode>, String> {
     crate::commands::run_blocking("list_agent_history", || {
         db::list_agent_history().map_err(|error| error.to_string())
-    }).await
+    })
+    .await
 }
 
 /// Reopen archived work without starting a process or replacing its session.
@@ -99,7 +120,8 @@ pub async fn list_agent_history() -> Result<Vec<AgentNode>, String> {
 pub async fn reopen_agent_node(node_id: i64) -> Result<AgentNode, String> {
     crate::commands::run_blocking("reopen_agent_node", move || {
         db::reopen_agent_node(node_id).map_err(|error| error.to_string())
-    }).await
+    })
+    .await
 }
 
 /// Get agent node by ID
@@ -135,19 +157,105 @@ pub async fn delete_agent_node(
 
 /// Spawn the background worktree-removal drain, emitting `worktree-cleanup-failed`
 /// for any removal that couldn't complete. Shared by close and startup reconcile.
+///
+/// Issue #2139: one event per *unreported* blocker, not per failed attempt. The
+/// drain persists each failure (operation, error, attempts, backoff) and only
+/// asks for an event when the user hasn't already been told about that exact
+/// blocker, so a worktree that stays blocked doesn't raise a toast on every
+/// drain. The event now carries the evidence the frontend needs to act.
 pub fn drain_pending_removals(app: tauri::AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
-        for (removal, error) in services::agent_node::process_pending_removals() {
+        for blocked in services::agent_node::process_pending_removals() {
+            if !blocked.notify {
+                continue;
+            }
             let _ = app.emit(
                 "worktree-cleanup-failed",
                 WorktreeCleanupFailedPayload {
-                    node_name: removal.node_name,
-                    worktree_path: removal.worktree_path,
-                    error,
+                    node_name: blocked.removal.node_name,
+                    worktree_path: blocked.removal.worktree_path,
+                    error: blocked.removal.last_error.unwrap_or_default(),
+                    operation: blocked.removal.last_operation.unwrap_or_default(),
+                    attempt_count: blocked.removal.attempt_count,
+                    last_attempt_at: blocked.removal.last_attempt_at,
+                    retry_not_before: blocked.removal.retry_not_before,
                 },
             );
         }
     });
+}
+
+/// Every worktree cleanup that is still blocked, with its persisted evidence.
+/// The blocked-cleanup dialog lists these and acts on them, so what the user
+/// sees is exactly what the drain knows (issue #2139).
+#[command]
+pub async fn list_pending_worktree_removals() -> Result<Vec<PendingWorktreeRemoval>, String> {
+    crate::commands::run_blocking("list_pending_worktree_removals", || {
+        Ok(services::agent_node::list_blocked_worktree_cleanups())
+    })
+    .await
+}
+
+/// Retry one blocked worktree cleanup immediately, ignoring its backoff.
+/// Returns the post-attempt row so the UI can refresh in place:
+/// `Some(record)` = still blocked (with new evidence), `None` = removed.
+#[command]
+pub async fn retry_worktree_cleanup(
+    worktree_path: String,
+) -> Result<Option<PendingWorktreeRemoval>, String> {
+    crate::commands::run_blocking("retry_worktree_cleanup", move || {
+        Ok(
+            match services::agent_node::retry_pending_worktree_removal(&worktree_path) {
+                services::agent_node::CleanupRetryOutcome::StillBlocked(record) => Some(record),
+                _ => None,
+            },
+        )
+    })
+    .await
+}
+
+/// Diagnose which processes are holding a worktree directory, so a blocked
+/// cleanup can name what to close instead of leaving the user to guess.
+///
+/// Read-only, and deliberately approximate: it reports every process whose
+/// executable or working directory lies inside the tree. The removal error
+/// itself says which permission failed; this says *who* is likely responsible.
+/// Nothing is terminated here (issue #2139).
+#[command]
+pub async fn diagnose_worktree_cleanup_blockers(
+    worktree_path: String,
+) -> Result<Vec<BlockingProcess>, String> {
+    crate::commands::run_blocking("diagnose_worktree_cleanup_blockers", move || {
+        Ok(crate::worktree_blockers::diagnose_blocking_processes(
+            &worktree_path,
+        ))
+    })
+    .await
+}
+
+/// Explicitly terminate one process that the diagnosis named.
+///
+/// Only ever reached from a user action on a diagnosed blocker: Buildmesh never
+/// closes an application by itself, and the caller cannot pass an arbitrary pid
+/// without having been shown the row by
+/// `diagnose_worktree_cleanup_blockers` first (issue #2139).
+#[command]
+pub async fn release_worktree_cleanup_blocker(pid: u32) -> Result<(), String> {
+    crate::commands::run_blocking("release_worktree_cleanup_blocker", move || {
+        crate::worktree_blockers::terminate_process(pid)
+    })
+    .await
+}
+
+/// "Keep worktree" — cancel the cleanup intent for one path. Nothing on disk
+/// changes; Buildmesh stops retrying and stops warning about it.
+#[command]
+pub async fn dismiss_worktree_cleanup(worktree_path: String) -> Result<(), String> {
+    crate::commands::run_blocking("dismiss_worktree_cleanup", move || {
+        services::agent_node::dismiss_pending_worktree_removal(&worktree_path)
+            .map_err(|e| e.to_string())
+    })
+    .await
 }
 
 /// Persist new grid positions for a batch of agent nodes (drag-to-reorder).
@@ -235,13 +343,9 @@ pub async fn rename_agent_node(
 /// error string rather than silently no-op'ing — matches the
 /// `set_agent_node_provider` and `update_mesh_layout` zero-rows contract.
 #[command]
-pub async fn set_node_pinned(
-    node_id: i64,
-    pinned: bool,
-) -> Result<AgentNode, String> {
+pub async fn set_node_pinned(node_id: i64, pinned: bool) -> Result<AgentNode, String> {
     crate::commands::run_blocking("set_node_pinned", move || {
-        let updated = db::set_agent_node_pinned(node_id, pinned)
-            .map_err(|e| e.to_string())?;
+        let updated = db::set_agent_node_pinned(node_id, pinned).map_err(|e| e.to_string())?;
         if updated == 0 {
             return Err(format!("set_node_pinned: node {node_id} not found"));
         }
@@ -316,11 +420,11 @@ pub async fn regenerate_agent_node(
     // the inner `AgentNodeError` to a `String` so `run_blocking`'s
     // `Result<T, String>` signature matches; `T` is inferred as the
     // helper's return tuple, so `.await?` unwraps once.
-    let (old_provider, skip_kill) = crate::commands::run_blocking(
-        "regenerate_agent_node_load",
-        move || regenerate_load_blocking(node_id).map_err(|e| e.to_string()),
-    )
-    .await?;
+    let (old_provider, skip_kill) =
+        crate::commands::run_blocking("regenerate_agent_node_load", move || {
+            regenerate_load_blocking(node_id).map_err(|e| e.to_string())
+        })
+        .await?;
 
     // 3. Kill the live process ONLY when one is registered. See
     // `services::agent_node::regenerate` (the removed orchestrator)
@@ -336,13 +440,10 @@ pub async fn regenerate_agent_node(
     // and preflight (spawn.rs:1399), so the write must land BEFORE
     // `spawn_with_intent`.
     let new_provider_for_apply = new_provider_id;
-    let resume = crate::commands::run_blocking(
-        "regenerate_agent_node_apply",
-        move || {
-            regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
-                .map_err(|e| e.to_string())
-        },
-    )
+    let resume = crate::commands::run_blocking("regenerate_agent_node_apply", move || {
+        regenerate_apply_blocking(node_id, &old_provider, &new_provider_for_apply)
+            .map_err(|e| e.to_string())
+    })
     .await?;
 
     let intent = if resume {
@@ -353,19 +454,18 @@ pub async fn regenerate_agent_node(
         SpawnIntent::Fresh
     };
 
-    let spawn_request = SpawnRequest::new(node_id, intent, TerminalSize::default())
-        .with_lifecycle_lease();
+    let spawn_request =
+        SpawnRequest::new(node_id, intent, TerminalSize::default()).with_lifecycle_lease();
     spawn_with_intent(&app, spawn_request)
-    .await
-    .map_err(|e| e.to_string())?;
+        .await
+        .map_err(|e| e.to_string())?;
 
     // 7. Final reload off-thread — returns the post-spawn row state
     // (the spawn pipeline may have updated `cli_session_id` /
     // `status_changed_at`).
-    crate::commands::run_blocking(
-        "regenerate_agent_node_reload",
-        move || regenerate_reload_blocking(node_id).map_err(|e| e.to_string()),
-    )
+    crate::commands::run_blocking("regenerate_agent_node_reload", move || {
+        regenerate_reload_blocking(node_id).map_err(|e| e.to_string())
+    })
     .await
 }
 
@@ -375,7 +475,10 @@ mod tests {
 
     #[test]
     fn validate_accepts_trimmed_name() {
-        assert_eq!(validate_rename_name("Fix OAuth callback").unwrap(), "Fix OAuth callback");
+        assert_eq!(
+            validate_rename_name("Fix OAuth callback").unwrap(),
+            "Fix OAuth callback"
+        );
     }
 
     #[test]

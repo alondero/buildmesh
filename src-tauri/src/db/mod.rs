@@ -600,7 +600,19 @@ pub(crate) fn ensure_baseline_tables(conn: &Connection) -> SqlResult<()> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             worktree_path TEXT NOT NULL UNIQUE,
             node_name TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            -- v47 (issue #2139) — the failure bookkeeping for a blocked
+            -- cleanup. Zero/zero means never attempted, NULL operation and
+            -- error mean never failed, retry_not_before 0 means due now, and
+            -- NULL notified_error with notified_at 0 means the user has not
+            -- been told yet.
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at INTEGER NOT NULL DEFAULT 0,
+            last_operation TEXT,
+            last_error TEXT,
+            retry_not_before INTEGER NOT NULL DEFAULT 0,
+            notified_error TEXT,
+            notified_at INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS device_sessions (

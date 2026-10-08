@@ -208,10 +208,17 @@ pub fn create_git_worktree(
 
     // Ensure parent directory exists
     if let Some(parent) = host_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create worktrees directory: {}", e))?;
     }
 
-    tracing::info!("Creating git worktree: {} at {} (mode: {}, base_ref: {})", branch_name, worktree_host_path, worktree_mode, base_ref);
+    tracing::info!(
+        "Creating git worktree: {} at {} (mode: {}, base_ref: {})",
+        branch_name,
+        worktree_host_path,
+        worktree_mode,
+        base_ref
+    );
 
     let repo = git2::Repository::open(project_root)
         .map_err(|e| format!("Failed to open repository at {}: {}", project_root, e))?;
@@ -316,7 +323,9 @@ fn generate_husk_stash_path(host_path: &std::path::Path) -> std::path::PathBuf {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "worktree".to_string());
-    let parent = host_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let parent = host_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     parent.join(format!("{stem}.husk-{millis}-{}", std::process::id()))
 }
 
@@ -431,7 +440,12 @@ pub(crate) fn apply_worktree_include(project_root: &str, host_path: &std::path::
 
             if src.is_file() {
                 if let Err(e) = std::fs::copy(&src, &dest) {
-                    tracing::warn!("Failed to copy included file {} -> {}: {}", src.display(), dest.display(), e);
+                    tracing::warn!(
+                        "Failed to copy included file {} -> {}: {}",
+                        src.display(),
+                        dest.display(),
+                        e
+                    );
                 } else {
                     tracing::info!("Copied included file: {}", trimmed);
                 }
@@ -585,11 +599,7 @@ pub fn reset_warm_worktree(worktree_path: &str, sha: &str) -> Result<(), String>
     let host = to_host_path(worktree_path);
 
     let mut cmd = crate::process_util::git_command();
-    cmd.arg("-C")
-        .arg(&host)
-        .arg("reset")
-        .arg("--hard")
-        .arg(sha);
+    cmd.arg("-C").arg(&host).arg("reset").arg("--hard").arg(sha);
 
     let output = cmd
         .output()
@@ -694,28 +704,52 @@ pub fn sanitize_git_worktree(worktree_host_path: &str, env_type: EnvType) -> Res
 /// worktrees. Lock the administrative entry so guest pruning cannot delete it.
 /// Buildmesh's removal path already explicitly prunes locked entries.
 pub(crate) fn prepare_cross_runtime_worktree(worktree_host_path: &str) -> Result<(), String> {
-    if !std::path::Path::new(worktree_host_path).join(".git").is_file() { return Ok(()); }
+    if !std::path::Path::new(worktree_host_path)
+        .join(".git")
+        .is_file()
+    {
+        return Ok(());
+    }
     sanitize_git_worktree(worktree_host_path, EnvType::Windows)?;
     let repo = Repository::open(worktree_host_path).map_err(|e| e.to_string())?;
-    if !repo.is_worktree() { return Ok(()); }
+    if !repo.is_worktree() {
+        return Ok(());
+    }
     let root = std::fs::canonicalize(worktree_host_path).map_err(|e| e.to_string())?;
     let admin = std::fs::canonicalize(repo.path()).map_err(|e| e.to_string())?;
     let root_parts = root.components().collect::<Vec<_>>();
     let admin_parts = admin.components().collect::<Vec<_>>();
-    let shared = root_parts.iter().zip(&admin_parts).take_while(|(a, b)| a == b).count();
+    let shared = root_parts
+        .iter()
+        .zip(&admin_parts)
+        .take_while(|(a, b)| a == b)
+        .count();
     if shared == 0 {
         return Err("Cross-runtime worktrees must share a filesystem with their repository".into());
     }
     let mut relative = std::path::PathBuf::new();
-    for _ in shared..root_parts.len() { relative.push(".."); }
-    for part in &admin_parts[shared..] { relative.push(part.as_os_str()); }
+    for _ in shared..root_parts.len() {
+        relative.push("..");
+    }
+    for part in &admin_parts[shared..] {
+        relative.push(part.as_os_str());
+    }
     let worktree = git2::Worktree::open_from_repository(&repo).map_err(|e| e.to_string())?;
     if matches!(worktree.is_locked(), Ok(git2::WorktreeLockStatus::Unlocked)) {
-        worktree.lock(Some("Buildmesh cross-runtime worktree; manage through Buildmesh"))
+        worktree
+            .lock(Some(
+                "Buildmesh cross-runtime worktree; manage through Buildmesh",
+            ))
             .map_err(|e| e.to_string())?;
     }
-    std::fs::write(root.join(".git"), format!("gitdir: {}\n", relative.to_string_lossy().replace('\\', "/")))
-        .map_err(|e| e.to_string())
+    std::fs::write(
+        root.join(".git"),
+        format!(
+            "gitdir: {}\n",
+            relative.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .map_err(|e| e.to_string())
 }
 
 // ── Inspect (close-safety) ──────────────────────────────────────────────────
@@ -848,26 +882,73 @@ fn head_is_reachable_from_another_branch_or_remote(
 const WORKTREE_REMOVE_ATTEMPTS: u32 = 5;
 const WORKTREE_REMOVE_BACKOFF_MS: u64 = 100;
 
+/// Stable identifier for the removal step that failed, persisted per blocked
+/// cleanup (`pending_worktree_removals.last_operation`) so the UI can name
+/// what Buildmesh was doing when it got stuck — a rename blocked by an open
+/// handle is a completely different problem from a delete blocked by the same
+/// thing (issue #2139).
+pub const OP_OPEN_WORKTREE_REPO: &str = "open-worktree-repository";
+pub const OP_OPEN_ADMIN_ENTRY: &str = "open-worktree-admin-entry";
+pub const OP_RENAME_TO_STAGING: &str = "rename-worktree-to-staging";
+pub const OP_DELETE_STAGING: &str = "delete-staged-worktree";
+pub const OP_PRUNE_ADMIN_ENTRY: &str = "prune-worktree-admin-entry";
+
+/// A removal failure that names the step that failed alongside the underlying
+/// OS error. `detail` is exactly the error text the old `Result<(), String>`
+/// carried, so every consumer that matched on message substrings keeps
+/// working; `operation` is the addition that makes a blocked cleanup
+/// diagnosable (issue #2139).
+#[derive(Debug, Clone)]
+pub struct WorktreeRemovalFailure {
+    pub operation: &'static str,
+    pub detail: String,
+}
+
+impl WorktreeRemovalFailure {
+    fn new(operation: &'static str, detail: impl ToString) -> Self {
+        Self {
+            operation,
+            detail: detail.to_string(),
+        }
+    }
+
+    /// Test-only constructor: build a failure for a named step so a test can
+    /// state exactly which step broke without forcing the real thing.
+    #[cfg(test)]
+    pub(crate) fn for_test(operation: &'static str, detail: &str) -> Self {
+        Self::new(operation, detail)
+    }
+
+    /// The error text alone — the shape every pre-#2139 caller consumed.
+    pub fn message(&self) -> String {
+        self.detail.clone()
+    }
+}
+
 /// Remove a single worktree: delete its working directory (with retry) then
 /// prune its git admin entry, leaving the branch it checked out alone. Used by
 /// the Worktree Manager, where branches are a separate, independently-selectable
 /// list. Idempotent — a missing directory counts as already removed.
 pub fn remove_one_worktree(path: &str) -> Result<(), String> {
-    remove_worktree_inner(path, false)
+    remove_worktree_inner(path, false).map_err(|f| f.message())
 }
 
-/// Like [`remove_one_worktree`], but also deletes the local branch the worktree
-/// had checked out. This is the *node close* path: a branched worktree's branch
-/// exists only to back that node, so leaving it behind on close is what lets
-/// dead branches pile up and slow git operations. The work-at-risk decision is
-/// made upstream (the close-safety prompt) — by the time a removal is queued the
-/// branch is meant to go, so the deletion is unconditional but best-effort.
-pub fn remove_one_worktree_and_branch(path: &str) -> Result<(), String> {
+/// [`remove_one_worktree`] with the failure kept structured: the caller gets the
+/// failed *operation* as well as the OS error, which is what a persisted blocked
+/// cleanup needs (issue #2139). This is the node-close path — the pending-removal
+/// drain calls it — and it also deletes the local branch the worktree had
+/// checked out, because a branched worktree's branch exists only to back that
+/// node and leaving it behind is what lets dead branches pile up and slow git
+/// operations. The work-at-risk decision is made upstream (the close-safety
+/// prompt); by the time a removal is queued the branch is meant to go, so the
+/// deletion is unconditional but best-effort.
+pub fn remove_one_worktree_and_branch_detailed(path: &str) -> Result<(), WorktreeRemovalFailure> {
     remove_worktree_inner(path, true)
 }
 
-fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> {
+fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), WorktreeRemovalFailure> {
     let host_path = to_host_path(path);
+    let dir = std::path::Path::new(&host_path);
 
     // An already-gone working directory is nothing to remove. The node may have
     // been gutted by a previous interrupted close (#239); treat it as success so
@@ -882,11 +963,15 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
     // parent directory is intact while the path itself is absent is a strong
     // signal of a derived-path bug rather than a completed delete, so say so
     // loudly enough to show up in a log scan.
-    if !std::path::Path::new(&host_path).exists() {
-        let parent_intact = std::path::Path::new(&host_path)
-            .parent()
-            .map(|p| p.exists())
-            .unwrap_or(false);
+    //
+    // Issue #2139: "absent" is not automatically "finished". An interrupted
+    // removal can leave a `<path>.removing` staging directory (the rename
+    // succeeded, the staged delete never ran) and a git admin entry that no
+    // longer has a working directory. Both are ours to finish, and a failure
+    // to finish them must keep the queue entry alive rather than reporting a
+    // clean success.
+    if !dir.exists() {
+        let parent_intact = dir.parent().map(|p| p.exists()).unwrap_or(false);
         if parent_intact {
             tracing::warn!(
                 "remove_worktree_inner: {} does not exist but its parent does — treating as \
@@ -896,12 +981,19 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
                 host_path
             );
         }
+        // Disk half: reclaim any staged copy of this worktree left behind by
+        // an interrupted removal.
+        remove_worktree_dir_with_retry(&host_path)?;
+        // Git half: prune the admin entry if it still points at this path, so
+        // the queue entry is only retired once both halves are done.
+        prune_orphaned_worktree_entry(&host_path)?;
         return Ok(());
     }
 
-    let repo = Repository::open(&host_path).map_err(|e| e.to_string())?;
+    let repo = Repository::open(&host_path)
+        .map_err(|e| WorktreeRemovalFailure::new(OP_OPEN_WORKTREE_REPO, e))?;
     let worktree = git2::Worktree::open_from_repository(&repo)
-        .map_err(|e| format!("not a removable worktree: {}", e))?;
+        .map_err(|e| WorktreeRemovalFailure::new(OP_OPEN_ADMIN_ENTRY, e))?;
 
     // Capture what we need to tidy the branch *before* the worktree is gone: a
     // branch checked out in a live worktree can't be deleted, so the delete must
@@ -923,7 +1015,9 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
 
     let mut opts = git2::WorktreePruneOptions::new();
     opts.valid(true).locked(true);
-    worktree.prune(Some(&mut opts)).map_err(|e| e.to_string())?;
+    worktree
+        .prune(Some(&mut opts))
+        .map_err(|e| WorktreeRemovalFailure::new(OP_PRUNE_ADMIN_ENTRY, e))?;
 
     // Best-effort: the worktree (and its work) is already gone, so a branch
     // delete that fails — e.g. the branch was reused by another worktree — must
@@ -941,7 +1035,11 @@ fn remove_worktree_inner(path: &str, delete_branch: bool) -> Result<(), String> 
 /// there.
 fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
     let Ok(repo) = Repository::open(commondir) else {
-        tracing::warn!("could not reopen repo at {:?} to delete branch {}", commondir, branch);
+        tracing::warn!(
+            "could not reopen repo at {:?} to delete branch {}",
+            commondir,
+            branch
+        );
         return;
     };
     // No such branch (detached, or already gone) — nothing to tidy.
@@ -949,8 +1047,18 @@ fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
         return;
     };
     if let Err(e) = branch_ref.delete() {
-        tracing::warn!("could not delete branch {} after closing its worktree: {}", branch, e);
+        tracing::warn!(
+            "could not delete branch {} after closing its worktree: {}",
+            branch,
+            e
+        );
     }
+}
+
+/// The staging sibling a removal renames a worktree to before deleting it
+/// (the atomicity gate from #239).
+fn staging_path(path: &str) -> String {
+    format!("{}.removing", path.trim_end_matches(['/', '\\']))
 }
 
 /// Remove a worktree's working directory *all-or-nothing*, retrying with backoff
@@ -966,12 +1074,36 @@ fn delete_local_branch_best_effort(commondir: &std::path::Path, branch: &str) {
 /// a failure leaves the worktree fully intact. Only once the rename succeeds —
 /// proving nothing pins the tree — do we delete the staged copy, where a
 /// partial failure can no longer harm the live worktree path.
-fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
+///
+/// Issue #2139 — the "original path absent" case is no longer a silent
+/// success. A removal interrupted between the rename and the staged delete
+/// leaves `<path>.removing` on disk with the original path gone; the old
+/// `!path.exists() → Ok(())` early-return skipped the staging cleanup, so the
+/// directory leaked for as long as the tombstone had been dequeued. Reclaiming
+/// it here (and failing loudly if that delete is blocked) is what lets the
+/// caller keep the cleanup queued until the disk really is clear.
+fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeRemovalFailure> {
+    let staging = staging_path(path);
+
     if !std::path::Path::new(path).exists() {
+        // Nothing to rename, but a staged copy from an interrupted removal may
+        // still be sitting here. It holds no live handles by definition (the
+        // rename already proved that), so deleting it can't gut a live worktree
+        // — and if the delete fails (e.g. a new holder appeared), the removal
+        // must report failure rather than pretend it is complete.
+        if std::path::Path::new(&staging).exists() {
+            tracing::info!(
+                "remove_worktree_dir_with_retry: original {} is absent; reclaiming leftover \
+                 staging {} (issue #2139)",
+                path,
+                staging
+            );
+            return std::fs::remove_dir_all(&staging)
+                .map_err(|e| WorktreeRemovalFailure::new(OP_DELETE_STAGING, e));
+        }
         return Ok(());
     }
 
-    let staging = format!("{}.removing", path.trim_end_matches(['/', '\\']));
     // Clear any staging dir left by a previous interrupted removal; by
     // definition it holds no live handles, so this can't gut the live worktree.
     let _ = std::fs::remove_dir_all(&staging);
@@ -979,7 +1111,10 @@ fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
     let mut last_err = String::new();
     for attempt in 0..WORKTREE_REMOVE_ATTEMPTS {
         match std::fs::rename(path, &staging) {
-            Ok(()) => return std::fs::remove_dir_all(&staging).map_err(|e| e.to_string()),
+            Ok(()) => {
+                return std::fs::remove_dir_all(&staging)
+                    .map_err(|e| WorktreeRemovalFailure::new(OP_DELETE_STAGING, e))
+            }
             Err(e) => {
                 last_err = e.to_string();
                 if attempt + 1 < WORKTREE_REMOVE_ATTEMPTS {
@@ -990,7 +1125,118 @@ fn remove_worktree_dir_with_retry(path: &str) -> Result<(), String> {
             }
         }
     }
-    Err(last_err)
+    Err(WorktreeRemovalFailure::new(OP_RENAME_TO_STAGING, last_err))
+}
+
+/// Finish the git half of a removal whose working directory is already gone:
+/// find the admin entry (in the repository that owns the worktree) that still
+/// points at `host_path` and prune it. Returns `Ok(())` when there is no entry
+/// to prune, so this is safe to run on every drain.
+///
+/// Without it, a worktree whose rename-into-staging succeeded but whose prune
+/// never ran keeps a dead entry in `.git/worktrees/` forever: `git worktree
+/// list` reports a phantom, and a later spawn reusing the name finds the name
+/// taken (issue #2139).
+fn prune_orphaned_worktree_entry(host_path: &str) -> Result<(), WorktreeRemovalFailure> {
+    let target = std::path::Path::new(host_path);
+    let Some(parent) = target.parent() else {
+        return Ok(());
+    };
+    // The working directory is gone, so open the repository from above: it is
+    // the one that holds the (still present) admin metadata.
+    let Ok(repo) = Repository::discover(parent) else {
+        return Ok(());
+    };
+    let Ok(names) = repo.worktrees() else {
+        return Ok(());
+    };
+    for i in 0..names.len() {
+        let Some(name) = names.get(i) else { continue };
+        let Ok(worktree) = repo.find_worktree(name) else {
+            continue;
+        };
+        // `worktree.path()` is the *working* directory, not the admin entry
+        // we need to read and prune — build that path from the repo's own
+        // git dir instead (issue #2139).
+        let admin_dir = repo.path().join("worktrees").join(name);
+        if !admin_entry_points_at(&admin_dir, target) {
+            continue;
+        }
+        let mut opts = git2::WorktreePruneOptions::new();
+        opts.valid(true).locked(true);
+        if let Err(e) = worktree.prune(Some(&mut opts)) {
+            return Err(WorktreeRemovalFailure::new(OP_PRUNE_ADMIN_ENTRY, e));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the admin entry in `admin_dir` (a `.git/worktrees/<name>` directory)
+/// still refers to the working directory `target`. The entry's `gitdir` file
+/// holds the path of the worktree's `.git` link, whose parent is the working
+/// directory itself. Git may write that path as absolute *or* relative to the
+/// admin directory, so resolve both spellings before comparing.
+fn admin_entry_points_at(admin_dir: &std::path::Path, target: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(admin_dir.join("gitdir")) else {
+        return false;
+    };
+    let gitdir = contents.trim();
+    if gitdir.is_empty() {
+        return false;
+    }
+    let raw = std::path::Path::new(gitdir);
+    let resolved = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        admin_dir.join(raw)
+    };
+    let Some(parent) = resolved.parent() else {
+        return false;
+    };
+    let candidates = [parent.to_path_buf(), normalize_parent(parent)];
+    candidates
+        .iter()
+        .any(|candidate| same_path(candidate, target) || inode_same(candidate, target))
+}
+
+/// Lexical fallback (`..` / . collapsing) for symlinked or non-normalised
+/// paths where canonicalisation isn't available.
+fn normalize_parent(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Identity comparison that survives a component being a symlink or junction
+/// (Windows dev machines have both under `.claude/worktrees/…`). False on any
+/// error, so a missing candidate simply loses the comparison.
+fn inode_same(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// Path equality that tolerates the Windows verbatim/UNC and separator
+/// differences a `gitdir` file can carry (git writes forward slashes, the
+/// queue can hold either spelling).
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let normalize = |p: &std::path::Path| {
+        p.to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .replace('\\', "/")
+            .to_lowercase()
+    };
+    normalize(a) == normalize(b)
 }
 
 #[cfg(test)]
@@ -1131,7 +1377,11 @@ mod tests {
             let t = Instant::now();
             create_git_worktree(&repo_root, &wt_path_str, wt_name, "branched", "HEAD")
                 .expect("create_git_worktree must succeed");
-            eprintln!("[e2e] run {} create_git_worktree (git CLI): {:?}", i, t.elapsed());
+            eprintln!(
+                "[e2e] run {} create_git_worktree (git CLI): {:?}",
+                i,
+                t.elapsed()
+            );
 
             // Cleanup between runs.
             let _ = remove_worktree_dir_with_retry(&wt_path_str);
@@ -1159,7 +1409,10 @@ mod tests {
         // Make the working tree dirty: modify a tracked file + add an untracked one.
         fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
         fs::write(parent.join("scratch.txt"), "untracked local note").unwrap();
-        assert!(repo_is_dirty(parent), "precondition: parent repo must be dirty");
+        assert!(
+            repo_is_dirty(parent),
+            "precondition: parent repo must be dirty"
+        );
 
         let wt_path = parent.join(".claude").join("worktrees").join("wt-1");
         create_git_worktree(
@@ -1180,7 +1433,10 @@ mod tests {
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(!wt_path.join("scratch.txt").exists());
-        assert!(repo_is_dirty(parent), "creating a worktree must not modify the parent");
+        assert!(
+            repo_is_dirty(parent),
+            "creating a worktree must not modify the parent"
+        );
     }
 
     #[test]
@@ -1189,7 +1445,10 @@ mod tests {
         let parent = td.path();
         init_repo_with_commit(parent, &[("README.md", "# project\n")]);
         fs::write(parent.join("README.md"), "# project (in-progress edit)\n").unwrap();
-        assert!(repo_is_dirty(parent), "precondition: parent repo must be dirty");
+        assert!(
+            repo_is_dirty(parent),
+            "precondition: parent repo must be dirty"
+        );
 
         let wt_path = parent.join(".claude").join("worktrees").join("wt-det");
         create_git_worktree(
@@ -1203,7 +1462,10 @@ mod tests {
 
         assert!(wt_path.exists());
         let wt_repo = git2::Repository::open(&wt_path).expect("worktree should be a valid repo");
-        assert!(wt_repo.head_detached().unwrap_or(false), "HEAD should be detached");
+        assert!(
+            wt_repo.head_detached().unwrap_or(false),
+            "HEAD should be detached"
+        );
         let wt_readme = fs::read_to_string(wt_path.join("README.md")).unwrap();
         assert_eq!(wt_readme, "# project\n");
         assert!(repo_is_dirty(parent));
@@ -1240,14 +1502,17 @@ mod tests {
             .unwrap()
             .filter_map(|e| e.ok())
             .count();
-        assert_eq!(husk_only, 1, "precondition: only the husk exists in the container");
+        assert_eq!(
+            husk_only, 1,
+            "precondition: only the husk exists in the container"
+        );
 
         create_git_worktree(&root, wt.to_str().unwrap(), "wt-empty", "branched", "HEAD")
             .expect("empty husk must be renamed aside, not block create");
 
         // The path is now a real, openable, registered worktree.
-        let wt_repo = git2::Repository::open(&wt)
-            .expect("after recovery the path must open as a Repository");
+        let wt_repo =
+            git2::Repository::open(&wt).expect("after recovery the path must open as a Repository");
         assert_eq!(
             wt_repo.head().unwrap().shorthand().unwrap_or(""),
             "wt-empty",
@@ -1291,7 +1556,11 @@ mod tests {
         let td = TestDir::new("wt_user_dir");
         init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
         let root = td.path().to_string_lossy().to_string();
-        let wt = td.path().join(".claude").join("worktrees").join("wt-userdata");
+        let wt = td
+            .path()
+            .join(".claude")
+            .join("worktrees")
+            .join("wt-userdata");
         fs::create_dir_all(&wt).unwrap();
         let sentinel = wt.join("user-notes.md");
         let sentinel_bytes = b"important user data - must survive a refused create\n";
@@ -1324,17 +1593,17 @@ mod tests {
         );
 
         // User data is untouched — the refused-create contract.
-        assert!(sentinel.exists(), "user file at top level must not be removed");
+        assert!(
+            sentinel.exists(),
+            "user file at top level must not be removed"
+        );
         assert_eq!(
             fs::read(&sentinel).unwrap(),
             sentinel_bytes,
             "top-level user file content must be byte-for-byte identical"
         );
         assert!(nested_dir.exists(), "nested user dir must not be removed");
-        assert!(
-            nested_file.exists(),
-            "nested user file must not be removed"
-        );
+        assert!(nested_file.exists(), "nested user file must not be removed");
         assert_eq!(
             fs::read_to_string(&nested_file).unwrap(),
             "deeper user data\n",
@@ -1374,34 +1643,59 @@ mod tests {
     fn live_wsl_cross_runtime_git_on_both_filesystems() {
         let host_root = tempfile::tempdir().unwrap();
         let guest_home = crate::env::wsl_home().expect("WSL home");
-        let guest_root = tempfile::Builder::new().prefix("buildmesh-interop-")
-            .tempdir_in(crate::env::to_host_path(&guest_home.to_string_lossy())).unwrap();
+        let guest_root = tempfile::Builder::new()
+            .prefix("buildmesh-interop-")
+            .tempdir_in(crate::env::to_host_path(&guest_home.to_string_lossy()))
+            .unwrap();
         // Trust only this fixture in an isolated libgit2 global config.
         // WSL ownership differs from the Windows account; never alter the
         // user's Git config or disable repository ownership checks globally.
         let config_dir = tempfile::tempdir().unwrap();
         let mut config = git2::Config::open(&config_dir.path().join(".gitconfig")).unwrap();
-        for path in [guest_root.path().to_path_buf(), guest_root.path().join(".claude/worktrees/guest")] {
-            config.set_multivar("safe.directory", "^$", &path.to_string_lossy().replace('\\', "/")).unwrap();
+        for path in [
+            guest_root.path().to_path_buf(),
+            guest_root.path().join(".claude/worktrees/guest"),
+        ] {
+            config
+                .set_multivar(
+                    "safe.directory",
+                    "^$",
+                    &path.to_string_lossy().replace('\\', "/"),
+                )
+                .unwrap();
         }
         drop(config);
         struct RestoreConfig(std::ffi::CString);
         impl Drop for RestoreConfig {
             fn drop(&mut self) {
-                unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap(); }
+                unsafe {
+                    git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap();
+                }
             }
         }
-        let _restore = RestoreConfig(unsafe { git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap() });
-        unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap(); }
+        let _restore = RestoreConfig(unsafe {
+            git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap()
+        });
+        unsafe {
+            git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap();
+        }
         for root in [host_root.path(), guest_root.path()] {
             init_repo_with_commit(root, &[("file.txt", "initial\n")]);
             let wt = make_detached_worktree(root, "guest");
             prepare_cross_runtime_worktree(wt.to_str().unwrap()).unwrap();
-            let guest_path = crate::env::windows_to_wsl(&crate::env::normalize_unc_to_wsl(wt.to_str().unwrap()));
+            let guest_path =
+                crate::env::windows_to_wsl(&crate::env::normalize_unc_to_wsl(wt.to_str().unwrap()));
             for guest in [false, true] {
                 let mut command = if guest {
                     let mut command = crate::process_util::command_no_window("wsl.exe");
-                    command.args(["-d", &crate::env::get_default_wsl_distro().unwrap(), "--exec", "git", "-C", &guest_path]);
+                    command.args([
+                        "-d",
+                        &crate::env::get_default_wsl_distro().unwrap(),
+                        "--exec",
+                        "git",
+                        "-C",
+                        &guest_path,
+                    ]);
                     command
                 } else {
                     let mut command = crate::process_util::git_command();
@@ -1409,9 +1703,22 @@ mod tests {
                     command
                 };
                 command.args(["status", "--porcelain"]);
-                let output = crate::process_util::run_command_with_timeout(command, "cross-runtime Git", std::time::Duration::from_secs(10)).unwrap();
-                assert!(output.status.success(), "guest={guest}: {}", String::from_utf8_lossy(&output.stderr));
-                assert!(output.stdout.is_empty(), "{}", String::from_utf8_lossy(&output.stdout));
+                let output = crate::process_util::run_command_with_timeout(
+                    command,
+                    "cross-runtime Git",
+                    std::time::Duration::from_secs(10),
+                )
+                .unwrap();
+                assert!(
+                    output.status.success(),
+                    "guest={guest}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    output.stdout.is_empty(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stdout)
+                );
             }
             remove_one_worktree(wt.to_str().unwrap()).unwrap();
             assert!(!wt.exists());
@@ -1426,7 +1733,10 @@ mod tests {
         let admin = Repository::open(&wt).unwrap().path().to_path_buf();
         let backpointer = fs::read(admin.join("gitdir")).unwrap();
         prepare_cross_runtime_worktree(wt.to_str().unwrap()).unwrap();
-        assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), "gitdir: ../../../.git/worktrees/guest\n");
+        assert_eq!(
+            fs::read_to_string(wt.join(".git")).unwrap(),
+            "gitdir: ../../../.git/worktrees/guest\n"
+        );
         assert_eq!(fs::read(admin.join("gitdir")).unwrap(), backpointer);
         let repo = Repository::open(&wt).unwrap();
         assert!(repo.statuses(None).unwrap().is_empty());
@@ -1460,7 +1770,10 @@ mod tests {
         )
         .expect("git worktree move must succeed");
 
-        assert!(!src.exists(), "source directory must be gone after the move");
+        assert!(
+            !src.exists(),
+            "source directory must be gone after the move"
+        );
         assert!(dst.exists(), "target directory must exist after the move");
 
         // Git's internal references must have followed the directory: the moved
@@ -1508,7 +1821,10 @@ mod tests {
             "error must name the occupied-target guard, got: {}",
             err
         );
-        assert!(src.exists(), "source must be untouched after a refused move");
+        assert!(
+            src.exists(),
+            "source must be untouched after a refused move"
+        );
         // The target must NOT have gained a nested worktree.
         assert!(
             !dst.join("warm-amber-fox").exists(),
@@ -1560,8 +1876,7 @@ mod tests {
         sanitize_git_worktree(wt.to_str().unwrap(), EnvType::Windows)
             .expect("sanitize must succeed");
 
-        git2::Repository::open(&wt)
-            .expect("libgit2 must open the worktree after sanitize");
+        git2::Repository::open(&wt).expect("libgit2 must open the worktree after sanitize");
         let backpointer = fs::read_to_string(admin_dir.join("gitdir")).unwrap();
         assert!(
             !backpointer.trim_start().starts_with('/'),
@@ -1595,8 +1910,14 @@ mod tests {
             "/mnt/f/src/repo"
         );
         // Real WSL paths must NOT be re-mangled.
-        assert_eq!(convert_link_path_for_env("/mnt/f/src", EnvType::Wsl), "/mnt/f/src");
-        assert_eq!(convert_link_path_for_env("/home/u/repo", EnvType::Wsl), "/home/u/repo");
+        assert_eq!(
+            convert_link_path_for_env("/mnt/f/src", EnvType::Wsl),
+            "/mnt/f/src"
+        );
+        assert_eq!(
+            convert_link_path_for_env("/home/u/repo", EnvType::Wsl),
+            "/home/u/repo"
+        );
         // → Windows (host conversion is a Windows-host behaviour).
         #[cfg(windows)]
         {
@@ -1632,7 +1953,10 @@ mod tests {
             .expect("sanitize must succeed");
 
         assert_eq!(fs::read_to_string(wt.join(".git")).unwrap(), gitlink_before);
-        assert_eq!(fs::read_to_string(&admin_gitdir).unwrap(), backpointer_before);
+        assert_eq!(
+            fs::read_to_string(&admin_gitdir).unwrap(),
+            backpointer_before
+        );
         git2::Repository::open(&wt).expect("worktree must still open");
     }
 
@@ -1640,7 +1964,13 @@ mod tests {
     fn resolve_base_ref_sha_resolves_and_falls_back_to_head() {
         let td = TestDir::new("resolve_sha");
         let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
-        let head = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+        let head = repo
+            .head()
+            .unwrap()
+            .peel_to_commit()
+            .unwrap()
+            .id()
+            .to_string();
 
         // A resolvable ref returns its concrete SHA.
         assert_eq!(
@@ -1684,7 +2014,9 @@ mod tests {
         let repo = init_repo_with_commit(td.path(), &[("f.txt", "a\n")]);
         let head = repo.head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(
-            resolve_base_commit(&repo, "origin/does-not-exist").unwrap().id(),
+            resolve_base_commit(&repo, "origin/does-not-exist")
+                .unwrap()
+                .id(),
             head,
             "an unresolvable ref must fall back to HEAD rather than error"
         );
@@ -1709,7 +2041,10 @@ mod tests {
         let content = fs::read_to_string(wt_path.join("f.txt")).unwrap();
         assert_eq!(content, "from-origin-main\n");
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
-        assert_eq!(wt_repo.head().unwrap().peel_to_commit().unwrap().id(), origin_oid);
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid
+        );
     }
 
     #[test]
@@ -1730,8 +2065,14 @@ mod tests {
 
         let wt_repo = git2::Repository::open(&wt_path).unwrap();
         assert!(wt_repo.head_detached().unwrap_or(false));
-        assert_eq!(wt_repo.head().unwrap().peel_to_commit().unwrap().id(), origin_oid);
-        assert_eq!(fs::read_to_string(wt_path.join("f.txt")).unwrap(), "from-origin-main\n");
+        assert_eq!(
+            wt_repo.head().unwrap().peel_to_commit().unwrap().id(),
+            origin_oid
+        );
+        assert_eq!(
+            fs::read_to_string(wt_path.join("f.txt")).unwrap(),
+            "from-origin-main\n"
+        );
     }
 
     #[test]
@@ -1755,7 +2096,10 @@ mod tests {
         let wt_oid = wt_repo.head().unwrap().peel_to_commit().unwrap().id();
         assert_eq!(wt_oid, head_oid);
         assert_ne!(wt_oid, origin_oid);
-        assert_eq!(fs::read_to_string(wt_path.join("f.txt")).unwrap(), "local-drift\n");
+        assert_eq!(
+            fs::read_to_string(wt_path.join("f.txt")).unwrap(),
+            "local-drift\n"
+        );
     }
 
     #[test]
@@ -1811,7 +2155,11 @@ mod tests {
         fs::create_dir_all(project_root.join("config/nested")).unwrap();
         fs::write(project_root.join("config/nested/.keep"), "keep\n").unwrap();
         fs::write(project_root.join("README-top"), "top\n").unwrap();
-        fs::write(project_root.join(".worktreeinclude"), "README-top\nconfig\n").unwrap();
+        fs::write(
+            project_root.join(".worktreeinclude"),
+            "README-top\nconfig\n",
+        )
+        .unwrap();
 
         fs::create_dir_all(&wt).unwrap();
         apply_worktree_include(project_root.to_str().unwrap(), &wt);
@@ -1960,11 +2308,8 @@ mod tests {
         let mut cfg = repo.config().unwrap();
         cfg.set_str("remote.origin.url", "https://example.invalid/repo.git")
             .unwrap();
-        cfg.set_str(
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/remotes/origin/*",
-        )
-        .unwrap();
+        cfg.set_str("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
         cfg.set_str(&format!("branch.{}.remote", branch), "origin")
             .unwrap();
         cfg.set_str(
@@ -2063,5 +2408,68 @@ mod tests {
         let missing = td.path().join("never-existed");
         remove_one_worktree(&missing.to_string_lossy())
             .expect("a missing worktree dir counts as already removed");
+    }
+
+    // ── issue #2139 — blocked cleanup stays recoverable ─────────────────────
+
+    /// Issue #2139: a removal interrupted between the rename into `<path>
+    /// .removing` staging and the staged delete leaves BOTH the staging
+    /// directory and a live git admin entry, with the original path already
+    /// gone. The old early-return ("missing directory = nothing to remove")
+    /// treated that state as a finished removal: the tombstone was dequeued
+    /// while the staging directory leaked and `git worktree list` kept a dead
+    /// entry forever. Recovery must finish both halves — disk and git
+    /// bookkeeping — and report failure if it can't, so the cleanup intent
+    /// survives in the queue until the removal is genuinely complete.
+    #[test]
+    fn removing_staging_is_recovered_when_original_directory_is_absent() {
+        let td = TestDir::new("staging_recover");
+        let root_repo = init_repo_with_commit(td.path(), &[("file.txt", "initial\n")]);
+        let wt = make_branched_worktree(td.path(), "wt-staging");
+        let staging = format!("{}.removing", wt.to_string_lossy());
+
+        // An interrupted removal: the atomic rename landed, the staged delete
+        // never ran.
+        std::fs::rename(&wt, &staging).unwrap();
+        assert!(!wt.exists(), "precondition: original path is absent");
+        assert!(
+            std::path::Path::new(&staging).exists(),
+            "precondition: the staged copy survives"
+        );
+
+        remove_one_worktree(&wt.to_string_lossy())
+            .expect("a leftover staging directory must be reclaimed, not ignored");
+
+        assert!(
+            !std::path::Path::new(&staging).exists(),
+            "the leftover .removing staging must be deleted"
+        );
+        assert!(
+            root_repo.find_worktree("wt-staging").is_err(),
+            "git bookkeeping must finish too: the admin entry must be pruned"
+        );
+    }
+
+    /// A blocked cleanup must record *what* failed, not just that something
+    /// did. A plain directory that isn't a worktree fails at the open step;
+    /// the returned failure names that operation so the UI can show
+    /// "failed operation: <step>" next to the OS error.
+    #[test]
+    fn removal_failure_names_the_operation_that_failed() {
+        let td = TestDir::new("failure_operation");
+        let plain = td.path().join("not-a-worktree");
+        std::fs::create_dir_all(&plain).unwrap();
+
+        let failure = remove_one_worktree_and_branch_detailed(&plain.to_string_lossy())
+            .expect_err("a non-worktree directory cannot be removed");
+
+        assert_eq!(
+            failure.operation, OP_OPEN_WORKTREE_REPO,
+            "the failure must identify the step that failed"
+        );
+        assert!(
+            !failure.detail.trim().is_empty(),
+            "the failure must carry the underlying error text"
+        );
     }
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, lazy, Suspense } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ProviderErrorPayload } from './types/generated/ProviderErrorPayload';
 import type { ResumeFailedPayload } from './types/generated/ResumeFailedPayload';
@@ -11,6 +11,15 @@ import { TitleBar } from './components/TitleBar/TitleBar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
+// Issue #1568 / #2139: the blocked-cleanup dialog is only ever opened by a
+// `worktree-cleanup-failed` event, so its chunk must not ship in the initial
+// bundle the user pays for on every boot (the budget gate failed before this
+// lazy split). Module scope keeps the lazy reference stable across renders.
+const BlockedCleanupDialog = lazy(() =>
+  import('./components/BlockedCleanupDialog/BlockedCleanupDialog').then((m) => ({
+    default: m.BlockedCleanupDialog,
+  })),
+);
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
 import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
 import { MeshCreateModal } from './components/Mesh/MeshCreateModal';
@@ -39,6 +48,7 @@ import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
 import { addToast, dismissToast, useToastStore } from './stores/toastStore';
+import { reportBlockedWorktreeCleanup } from './lib/worktreeCleanupAlerts';
 import type { CircuitNotificationPayload } from './types/generated/CircuitEvents';
 import './App.css';
 
@@ -537,16 +547,21 @@ function App() {
   }, []);
 
   // The node closes instantly; if its worktree directory couldn't be removed in
-  // the background, warn here. It stays queued and is retried on next launch.
+  // the background, name the problem and open the actionable dialog (issue
+  // #2139). The payload carries the evidence — node identity, full path, the
+  // removal step that failed and the OS error — and the dialog is where Copy
+  // path / Copy diagnostics / What is holding it? / Retry / Keep worktree live.
+  // The load of that surface is deferred (see worktreeCleanupAlerts), so a boot
+  // with nothing blocked pays nothing extra for it.
+  //
+  // The backend emits at most once per unchanged blocker, so the dialog opens
+  // when a *new* block appears; the queue (list_pending_worktree_removals) is
+  // the live source for everything already blocked.
   useEffect(() => {
     const unlisten = listen<WorktreeCleanupFailedPayload>(
       'worktree-cleanup-failed',
       (event) => {
-        addToast(
-          'Worktree',
-          `Couldn't remove worktree for ${event.payload.node_name} — it'll be retried on next launch.`,
-          'warning',
-        );
+        void reportBlockedWorktreeCleanup(event.payload);
       },
     );
     return () => { unlisten.then((fn) => fn()); };
@@ -678,6 +693,14 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
+      {/* Blocked worktree cleanup (issue #2139). Mounted unconditionally like
+          WorktreeCloseDialog so its Modal — and therefore the Escape/backdrop
+          listeners — only exist while a blocked cleanup actually needs it. The
+          component itself is a lazy chunk: nothing is fetched until an event
+          opens it. */}
+      <Suspense fallback={null}>
+        <BlockedCleanupDialog />
+      </Suspense>
       {/* Issue #1536 — the canvas empty state needs to summon this
           modal from outside the Sidebar's render tree. Both call sites
           (Sidebar's "+ New mesh" buttons + the canvas empty state's

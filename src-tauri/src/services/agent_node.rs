@@ -798,7 +798,13 @@ static DRAIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// launch, and are returned so the caller can warn the user. Safe to run from
 /// the close path and from startup reconcile — `remove_one_worktree` is
 /// idempotent (a missing directory counts as already removed).
-pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
+///
+/// Issue #2139 — a failure is no longer only "returned". Each one is persisted
+/// on its queue row (failed step, OS error, attempt count, backoff deadline)
+/// and reported at most once per *unchanged* blocker: the drain backs off
+/// instead of retrying a block it cannot clear, and the user hears about a
+/// stuck worktree once instead of on every drain.
+pub fn process_pending_removals() -> Vec<BlockedCleanup> {
     let _guard = DRAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let pending = match db::list_pending_worktree_removals() {
@@ -809,9 +815,29 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
         }
     };
 
-    process_removals(
-        pending,
-        crate::git::worktree::remove_one_worktree_and_branch,
+    // Backoff gate: an entry inside its retry window is left untouched — no
+    // attempt, no new failure row, no notification. This is what stops the
+    // drain from hammering a block it already knows about (issue #2139).
+    let now = now_epoch_ms();
+    let due: Vec<PendingWorktreeRemoval> = pending
+        .into_iter()
+        .filter(|removal| {
+            if removal.retry_due(now) {
+                true
+            } else {
+                tracing::debug!(
+                    "worktree cleanup for {} is backing off until {} ms; skipping",
+                    removal.node_name,
+                    removal.retry_not_before
+                );
+                false
+            }
+        })
+        .collect();
+
+    let failures = process_removals(
+        due,
+        crate::git::worktree::remove_one_worktree_and_branch_detailed,
         db::delete_pending_worktree_removal,
         // Issue #653 deleter-side guard: skip paths whose `warm_worktrees`
         // row is currently `claimed` (a live spawn has just adopted the
@@ -821,7 +847,198 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
         // no longer claimed and any *new* pending removal (e.g. a subsequent
         // close of the same node) flows through normally.
         db::warm_pool_claims_path,
-    )
+    );
+
+    record_blocked_cleanups(failures, now)
+}
+
+/// Persist each failed attempt, then decide which ones the user still needs to
+/// hear about. Kept separate from [`process_removals`] so the "what happened"
+/// half stays pure and DB-free while the bookkeeping half is the only DB-aware
+/// part of the drain.
+///
+/// A blocker that the user has already been told about (`notified_error` holds
+/// its signature) produces no event: a worktree that is still held by the same
+/// process in the same way is not new information (issue #2139).
+fn record_blocked_cleanups(
+    failures: Vec<(
+        PendingWorktreeRemoval,
+        crate::git::worktree::WorktreeRemovalFailure,
+    )>,
+    now: i64,
+) -> Vec<BlockedCleanup> {
+    let mut blocked = Vec::new();
+    for (removal, failure) in failures {
+        let attempts = removal.attempt_count + 1;
+        let retry_not_before = now + backoff_secs(attempts) * 1000;
+        if let Err(e) = db::record_pending_removal_failure(
+            &removal.worktree_path,
+            failure.operation,
+            &failure.detail,
+            now,
+            retry_not_before,
+        ) {
+            tracing::error!(
+                "removed worktree {} but failed to record its failure: {}",
+                removal.node_name,
+                e
+            );
+        }
+
+        let notify = !removal.already_notified(failure.operation, &failure.detail, now);
+        if notify {
+            if let Err(e) = db::mark_pending_removal_notified(
+                &removal.worktree_path,
+                &crate::models::blocker_signature(failure.operation, &failure.detail),
+                now,
+            ) {
+                tracing::error!(
+                    "could not record that the user was warned about {}: {}",
+                    removal.node_name,
+                    e
+                );
+            }
+        }
+
+        let record =
+            removal.with_failure(failure.operation, &failure.detail, now, retry_not_before);
+        tracing::warn!(
+            "worktree cleanup for {} still blocked after {} attempt(s): {} failed — {} \
+             (retry not before {} ms{}",
+            record.node_name,
+            record.attempt_count,
+            record.last_operation.as_deref().unwrap_or("unknown step"),
+            failure.detail,
+            retry_not_before,
+            if notify {
+                ""
+            } else {
+                "; blocker unchanged, warning suppressed"
+            }
+        );
+        blocked.push(BlockedCleanup {
+            removal: record,
+            notify,
+        });
+    }
+    blocked
+}
+
+/// A worktree cleanup that is still blocked, together with the evidence the UI
+/// needs to make it actionable (issue #2139): the queue row after the failed
+/// attempt, and whether this blocker is being reported for the first time.
+pub struct BlockedCleanup {
+    pub removal: PendingWorktreeRemoval,
+    /// `false` when the user has already been told about this exact blocker —
+    /// the drain still retries (with backoff), it just does not warn again.
+    pub notify: bool,
+}
+
+/// The backoff schedule for automatic worktree-removal retries, in seconds.
+///
+/// A blocked cleanup is usually blocked by something the user must close (an
+/// Explorer window, a stray helper). Retrying every few milliseconds buys
+/// nothing and floods the log and the UI, so the drain waits: 5s, 10s, 20s …
+/// capped at 5 minutes. The cap matters because a worktree blocked overnight
+/// must still be attempted soon after launch rather than much later.
+///
+/// `attempt_count` is the number of failures *including* the one just made.
+pub fn backoff_secs(attempt_count: i64) -> i64 {
+    let exponent = attempt_count.saturating_sub(1).clamp(0, 30) as u32;
+    (CLEANUP_BACKOFF_BASE_SECS << exponent).min(CLEANUP_BACKOFF_MAX_SECS)
+}
+
+const CLEANUP_BACKOFF_BASE_SECS: i64 = 5;
+const CLEANUP_BACKOFF_MAX_SECS: i64 = 300;
+
+/// Epoch milliseconds, used for the queue's attempt/backoff bookkeeping.
+fn now_epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Every queued worktree cleanup with its current bookkeeping, in queue order.
+/// The blocked-cleanup surface (and its actions) reads from here so what the
+/// user sees is exactly what the drain knows.
+pub fn list_blocked_worktree_cleanups() -> Vec<PendingWorktreeRemoval> {
+    db::list_pending_worktree_removals().unwrap_or_else(|e| {
+        tracing::error!("could not read pending worktree removals: {}", e);
+        Vec::new()
+    })
+}
+
+/// Retry one blocked cleanup now, ignoring its backoff. Returns the post-attempt
+/// row so the caller can refresh what it shows, or `Gone` when the queue no
+/// longer holds the path (it was retried or dismissed elsewhere).
+///
+/// A failed retry still records the failure and schedules the next backoff, so
+/// hammering a blocked path through the UI cannot turn into a retry storm.
+pub fn retry_pending_worktree_removal(path: &str) -> CleanupRetryOutcome {
+    // Serialise against the drain: a background drain and a manual retry must
+    // not both remove (and both record) the same worktree.
+    let _guard = DRAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let Some(record) = db::get_pending_worktree_removal(path).unwrap_or_default() else {
+        return CleanupRetryOutcome::Gone;
+    };
+
+    match crate::git::worktree::remove_one_worktree_and_branch_detailed(path) {
+        Ok(()) => {
+            if let Err(e) = db::delete_pending_worktree_removal(path) {
+                tracing::error!(
+                    "worktree {} was removed but failed to dequeue it: {}",
+                    record.node_name,
+                    e
+                );
+            }
+            CleanupRetryOutcome::Removed
+        }
+        Err(failure) => {
+            let now = now_epoch_ms();
+            let attempts = record.attempt_count + 1;
+            let retry_not_before = now + backoff_secs(attempts) * 1000;
+            if let Err(e) = db::record_pending_removal_failure(
+                path,
+                failure.operation,
+                &failure.detail,
+                now,
+                retry_not_before,
+            ) {
+                tracing::error!(
+                    "could not record the failed retry for {}: {}",
+                    record.node_name,
+                    e
+                );
+            }
+            CleanupRetryOutcome::StillBlocked(record.with_failure(
+                failure.operation,
+                &failure.detail,
+                now,
+                retry_not_before,
+            ))
+        }
+    }
+}
+
+/// The outcome of a user-initiated retry of one blocked cleanup.
+pub enum CleanupRetryOutcome {
+    /// The directory and its git bookkeeping are gone; the queue entry is
+    /// dequeued.
+    Removed,
+    /// Still blocked. Carries the updated row so the UI can show the new
+    /// evidence without a second read.
+    StillBlocked(PendingWorktreeRemoval),
+    /// The queue entry no longer exists — already cleaned or dismissed.
+    Gone,
+}
+
+/// "Keep worktree" — the user has decided to leave the directory where it is.
+/// Nothing on disk changes; the cleanup intent is cancelled so the drain stops
+/// retrying and stops warning about it.
+pub fn dismiss_pending_worktree_removal(path: &str) -> db::SqlResult<()> {
+    db::delete_pending_worktree_removal(path)
 }
 
 /// Pure orchestration for the drain: for each removal, attempt the directory
@@ -838,10 +1055,13 @@ pub fn process_pending_removals() -> Vec<(PendingWorktreeRemoval, String)> {
 /// broken; no user warning is warranted.
 fn process_removals(
     pending: Vec<PendingWorktreeRemoval>,
-    remove: impl Fn(&str) -> Result<(), String>,
+    remove: impl Fn(&str) -> Result<(), crate::git::worktree::WorktreeRemovalFailure>,
     dequeue: impl Fn(&str) -> db::SqlResult<()>,
     is_claimed: impl Fn(&str) -> db::SqlResult<bool>,
-) -> Vec<(PendingWorktreeRemoval, String)> {
+) -> Vec<(
+    PendingWorktreeRemoval,
+    crate::git::worktree::WorktreeRemovalFailure,
+)> {
     let mut failures = Vec::new();
     for removal in pending {
         match is_claimed(&removal.worktree_path) {
@@ -875,13 +1095,14 @@ fn process_removals(
                         );
                     }
                 }
-                Err(e) => {
+                Err(failure) => {
                     tracing::warn!(
-                        "worktree removal for {} failed, will retry: {}",
+                        "worktree removal for {} failed during {}, will retry: {}",
                         removal.node_name,
-                        e
+                        failure.operation,
+                        failure.detail
                     );
-                    failures.push((removal, e));
+                    failures.push((removal, failure));
                 }
             },
             Err(e) => {
@@ -1163,25 +1384,23 @@ mod tests {
         let good = add_worktree(&root_repo, &root, "wt-good");
 
         let pending = vec![
-            PendingWorktreeRemoval {
-                worktree_path: good.to_string_lossy().to_string(),
-                node_name: "wt-good".to_string(),
-            },
-            PendingWorktreeRemoval {
-                worktree_path: "/nonexistent/wt-bad".to_string(),
-                node_name: "wt-bad".to_string(),
-            },
+            PendingWorktreeRemoval::new(&good.to_string_lossy(), "wt-good"),
+            PendingWorktreeRemoval::new("/nonexistent/wt-bad", "wt-bad"),
         ];
 
         let dequeued = std::cell::RefCell::new(Vec::<String>::new());
         let failures = process_removals(
             pending,
             |path| {
-                // A missing parent repo can't be opened → genuine failure.
+                // A missing parent repo can't be opened → genuine failure, and
+                // the failure names the step that failed (issue #2139).
                 if path.starts_with("/nonexistent") {
-                    return Err("not a removable worktree".to_string());
+                    return Err(crate::git::worktree::WorktreeRemovalFailure::for_test(
+                        crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+                        "not a removable worktree",
+                    ));
                 }
-                crate::git::worktree::remove_one_worktree(path)
+                crate::git::worktree::remove_one_worktree_and_branch_detailed(path)
             },
             |path| {
                 dequeued.borrow_mut().push(path.to_string());
@@ -1208,6 +1427,11 @@ mod tests {
             "the failed removal is returned for warning"
         );
         assert_eq!(failures[0].0.node_name, "wt-bad");
+        assert_eq!(
+            failures[0].1.operation,
+            crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+            "the failure carries the step that failed so the UI can label it"
+        );
     }
 
     /// Issue #653 deleter-side guard: a pending-removal entry whose path is
@@ -1226,15 +1450,9 @@ mod tests {
         let pending = vec![
             // Live spawn's worktree: warm pool row is `claimed`. The drain
             // must skip — no `remove`, dequeue + no failure.
-            PendingWorktreeRemoval {
-                worktree_path: "/repo/m/.claude/worktrees/wt-claimed".to_string(),
-                node_name: "wt-claimed".to_string(),
-            },
+            PendingWorktreeRemoval::new("/repo/m/.claude/worktrees/wt-claimed", "wt-claimed"),
             // Normal cold removal: not claimed. The drain proceeds.
-            PendingWorktreeRemoval {
-                worktree_path: "/repo/m/.claude/worktrees/wt-cold".to_string(),
-                node_name: "wt-cold".to_string(),
-            },
+            PendingWorktreeRemoval::new("/repo/m/.claude/worktrees/wt-cold", "wt-cold"),
         ];
 
         let removed = std::cell::RefCell::new(Vec::<String>::new());
@@ -1287,10 +1505,10 @@ mod tests {
     /// tombstone survives for the next drain to retry.
     #[test]
     fn process_removals_fails_closed_when_is_claimed_errors() {
-        let pending = vec![PendingWorktreeRemoval {
-            worktree_path: "/repo/m/.claude/worktrees/wt-uncertain".to_string(),
-            node_name: "wt-uncertain".to_string(),
-        }];
+        let pending = vec![PendingWorktreeRemoval::new(
+            "/repo/m/.claude/worktrees/wt-uncertain",
+            "wt-uncertain",
+        )];
 
         let removed = std::cell::RefCell::new(Vec::<String>::new());
         let dequeued = std::cell::RefCell::new(Vec::<String>::new());
@@ -1320,6 +1538,292 @@ mod tests {
             "a guard-query error must NOT surface as a worktree-cleanup failure \
              (would emit a misleading user toast); the next drain retries silently"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Issue #2139 — blocked cleanups are persisted, backed off and reported
+    // at most once per unchanged blocker.
+    // -------------------------------------------------------------------
+
+    /// The backoff schedule must grow, so a blocker the drain cannot clear
+    /// costs less and less rows/second, and must cap so a worktree blocked
+    /// overnight is still retried promptly after the next launch.
+    #[test]
+    fn backoff_schedule_doubles_from_five_seconds_and_caps() {
+        assert_eq!(backoff_secs(0), 5, "a never-attempted row is due now");
+        assert_eq!(backoff_secs(1), 5, "first retry after 5 seconds");
+        assert_eq!(backoff_secs(2), 10, "the wait doubles each failure");
+        assert_eq!(backoff_secs(3), 20);
+        assert_eq!(backoff_secs(6), 160);
+        assert_eq!(
+            backoff_secs(64),
+            300,
+            "capped so a stale block is retried promptly"
+        );
+    }
+
+    /// A directory that is not a worktree can never be removed, which makes it
+    /// a deterministic blocker for the drain-level tests below (no process
+    /// juggling, no Windows-specific locking). Returns the directory (so the
+    /// test can assert it was left alone) and its path.
+    fn enqueue_blocked_cleanup(root: &TempDir, name: &str) -> (PathBuf, String) {
+        let blocker = root.path().join(name);
+        fs::create_dir_all(&blocker).unwrap();
+        let path = blocker.to_string_lossy().to_string();
+        db::enqueue_worktree_removal_inner(&db::write_conn(), &path, name).unwrap();
+        (blocker, path)
+    }
+
+    /// The user hears about a blocked worktree once. The same blocker on the
+    /// next drain is not new information, so it retries silently instead of
+    /// raising another warning toast — the pre-#2139 behaviour was one toast
+    /// per drain per worktree.
+    #[test]
+    fn blocked_cleanup_warns_once_and_suppresses_the_unchanged_blocker() {
+        let _db = crate::db::test_support::isolated();
+        let td = TempDir::new();
+        let (blocker, path) = enqueue_blocked_cleanup(&td, "wt-blocked");
+
+        let first = process_pending_removals();
+        assert_eq!(first.len(), 1, "one blocked cleanup reported");
+        assert!(
+            first[0].notify,
+            "the first failure is new information and must reach the user"
+        );
+        assert_eq!(first[0].removal.attempt_count, 1);
+        assert_eq!(
+            first[0].removal.last_operation.as_deref(),
+            Some(crate::git::worktree::OP_OPEN_WORKTREE_REPO),
+            "the failed step is persisted for the UI"
+        );
+        assert!(
+            first[0].removal.last_error.is_some(),
+            "the OS error is persisted"
+        );
+
+        // A later drain with the same blocker: the gate lets it through (the
+        // row is read back, not re-queued), and the blocker is unchanged, so
+        // it retries silently instead of raising another warning toast.
+        let row = list_blocked_worktree_cleanups().remove(0);
+        let now = now_epoch_ms();
+        let second = record_blocked_cleanups(
+            vec![(
+                row,
+                failed(
+                    crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+                    &first[0].removal.last_error.clone().unwrap_or_default(),
+                ),
+            )],
+            now,
+        );
+        assert_eq!(second.len(), 1, "the cleanup is still blocked");
+        assert!(
+            !second[0].notify,
+            "an unchanged blocker must not warn again (issue #2139)"
+        );
+        assert_eq!(
+            second[0].removal.attempt_count, 2,
+            "attempts keep accumulating"
+        );
+
+        // The evidence survived both attempts and reads back from the queue.
+        let [row] = &list_blocked_worktree_cleanups()[..] else {
+            panic!("the queue holds exactly one blocked cleanup");
+        };
+        assert_eq!(row.worktree_path, path);
+        assert_eq!(row.attempt_count, 2);
+        assert!(row.last_error.is_some() && row.last_operation.is_some());
+        assert!(
+            blocker.exists(),
+            "the blocked directory is left untouched — no gutting (issue #239)"
+        );
+    }
+
+    /// A worktree inside its backoff window is not attempted at all: no
+    /// removal, no new failure row, no notification. Without the gate the
+    /// drain retries a block it already knows about on every pass.
+    #[test]
+    fn a_cleanup_inside_its_backoff_window_is_not_attempted() {
+        let _db = crate::db::test_support::isolated();
+        let td = TempDir::new();
+        let (blocker, path) = enqueue_blocked_cleanup(&td, "wt-backoff");
+        db::record_pending_removal_failure(
+            &path,
+            crate::git::worktree::OP_RENAME_TO_STAGING,
+            "being used by another process (os error 32)",
+            1_000,
+            i64::MAX, // far future: retry not due
+        )
+        .unwrap();
+
+        let blocked = process_pending_removals();
+
+        assert!(
+            blocked.is_empty(),
+            "an entry inside its backoff window must not be attempted or reported"
+        );
+        let [row] = &list_blocked_worktree_cleanups()[..] else {
+            panic!("the queue still holds the backing-off cleanup")
+        };
+        assert_eq!(row.attempt_count, 1, "no second attempt was made");
+        assert_eq!(
+            row.last_operation.as_deref(),
+            Some(crate::git::worktree::OP_RENAME_TO_STAGING),
+            "the previous failure record is untouched"
+        );
+        assert!(
+            blocker.exists(),
+            "the blocked directory must not be touched while backing off"
+        );
+    }
+
+    /// A user-triggered retry of a worktree that is no longer blocked must
+    /// actually remove it and dequeue the tombstone.
+    #[test]
+    fn retry_removes_a_worktree_once_it_is_unblocked() {
+        let _db = crate::db::test_support::isolated();
+        let root = TempDir::new();
+        let root_repo = init_repo(root.path());
+        let good = add_worktree(&root_repo, &root, "wt-retry");
+        let path = good.to_string_lossy().to_string();
+        db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-retry").unwrap();
+
+        match retry_pending_worktree_removal(&path) {
+            CleanupRetryOutcome::Removed => {}
+            other => panic!(
+                "expected the retry to remove the worktree, got {:?}",
+                outcome_tag(&other)
+            ),
+        }
+
+        assert!(!good.exists(), "the worktree directory must be gone");
+        assert!(
+            list_blocked_worktree_cleanups().is_empty(),
+            "a successful retry dequeues the tombstone"
+        );
+    }
+
+    /// A user-triggered retry of a still-blocked worktree records the failure
+    /// (so the evidence grows) and leaves the tombstone queued, rather than
+    /// reporting a bare success.
+    #[test]
+    fn retry_of_a_still_blocked_worktree_records_the_failure() {
+        let _db = crate::db::test_support::isolated();
+        let td = TempDir::new();
+        let (_blocker, path) = enqueue_blocked_cleanup(&td, "wt-still-blocked");
+
+        match retry_pending_worktree_removal(&path) {
+            CleanupRetryOutcome::StillBlocked(record) => {
+                assert_eq!(record.attempt_count, 1, "the retry is one more attempt");
+                assert!(
+                    record.last_operation.is_some() && record.last_error.is_some(),
+                    "the retry persists its own evidence"
+                );
+            }
+            other => panic!("expected StillBlocked, got {:?}", outcome_tag(&other)),
+        }
+
+        let [row] = &list_blocked_worktree_cleanups()[..] else {
+            panic!("the blocked cleanup stays queued after a failed retry")
+        };
+        assert_eq!(row.attempt_count, 1);
+    }
+
+    /// A retry for a path the queue no longer holds reports `Gone` instead of
+    /// pretending it removed something.
+    #[test]
+    fn retry_after_dismiss_reports_the_entry_is_gone() {
+        let _db = crate::db::test_support::isolated();
+        let td = TempDir::new();
+        let (_blocker, path) = enqueue_blocked_cleanup(&td, "wt-dismissed");
+
+        dismiss_pending_worktree_removal(&path).unwrap();
+
+        assert!(matches!(
+            retry_pending_worktree_removal(&path),
+            CleanupRetryOutcome::Gone
+        ));
+        assert!(
+            list_blocked_worktree_cleanups().is_empty(),
+            "dismissing cancels the cleanup intent"
+        );
+    }
+
+    /// A blocker that *changes shape* is new information and must warn again:
+    /// the error that stopped the removal changed, so the user needs a fresh
+    /// (accurate) diagnosis rather than a suppressed repeat.
+    #[test]
+    fn a_changed_blocker_warns_again() {
+        let _db = crate::db::test_support::isolated();
+        let path = "/repo/m/.claude/worktrees/wt-changing";
+        db::enqueue_worktree_removal_inner(&db::write_conn(), path, "wt-changing").unwrap();
+
+        // First failure: access denied.
+        let first = record_blocked_cleanups(
+            vec![(
+                PendingWorktreeRemoval::new(path, "wt-changing"),
+                failed(
+                    crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+                    "access is denied",
+                ),
+            )],
+            1_000,
+        );
+        assert!(first[0].notify, "the first blocker is new information");
+
+        // Same blocker again, seeded from the row that pass persisted.
+        let row = list_blocked_worktree_cleanups().remove(0);
+        assert!(
+            row.already_notified(
+                crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+                "access is denied",
+                2_000
+            ),
+            "the recorded signature suppresses the identical blocker"
+        );
+        let repeated = record_blocked_cleanups(
+            vec![(
+                row,
+                failed(
+                    crate::git::worktree::OP_OPEN_WORKTREE_REPO,
+                    "access is denied",
+                ),
+            )],
+            2_000,
+        );
+        assert!(
+            !repeated[0].notify,
+            "an identical blocker on the next drain stays silent"
+        );
+
+        // Same step, a *different* OS error: the blocker changed shape.
+        let row = list_blocked_worktree_cleanups().remove(0);
+        let changed = record_blocked_cleanups(
+            vec![(
+                row,
+                failed(crate::git::worktree::OP_OPEN_WORKTREE_REPO, "os error 32"),
+            )],
+            3_000,
+        );
+        assert!(changed[0].notify, "a changed blocker warns again");
+    }
+
+    /// Test helper: a failure for a specific step of the worktree-removal
+    /// vocabulary, so a test can say which step broke.
+    fn failed(
+        operation: &'static str,
+        detail: &str,
+    ) -> crate::git::worktree::WorktreeRemovalFailure {
+        crate::git::worktree::WorktreeRemovalFailure::for_test(operation, detail)
+    }
+
+    /// Label for panic messages: `StillBlocked`/`Removed`/`Gone`.
+    fn outcome_tag(outcome: &CleanupRetryOutcome) -> &'static str {
+        match outcome {
+            CleanupRetryOutcome::Removed => "Removed",
+            CleanupRetryOutcome::StillBlocked(_) => "StillBlocked",
+            CleanupRetryOutcome::Gone => "Gone",
+        }
     }
 
     // -------------------------------------------------------------------
