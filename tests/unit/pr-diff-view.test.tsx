@@ -160,11 +160,16 @@ describe('PrDiffView (#421)', () => {
     // classification itself, which the +/âˆ’ marker conveys).
     await screen.findByText('src/modified.ts');
 
+    // The breadcrumb above comes from props, so it renders before the
+    // `get_pr_files` fetch resolves; the patch lines only exist once it has.
+    // Wait for the content under test, not for the toolbar (a synchronous
+    // `getByText` here raced the fetch and failed on a loaded runner).
+    //
     // Use a regex on the marker span: the patch produces one '+' line and
     // one '-' line. They live in spans inside the body — we assert by
     // text content of the lines themselves.
-    expect(screen.getByText('added line')).toBeTruthy();
-    expect(screen.getByText('removed line')).toBeTruthy();
+    expect(await screen.findByText('added line')).toBeTruthy();
+    expect(await screen.findByText('removed line')).toBeTruthy();
   });
 
   it('renders a "Binary file not shown" placeholder for files with an empty patch', async () => {
