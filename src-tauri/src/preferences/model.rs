@@ -44,13 +44,15 @@ pub struct HarnessProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub wsl_distro: Option<String>,
-    /// Absolute path to the harness binary when discovery resolved one that
-    /// is **not on `PATH`** (issue #1773 review). `cmd.exe /c <name>` would
-    /// fail with `'name' is not recognized` for off-PATH installs, so the
-    /// spawn path threads this through `spawn_environment::wrap` as
-    /// `executable_override`. `None` for PATH-resolvable harnesses (every
-    /// native provider on macOS/Linux, npm-shim Cline on Windows, etc.) —
-    /// the spawn keeps its normal `recipe.binary` lookup.
+    /// Absolute path to the harness binary when discovery resolved one on disk
+    /// (issue #1773 review, extended to every harness so a GUI-launched app
+    /// spawns the same path it detected). `cmd.exe /c <name>` would fail with
+    /// `'name' is not recognized` for installs outside the GUI process `PATH`
+    /// (npm prefix bins, `~/.local/bin`, Node manager shims), so the spawn
+    /// path threads this through `spawn_environment::wrap` as
+    /// `executable_override`. `None` when only a config directory was found —
+    /// the spawn then re-resolves the bare stem through the same enriched
+    /// search path detection uses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub executable: Option<PathBuf>,

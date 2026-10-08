@@ -122,7 +122,12 @@ pub enum PreparedLaunchRouting {
     /// review); `None` keeps `spawn_environment::wrap` falling back to its
     /// normal `recipe.binary` lookup.
     Native { executable: Option<PathBuf> },
-    Environment(Vec<(String, String)>),
+    /// Proxied Claude-compatible launch: backend env plus the same resolved
+    /// absolute `executable` `Native` carries. Without it a paired
+    /// Claude/Cline launch would fall back to a bare stem the GUI process
+    /// `PATH` cannot resolve, re-creating the picker-visible-but-spawn-fails
+    /// gap for the most common harness.
+    Environment { values: Vec<(String, String)>, executable: Option<PathBuf> },
     CodexProxy {
         harness_id: String,
         provider_id: String,
@@ -143,9 +148,10 @@ impl std::fmt::Debug for PreparedLaunchRouting {
                 .debug_struct("Native")
                 .field("executable", executable)
                 .finish(),
-            Self::Environment(values) => formatter
-                .debug_tuple("Environment")
-                .field(&format_args!("{} values (redacted)", values.len()))
+            Self::Environment { values, executable } => formatter
+                .debug_struct("Environment")
+                .field("values", &format_args!("{} values (redacted)", values.len()))
+                .field("executable", executable)
                 .finish(),
             Self::CodexProxy {
                 harness_id,
@@ -178,7 +184,7 @@ impl PreparedLaunchRouting {
         if values.is_empty() {
             Self::Native { executable: None }
         } else {
-            Self::Environment(values.to_vec())
+            Self::Environment { values: values.to_vec(), executable: None }
         }
     }
 
@@ -191,14 +197,15 @@ impl PreparedLaunchRouting {
                 harness_home: Some(install.codex_home.clone()),
                 wsl_distro: install.wsl_distro.clone(),
             },
-            Self::Native { .. } | Self::Environment(_) => LaunchRuntime::default(),
+            Self::Native { .. } | Self::Environment { .. } => LaunchRuntime::default(),
         }
     }
 
     /// The resolved absolute path to spawn, when the harness's detection
-    /// yielded something the `PATH` lookup wouldn't find. Returns `None`
-    /// for the common case (PATH-resolvable binary or Codex proxy, which
-    /// carries its own `install.executable` plumbing).
+    /// yielded something the GUI process `PATH` lookup wouldn't find (or the
+    /// spawn-time re-resolution in [`prepare`] found it after startup).
+    /// Returns `None` when neither source resolved a path, or for the Codex
+    /// proxy, which carries its own `install.executable` plumbing.
     ///
     /// Unified across variants so [`super::command::build_spawn_command`]
     /// has one place to read it. Codex's `install.executable` wins over the
@@ -208,7 +215,7 @@ impl PreparedLaunchRouting {
         match self {
             Self::CodexProxy { install, .. } => Some(std::path::Path::new(&install.executable)),
             Self::Native { executable } => executable.as_deref(),
-            Self::Environment(_) => None,
+            Self::Environment { executable, .. } => executable.as_deref(),
         }
     }
 }
@@ -244,13 +251,26 @@ pub fn prepare(
             return Err(format!("This harness belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh, or select a harness from the current default distribution."));
         }
     }
-    // Carry the resolved absolute path (issue #1773 review). The profile's
-    // `executable` is `None` for every harness whose binary is on `PATH`
-    // (Claude Code, native Codex, Antigravity, OpenCode on PATH, etc.) —
-    // the spawn path skips the absolute-path override in that case.
+    // Carry the resolved absolute path (issue #1773 review): detection records
+    // it for every binary-found harness so a GUI-launched app spawns the same
+    // path it discovered. When the profile carries none (config-dir-only
+    // install, custom profile, or a binary that appeared after startup),
+    // re-resolve the recipe stem through the same enriched search path at
+    // spawn time — changing picker detection alone does not fix the launch.
+    // WSL guests are exempt: the `wsl.exe` wrapper exports the guest user bins
+    // and the guest login shell resolves the stem itself.
     let executable_override = profile_for_distro
         .as_ref()
-        .and_then(|profile| profile.executable.clone());
+        .and_then(|profile| profile.executable.clone())
+        .or_else(|| {
+            if resolved.env_type == crate::models::EnvType::Wsl {
+                return None;
+            }
+            crate::agent::detection::resolve_spawn_binary(recipe_binary_for(
+                provider,
+                resolved.env_type,
+            ))
+        });
 
     let routing = resolve_routing(spawn_option_id, provider, resolved, executable_override)?;
     // Only the value-only variants are memoised. `CodexProxy` carries a live
@@ -258,11 +278,32 @@ pub fn prepare(
     // `Err` must be re-derived so its guard sees the current settings.
     if matches!(
         routing,
-        PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment(_)
+        PreparedLaunchRouting::Native { .. } | PreparedLaunchRouting::Environment { .. }
     ) {
         with_routing_cache(|cache| cache.put(cache_key, generation, routing.clone()));
     }
     Ok(routing)
+}
+
+/// The recipe stem the spawn would invoke for `provider` on `env_type` — the
+/// same binary [`super::command::build_spawn_command_prepared`] hands to
+/// `spawn_environment::wrap` when no override is present. Used for the
+/// spawn-time re-resolution, so discovery and spawning consult the same name.
+fn recipe_binary_for(
+    provider: Provider,
+    env_type: crate::models::EnvType,
+) -> &'static str {
+    let platform = if env_type == crate::models::EnvType::Wsl {
+        crate::agent::provider::Platform::Linux
+    } else if env_type == crate::models::EnvType::WindowsInterop {
+        crate::agent::provider::Platform::Windows
+    } else {
+        crate::agent::provider::Platform::current()
+    };
+    provider
+        .adapter()
+        .spawn_recipe(platform, env_type)
+        .binary
 }
 
 /// The uncached body of [`prepare`] — resolved pairing → routing. Split out so
@@ -286,7 +327,10 @@ fn resolve_routing(
                 "selected proxied pairing '{spawn_option_id}' no longer exists"
             ));
         }
-        return Ok(PreparedLaunchRouting::Environment(env));
+        return Ok(PreparedLaunchRouting::Environment {
+            values: env,
+            executable: executable_override,
+        });
     }
     let Some((pairing, account)) =
         preferences::resolve_stored_pairing_and_account(spawn_option_id)?
@@ -301,9 +345,12 @@ fn resolve_routing(
 
     preferences::preflight_resolve_provider_env(spawn_option_id)?;
     if provider == Provider::Anthropic {
-        return Ok(PreparedLaunchRouting::Environment(preferences::resolve_provider_env(spawn_option_id)));
+        return Ok(PreparedLaunchRouting::Environment {
+            values: preferences::resolve_provider_env(spawn_option_id),
+            executable: executable_override,
+        });
     }
-    prepare_route(pairing, account, provider, resolved, None)
+    prepare_route(pairing, account, provider, resolved, None, executable_override)
 }
 
 pub fn prepare_snapshot(
@@ -322,12 +369,29 @@ pub fn prepare_snapshot(
             return Err(format!("This saved launch belongs to WSL distribution '{distro}'. Set it as the default distribution and restart Buildmesh."));
         }
     }
+    let provider = Provider::from_db_str(&plan.harness.harness);
+    let executable_override = plan.harness.executable.clone().or_else(|| {
+        if resolved.env_type == crate::models::EnvType::Wsl {
+            return None;
+        }
+        crate::agent::detection::resolve_spawn_binary(recipe_binary_for(
+            provider,
+            resolved.env_type,
+        ))
+    });
     let Some(route) = plan.route.clone() else {
-        return Ok(PreparedLaunchRouting::Native { executable: plan.harness.executable.clone() });
+        return Ok(PreparedLaunchRouting::Native { executable: executable_override });
     };
     let account = preferences::provider_accounts().into_iter().find(|a| a.id == route.provider_id)
         .ok_or_else(|| format!("Provider account '{}' is missing; restore its credential to resume", route.provider_id))?;
-    prepare_route(route, account, Provider::from_db_str(&plan.harness.harness), resolved, plan.verification.as_ref())
+    prepare_route(
+        route,
+        account,
+        provider,
+        resolved,
+        plan.verification.as_ref(),
+        executable_override,
+    )
 }
 
 fn prepare_route(
@@ -336,6 +400,7 @@ fn prepare_route(
     provider: Provider,
     resolved: &ResolvedPath,
     verification: Option<&preferences::PairingVerification>,
+    executable_override: Option<PathBuf>,
 ) -> Result<PreparedLaunchRouting, String> {
     preferences::compatibility::preflight_pairing_env(Some(&pairing), &account.id)?;
     match provider {
@@ -400,7 +465,7 @@ fn prepare_route(
                     &pairing.model_tiers,
                 )
             };
-            Ok(PreparedLaunchRouting::Environment(env))
+            Ok(PreparedLaunchRouting::Environment { values: env, executable: executable_override })
         }
         _ => Err("the selected harness does not support proxied providers".into()),
     }
@@ -444,7 +509,7 @@ mod routing_cache_tests {
             env_type: crate::models::EnvType::Windows,
         };
         let routing = resolve_routing("cline:minimax", Provider::Cline, &resolved, None).unwrap();
-        let PreparedLaunchRouting::Environment(env) = routing else {
+        let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
             panic!("expected Cline environment routing");
         };
         assert_eq!(env.iter().find(|(key, _)| key == "ANTHROPIC_API_KEY").map(|(_, value)| value.as_str()), Some("test-key"));
@@ -493,7 +558,7 @@ mod routing_cache_tests {
             ).unwrap();
             assert_eq!(plan.route.as_ref().map(|route| route.surface), Some(surface));
             let routing = prepare_snapshot(&plan, &resolved).unwrap();
-            let PreparedLaunchRouting::Environment(env) = routing else {
+            let PreparedLaunchRouting::Environment { values: env, .. } = routing else {
                 panic!("expected Cline environment routing");
             };
             let key_name = match surface {
@@ -505,6 +570,74 @@ mod routing_cache_tests {
             assert_eq!(resumed.route.as_ref().map(|route| route.surface), Some(surface));
         }
         preferences::reset_for_tests();
+    }
+
+    /// Picker-visible-but-spawn-fails regression: a paired Claude launch must
+    /// carry the detection-resolved executable on its `Environment` routing.
+    /// The variant previously dropped it, so the spawn fell back to a bare
+    /// stem the GUI process `PATH` cannot resolve. The profile path here is
+    /// never touched on disk — the `or_else` short-circuits — so the test is
+    /// hermetic on machines with and without the CLI installed.
+    #[test]
+    fn prepare_threads_profile_executable_into_environment_routing() {
+        let temp = tempfile::tempdir().unwrap();
+        preferences::init_for_tests(temp.path().to_path_buf());
+        let resolved_exe = PathBuf::from(if cfg!(windows) {
+            "C:/Users/me/.local/bin/claude.exe"
+        } else {
+            "/home/me/.local/bin/claude"
+        });
+        preferences::save(preferences::AppPreferences {
+            harness_profiles: vec![preferences::HarnessProfile {
+                id: "claude".into(), name: "Claude Code".into(), harness: "anthropic".into(),
+                runtime: None, wsl_distro: None, executable: Some(resolved_exe.clone()),
+            }],
+            provider_accounts: vec![preferences::ProviderAccount {
+                id: "minimax".into(), name: "MiniMax".into(), enabled: true,
+                billing_mode: preferences::BillingMode::PayAsYouGo,
+                claude_compatible: true, api_key: Some("test-key".into()),
+            }],
+            provider_pairings: vec![preferences::ProviderPairing {
+                harness_id: "claude".into(), provider_id: "minimax".into(),
+                surface: preferences::ApiSurface::Anthropic,
+                base_url: Some("https://example.invalid/anthropic".into()),
+                model_tiers: preferences::ModelTiers {
+                    default: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+        let resolved = crate::env::ResolvedPath {
+            host_path: "C:/work".into(),
+            spawn_path: "C:/work".into(),
+            raw_path: "C:/work".into(),
+            env_type: crate::models::EnvType::Windows,
+        };
+        let routing = prepare("claude:minimax", Provider::Anthropic, &resolved).unwrap();
+        let PreparedLaunchRouting::Environment { values: env, executable } = routing else {
+            panic!("expected Claude environment routing");
+        };
+        assert_eq!(executable.as_deref(), Some(resolved_exe.as_path()));
+        assert!(
+            env.iter().any(|(key, _)| key == "ANTHROPIC_API_KEY"),
+            "backend env must still flow alongside the executable"
+        );
+        preferences::reset_for_tests();
+    }
+
+    /// `recipe_binary_for` must name the same stem the spawn invokes, per
+    /// platform — the spawn-time re-resolution consults this name, so a
+    /// mismatch would resolve (and launch) a different program than routing
+    /// selected.
+    #[test]
+    fn recipe_binary_for_returns_the_stem_the_spawn_invokes() {
+        use crate::models::EnvType;
+        assert_eq!(super::recipe_binary_for(Provider::Anthropic, EnvType::Windows), "claude.exe");
+        assert_eq!(super::recipe_binary_for(Provider::Anthropic, EnvType::Wsl), "claude");
+        assert_eq!(super::recipe_binary_for(Provider::Codex, EnvType::Windows), "codex");
+        assert_eq!(super::recipe_binary_for(Provider::Cline, EnvType::Windows), "cline");
     }
 
     fn key(id: &str) -> RoutingCacheKey {
