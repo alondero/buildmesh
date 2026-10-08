@@ -316,7 +316,10 @@ waited out the submission budget without sending Enter.
 
 For an already staged prompt, inspect the input box before submitting it manually
 or retrying the step, so the same prompt is not sent twice. New deliveries confirm
-the inline prefix and remaining count before sending Enter separately.
+sequences of inline text and counted paste markers before sending Enter
+separately. Before writing a multiline Codex prompt, Buildmesh applies Codex's
+newline normalization and control-character sanitization; counts and visible
+text use that same transformed prompt.
 
 ## MiniMax Code attaches the wrong conversation or never captures one
 

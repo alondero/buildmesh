@@ -17,13 +17,30 @@ uses a 60-millisecond idle timeout on Windows; each flush is integrated
 independently. This permits several markers from one PTY write.
 
 The count convention comes from
-[`apply_paste`](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs#L134-L166):
+[`apply_paste`](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs#L118-L146):
 it converts CRLF and bare CR to LF, sanitizes control text, then counts Rust
 `chars()` (Unicode scalar values, not UTF-8 bytes or display columns). Counts
 above 1,000 produce a placeholder. The
 [placeholder allocator](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/tui/src/bottom_pane/chat_composer.rs#L1931-L1954)
 puts duplicate-size ordinals after the closing bracket, for example
 `[Pasted Content 1500 chars] #2`.
+
+The pinned
+[`sanitize_user_text`](https://github.com/openai/codex/blob/rust-v0.160.1/codex-rs/tui/src/history_cell/messages.rs#L24-L50)
+removes `ESC [` through the first ASCII character in `@` through `~`. An
+unfinished sequence consumes the remaining paste. Other control characters,
+including NUL, DEL and C1 controls, are removed; tabs and newlines remain.
+An ESC followed by something other than `[` removes only the ESC, retaining
+the printable text that follows. Buildmesh applies these rules to the Codex
+prompt body before the PTY write, then counts that same text, builds its
+visible-text proof and precomputes segment boundaries.
+
+Sanitizing only the expected text is insufficient: Codex sanitizes each burst
+independently. If a trailing `ESC [31m` is cut after `ESC [3`, the first burst
+discards that fragment and the next retains printable `1m`. The first marker
+could then appear to count the entire globally sanitized prompt while input
+still remained. Transforming the body before adding the bracketed-paste
+protocol removes CSI/control fragments before burst boundaries can affect them.
 
 ## Reproduction and regression
 
@@ -91,9 +108,23 @@ and that wrapped marker. The earlier 119/5,266 frame is a different run.
 The active-burst key path appends Enter as LF before placeholder counting;
 the observed missing LF was outside the collapsed suffix. This evidence does
 not establish a rule permitting arbitrary newline loss inside hidden bursts.
-The matcher applies counts to original or CRLF-normalized character boundaries
+The matcher applies counts to newline-normalized, sanitized character boundaries
 without adding count tolerances. Boundaries differing only in ignored
 whitespace or punctuation remain indistinguishable in rendered output.
+
+## Control-character regression
+
+The multi-burst revision still counted unsanitized input. A 1,028-character
+prompt containing `Review this change`, LF, 1,000 `x` characters, `ESC [31m`
+and `tail` is 1,023 characters after removing the five-character color
+sequence. The production staging/readiness regression timed out on the reviewed
+revision before the fix. It now pins the literal sanitized PTY body,
+1,023-character marker and separate Enter. Trailing SGR and unfinished CSI
+before Unicode also assert the entire canonical transmitted body, preventing
+the premature first-burst proof. Control-bearing fixtures cover
+sanitized inline text and burst suffixes, retained tabs/newlines, Unicode,
+non-CSI escape text, unfinished CSI sequences and incorrect marker counts.
+These are synthetic composer traces, not live control-character captures.
 
 Rendered confirmation cannot verify the contents hidden behind a marker or
 provide byte-exact delivery. The standalone native smoke retained the complete
