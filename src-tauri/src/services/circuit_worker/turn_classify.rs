@@ -30,19 +30,39 @@ pub(super) struct MissingResult {
     pub input_stamp: String,
 }
 
-/// The report to interpret for a turn that owes a result file: the file's text
-/// once it is written, otherwise the transcript report. The flag is `true` when
-/// the file is missing, blank or unreadable.
-fn report_from_result_file(
-    transcript_output: String,
-    result: std::io::Result<Option<String>>,
-) -> (String, bool) {
-    match result {
-        Ok(Some(text)) => (text, false),
-        Ok(None) => (transcript_output, true),
-        Err(error) => {
-            tracing::warn!("circuits: could not read the agent's result file: {error}");
-            (transcript_output, true)
+impl readiness::Candidate {
+    pub(crate) fn with_result_file(
+        mut self,
+        path: &std::path::Path,
+        gate: &StepView,
+    ) -> (Self, bool) {
+        use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
+        match ReportSnapshot::read_result_file(
+            path,
+            &self.binding.report_revision,
+            self.binding.input_guard.observed_at_ms,
+            self.binding.input_guard.report_guard.as_ref(),
+        ) {
+            Ok(Some(report)) => {
+                self.output = report.text.clone();
+                self.binding.report_revision = report.revision.clone();
+                self.binding.owner.report_revision = Some(report.revision.clone());
+                // A native receipt can be borrowed from an upstream spawn.
+                // This new result is a report handoff at the current gate;
+                // the receipt itself keeps its original owner and identity.
+                self.binding.owner.step_id = gate.node_id.clone();
+                self.binding.owner.attempt = gate.attempt;
+                self.binding.input_guard.report_guard = Some(report);
+                (self, false)
+            }
+            Ok(None) => (self, true),
+            Err(error) => {
+                tracing::warn!(
+                    "circuits: could not bind result file {}: {error}",
+                    path.display()
+                );
+                (self, true)
+            }
         }
     }
 }
@@ -111,31 +131,22 @@ pub(super) fn classify_step_turn(
             })
         }
     };
+    // Continuation delivery and pre-prompt baselines compare assistant
+    // revisions, independently of the result report used for classification.
+    let transcript_revision = candidate.binding.report_revision.clone();
+    let (candidate, missing_path) = if let Some(path) =
+        crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
+    {
+        let (candidate, missing) = candidate.with_result_file(&path, step);
+        (candidate, missing.then_some(path))
+    } else {
+        (candidate, None)
+    };
     let readiness::Candidate {
         binding,
-        mut output,
+        output,
         status,
     } = candidate;
-    let mut missing_path = None;
-    if let Some(path) = crate::circuit::handoff::expected_result(active.run.id, agent_node_id) {
-        let (report, missing) =
-            report_from_result_file(output, crate::circuit::handoff::read_result(&path));
-        output = report;
-        if missing {
-            tracing::info!(
-                "circuits: run {} step {node_id} agent {agent_node_id}: result file {} is missing or blank; keeping the transcript report",
-                active.run.id,
-                path.display()
-            );
-            missing_path = Some(path);
-        } else {
-            tracing::info!(
-                "circuits: run {} step {node_id} agent {agent_node_id}: interpreting the result file {}",
-                active.run.id,
-                path.display()
-            );
-        }
-    }
     let superseded = || {
         stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
             || crate::agent::process::PROCESS_REGISTRY
@@ -231,7 +242,7 @@ pub(super) fn classify_step_turn(
     let continuation = if classification == Some(evaluator::Classification::Continue) {
         let revision =
             crate::coordinator::enrichment::assistant_report(&agent).map(|report| report.revision);
-        let fresh = revision.as_deref() == Some(binding.report_revision.as_str())
+        let fresh = revision.as_deref() == Some(transcript_revision.as_str())
             && crate::agent::process::PROCESS_REGISTRY.is_alive(&agent_node_id);
         if !fresh {
             classification = Some(evaluator::Classification::Working);
@@ -241,7 +252,7 @@ pub(super) fn classify_step_turn(
                 stamp.map(|stamp| {
                     (
                         stamp,
-                        binding.report_revision.clone(),
+                        transcript_revision.clone(),
                         binding.input_guard.input_stamp.clone(),
                     )
                 })
@@ -1122,40 +1133,5 @@ mod classifier_selection_tests {
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
         preferences.default_provider = Some("opencode".into());
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
-    }
-}
-
-#[cfg(test)]
-mod result_file_tests {
-    use super::report_from_result_file;
-
-    #[test]
-    fn a_written_result_file_replaces_the_transcript_report() {
-        let (output, missing) = report_from_result_file(
-            "transcript report".into(),
-            Ok(Some("final report\nBUILDMESH_HANDOFF_V1: READY".into())),
-        );
-        assert_eq!(output, "final report\nBUILDMESH_HANDOFF_V1: READY");
-        assert!(!missing);
-    }
-
-    #[test]
-    fn a_missing_result_file_keeps_the_transcript_report_and_is_missing() {
-        let (output, missing) = report_from_result_file("transcript report".into(), Ok(None));
-        assert_eq!(output, "transcript report");
-        assert!(missing);
-    }
-
-    #[test]
-    fn an_unreadable_result_file_keeps_the_transcript_report_and_is_missing() {
-        let (output, missing) = report_from_result_file(
-            "transcript report".into(),
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "file is locked",
-            )),
-        );
-        assert_eq!(output, "transcript report");
-        assert!(missing);
     }
 }
