@@ -1598,9 +1598,9 @@ impl AgentProvider for CodexAdapter {
         }
     }
 
-    /// Codex draws mid-size pastes inline and can collapse just the suffix
-    /// of a larger Windows paste burst. Its marker counts that suffix, not
-    /// the complete prompt, so readiness must also match the inline prefix.
+    /// Codex draws mid-size pastes inline and can collapse larger Windows
+    /// paste bursts individually. Readiness accounts for every burst count
+    /// and the expected inline segments between markers.
     fn paste_gate_policy(&self) -> crate::agent::provider::PasteGatePolicy {
         crate::agent::provider::PasteGatePolicy::RenderedWithSplitMarker
     }
