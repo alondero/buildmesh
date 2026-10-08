@@ -1,12 +1,14 @@
 //! Circuit spawn overrides and two-stage agent launch (issue #1660).
 
+use std::path::Path;
+
 use tauri::{AppHandle, Emitter};
 
 use crate::agent::spawn::ExplicitSpawnOverrides;
 use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::RunView;
 use crate::db;
-use crate::models::SessionStatus;
+use crate::models::{EnvType, SessionStatus};
 
 use super::{begin_circuit_spawn, run_accepts_effects, CircuitSpawnPermit};
 
@@ -159,8 +161,12 @@ pub(super) fn resolve_review_spawn_inputs(
     (provider, explicit)
 }
 
-fn frozen_review_configuration(view: &RunView, node_id: &str) -> Option<crate::preferences::spawn_configurations::SpawnConfiguration> {
-    view.context.get(&format!("review.launch.{node_id}"))
+fn frozen_review_configuration(
+    view: &RunView,
+    node_id: &str,
+) -> Option<crate::preferences::spawn_configurations::SpawnConfiguration> {
+    view.context
+        .get(&format!("review.launch.{node_id}"))
         .and_then(|value| serde_json::from_str(value).ok())
 }
 
@@ -245,8 +251,8 @@ pub(super) fn circuit_spawn_intent(
     delivery: crate::agent::launch::InitialPromptDelivery,
     prompt: &str,
 ) -> crate::agent::spawn::SpawnIntent {
-    use crate::agent::spawn::SpawnIntent;
     use crate::agent::launch::InitialPromptDelivery;
+    use crate::agent::spawn::SpawnIntent;
 
     match delivery {
         InitialPromptDelivery::Prefill => SpawnIntent::Loop {
@@ -271,9 +277,16 @@ pub(super) fn deliver_circuit_initial_prompt(
         InitialPromptDelivery::Prefill => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
             crate::circuit::delivery::write_prompt_to_pty_guarded(
-                &crate::agent::process::PROCESS_REGISTRY, node_id, prompt, app, expected_input,
-            ).and_then(|submitted| {
-                submitted.then_some(()).ok_or_else(|| "Input ownership changed before initial prompt submission completed".into())
+                &crate::agent::process::PROCESS_REGISTRY,
+                node_id,
+                prompt,
+                app,
+                expected_input,
+            )
+            .and_then(|submitted| {
+                submitted.then_some(()).ok_or_else(|| {
+                    "Input ownership changed before initial prompt submission completed".into()
+                })
             })
         }
         InitialPromptDelivery::Fresh => Ok(()),
@@ -318,23 +331,41 @@ async fn wait_for_initial_prompt(run_id: i64, node_id: i64) -> Result<Option<Str
     let provider = tauri::async_runtime::spawn_blocking(move || {
         db::get_agent_node_by_id(node_id)
             .map(|node| crate::preferences::resolve_harness_provider(&node.provider))
-    }).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
-    let input = crate::agent::process::PROCESS_REGISTRY.input_stamp(node_id)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let input = crate::agent::process::PROCESS_REGISTRY
+        .input_stamp(node_id)
         .ok_or("Initial prompt deferred because the terminal input is already owned")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
-        if !run_accepts_effects_async(run_id).await { return Ok(None); }
+        if !run_accepts_effects_async(run_id).await {
+            return Ok(None);
+        }
         if !crate::agent::process::PROCESS_REGISTRY.is_alive(&node_id) {
             return Err("Agent exited before accepting its initial prompt".into());
         }
-        if crate::agent::process::PROCESS_REGISTRY.input_stamp(node_id).as_ref() != Some(&input) {
-            return Err("Terminal input changed during startup; initial prompt was not sent".into());
+        if crate::agent::process::PROCESS_REGISTRY
+            .input_stamp(node_id)
+            .as_ref()
+            != Some(&input)
+        {
+            return Err(
+                "Terminal input changed during startup; initial prompt was not sent".into(),
+            );
         }
-        if provider.adapter().ready_for_initial_prompt(&crate::circuit::evaluator::cleaned_tail(node_id)) {
+        if provider
+            .adapter()
+            .ready_for_initial_prompt(&crate::circuit::evaluator::cleaned_tail(node_id))
+        {
             return Ok(Some(input));
         }
         if std::time::Instant::now() >= deadline {
-            return Err("Harness startup did not become ready for the initial prompt; inspect the terminal".into());
+            return Err(
+                "Harness startup did not become ready for the initial prompt; inspect the terminal"
+                    .into(),
+            );
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
@@ -402,23 +433,29 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
             abort_circuit_spawn_async(run_id, node_id).await;
             return;
         }
-        let expected_input = if delivery == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn {
-            match wait_for_initial_prompt(run_id, node_id).await {
-                Ok(Some(input)) => Some(input),
-                Ok(None) => {
-                    abort_circuit_spawn_async(run_id, node_id).await;
-                    return;
+        let expected_input =
+            if delivery == crate::agent::launch::InitialPromptDelivery::InjectAfterSpawn {
+                match wait_for_initial_prompt(run_id, node_id).await {
+                    Ok(Some(input)) => Some(input),
+                    Ok(None) => {
+                        abort_circuit_spawn_async(run_id, node_id).await;
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "circuits: initial prompt for agent {node_id} was not sent: {error}"
+                        );
+                        let attention_app = app_for_spawn.clone();
+                        let _ = tauri::async_runtime::spawn_blocking(move || {
+                            crate::commands::attention::mark_attention(node_id, &attention_app);
+                        })
+                        .await;
+                        return;
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!("circuits: initial prompt for agent {node_id} was not sent: {error}");
-                    let attention_app = app_for_spawn.clone();
-                    let _ = tauri::async_runtime::spawn_blocking(move || {
-                        crate::commands::attention::mark_attention(node_id, &attention_app);
-                    }).await;
-                    return;
-                }
-            }
-        } else { None };
+            } else {
+                None
+            };
         schedule_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery);
         if !run_accepts_effects_async(run_id).await {
             abort_circuit_spawn_async(run_id, node_id).await;
@@ -426,9 +463,16 @@ pub(super) fn spawn_circuit_agent_in_background(app: &AppHandle, spawn: CircuitB
         }
         let _ = tauri::async_runtime::spawn_blocking(move || {
             if run_accepts_effects(run_id).unwrap_or(false) {
-                deliver_circuit_initial_prompt(&app_for_spawn, node_id, &prompt, delivery, expected_input.as_deref());
+                deliver_circuit_initial_prompt(
+                    &app_for_spawn,
+                    node_id,
+                    &prompt,
+                    delivery,
+                    expected_input.as_deref(),
+                );
             }
-        }).await;
+        })
+        .await;
     });
 }
 
@@ -470,11 +514,20 @@ pub(super) fn attach_spawned_agent(
     agent_node_id: i64,
     parent_agent_node_id: Option<i64>,
 ) -> Result<(), String> {
-    let attempt = view.step(node_id).ok_or("Spawn step no longer exists")?.attempt;
+    let attempt = view
+        .step(node_id)
+        .ok_or("Spawn step no longer exists")?
+        .attempt;
     let revision = db::circuit::evidence::acknowledge_spawn_attachment(
-        run_id, node_id, attempt, agent_node_id, parent_agent_node_id, view.step(node_id).and_then(|step| step.agent_node_id),
-    ).map_err(|error| format!("could not attach agent to step: {error}"))?
-        .ok_or("Spawn attachment lost its run, attempt or agent identity fence")?;
+        run_id,
+        node_id,
+        attempt,
+        agent_node_id,
+        parent_agent_node_id,
+        view.step(node_id).and_then(|step| step.agent_node_id),
+    )
+    .map_err(|error| format!("could not attach agent to step: {error}"))?
+    .ok_or("Spawn attachment lost its run, attempt or agent identity fence")?;
     view.context.set("evidence.revision", revision.to_string());
     view.attach_agent_node(node_id, agent_node_id);
     Ok(())
@@ -490,10 +543,14 @@ pub(super) fn spawn_step_agent(
     use crate::agent::spawn::WorktreePolicy;
 
     if let Some(value) = view.context.get(&format!("review.launch.{node_id}")) {
-        let configuration: crate::preferences::spawn_configurations::SpawnConfiguration = serde_json::from_str(value)
-            .map_err(|_| "The frozen reviewer configuration is unreadable. Start a fresh review.".to_string())?;
+        let configuration: crate::preferences::spawn_configurations::SpawnConfiguration =
+            serde_json::from_str(value).map_err(|_| {
+                "The frozen reviewer configuration is unreadable. Start a fresh review.".to_string()
+            })?;
         if configuration.resolved.is_none() {
-            return Err("The frozen reviewer configuration is incomplete. Start a fresh review.".into());
+            return Err(
+                "The frozen reviewer configuration is incomplete. Start a fresh review.".into(),
+            );
         }
     }
     let kind = view
@@ -530,9 +587,11 @@ pub(super) fn spawn_step_agent(
             .is_none()
     {
         parent_agent_node_id.and_then(|parent_id| {
-            db::get_agent_node_by_id(parent_id)
-                .ok()
-                .map(|parent| parent.launch_configuration.map_or(parent.provider, |c| c.id))
+            db::get_agent_node_by_id(parent_id).ok().map(|parent| {
+                parent
+                    .launch_configuration
+                    .map_or(parent.provider, |c| c.id)
+            })
         })
     } else {
         None
@@ -549,21 +608,58 @@ pub(super) fn spawn_step_agent(
         parent_provider.as_deref(),
     );
 
-    let resolved_prompt = super::report_contract::prompt(view, node_id, &view.context.resolve(&prompt));
+    let raw_prompt = view.context.resolve(&prompt);
+    let requests_result = super::report_contract::requests_result(view, node_id, &raw_prompt);
+    let resolved_prompt = super::report_contract::prompt(view, node_id, &raw_prompt);
     let source_issue = view
         .context
         .get("issue.number")
         .and_then(|number| number.parse::<i64>().ok());
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    // The agent does not exist yet, so its environment comes from the mesh path.
+    // Staging happens before the delivery decision so every later use sees the
+    // text the agent will actually receive. The turn it opens is recorded
+    // against the agent id once that id is known.
+    let (resolved_prompt, handoff_turn) = if resolved_prompt.trim().is_empty() {
+        (resolved_prompt, None)
+    } else {
+        let attempt = view.step(node_id).map_or(1, |s| s.attempt);
+        let env = EnvType::from(crate::env::env_for_path(Path::new(&mesh.path)));
+        let staged = crate::circuit::handoff::stage_prompt(
+            run_id,
+            node_id,
+            attempt,
+            env,
+            &resolved_prompt,
+            requests_result,
+        );
+        (staged.delivered, staged.turn)
+    };
     let provider = provider_str
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::preferences::resolve_default_provider(None, mesh.default_provider.clone(), crate::preferences::default_provider()));
-    let inherited_configuration = frozen_review_configuration(view, node_id).or_else(|| parent_agent_node_id.and_then(|id| db::get_agent_node_by_id(id).ok())
-        .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)
-        .or_else(|| view.step(node_id).and_then(|s| s.agent_node_id)
+        .unwrap_or_else(|| {
+            crate::preferences::resolve_default_provider(
+                None,
+                mesh.default_provider.clone(),
+                crate::preferences::default_provider(),
+            )
+        });
+    let inherited_configuration = frozen_review_configuration(view, node_id).or_else(|| {
+        parent_agent_node_id
             .and_then(|id| db::get_agent_node_by_id(id).ok())
-            .and_then(|node| node.launch_configuration).filter(|c| c.id == provider)));
-    let launch_harness = inherited_configuration.as_ref().and_then(|c| c.resolved.as_ref())
+            .and_then(|node| node.launch_configuration)
+            .filter(|c| c.id == provider)
+            .or_else(|| {
+                view.step(node_id)
+                    .and_then(|s| s.agent_node_id)
+                    .and_then(|id| db::get_agent_node_by_id(id).ok())
+                    .and_then(|node| node.launch_configuration)
+                    .filter(|c| c.id == provider)
+            })
+    });
+    let launch_harness = inherited_configuration
+        .as_ref()
+        .and_then(|c| c.resolved.as_ref())
         .map_or(provider.as_str(), |plan| plan.harness.harness.as_str());
     let prompt_delivery =
         crate::agent::launch::initial_prompt_delivery(launch_harness, &resolved_prompt);
@@ -609,13 +705,20 @@ pub(super) fn spawn_step_agent(
             );
             let _ = db::update_agent_node_status(existing_agent_id, SessionStatus::Running);
             crate::circuit::evaluator::note_turn_start(existing_agent_id);
-            crate::circuit::delivery::write_prompt_to_pty(
+            crate::circuit::handoff::set_agent_turn(
+                run_id,
                 existing_agent_id,
-                &resolved_prompt,
-                app,
-            )
-            .map_err(|e| format!("PTY write failed on retry: {}", e))?;
-            attach_spawned_agent(run_id, view, node_id, existing_agent_id, parent_agent_node_id)?;
+                handoff_turn.as_ref(),
+            );
+            crate::circuit::delivery::write_prompt_to_pty(existing_agent_id, &resolved_prompt, app)
+                .map_err(|e| format!("PTY write failed on retry: {}", e))?;
+            attach_spawned_agent(
+                run_id,
+                view,
+                node_id,
+                existing_agent_id,
+                parent_agent_node_id,
+            )?;
             return Ok(());
         }
 
@@ -629,17 +732,23 @@ pub(super) fn spawn_step_agent(
             let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
                 return Ok(());
             };
-            let new_node = crate::services::agent_node::create_pending_with_worktree_override_configured(
-                mesh_id,
-                &old_node.path,
-                &old_node.branch,
-                Some(provider.as_str()),
-                source_issue,
-                name.as_deref(),
-                use_worktree_override,
-                inherited_configuration.as_ref().or_else(|| old_node.launch_configuration.as_ref().filter(|c| c.id == provider)),
-            )
-            .map_err(|e| e.to_string())?;
+            let new_node =
+                crate::services::agent_node::create_pending_with_worktree_override_configured(
+                    mesh_id,
+                    &old_node.path,
+                    &old_node.branch,
+                    Some(provider.as_str()),
+                    source_issue,
+                    name.as_deref(),
+                    use_worktree_override,
+                    inherited_configuration.as_ref().or_else(|| {
+                        old_node
+                            .launch_configuration
+                            .as_ref()
+                            .filter(|c| c.id == provider)
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
 
             if let Err(error) = crate::agent::session_lifecycle::on_created(
                 &crate::agent::session_lifecycle::AppSessionLifecycleSink { app },
@@ -671,6 +780,7 @@ pub(super) fn spawn_step_agent(
                 "node-created",
                 crate::commands::agent::NodeCreatedPayload { id: new_node.id },
             );
+            crate::circuit::handoff::set_agent_turn(run_id, new_node.id, handoff_turn.as_ref());
             spawn_circuit_agent_in_background(
                 app,
                 CircuitBackgroundSpawn {
@@ -747,6 +857,7 @@ pub(super) fn spawn_step_agent(
     // uses prefill when supported and otherwise is injected after spawn.
     // Issue #1358: per-step model / effort / extra_args ride the explicit
     // layer through to `spawn_with_intent`, where capability masking occurs.
+    crate::circuit::handoff::set_agent_turn(run_id, node.id, handoff_turn.as_ref());
     spawn_circuit_agent_in_background(
         app,
         CircuitBackgroundSpawn {

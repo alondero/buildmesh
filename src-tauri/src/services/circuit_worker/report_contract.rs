@@ -47,11 +47,9 @@ fn reprompts_reviewer(view: &RunView, node_id: &str) -> bool {
     )
 }
 
-/// Append at dispatch so saved/custom prompts get the same transport contract
-/// without rewriting their review instructions or pinned graph.
-pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
-    let suffix = if spawn::is_review_spawn_step(view, node_id) || reprompts_reviewer(view, node_id)
-    {
+/// The result contract a dispatch to this node carries, if any.
+fn suffix(view: &RunView, node_id: &str, prompt: &str) -> Option<&'static str> {
+    if spawn::is_review_spawn_step(view, node_id) || reprompts_reviewer(view, node_id) {
         Some(REVIEW_PROMPT)
     } else if node_id == "feedback" && awaits_review_turn(view, "await_fixes") {
         Some(HANDOFF_PROMPT)
@@ -61,11 +59,22 @@ pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
         Some(ISSUE_HANDOFF_PROMPT)
     } else {
         None
-    };
-    suffix.map_or_else(
+    }
+}
+
+/// Append at dispatch so saved/custom prompts get the same transport contract
+/// without rewriting their review instructions or pinned graph.
+pub(super) fn prompt(view: &RunView, node_id: &str, prompt: &str) -> String {
+    suffix(view, node_id, prompt).map_or_else(
         || prompt.to_owned(),
         |suffix| format!("{prompt}\n\n{suffix}"),
     )
+}
+
+/// Whether a dispatch of `prompt` to this node carries a result contract, and so
+/// expects its final report in a result file as well as the transcript.
+pub(super) fn requests_result(view: &RunView, node_id: &str, prompt: &str) -> bool {
+    suffix(view, node_id, prompt).is_some()
 }
 
 // Missing contracts retain legacy interpretation. A present but malformed
@@ -415,5 +424,39 @@ mod tests {
             None
         );
         assert_eq!(prompt(&view, "feedback", "Fix"), "Fix");
+    }
+
+    #[test]
+    fn requests_result_follows_the_contract_the_prompt_carries() {
+        let view = RunView {
+            run_id: 280,
+            state: RunState::Running,
+            graph: CircuitGraph::issue_driven_autopilot_review("ready-for-agent"),
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        assert!(requests_result(
+            &view,
+            "implementer",
+            "Custom phase instructions"
+        ));
+        // An allocation-only spawn carries no contract, so it expects no result file.
+        assert!(!requests_result(&view, "implementer", ""));
+        assert!(!requests_result(&view, "approved", "Unchanged"));
+
+        let mut review = RunView {
+            run_id: 1,
+            state: RunState::Running,
+            graph: CircuitGraph::agent_review(None, None, 3),
+            context: CircuitContext::new(),
+            steps: vec![],
+        };
+        review.context.set("source.review_preset", "1");
+        assert!(requests_result(
+            &review,
+            "reviewer",
+            "Custom review instructions"
+        ));
+        assert!(!requests_result(&review, "approved", "Unchanged"));
     }
 }

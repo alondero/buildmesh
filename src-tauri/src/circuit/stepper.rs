@@ -429,6 +429,19 @@ impl RunView {
         resolve_target_agent(&self.graph, &self.steps, node_id)
     }
 
+    /// The agent a bounded continuation may be sent to. A spawn step owns the
+    /// agent it started, so it is its own continuation target; every other
+    /// step uses the lineage target.
+    pub fn continuation_target(&self, node_id: &str) -> Option<i64> {
+        if matches!(
+            self.graph.node(node_id).map(|n| &n.kind),
+            Some(CircuitNodeKind::SpawnAgentNode { .. })
+        ) {
+            return self.step(node_id).and_then(|step| step.agent_node_id);
+        }
+        self.resolve_target_agent(node_id)
+    }
+
     /// Resolve the implementation agent whose worktree an OpenPr action
     /// inspects. This is deliberately separate from target-agent resolution:
     /// an OpenPr step observes a repository, it does not pilot a process.
@@ -643,6 +656,17 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         error: String,
+    },
+    /// The agent's turn finished but the result file its prompt asked for is
+    /// missing. The stepper answers with a bounded reminder, or fails the step
+    /// once the reminders are spent.
+    ResultFileMissing {
+        node_id: String,
+        attempt: i32,
+        result_path: String,
+        stamp: String,
+        revision: String,
+        input_stamp: String,
     },
     /// The run was triggered. Renamed from `ManualTriggered` in #1208:
     /// runs are minted pending by ANY trigger dispatch (Trigger Now,
@@ -910,6 +934,12 @@ impl Transition {
 // ---------------------------------------------------------------------------
 // The stepper.
 // ---------------------------------------------------------------------------
+
+fn result_reminder_prompt(path: &str) -> String {
+    format!(
+        "Save your final report, ending with the required result line, to {path} now (overwrite it). Do not redo the work."
+    )
+}
 
 fn continuation_effect(node_id: &str, target_agent_id: i64) -> Effect {
     Effect::ContinueAgentTurn {
@@ -1226,7 +1256,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     .get(&format!("node.{node_id}.continuation.delivery"))
                     == Some("pending")
             {
-                if let Some(target_agent_id) = run.resolve_target_agent(node_id) {
+                if let Some(target_agent_id) = run.continuation_target(node_id) {
                     run.context
                         .set(&format!("node.{node_id}.continuation.delivery"), "claimed");
                     t.context_changed = true;
@@ -1259,6 +1289,115 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     unverify_step(run, &mut t, node_id, format!("Continuation delivery is unverified: {error}. Inspect the agent; the prompt will not be replayed."));
                 }
                 t.context_changed = true;
+            }
+        }
+        CircuitEvent::ResultFileMissing {
+            node_id,
+            attempt,
+            result_path,
+            stamp,
+            revision,
+            input_stamp,
+        } => {
+            if run.state != RunState::Running
+                || !run
+                    .step(node_id)
+                    .is_some_and(|s| s.status == StepStatus::Running && s.attempt == *attempt)
+            {
+                return t;
+            }
+            // One reminder per report revision: the same report observed again
+            // is the same unanswered turn, not a new one.
+            if run
+                .context
+                .get(&format!("node.{node_id}.result_reminder_revision"))
+                == Some(revision.as_str())
+            {
+                return t;
+            }
+            if run
+                .context
+                .get(&format!("node.{node_id}.continuation.delivery"))
+                == Some("claimed")
+            {
+                return t;
+            }
+            let count_key = format!("node.{node_id}.result_reminders.{attempt}");
+            let count = run
+                .context
+                .get(&count_key)
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            // Never drive a borrowed source agent: its turn is not ours to answer.
+            let target = run
+                .continuation_target(node_id)
+                .filter(|target| Some(*target) != run.context.source_agent_id());
+            match target {
+                Some(target_agent_id) if count < 2 => {
+                    let count = count + 1;
+                    run.context.set(&count_key, count.to_string());
+                    run.context.set(
+                        &format!("node.{node_id}.result_reminder_revision"),
+                        revision.clone(),
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.continuation.stamp"),
+                        stamp.clone(),
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.continuation.revision"),
+                        revision.clone(),
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.continuation.input"),
+                        input_stamp.clone(),
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.continuation.delivery"),
+                        "claimed",
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.continuation.attempt"),
+                        attempt.to_string(),
+                    );
+                    t.context_changed = true;
+                    let error = format!(
+                        "Agent finished without saving its result file; reminder {count} of 2 sent."
+                    );
+                    if let Some(step) = run.step_mut(node_id) {
+                        step.error = Some(error.clone());
+                    }
+                    t.step_writes.push(StepWrite {
+                        node_id: node_id.clone(),
+                        status: StepStatus::Running,
+                        outcome: None,
+                        error: Some(Some(error)),
+                        agent_node_id: None,
+                        attempt: *attempt,
+                        fresh_attempt: false,
+                    });
+                    t.effects.push(Effect::ContinueAgentTurn {
+                        node_id: node_id.clone(),
+                        target_agent_id,
+                        prompt: result_reminder_prompt(result_path),
+                    });
+                }
+                Some(_) => unverify_step(
+                    run,
+                    &mut t,
+                    node_id,
+                    format!(
+                        "Agent finished without saving its result file to {result_path} after 2 reminders. Ask it to save the result, or inspect its report."
+                    ),
+                ),
+                None => unverify_step(
+                    run,
+                    &mut t,
+                    node_id,
+                    format!(
+                        "Agent finished without saving its result file to {result_path}; the agent is not owned by this circuit, so no reminder was sent."
+                    ),
+                ),
             }
         }
         CircuitEvent::Triggered => {
@@ -5480,6 +5619,140 @@ mod tests {
         assert_eq!(run.state, RunState::Running);
         assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
         assert!(t.effects.is_empty());
+    }
+
+    fn result_file_missing(node_id: &str, attempt: i32, revision: &str) -> CircuitEvent {
+        CircuitEvent::ResultFileMissing {
+            node_id: node_id.into(),
+            attempt,
+            result_path: "C:/runs/run-42/classify-attempt1.result.md".into(),
+            stamp: "100:yield".into(),
+            revision: revision.into(),
+            input_stamp: "1:0".into(),
+        }
+    }
+
+    #[test]
+    fn missing_result_file_gets_two_reminders_per_attempt_then_is_unverified() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        assert!(
+            advance(&mut run, &result_file_missing("classify", 2, "report-0"))
+                .effects
+                .is_empty(),
+            "a result event for another attempt is ignored"
+        );
+
+        let first = advance(&mut run, &result_file_missing("classify", 1, "report-1"));
+        assert_eq!(
+            first.effects,
+            vec![Effect::ContinueAgentTurn {
+                node_id: "classify".into(),
+                target_agent_id: 900,
+                prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now (overwrite it). Do not redo the work.".into(),
+            }]
+        );
+        assert_eq!(
+            run.context.get("node.classify.result_reminders.1"),
+            Some("1")
+        );
+        assert_eq!(
+            run.context.get("node.classify.continuation.delivery"),
+            Some("claimed")
+        );
+        assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+        assert_eq!(
+            run.step("classify").unwrap().error.as_deref(),
+            Some("Agent finished without saving its result file; reminder 1 of 2 sent.")
+        );
+
+        assert!(
+            advance(&mut run, &result_file_missing("classify", 1, "report-1"))
+                .effects
+                .is_empty(),
+            "the same report is not reminded twice"
+        );
+
+        advance(
+            &mut run,
+            &CircuitEvent::ContinuationDelivered {
+                node_id: "classify".into(),
+                attempt: 1,
+            },
+        );
+        let second = advance(&mut run, &result_file_missing("classify", 1, "report-2"));
+        assert_eq!(second.effects.len(), 1);
+        assert_eq!(
+            run.context.get("node.classify.result_reminders.1"),
+            Some("2")
+        );
+        assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+
+        advance(
+            &mut run,
+            &CircuitEvent::ContinuationDelivered {
+                node_id: "classify".into(),
+                attempt: 1,
+            },
+        );
+        let third = advance(&mut run, &result_file_missing("classify", 1, "report-3"));
+        assert!(third.effects.is_empty());
+        assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+        let error = run.step("classify").unwrap().error.clone().unwrap();
+        assert_eq!(
+            error,
+            "Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md after 2 reminders. Ask it to save the result, or inspect its report."
+        );
+    }
+
+    #[test]
+    fn missing_result_file_of_a_borrowed_source_agent_is_not_reminded() {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        run.context.set("source.agent_id", "900");
+
+        let t = advance(&mut run, &result_file_missing("classify", 1, "report-1"));
+        assert!(t.effects.is_empty(), "the source is borrowed, not ours");
+        assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+        assert_eq!(
+            run.step("classify").unwrap().error.as_deref(),
+            Some("Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md; the agent is not owned by this circuit, so no reminder was sent.")
+        );
+        assert_eq!(run.context.get("node.classify.result_reminders.1"), None);
+    }
+
+    #[test]
+    fn missing_result_file_of_a_spawn_step_reminds_the_agent_the_step_owns() {
+        let mut run = linear_run();
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(1));
+        run.attach_agent_node("spawn", 900);
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+
+        let t = advance(&mut run, &result_file_missing("spawn", 1, "report-1"));
+        assert!(matches!(
+            t.effects.as_slice(),
+            [Effect::ContinueAgentTurn {
+                target_agent_id: 900,
+                ..
+            }]
+        ));
+        assert_eq!(
+            run.context.get("node.spawn.continuation.delivery"),
+            Some("claimed")
+        );
     }
 
     #[test]

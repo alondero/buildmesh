@@ -2540,6 +2540,58 @@ fn circuit_continuation_rejects_user_input_regeneration_and_new_report() {
 }
 
 #[test]
+fn circuit_continuation_accepts_only_the_agent_a_spawn_step_owns() {
+    let spawn_node = CircuitNode {
+        id: "implement".into(),
+        kind: crate::circuit::model::CircuitNodeKind::SpawnAgentNode {
+            prompt: "implement".into(),
+            name: None,
+            provider: None,
+            model: None,
+            effort: None,
+            extra_args: None,
+            timeout_seconds: None,
+        },
+    };
+    let mut view = RunView {
+        run_id: 27,
+        graph: crate::circuit::model::CircuitGraph {
+            version: CIRCUIT_GRAPH_VERSION,
+            blueprint: None,
+            nodes: vec![spawn_node],
+            edges: vec![],
+        },
+        state: RunState::Running,
+        context: CircuitContext::new(),
+        steps: vec![StepView {
+            node_id: "implement".into(),
+            status: StepStatus::Running,
+            agent_node_id: Some(900),
+            attempt: 1,
+            outcome: None,
+            error: None,
+        }],
+    };
+    view.context
+        .set("node.implement.continuation.stamp", "100:yield");
+    view.context
+        .set("node.implement.continuation.revision", "report-1");
+    let valid = |target| {
+        continuation_is_current(
+            &view,
+            "implement",
+            target,
+            SessionStatus::Ready,
+            true,
+            Some("100:yield"),
+            Some("report-1"),
+        )
+    };
+    assert!(valid(900));
+    assert!(!valid(901));
+}
+
+#[test]
 fn circuit_report_dedupe_reconsiders_identical_text_from_a_new_native_turn() {
     let mut view = report_gate_view();
     let report = "Still working";

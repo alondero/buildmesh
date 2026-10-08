@@ -168,6 +168,20 @@ pub fn prune_circuit_runs_once() -> Result<(usize, usize), String> {
              {compacted} trigger tombstone(s) older than {CIRCUIT_RUN_RETENTION_DAYS} days"
         );
     }
+    // Runs removed by any path (delete circuit, delete mesh, or the prune above)
+    // leave their handoff folder behind. One sweep here catches all of them,
+    // and runs after the prune so the DB lock is already released.
+    match crate::circuit::handoff::remove_orphan_run_dirs(|ids| {
+        crate::db::circuit::existing_circuit_run_ids(ids).map_err(|e| e.to_string())
+    }) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(
+            "circuit_run_gc: removed {removed} handoff folder(s) for circuit runs that no longer exist"
+        ),
+        Err(error) => tracing::warn!(
+            "circuit_run_gc: could not remove orphaned handoff folders (next tick will retry): {error}"
+        ),
+    }
     Ok((deleted, compacted))
 }
 
@@ -235,8 +249,8 @@ mod tests {
         insert(&conn, 2, "old1", Some("'-10 days'"));
         insert(&conn, 3, "old2", Some("'-30 days'"));
 
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 2);
 
         let count: i64 = conn
@@ -265,8 +279,8 @@ mod tests {
     #[test]
     fn empty_table_is_a_no_op() {
         let conn = db();
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 0);
     }
 
@@ -283,8 +297,8 @@ mod tests {
             "boundary",
             Some(&format!("'-{} days'", LEDGER_RETENTION_DAYS)),
         );
-        let pruned = crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS)
-            .unwrap();
+        let pruned =
+            crate::db::prune_drive_prompts_older_than_inner(&conn, LEDGER_RETENTION_DAYS).unwrap();
         assert_eq!(pruned, 0);
     }
 

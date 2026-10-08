@@ -29,7 +29,7 @@ const RENDERED_PASTE_TOTAL_BUDGET: Duration = Duration::from_secs(90);
 /// collapsed or scrolled out of the TUI; unless the harness's adapter
 /// declares [`PasteGatePolicy::RenderedWithTailAnchor`] they require the
 /// harness's paste marker.
-const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
+pub(crate) const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// A harness that draws a mid-size paste in full collapses only the largest
 /// into a marker (Muse probed in a real PTY: 839 chars drawn, 1,509
 /// collapsed; Codex showed a ~600-char inline paste in a partial 0.160.0

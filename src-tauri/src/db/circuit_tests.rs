@@ -3837,3 +3837,44 @@ fn gate_outcomes_stamp_completed_at_and_round_trip() {
         "a blocked status parks without completing"
     );
 }
+
+#[test]
+fn existing_circuit_run_ids_reports_only_rows_that_still_exist() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "handoff gc", "/tmp/handoff-gc").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "gc", "", &sample_graph_json()).unwrap();
+    let kept =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:kept", "{}").unwrap();
+    let deleted =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:gone", "{}").unwrap();
+    conn.execute(
+        "DELETE FROM autopilot_circuit_runs WHERE id = ?1",
+        [deleted],
+    )
+    .unwrap();
+
+    let existing = existing_circuit_run_ids_inner(&conn, &[kept, deleted, kept + 1000]).unwrap();
+    assert_eq!(existing, std::collections::HashSet::from([kept]));
+
+    assert!(existing_circuit_run_ids_inner(&conn, &[])
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn existing_circuit_run_ids_finds_a_live_run_across_the_query_chunk_boundary() {
+    let mut conn = isolated_test_conn();
+    let mesh = create_mesh_inner(&conn, "handoff chunks", "/tmp/handoff-chunks").unwrap();
+    let circuit =
+        create_autopilot_circuit_inner(&conn, mesh.id, "chunks", "", &sample_graph_json()).unwrap();
+    let run =
+        create_circuit_run_locked(&mut conn, circuit.id, mesh.id, "manual:chunk", "{}").unwrap();
+    // The live run lands in the second chunk: 1,000 ids is two queries of 500.
+    let mut ids: Vec<i64> = (1_000_000..1_000_000 + 999).collect();
+    ids.push(run);
+
+    let existing = existing_circuit_run_ids_inner(&conn, &ids).unwrap();
+
+    assert_eq!(existing, std::collections::HashSet::from([run]));
+}

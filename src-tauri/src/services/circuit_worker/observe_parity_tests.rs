@@ -4,7 +4,7 @@ use super::observation::{
     observe_agent_projection_with, observe_with, Observations, WaitObservation, ACTIVE_WAIT_MS,
     YIELDED_WAIT_MS,
 };
-use super::turn_classify::ClassifiedTurn;
+use super::turn_classify::{ClassifiedTurn, MissingResult};
 use super::*;
 use crate::circuit::evaluator::Classification;
 use crate::circuit::model::{
@@ -177,6 +177,7 @@ fn turn(classification: Option<Classification>, parked: bool) -> ClassifiedTurn 
         output: "review report".into(),
         continuation: None,
         waiting_for_a_finished_turn: parked,
+        missing_result: None,
     }
 }
 
@@ -411,4 +412,86 @@ fn native_receipts_precede_trigger_and_capacity_events() {
             CircuitEvent::Tick(_)
         ]
     ));
+}
+
+#[test]
+fn a_finished_turn_missing_its_result_file_is_reminded_and_never_classified() {
+    let mut view = view(
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        RunState::Running,
+        StepStatus::Running,
+        Some(42),
+    );
+    let owed = |turn_missing: Option<MissingResult>| ClassifiedTurn {
+        classifier_error: None,
+        observation_blocker: None,
+        binding: None,
+        agent_node_id: 42,
+        classification: None,
+        output: "transcript report".into(),
+        continuation: None,
+        waiting_for_a_finished_turn: false,
+        missing_result: turn_missing,
+    };
+    let missing = || MissingResult {
+        path_for_agent: "C:/runs/result.md".into(),
+        stamp: "100:yield".into(),
+        revision: "report-1".into(),
+        input_stamp: "1:0".into(),
+    };
+
+    let mut script = Script {
+        turn: Some(owed(Some(missing()))),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&view, &mut events, &mut script);
+    assert_eq!(events.len(), 1, "only the reminder is observed");
+    assert!(matches!(
+        &events[0],
+        CircuitEvent::ResultFileMissing {
+            node_id,
+            attempt: 1,
+            result_path,
+            stamp,
+            revision,
+            input_stamp,
+        } if node_id == "step"
+            && result_path == "C:/runs/result.md"
+            && stamp == "100:yield"
+            && revision == "report-1"
+            && input_stamp == "1:0"
+    ));
+    assert!(
+        !script.calls.contains(&"blocked"),
+        "a first reminder raises no attention"
+    );
+
+    // Two reminders are spent for this attempt, and this report is new: the
+    // step is exhausted, so the agent is marked for attention exactly once.
+    view.context.set("node.step.result_reminders.1", "2");
+    let mut script = Script {
+        turn: Some(owed(Some(missing()))),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&view, &mut events, &mut script);
+    assert_eq!(script.calls.iter().filter(|c| **c == "blocked").count(), 1);
+    assert!(matches!(
+        events.as_slice(),
+        [CircuitEvent::ResultFileMissing { .. }]
+    ));
+
+    // The revision already answered is not raised again.
+    view.context
+        .set("node.step.result_reminder_revision", "report-1");
+    let mut script = Script {
+        turn: Some(owed(Some(missing()))),
+        ..Default::default()
+    };
+    let mut events = Vec::new();
+    super::turn_classify::observe_gates_with(&view, &mut events, &mut script);
+    assert!(!script.calls.contains(&"blocked"));
 }
