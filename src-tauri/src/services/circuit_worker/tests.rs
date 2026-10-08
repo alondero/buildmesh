@@ -6,6 +6,7 @@ use super::spawn::*;
 use super::turn_classify::*;
 use super::*;
 use crate::agent::spawn::ExplicitSpawnOverrides;
+use crate::circuit::evaluator;
 use crate::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
 use crate::circuit::test_support::advance_with_report_evidence;
 use rusqlite::{Connection, OptionalExtension};
@@ -3057,6 +3058,336 @@ fn install_temp_db() -> crate::db::test_support::IsolatedDbGuard {
     crate::db::test_support::isolated()
 }
 
+// Exercise real DB admission, process input, handoff marker and file reading.
+struct ResultReadFixture {
+    _db: crate::db::test_support::IsolatedDbGuard,
+    _directory: tempfile::TempDir,
+    agent_id: i64,
+    view: RunView,
+    result: std::path::PathBuf,
+}
+
+impl ResultReadFixture {
+    fn new() -> Self {
+        use crate::circuit::observation::{ObservationIdentity, ReportEvidence, WorkEvidence};
+        static NEXT_ID: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-721_000);
+        let db = install_temp_db();
+        let directory = tempfile::tempdir().unwrap();
+        crate::preferences::init_for_tests(directory.path().to_path_buf());
+        let path = directory.path().to_str().unwrap();
+        let mesh = db::create_mesh("result-read", path).unwrap();
+        let old_id = db::create_agent_node(
+            mesh.id,
+            "result writer",
+            path,
+            "main",
+            crate::models::EnvType::Windows,
+            "cline",
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .id;
+        let agent_id = NEXT_ID.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        db::write_conn().execute(
+            "UPDATE agent_nodes SET id=?1,cli_session_id='result-session',session_started_at=1,status='ready' WHERE id=?2",
+            rusqlite::params![agent_id, old_id],
+        ).unwrap();
+        crate::agent::process::testing::insert_standin(
+            &crate::agent::process::PROCESS_REGISTRY,
+            agent_id,
+        );
+        let input = crate::agent::process::PROCESS_REGISTRY
+            .input_stamp_result(agent_id)
+            .unwrap();
+        let mut view = RunView {
+            run_id: 721_000 - agent_id,
+            graph: CircuitGraph::issue_driven_autopilot_review("ready"),
+            state: RunState::Running,
+            context: CircuitContext::new(),
+            steps: vec![
+                StepView {
+                    node_id: "implementer".into(),
+                    status: StepStatus::Completed,
+                    agent_node_id: Some(agent_id),
+                    attempt: 1,
+                    outcome: None,
+                    error: None,
+                },
+                StepView {
+                    node_id: "implementation_classifier".into(),
+                    status: StepStatus::Running,
+                    agent_node_id: None,
+                    attempt: 1,
+                    outcome: None,
+                    error: None,
+                },
+            ],
+        };
+        let evidence = WorkEvidence {
+            identity: Some(ObservationIdentity {
+                run_id: view.run_id,
+                step_id: "implementer".into(),
+                attempt: 1,
+                agent_node_id: agent_id,
+                session_incarnation: Some("1".into()),
+                session_id: Some("result-session".into()),
+                turn_id: Some("turn-1".into()),
+                report_revision: Some("native:1".into()),
+            }),
+            report: Some(ReportEvidence {
+                text: "Finished work".into(),
+                revision: "native:1".into(),
+                input_stamp: Some(input),
+                observed_at_ms: 2,
+            }),
+            foreground_terminated: true,
+            assignment_completed: true,
+            ownership_covered: true,
+            ..Default::default()
+        };
+        view.context.set(
+            "node.implementer.evidence.1",
+            serde_json::to_string(&evidence).unwrap(),
+        );
+        crate::circuit::handoff::set_agent_turn_in(
+            directory.path(),
+            view.run_id,
+            agent_id,
+            Some(&crate::circuit::handoff::HandoffTurn {
+                node_id: "implementation_classifier".into(),
+                attempt: 1,
+            }),
+        );
+        let result = crate::circuit::handoff::paths_in(
+            directory.path(),
+            view.run_id,
+            "implementation_classifier",
+            1,
+        )
+        .result;
+        Self {
+            _db: db,
+            _directory: directory,
+            agent_id,
+            view,
+            result,
+        }
+    }
+
+    fn probe(
+        &mut self,
+    ) -> (
+        Vec<CircuitEvent>,
+        Vec<crate::circuit::stepper::Effect>,
+        usize,
+    ) {
+        // Simulate worker restart to permit a pull without wall-clock sleeps.
+        // Retry counts must survive loss of the in-memory evaluator state.
+        evaluator::unregister(self.agent_id);
+        evaluator::register_circuit(self.agent_id);
+        let mut source = super::observe_parity_tests::Script::default();
+        source.live_run = Some(self.view.run_id);
+        let mut events = Vec::new();
+        super::turn_classify::observe_gates_with(&self.view, &mut events, &mut source);
+        let mut effects = Vec::new();
+        for event in &events {
+            effects.extend(advance(&mut self.view, event).effects);
+        }
+        let attention = source
+            .calls
+            .iter()
+            .filter(|call| **call == "blocked")
+            .count();
+        (events, effects, attention)
+    }
+}
+
+impl Drop for ResultReadFixture {
+    fn drop(&mut self) {
+        crate::agent::process::PROCESS_REGISTRY.kill_session(self.agent_id);
+        evaluator::unregister(self.agent_id);
+        crate::preferences::reset_for_tests();
+    }
+}
+
+#[test]
+fn result_invalid_encoding_requests_agent_repair_through_production_classifier() {
+    for bytes in [
+        vec![0xff, 0xfe, b'O', 0, b'K', 0], // Windows PowerShell Out-File / >
+        vec![b'O', b'K', b' ', 0x97],       // Windows-1252 Set-Content
+    ] {
+        let mut fixture = ResultReadFixture::new();
+        std::fs::write(&fixture.result, bytes).unwrap();
+        let (events, effects, attention) = fixture.probe();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::ResultFileMissing { .. })));
+        assert_eq!(attention, 0);
+        assert_eq!(effects.len(), 1);
+        let crate::circuit::stepper::Effect::ContinueAgentTurn { prompt, .. } = &effects[0] else {
+            panic!("invalid encoding must request an agent repair");
+        };
+        assert!(prompt.contains("UTF-8"));
+        assert_eq!(
+            fixture
+                .view
+                .context
+                .get("node.implementation_classifier.result_reminders.1"),
+            Some("1")
+        );
+        // Each delivered reminder gets a fresh finished turn, then the same
+        // encoding error must exhaust the shared two-reminder budget.
+        for turn in 2..=3 {
+            advance(
+                &mut fixture.view,
+                &CircuitEvent::ContinuationDelivered {
+                    node_id: "implementation_classifier".into(),
+                    attempt: 1,
+                },
+            );
+            db::write_conn()
+                .execute(
+                    "UPDATE agent_nodes SET status_changed_at=?2 WHERE id=?1",
+                    rusqlite::params![fixture.agent_id, format!("turn-{turn}")],
+                )
+                .unwrap();
+            let (events, effects, attention) = fixture.probe();
+            assert!(matches!(
+                events.as_slice(),
+                [CircuitEvent::ResultFileMissing { .. }]
+            ));
+            assert_eq!(effects.len(), usize::from(turn == 2));
+            assert_eq!(attention, usize::from(turn == 3));
+        }
+        assert_eq!(fixture.view.steps[1].status, StepStatus::Unverified);
+        let (_, effects, attention) = fixture.probe();
+        assert!(effects.is_empty());
+        assert_eq!(attention, 0);
+        std::fs::write(
+            &fixture.result,
+            "\u{feff}Repaired result\nBUILDMESH_HANDOFF_V1: READY\n",
+        )
+        .unwrap();
+        fixture.probe();
+        assert_eq!(fixture.view.steps[1].status, StepStatus::Completed);
+    }
+}
+
+#[test]
+fn result_read_error_then_invalid_encoding_can_request_repair_while_unverified() {
+    let mut fixture = ResultReadFixture::new();
+    std::fs::create_dir(&fixture.result).unwrap();
+    fixture.probe();
+    assert_eq!(fixture.view.steps[1].status, StepStatus::Unverified);
+    std::fs::remove_dir(&fixture.result).unwrap();
+    std::fs::write(&fixture.result, [0x97]).unwrap();
+    let (_, effects, attention) = fixture.probe();
+    assert_eq!(effects.len(), 1);
+    assert_eq!(attention, 0);
+    assert_eq!(fixture.view.steps[1].status, StepStatus::Running);
+}
+
+#[test]
+fn result_read_error_count_is_attempt_scoped_and_rejects_stale_or_paused_events() {
+    let mut fixture = ResultReadFixture::new();
+    std::fs::create_dir(&fixture.result).unwrap();
+    let (mut events, _, _) = fixture.probe();
+    let stale = events.remove(0);
+    fixture.view.steps[1].attempt = 2;
+    let before = fixture.view.context.to_json().unwrap();
+    assert!(!advance(&mut fixture.view, &stale).context_changed);
+    assert_eq!(before, fixture.view.context.to_json().unwrap());
+    let (events, effects, attention) = fixture.probe();
+    assert_eq!(events.len(), 1);
+    assert!(effects.is_empty());
+    assert_eq!(attention, 0);
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.result_read_failures.1"),
+        Some("1")
+    );
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.result_read_failures.2"),
+        Some("1")
+    );
+    fixture.view.state = RunState::Paused;
+    let before = fixture.view.context.to_json().unwrap();
+    assert!(!advance(&mut fixture.view, &events[0]).context_changed);
+    assert_eq!(before, fixture.view.context.to_json().unwrap());
+    assert!(classify_step_turn(
+        &active_run(fixture.view.run_id),
+        &fixture.view,
+        "implementation_classifier"
+    )
+    .is_none());
+}
+
+#[test]
+fn result_persistent_read_error_is_bounded_and_recovers_through_production_classifier() {
+    let mut fixture = ResultReadFixture::new();
+    std::fs::create_dir(&fixture.result).unwrap();
+    for probe in 1..=6 {
+        let (events, effects, attention) = fixture.probe();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            CircuitEvent::ObservationDeferred { .. }
+        ));
+        assert!(
+            effects.is_empty(),
+            "I/O failure must never send an agent prompt"
+        );
+        assert_eq!(
+            attention,
+            usize::from(probe == 3),
+            "attention once at the bound"
+        );
+        assert_eq!(fixture.view.steps[1].status, StepStatus::Unverified);
+        assert!(fixture.view.steps[1]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains(&fixture.result.display().to_string()));
+        assert_eq!(
+            fixture
+                .view
+                .context
+                .get("node.implementation_classifier.result_reminders.1"),
+            None
+        );
+        fixture.view.context =
+            CircuitContext::from_json(&fixture.view.context.to_json().unwrap()).unwrap();
+    }
+    std::fs::remove_dir(&fixture.result).unwrap();
+    std::fs::write(
+        &fixture.result,
+        "Repaired result\nBUILDMESH_HANDOFF_V1: READY\n",
+    )
+    .unwrap();
+    let (events, _, attention) = fixture.probe();
+    assert_eq!(attention, 0);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        CircuitEvent::TurnClassified {
+            classification: Some(evaluator::Classification::Completed),
+            ..
+        }
+    )));
+    assert_eq!(fixture.view.steps[1].status, StepStatus::Completed);
+}
+
 #[test]
 fn circuit_archive_preserves_work_and_publishes_only_after_cleanup_receipt() {
     let _db = install_temp_db();
@@ -4202,7 +4533,7 @@ fn watchdog_needs_alive_quiet_and_still_running() {
 /// populated — the sweep only reads `r.run.id`, every other field is
 /// a placeholder. Avoids sprawling struct literals across the three
 /// tests below.
-fn active_run(id: i64) -> db::ActiveCircuitRun {
+pub(super) fn active_run(id: i64) -> db::ActiveCircuitRun {
     db::ActiveCircuitRun {
         run: crate::models::AutopilotCircuitRun {
             id,

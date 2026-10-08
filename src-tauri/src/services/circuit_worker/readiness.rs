@@ -11,8 +11,12 @@ pub(crate) struct Candidate {
     pub binding: ClassificationBinding,
     pub output: String,
     pub status: SessionStatus,
+    /// The admitted assistant turn stays the continuation baseline even when
+    /// classification binds a separate result-file report.
+    pub(super) turn_revision: String,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(
     view: &RunView,
     node_id: &str,
@@ -153,6 +157,7 @@ pub(crate) fn prepare_with_lifecycle_veto(
         return Ok(Some(Candidate {
             output: report.text.clone(),
             status,
+            turn_revision: report.revision.clone(),
             binding: ClassificationBinding {
                 owner: ObservationIdentity {
                     run_id: view.run_id,
@@ -188,6 +193,7 @@ pub(crate) fn prepare_with_lifecycle_veto(
                 return Ok(Some(Candidate {
                     output: native_report.text,
                     status,
+                    turn_revision: native_report.revision.clone(),
                     binding: ClassificationBinding {
                         owner,
                         report_revision: native_report.revision,
