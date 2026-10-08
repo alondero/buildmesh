@@ -130,17 +130,18 @@ impl readiness::Candidate {
                 Ok((self, false))
             }
             Ok(None) => Ok((self, true)),
+            // Invalid bytes are an agent output-format error, not transient I/O.
+            // Reuse the bounded missing/blank-result repair lifecycle.
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok((self, true)),
             Err(error) => {
                 tracing::warn!(
                     "circuits: could not bind result file {}: {error}",
                     path.display()
                 );
                 Err(
-                    crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable {
-                        reason: format!(
-                            "could not read the result file {}: {error}",
-                            path.display()
-                        ),
+                    crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable {
+                        path: path.display().to_string(),
+                        reason: error.to_string(),
                     },
                 )
             }
@@ -1040,6 +1041,13 @@ pub(super) fn observe_gates_with(
                 }) = source.classify(view, step)
                 {
                     if let Some(blocker) = observation_blocker {
+                        if matches!(blocker, crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable { .. })
+                            && view.result_read_failures(&step.node_id, step.attempt, agent_node_id) == Some(2)
+                        {
+                            let issue = view.context.get("issue.number")
+                                .and_then(|number| number.parse::<i64>().ok()).unwrap_or(0);
+                            source.blocked(agent_node_id, issue);
+                        }
                         events.push(CircuitEvent::ObservationDeferred {
                             node_id: step.node_id.clone(),
                             attempt: step.attempt,
@@ -1191,6 +1199,31 @@ mod result_continuation_tests {
                 cli_session_id: native.owner.session_id.clone(),
                 ..Default::default()
             };
+            std::fs::remove_file(&result).unwrap();
+            std::fs::create_dir(&result).unwrap();
+            let candidate = readiness::prepare(
+                &run,
+                "step",
+                &agent,
+                Some("100:ready"),
+                Ok(native.input_guard.input_stamp.clone()),
+                Err(ReportReadError::Unsupported),
+            )
+            .unwrap()
+            .unwrap();
+            let Err(blocker) = candidate.with_result_file(&result, run.step("step").unwrap())
+            else {
+                panic!("directory result must defer");
+            };
+            let mut source = Script::default();
+            source.turn = Some(ClassifiedTurn::deferred(42, blocker));
+            let mut deferred = Vec::new();
+            observe_gates_with(&run, &mut deferred, &mut source);
+            assert_eq!(deferred.len(), 1);
+            assert!(advance(&mut run, &deferred[0]).effects.is_empty());
+            assert_eq!(run.step("step").unwrap().status, StepStatus::Unverified);
+            std::fs::remove_dir(&result).unwrap();
+            std::fs::write(&result, report).unwrap();
             let prepare = || {
                 readiness::prepare(
                     &run,

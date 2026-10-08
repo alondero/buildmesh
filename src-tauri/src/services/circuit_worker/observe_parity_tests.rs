@@ -13,6 +13,7 @@ use crate::circuit::model::{
 
 #[derive(Default)]
 pub(super) struct Script {
+    pub(super) live_run: Option<i64>,
     native: Vec<CircuitEvent>,
     clock_reads: usize,
     status: Option<SessionStatus>,
@@ -22,7 +23,7 @@ pub(super) struct Script {
     pub(super) turn: Option<ClassifiedTurn>,
     observed: bool,
     approvals: Vec<String>,
-    calls: Vec<&'static str>,
+    pub(super) calls: Vec<&'static str>,
 }
 
 impl Observations for Script {
@@ -87,9 +88,17 @@ impl Observations for Script {
     fn alive(&mut self, _: i64) -> bool {
         self.alive
     }
-    fn classify(&mut self, _: &RunView, _: &StepView) -> Option<ClassifiedTurn> {
+    fn classify(&mut self, view: &RunView, step: &StepView) -> Option<ClassifiedTurn> {
         self.calls.push("classify");
-        self.turn.take()
+        if let Some(run_id) = self.live_run {
+            super::turn_classify::classify_step_turn(
+                &super::tests::active_run(run_id),
+                view,
+                &step.node_id,
+            )
+        } else {
+            self.turn.take()
+        }
     }
     fn verify(&mut self, _: &RunView, _: &StepView, _: &str) -> Option<bool> {
         self.calls.push("verify");
@@ -590,7 +599,7 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
         .unwrap()
         .unwrap()
     };
-    for _ in 0..3 {
+    for probe in 1..=3 {
         let Err(blocker) = prepare(&run).with_result_file(&path, run.step("step").unwrap()) else {
             panic!("an unreadable result must defer observation");
         };
@@ -603,14 +612,14 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
         assert!(
             matches!(events.as_slice(), [CircuitEvent::ObservationDeferred {
             node_id, attempt: 1, agent_node_id: 42,
-            blocker: CircuitObservationBlocker::ReportUnavailable { .. },
+            blocker: CircuitObservationBlocker::ResultFileUnavailable { .. },
         }] if node_id == "step")
         );
         let transition = advance(&mut run, &events[0]);
         assert!(transition.effects.is_empty());
         assert_eq!(run.step("step").unwrap().status, StepStatus::Unverified);
         assert_eq!(run.context.get("node.step.result_reminders.1"), None);
-        assert!(!script.calls.contains(&"blocked"));
+        assert_eq!(script.calls.contains(&"blocked"), probe == 3);
     }
     std::fs::remove_dir(&path).unwrap();
     let report = "Full completed result\nBUILDMESH_HANDOFF_V1: READY\n";

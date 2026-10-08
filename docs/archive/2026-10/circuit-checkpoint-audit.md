@@ -38,14 +38,21 @@ No historical run was replayed, attested complete, or changed in the live databa
 
 ## Additional result-read failure
 
-The imported repair still mapped every result-file I/O error to "missing". That
-can spend a bounded reminder on an unreadable file or a result changing during
-inspection. Only a successfully observed missing/blank file should use reminders.
-Read errors defer observation with an actionable diagnostic and retry through the
-existing probe schedule, without classifying the transcript or sending input.
+The imported repair mapped every result-file read error to "missing". The initial
+follow-up separated read errors from absent files, but the request-changes review
+found that it also deferred invalid UTF-8 and left persistent I/O failures unbounded.
 
-The test uses an unreadable directory at the expected file path for a deterministic
-cross-platform error, then replaces it with a valid result to prove recovery.
+The corrected policy sends missing, blank and invalid-UTF-8 files through the
+existing two-reminder repair lifecycle. Other read errors visibly make the step
+Unverified, with the path and error. A durable per-attempt counter raises attention
+on the third failed probe, once. A repaired file can still recover through the
+normal report/session/input freshness checks. UTF-8 instructions explicitly name
+Windows PowerShell's Set-Content -Encoding UTF8, including its supported UTF-8 BOM.
+
+Regression fixtures call classify_step_turn with an isolated database, a registered
+process input boundary, finished hook-native evidence, handoff markers and real
+UTF-16, Windows-1252 and unreadable-directory results. They cover bounded reminders,
+read-error attention, restart persistence, attempt fencing and file repair.
 Separate report freshness tests cover transcript changes and result replacement.
-These tests exercise report admission, the production stepper and commit fences;
-they do not claim the running production binary has been upgraded.
+These checks do not claim the running production binary has been upgraded.
+The live counts above remain the original read-only snapshot, not a fresh census.

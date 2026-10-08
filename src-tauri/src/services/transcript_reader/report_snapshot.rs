@@ -675,8 +675,8 @@ mod tests {
         fs::create_dir(&result).unwrap();
         let failed_read = prepare().with_result_file(&result, run.step("await_source").unwrap());
         assert!(
-            matches!(failed_read, Err(crate::circuit::observation::CircuitObservationBlocker::ReportUnavailable { reason })
-            if reason.contains("could not read the result file")),
+            matches!(failed_read, Err(crate::circuit::observation::CircuitObservationBlocker::ResultFileUnavailable { path, reason })
+            if path == result.display().to_string() && !reason.is_empty()),
             "read errors must defer without spending the missing-result reminder budget"
         );
         fs::remove_dir(&result).unwrap();
