@@ -54,23 +54,33 @@ pub(super) fn classify_step_turn(
     let stamp = db::agent_turn_stamp(agent_node_id).ok().flatten();
     let input = crate::agent::process::PROCESS_REGISTRY.input_stamp_result(agent_node_id);
     let snapshot = crate::coordinator::enrichment::circuit_report_snapshot(&agent);
-    let candidate =
-        match readiness::prepare(view, node_id, &agent, stamp.as_deref(), input, snapshot) {
-            Ok(Some(candidate)) => candidate,
-            Ok(None) => return None,
-            Err(blocker) => {
-                return Some(ClassifiedTurn {
-                    classifier_error: None,
-                    observation_blocker: Some(blocker),
-                    agent_node_id,
-                    classification: None,
-                    binding: None,
-                    output: String::new(),
-                    continuation: None,
-                    waiting_for_a_finished_turn: false,
-                })
-            }
-        };
+    let lifecycle_blocker = db::agent_node::circuit_lifecycle_blocker(agent_node_id).unwrap_or(
+        Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable),
+    );
+    let candidate = match readiness::prepare_with_lifecycle_veto(
+        view,
+        node_id,
+        &agent,
+        stamp.as_deref(),
+        input,
+        snapshot,
+        lifecycle_blocker,
+    ) {
+        Ok(Some(candidate)) => candidate,
+        Ok(None) => return None,
+        Err(blocker) => {
+            return Some(ClassifiedTurn {
+                classifier_error: None,
+                observation_blocker: Some(blocker),
+                agent_node_id,
+                classification: None,
+                binding: None,
+                output: String::new(),
+                continuation: None,
+                waiting_for_a_finished_turn: false,
+            })
+        }
+    };
     let readiness::Candidate {
         binding,
         output,

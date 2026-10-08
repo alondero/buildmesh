@@ -35,6 +35,15 @@ pub(crate) fn with_env_vars<T>(
     vars: &[(&str, Option<&std::ffi::OsStr>)],
     f: impl FnOnce() -> T,
 ) -> T {
+    // Windows resolves `git`, `node`, `powershell.exe` ... through the
+    // process-wide `PATH` at every spawn, so rewriting it, even briefly and
+    // even under `ENV_LOCK`, makes unrelated tests fail with "program not
+    // found" (issue #2109). Inject the search path instead, e.g.
+    // `session_naming::ClaudeSearch`.
+    assert!(
+        vars.iter().all(|(key, _)| !key.eq_ignore_ascii_case("PATH")),
+        "with_env_vars must not rewrite the process PATH: concurrent tests that spawn programs would fail with \"program not found\" (issue #2109); pass the search path to the code under test instead"
+    );
     let saved = vars
         .iter()
         .map(|(key, _)| (*key, std::env::var_os(key)))
@@ -78,7 +87,7 @@ pub(crate) mod test_helpers {
 
     /// Per-test scratch directory under %TEMP%, named uniquely so parallel
     /// cargo test invocations don't collide. Removed on drop.
-    pub(crate) struct TestDir(PathBuf);
+    pub(crate) struct TestDir(PathBuf, std::sync::Mutex<Vec<PathBuf>>);
     impl TestDir {
         pub(crate) fn new(suffix: &str) -> Self {
             let id = NEXT_TEST_DIR.fetch_add(1, Ordering::SeqCst);
@@ -90,15 +99,37 @@ pub(crate) mod test_helpers {
             ));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
-            Self(path)
+            Self(path, std::sync::Mutex::new(Vec::new()))
         }
         pub(crate) fn path(&self) -> &Path {
             &self.0
+        }
+        /// A sibling directory (`<this dir>_<suffix>`) for a fixture's bare
+        /// origin, clone or upstream. It is created fresh and removed on drop,
+        /// like the directory itself.
+        ///
+        /// Tests used to build this path by hand and never remove it. The name
+        /// is only unique per process id and counter, and Windows reuses
+        /// process ids quickly, so a later process with the same id and
+        /// counter found the previous run's bare repo still there: `git init
+        /// --bare` printed "re-init", and every push to it was rejected
+        /// because the remote already held another run's commits.
+        pub(crate) fn sibling(&self, suffix: &str) -> PathBuf {
+            let mut name = self.0.file_name().unwrap().to_os_string();
+            name.push(format!("_{suffix}"));
+            let path = self.0.parent().unwrap().join(name);
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            self.1.lock().unwrap().push(path.clone());
+            path
         }
     }
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+            for sibling in self.1.lock().map(|g| g.clone()).unwrap_or_default() {
+                let _ = fs::remove_dir_all(sibling);
+            }
         }
     }
 
@@ -292,6 +323,44 @@ mod tests {
     /// `<home>/.gemini/antigravity-cli/brain` (or `GEMINI_HOME` /
     /// `ANTIGRAVITY_HOME` overrides, but those aren't tested because the
     /// bare-env expectation matches every supported platform).
+    /// A fixture's bare origin lives next to its `TestDir`. A previous process
+    /// with the same pid and counter (Windows recycles pids) leaves that
+    /// directory behind; the new test must start from an empty one, not push
+    /// into the old run's commits, and must leave nothing behind itself.
+    #[test]
+    fn test_dir_sibling_starts_empty_and_is_removed_on_drop() {
+        let (main, sibling) = {
+            let dir = test_helpers::TestDir::new("sibling_cleanup");
+            let main = dir.path().to_path_buf();
+            let mut stale = main.file_name().unwrap().to_os_string();
+            stale.push("_origin");
+            let stale = main.parent().unwrap().join(stale);
+            std::fs::create_dir_all(stale.join("objects")).unwrap();
+            std::fs::write(stale.join("HEAD"), "ref: refs/heads/leftover\n").unwrap();
+
+            let sibling = dir.sibling("origin");
+
+            assert_eq!(sibling, stale);
+            assert_eq!(
+                std::fs::read_dir(&sibling).unwrap().count(),
+                0,
+                "the leftover repository from an earlier run must be cleared"
+            );
+            std::fs::write(sibling.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+            (main, sibling)
+        };
+        assert!(!main.exists(), "the TestDir itself is removed on drop");
+        assert!(!sibling.exists(), "the sibling is removed on drop too");
+    }
+
+    /// Regression for #2109: tests that rewrote `PATH` made concurrent tests
+    /// spawning `git`/`node`/`powershell.exe` fail with "program not found".
+    #[test]
+    #[should_panic(expected = "must not rewrite the process PATH")]
+    fn with_env_vars_refuses_to_rewrite_path() {
+        with_env_vars(&[("PATH", Some(std::ffi::OsStr::new("empty")))], || ());
+    }
+
     #[test]
     fn agy_brain_dir_uses_the_current_environment_home() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());

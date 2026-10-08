@@ -155,11 +155,38 @@ fn open_isolated_at(db_path: &Path) -> SqlResult<&'static super::Database> {
     let conn = super::open_writer(db_path)?;
     super::apply_connection_pragmas(&conn, false)?;
     super::init_schema(&conn)?;
+    seed_unique_node_ids(&conn)?;
     let readers = super::ReaderPool::open_sized(db_path, TEST_READER_POOL_SIZE)?;
     Ok(Box::leak(Box::new(super::Database {
         writer: Mutex::new(conn),
         readers,
     })))
+}
+
+/// Width of the agent-node id range each isolated database owns.
+///
+/// 100 000 ids per database keeps every id of a full run far inside `i32`
+/// (the wire types annotate 64-bit ids as `i32`): thousands of installs times
+/// this width stays well under 2^31.
+const NODE_ID_RANGE: i64 = 100_000;
+
+/// Hands each isolated database its own range of agent-node ids.
+///
+/// Several process-global registries are keyed by agent-node id (the circuit
+/// evaluator's `NODES` map, for one). Every isolated database used to number
+/// its agents from 1, so two parallel tests both owned "agent 1", and one
+/// test's `unregister(1)` or `register_circuit(1)` changed what the other
+/// observed. Disjoint ranges make a node id unique across the whole test
+/// process, so a global keyed by it can no longer be shared by accident.
+fn seed_unique_node_ids(conn: &rusqlite::Connection) -> SqlResult<()> {
+    static NEXT_RANGE: AtomicU64 = AtomicU64::new(0);
+    let range = NEXT_RANGE.fetch_add(1, Ordering::Relaxed) as i64;
+    conn.execute("DELETE FROM sqlite_sequence WHERE name = 'agent_nodes'", [])?;
+    conn.execute(
+        "INSERT INTO sqlite_sequence (name, seq) VALUES ('agent_nodes', ?1)",
+        [range * NODE_ID_RANGE],
+    )?;
+    Ok(())
 }
 
 /// Per-process scratch directory for the file-backed installs of
@@ -534,6 +561,41 @@ mod tests {
             crate::db::list_meshes().unwrap().len(),
             0,
             "a reinstalled database must not inherit the previous test's rows"
+        );
+    }
+
+    /// Process-global registries keyed by agent-node id (the circuit
+    /// evaluator's `NODES`) used to see every parallel test's first agent as
+    /// "agent 1", so one test's `unregister(1)` changed what another observed.
+    /// Each isolated database now owns a disjoint id range.
+    #[test]
+    fn isolated_databases_hand_out_disjoint_agent_node_ids() {
+        fn first_agent_id() -> i64 {
+            let _db = isolated();
+            let mesh = crate::db::create_mesh("ids", "C:/isolated-ids").unwrap();
+            let conn = crate::db::write_conn();
+            conn.execute(
+                "INSERT INTO agent_nodes (mesh_id, name, path) VALUES (?1, 'first', 'C:/isolated-ids')",
+                [mesh.id],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        }
+        let ids: Vec<i64> = (0..4)
+            .map(|_| std::thread::spawn(first_agent_id))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "agent ids collided across installs: {ids:?}"
+        );
+        assert!(
+            ids.iter().all(|id| *id > 0 && *id <= i32::MAX as i64),
+            "{ids:?}"
         );
     }
 

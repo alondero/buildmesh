@@ -1,4 +1,5 @@
-﻿import { describe, it, expect, vi, beforeEach } from 'vitest';
+﻿import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { ProbePanel } from '../../src/components/Probe/ProbePanel';
@@ -56,6 +57,9 @@ const DIFF: DiffResult = {
     },
   ],
 };
+
+// Load the lazy Probe tab chunks up front so rendering a tab does not wait on disk.
+beforeAll(preloadProbeTabs, 60_000);
 
 describe('ProbePanel', () => {
   beforeEach(() => {

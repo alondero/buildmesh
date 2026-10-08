@@ -877,6 +877,79 @@ mod tests {
             status: SessionStatus::Running,
             ..Default::default()
         };
+        // A finished report cannot answer a request or terminate known work,
+        // including on harnesses without native Circuit receipts.
+        use crate::agent::session_lifecycle::{
+            HookSignalDetail, LifecycleChangedPayload, LifecycleKind,
+        };
+        let generic_attention = AgentNode {
+            status: SessionStatus::AwaitingInput,
+            lifecycle: Some(LifecycleChangedPayload::new(
+                900,
+                LifecycleKind::InputRequired,
+                SessionStatus::AwaitingInput,
+                &HookSignalDetail::default(),
+                "generic attention without a structured request",
+            )),
+            ..agent.clone()
+        };
+        let candidate = readiness::prepare(
+            &run,
+            "await_source",
+            &generic_attention,
+            Some("100:projection"),
+            Ok("1:0".into()),
+            Ok(report.clone()),
+        )
+        .unwrap()
+        .expect("a finished report remains admissible after generic InputRequired");
+        assert_eq!(candidate.output, report.text);
+
+        for provider in ["anthropic", "codex", "agy", "mcode", "opencode", "grok"] {
+            for (kind, status, blocker) in [
+                (
+                    LifecycleKind::QuestionRequested,
+                    SessionStatus::AwaitingInput,
+                    B::HumanResponseRequired,
+                ),
+                (
+                    LifecycleKind::PermissionRequested,
+                    SessionStatus::AwaitingInput,
+                    B::HumanResponseRequired,
+                ),
+                (
+                    LifecycleKind::BackgroundRunning,
+                    SessionStatus::Running,
+                    B::KnownWorkOutstanding,
+                ),
+            ] {
+                let blocked_agent = AgentNode {
+                    provider: provider.into(),
+                    status,
+                    lifecycle: Some(LifecycleChangedPayload::new(
+                        900,
+                        kind,
+                        status,
+                        &HookSignalDetail::default(),
+                        "",
+                    )),
+                    ..agent.clone()
+                };
+                assert_eq!(
+                    readiness::prepare(
+                        &run,
+                        "await_source",
+                        &blocked_agent,
+                        Some("100:projection"),
+                        Ok("1:0".into()),
+                        Ok(report.clone())
+                    )
+                    .err(),
+                    Some(blocker),
+                    "{provider}: {kind:?}"
+                );
+            }
+        }
         for status in [StepStatus::Running, StepStatus::Unverified] {
             run.step_mut("await_source").unwrap().status = status;
             let candidate = readiness::prepare(
