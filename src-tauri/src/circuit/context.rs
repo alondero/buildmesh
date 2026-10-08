@@ -24,6 +24,7 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CircuitContext {
     vars: BTreeMap<String, String>,
+    runtime_lifecycle_blockers: BTreeMap<String, String>,
 }
 
 impl CircuitContext {
@@ -38,6 +39,20 @@ impl CircuitContext {
 
     pub fn get(&self, path: &str) -> Option<&str> {
         self.vars.get(path).map(|s| s.as_str())
+    }
+
+    /// Attach lifecycle evidence to this in-memory view. These projections
+    /// are rebuilt from the agent lifecycle table and must never be persisted
+    /// as part of a circuit run's template context.
+    pub fn set_lifecycle_blocker(&mut self, node_id: &str, blocker_json: impl Into<String>) {
+        self.runtime_lifecycle_blockers
+            .insert(node_id.to_string(), blocker_json.into());
+    }
+
+    pub fn lifecycle_blocker(&self, node_id: &str) -> Option<&str> {
+        self.runtime_lifecycle_blockers
+            .get(node_id)
+            .map(String::as_str)
     }
 
     /// Borrowed triggering agent, deliberately separate from owned spawns.
@@ -173,9 +188,15 @@ impl CircuitContext {
 
     /// Parse back from `context_json`.
     pub fn from_json(json: &str) -> Result<Self, String> {
-        let vars: BTreeMap<String, String> =
+        let mut vars: BTreeMap<String, String> =
             serde_json::from_str(json).map_err(|e| format!("invalid context_json: {}", e))?;
-        Ok(Self { vars })
+        // Older builds could accidentally persist a recovery-view projection.
+        // Drop it on load so a settled lifecycle report releases that veto.
+        vars.retain(|key, _| !is_lifecycle_blocker_key(key));
+        Ok(Self {
+            vars,
+            runtime_lifecycle_blockers: BTreeMap::new(),
+        })
     }
 
     /// Resolve every `{{ path }}` placeholder in `template` against this
@@ -206,6 +227,12 @@ impl CircuitContext {
     }
 }
 
+fn is_lifecycle_blocker_key(key: &str) -> bool {
+    key.strip_prefix("node.")
+        .and_then(|node_key| node_key.rsplit_once('.'))
+        .is_some_and(|(_, suffix)| suffix == "lifecycle_blocker")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,8 +248,14 @@ mod tests {
     #[test]
     fn resolves_dotted_paths_in_both_brace_styles() {
         let ctx = sample_context();
-        assert_eq!(ctx.resolve("run {{circuit.name}} now"), "run nightly-sweep now");
-        assert_eq!(ctx.resolve("run {{ circuit.name }} now"), "run nightly-sweep now");
+        assert_eq!(
+            ctx.resolve("run {{circuit.name}} now"),
+            "run nightly-sweep now"
+        );
+        assert_eq!(
+            ctx.resolve("run {{ circuit.name }} now"),
+            "run nightly-sweep now"
+        );
     }
 
     #[test]
@@ -318,7 +351,10 @@ mod tests {
             "https://github.com/alondero/buildmesh/issues/7",
             &[],
         );
-        assert_eq!(ctx.resolve("{{issue.prefill}}"), "Circuit: alondero/buildmesh#7");
+        assert_eq!(
+            ctx.resolve("{{issue.prefill}}"),
+            "Circuit: alondero/buildmesh#7"
+        );
 
         crate::preferences::storage::reset_for_tests();
         let _ = std::fs::remove_dir_all(&dir);
@@ -365,7 +401,10 @@ mod tests {
         ctx.with_pr(10, "pt", "", "pa", "pu", "head", &[]);
         let back = CircuitContext::from_json(&ctx.to_json().unwrap()).unwrap();
         assert_eq!(back, ctx);
-        assert_eq!(back.resolve("fix {{issue.number}} via {{pr.head_ref}}"), "fix 9 via head");
+        assert_eq!(
+            back.resolve("fix {{issue.number}} via {{pr.head_ref}}"),
+            "fix 9 via head"
+        );
     }
 
     #[test]

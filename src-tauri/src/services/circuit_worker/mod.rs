@@ -362,15 +362,26 @@ fn sweep_stale_approvals(active_runs: &[db::ActiveCircuitRun]) {
     if queue.is_empty() {
         return;
     }
-    let before = queue.len();
-    queue.retain(|(run_id, _)| active_runs.iter().any(|r| r.run.id == *run_id));
-    let dropped = before - queue.len();
+    let (retained, dropped) = retain_active_approvals(std::mem::take(&mut *queue), active_runs);
+    *queue = retained;
     if dropped > 0 {
         tracing::debug!(
             "circuits: dropped {} stale approval(s) for vanished runs",
             dropped
         );
     }
+}
+
+/// Keep approvals belonging to active runs. Takes ownership so this policy
+/// can be tested without touching the process-wide queue.
+fn retain_active_approvals(
+    mut approvals: Vec<(i64, String)>,
+    active_runs: &[db::ActiveCircuitRun],
+) -> (Vec<(i64, String)>, usize) {
+    let before = approvals.len();
+    approvals.retain(|(run_id, _)| active_runs.iter().any(|run| run.run.id == *run_id));
+    let dropped = before - approvals.len();
+    (approvals, dropped)
 }
 
 /// Wake the circuit worker immediately (manual trigger dispatch).

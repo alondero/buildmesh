@@ -20,6 +20,7 @@ pub mod context;
 pub mod model;
 pub mod model_node_review;
 pub mod observation;
+pub(crate) mod report_admission;
 pub mod stepper;
 pub mod vocabulary;
 

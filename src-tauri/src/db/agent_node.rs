@@ -170,6 +170,44 @@ mod lifecycle_snapshot_tests {
     };
 
     #[test]
+    fn missing_agent_lifecycle_fails_closed_as_unavailable_lifecycle_evidence() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+
+        let blocker = circuit_lifecycle_blocker_inner(&conn, 404).unwrap();
+        assert_eq!(
+            blocker,
+            Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable)
+        );
+        assert_eq!(
+            blocker.unwrap().message(),
+            "The agent's lifecycle evidence is unavailable or inconsistent, so Buildmesh cannot verify this step. Inspect or repair the agent record and lifecycle report; if the record was removed, pause or cancel the Circuit before recording completion."
+        );
+    }
+
+    #[test]
+    fn unreadable_agent_lifecycle_fails_closed_as_unavailable_lifecycle_evidence() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status,lifecycle_snapshot)
+             VALUES (1,1,'node','C:/mesh','running','{unreadable')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable)
+        );
+    }
+
+    #[test]
     fn observation_round_trips_and_process_transition_invalidates_it() {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::init_schema(&conn).unwrap();
@@ -216,6 +254,74 @@ mod lifecycle_snapshot_tests {
             get_agent_node_by_id_inner(&conn, 1).unwrap().status,
             SessionStatus::Lost
         );
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::KnownWorkOutstanding),
+            "a process status write invalidates positive projection evidence, not the last harness veto"
+        );
+    }
+
+    #[test]
+    fn process_status_write_does_not_release_a_harness_request_veto() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO meshes (id,name,path) VALUES (1,'mesh','C:/mesh')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO agent_nodes (id,mesh_id,name,path,status) VALUES (1,1,'node','C:/mesh','awaiting_input')", []).unwrap();
+        let mut request = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::QuestionRequested,
+            SessionStatus::AwaitingInput,
+            &HookSignalDetail::default(),
+            "approve the requested action",
+        );
+        assert!(commit_agent_lifecycle_inner(&conn, &mut request, &[]).unwrap());
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::HumanResponseRequired)
+        );
+
+        update_agent_node_status_inner(&conn, 1, SessionStatus::AwaitingInput).unwrap();
+
+        assert!(
+            get_agent_node_by_id_inner(&conn, 1)
+                .unwrap()
+                .lifecycle
+                .is_none(),
+            "the status projection should still reject a stale positive snapshot"
+        );
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::HumanResponseRequired),
+            "a same-status process write must not release a pending harness request"
+        );
+
+        let mut process_idle = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::ProcessIdle,
+            SessionStatus::Idle,
+            &HookSignalDetail::default(),
+            "the local process is idle",
+        );
+        assert!(commit_agent_lifecycle_inner(&conn, &mut process_idle, &[]).unwrap());
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 1).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::HumanResponseRequired),
+            "a process lifecycle projection must not release a harness request"
+        );
+
+        let mut resumed = LifecycleChangedPayload::new(
+            1,
+            LifecycleKind::WorkResumed,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "operator answered the request",
+        );
+        assert!(commit_agent_lifecycle_inner(&conn, &mut resumed, &[]).unwrap());
+        assert_eq!(circuit_lifecycle_blocker_inner(&conn, 1).unwrap(), None);
     }
 
     #[test]
@@ -356,6 +462,39 @@ mod lifecycle_snapshot_tests {
         assert_eq!(
             get_agent_node_by_id_inner(&conn, 2).unwrap().status,
             SessionStatus::Error
+        );
+
+        conn.execute(
+            "INSERT INTO agent_nodes (id,mesh_id,name,path,status)
+            VALUES (3,1,'requesting','C:/mesh','spawning')",
+            [],
+        )
+        .unwrap();
+        let request = LifecycleChangedPayload::new(
+            3,
+            LifecycleKind::QuestionRequested,
+            SessionStatus::AwaitingInput,
+            &HookSignalDetail::default(),
+            "approval is still pending",
+        );
+        let request_json = serde_json::to_string(&request).unwrap();
+        conn.execute(
+            "UPDATE agent_nodes SET lifecycle_snapshot=?1 WHERE id=3",
+            [request_json],
+        )
+        .unwrap();
+        let mut promotion = LifecycleChangedPayload::new(
+            3,
+            LifecycleKind::ProcessRunning,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "process survived spawn",
+        );
+        assert!(commit_spawn_promotion_inner(&conn, &mut promotion).unwrap());
+        assert_eq!(
+            circuit_lifecycle_blocker_inner(&conn, 3).unwrap(),
+            Some(crate::circuit::observation::CircuitObservationBlocker::HumanResponseRequired),
+            "spawn reconciliation must not replace a pending harness request"
         );
     }
 
@@ -590,6 +729,66 @@ pub(crate) fn get_agent_node_by_id_inner(conn: &Connection, id: i64) -> SqlResul
         AGENT_NODE_COLUMNS
     ))?;
     stmt.query_row(params![id], map_agent_node_row)
+}
+
+/// Read lifecycle evidence used as a Circuit veto independently from the
+/// freshness-filtered status projection. Process-only status writes do not
+/// supersede what the harness last reported; only a later lifecycle payload
+/// can do that.
+fn lifecycle_snapshot_json_inner(conn: &Connection, id: i64) -> SqlResult<Option<String>> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT lifecycle_snapshot FROM agent_nodes WHERE id=?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+pub(crate) fn circuit_lifecycle_blocker_inner(
+    conn: &Connection,
+    id: i64,
+) -> SqlResult<Option<crate::circuit::observation::CircuitObservationBlocker>> {
+    use rusqlite::OptionalExtension;
+    let Some(snapshot) = conn
+        .query_row(
+            "SELECT lifecycle_snapshot FROM agent_nodes WHERE id=?1",
+            [id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+    else {
+        return Ok(Some(
+            crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
+        ));
+    };
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
+    let lifecycle = match serde_json::from_str::<
+        crate::agent::session_lifecycle::LifecycleChangedPayload,
+    >(&snapshot)
+    {
+        Ok(lifecycle) => lifecycle,
+        Err(_) => {
+            return Ok(Some(
+                crate::circuit::observation::CircuitObservationBlocker::LifecycleEvidenceUnavailable,
+            ));
+        }
+    };
+    Ok(crate::circuit::report_admission::lifecycle_blocker(Some(
+        &lifecycle,
+    )))
+}
+
+/// Public read seam for report admission. The transaction commit repeats this
+/// check under its writer connection before persisting a classification.
+pub(crate) fn circuit_lifecycle_blocker(
+    id: i64,
+) -> SqlResult<Option<crate::circuit::observation::CircuitObservationBlocker>> {
+    circuit_lifecycle_blocker_inner(&read_conn(), id)
 }
 // --- Agent Node operations ---
 
@@ -1124,8 +1323,24 @@ pub(crate) fn commit_agent_lifecycle_inner(
     // pinning a warning no callback ever earned.
     let harness_reported_health = payload.provider_event.is_some()
         || payload.signal_health != crate::agent::session_lifecycle::SignalHealth::Ok;
-    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+    let Some(next_snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
         return Ok(false);
+    };
+    // Process lifecycle events still update the display status and timestamp,
+    // but they cannot clear a negative harness observation. WorkResumed and
+    // TurnCompleted are the explicit settled transitions that release it.
+    let preserves_circuit_veto = circuit_lifecycle_blocker_inner(conn, payload.session_id)?
+        .is_some()
+        && crate::circuit::report_admission::lifecycle_blocker(Some(payload)).is_none()
+        && !matches!(
+            payload.kind,
+            crate::agent::session_lifecycle::LifecycleKind::WorkResumed
+                | crate::agent::session_lifecycle::LifecycleKind::TurnCompleted
+        );
+    let snapshot = if preserves_circuit_veto {
+        lifecycle_snapshot_json_inner(conn, payload.session_id)?.unwrap_or(next_snapshot)
+    } else {
+        next_snapshot
     };
     let forbidden_json = serde_json::to_string(
         &forbidden
@@ -1161,8 +1376,13 @@ pub(crate) fn commit_spawn_promotion_inner(
     conn: &Connection,
     payload: &mut crate::agent::session_lifecycle::LifecycleChangedPayload,
 ) -> SqlResult<bool> {
-    let Some(snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
+    let Some(next_snapshot) = lifecycle_snapshot_inner(conn, payload)? else {
         return Ok(false);
+    };
+    let snapshot = if circuit_lifecycle_blocker_inner(conn, payload.session_id)?.is_some() {
+        lifecycle_snapshot_json_inner(conn, payload.session_id)?.unwrap_or(next_snapshot)
+    } else {
+        next_snapshot
     };
     let changed = conn.execute(
         "UPDATE agent_nodes SET status=?1, status_changed_at=?2, lifecycle_snapshot=?3 \
@@ -1525,6 +1745,17 @@ pub(crate) fn recover_circuit_agent_turn_inner(
             .agent_node_id
             .or_else(|| view.resolve_target_agent(&step.node_id))
             != Some(fence.agent_node_id)
+    {
+        return Ok(false);
+    }
+    if get_agent_node_by_id_inner(conn, fence.agent_node_id)
+        .optional()?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    if view.report_has_known_blockers(&fence.step_id)
+        || circuit_lifecycle_blocker_inner(conn, fence.agent_node_id)?.is_some()
     {
         return Ok(false);
     }
