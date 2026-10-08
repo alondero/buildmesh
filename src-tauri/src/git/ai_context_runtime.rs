@@ -107,7 +107,7 @@ mod windows {
         backup: PathBuf,
     }
 
-    struct Transaction {
+    pub(super) struct Transaction {
         path: PathBuf,
         file: Option<fs::File>,
     }
@@ -143,7 +143,17 @@ mod windows {
         }
     }
 
+    /// How long a launch waits for another launch's repair of the same worktree.
+    const LOCK_WAIT_TIMEOUT: Duration = Duration::from_millis(1_520);
+
     pub(super) fn prepare(host_path: &str) -> Result<(), String> {
+        prepare_waiting(host_path, LOCK_WAIT_TIMEOUT)
+    }
+
+    /// `prepare` with the lock wait supplied, so a test of serialization can
+    /// give waiters a budget no loaded machine exhausts instead of asserting
+    /// that four git-heavy critical sections finish inside 1.5 s.
+    pub(super) fn prepare_waiting(host_path: &str, lock_wait: Duration) -> Result<(), String> {
         let repo = match git2::Repository::discover(host_path) {
             Ok(repo) => repo,
             Err(_) => return Ok(()),
@@ -155,7 +165,7 @@ mod windows {
             .canonicalize()
             .map_err(|e| format!("Muse context: cannot resolve worktree root: {e}"))?;
         let admin = repo.path().to_path_buf();
-        let Some(transaction) = acquire_transaction(&admin)? else {
+        let Some(transaction) = acquire_transaction(&admin, lock_wait)? else {
             return Err("Muse context repair is already running for this worktree".into());
         };
         let _transaction = transaction;
@@ -266,11 +276,13 @@ mod windows {
         Ok(())
     }
 
-    fn acquire_transaction(admin: &Path) -> Result<Option<Transaction>, String> {
+    pub(super) fn acquire_transaction(
+        admin: &Path,
+        lock_wait: Duration,
+    ) -> Result<Option<Transaction>, String> {
         let path = admin.join(format!("{TRANSACTION_PREFIX}lock"));
         const POLL_INTERVAL: Duration = Duration::from_millis(25);
-        const WAIT_TIMEOUT: Duration = Duration::from_millis(1_520);
-        let deadline = Instant::now() + WAIT_TIMEOUT;
+        let deadline = Instant::now() + lock_wait;
         loop {
             match OpenOptions::new()
                 .write(true)
@@ -1109,8 +1121,7 @@ mod tests {
                 "denied repair must name the missing capability, got: {error}"
             );
             assert!(
-                error.contains("Developer Mode")
-                    && error.contains("SeCreateSymbolicLinkPrivilege"),
+                error.contains("Developer Mode") && error.contains("SeCreateSymbolicLinkPrivilege"),
                 "denied repair must explain remediation, got: {error}"
             );
             for (alias, target) in [
@@ -1285,7 +1296,14 @@ mod tests {
                         if worker_id == 0 {
                             arm_windows_fault(super::super::windows::TEST_HOLD_LOCK_AFTER_ACQUIRE);
                         }
-                        prepare_muse_context(root.to_str().unwrap())
+                        // Waiters get a budget a loaded machine cannot exhaust: the
+                        // property is that launches serialize and all succeed, not
+                        // that four git-heavy repairs finish inside the 1.5 s the
+                        // product allows a real second launch.
+                        super::super::windows::prepare_waiting(
+                            root.to_str().unwrap(),
+                            std::time::Duration::from_secs(120),
+                        )
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1302,6 +1320,35 @@ mod tests {
                 .file_type()
                 .is_symlink());
             assert!(git(&root, &["status", "--porcelain"], None).is_empty());
+        }
+
+        #[test]
+        fn a_launch_that_outwaits_a_live_repair_reports_it_and_succeeds_once_released() {
+            let temp = fixture();
+            let root = temp.path().to_path_buf();
+            let admin = root.join(".git");
+            let held = super::super::windows::acquire_transaction(
+                &admin,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap()
+            .expect("an idle worktree grants the lock");
+            // The lock is held for the whole call, so a short wait can only time out.
+            let error = super::super::windows::prepare_waiting(
+                root.to_str().unwrap(),
+                std::time::Duration::from_millis(50),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "Muse context repair is already running for this worktree"
+            );
+            drop(held);
+            super::super::windows::prepare_waiting(
+                root.to_str().unwrap(),
+                std::time::Duration::from_secs(120),
+            )
+            .unwrap();
         }
 
         #[test]
@@ -1444,10 +1491,8 @@ mod tests {
                 "native muse.exe failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            assert!(
-                String::from_utf8_lossy(&output.stdout)
-                    .contains("MUSE_PRODUCTION_NATIVE_PREFLIGHT_OK")
-            );
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("MUSE_PRODUCTION_NATIVE_PREFLIGHT_OK"));
             assert!(std::fs::symlink_metadata(root.join("AGENTS.md"))
                 .unwrap()
                 .file_type()

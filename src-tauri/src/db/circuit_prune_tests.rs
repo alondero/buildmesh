@@ -19,7 +19,9 @@
 //!   Deleting one would re-mint a run and re-spawn agents on finished work, so
 //!   the row is kept forever and only its body is dropped.
 
-use super::circuit::prune_terminal_circuit_runs_older_than_inner;
+use super::circuit::{
+    prune_terminal_circuit_runs_before_inner, prune_terminal_circuit_runs_older_than_inner,
+};
 use rusqlite::Connection;
 
 /// In-memory DB carrying the real evolved schema (the `evolve_to` precedent in
@@ -578,28 +580,37 @@ fn retention_still_sweeps_a_manual_run_outside_any_lineage() {
 
 /// A row at the retention boundary is kept — the sweep uses `updated_at <`,
 /// mirroring the drive-ledger sweep, so a row that is only just turning 30 days
-/// old is not swept on the same tick. The row sits one minute inside the window:
-/// stamping it at exactly `now - 30 days` races the sweep's own `now` (the
-/// clock ticking over a second between the two made the row older than the
-/// cutoff), and the sweep has no injectable clock to pin it.
+/// old is not swept on the same tick — and one second older is swept.
+///
+/// The cutoff is an input (`prune_terminal_circuit_runs_before_inner`), so both
+/// rows are stamped against the same fixed instant. Stamping the boundary row
+/// from `datetime('now', '-30 days')` and letting the sweep read its own `now`
+/// raced the clock: ticking over a second between the two statements made the
+/// kept row older than the cutoff (#2111).
 #[test]
 fn prune_keeps_a_row_at_the_retention_boundary() {
     let conn = prune_db();
-    let boundary = insert_run(&conn, "interval:1000", "completed", 30, "{}");
-    conn.execute(
-        "UPDATE autopilot_circuit_runs
-         SET created_at = datetime('now', '-30 days', '+1 minutes'),
-             updated_at = datetime('now', '-30 days', '+1 minutes')
-         WHERE id = ?1",
-        [boundary],
-    )
-    .unwrap();
-    insert_run(&conn, "interval:2000", "completed", 1, "{}"); // newest, fresh
+    let cutoff = "2026-03-01 12:00:00";
+    let stamp = |id: i64, at: &str| {
+        conn.execute(
+            "UPDATE autopilot_circuit_runs SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
+            rusqlite::params![id, at],
+        )
+        .unwrap();
+    };
+    let boundary = insert_run(&conn, "interval:1000", "completed", 0, "{}");
+    stamp(boundary, cutoff);
+    let just_older = insert_run(&conn, "interval:1500", "completed", 0, "{}");
+    stamp(just_older, "2026-03-01 11:59:59");
+    insert_run(&conn, "interval:2000", "completed", 0, "{}"); // newest, fresh
 
-    let (deleted, _) = prune_terminal_circuit_runs_older_than_inner(&conn, 30).unwrap();
+    let (deleted, _) = prune_terminal_circuit_runs_before_inner(&conn, cutoff).unwrap();
 
-    assert_eq!(deleted, 0);
-    assert_eq!(count(&conn, "autopilot_circuit_runs"), 2);
+    assert_eq!(
+        deleted, 1,
+        "only the row strictly older than the cutoff goes"
+    );
+    assert_eq!(identities(&conn), vec!["interval:1000", "interval:2000"]);
 }
 
 /// Pins the shipped constant to the sweep's behaviour. Every test above passes

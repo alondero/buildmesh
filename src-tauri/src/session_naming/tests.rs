@@ -1,7 +1,11 @@
 use std::collections::HashSet;
 
-use super::{engine::*, repository::*, slug::*, words::{ADJECTIVES, NOUNS}};
-use crate::env::{with_env_vars, ENV_LOCK};
+use super::{
+    engine::*,
+    repository::*,
+    slug::*,
+    words::{ADJECTIVES, NOUNS},
+};
 use crate::models::AgentNode;
 
 #[test]
@@ -11,30 +15,47 @@ fn naming_accepts_native_codex_launch_configuration() {
         &prefs,
         "codex",
         &crate::preferences::launch_configurations::LaunchOverrides::default(),
-    ).unwrap();
+    )
+    .unwrap();
     let result = naming_backend_env_from_plan(plan, &prefs);
-    assert!(result.is_ok(), "native Codex supports background inference: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "native Codex supports background inference: {:?}",
+        result.err()
+    );
 }
 
 #[tokio::test]
 #[ignore = "requires an installed and authenticated harness; set BUILDMESH_BACKGROUND_HARNESS"]
 async fn live_background_inference() {
-    let harness = std::env::var("BUILDMESH_BACKGROUND_HARNESS").expect("select the live harness explicitly");
+    let harness =
+        std::env::var("BUILDMESH_BACKGROUND_HARNESS").expect("select the live harness explicitly");
     let prefs = crate::preferences::AppPreferences::default();
     let plan = crate::preferences::launch_configurations::capture(
-        &prefs, &harness, &crate::preferences::launch_configurations::LaunchOverrides::default(),
-    ).unwrap();
+        &prefs,
+        &harness,
+        &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    )
+    .unwrap();
     let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
     let slug = summarize_and_rename_with(
-        0, "The user asked to fix background naming. Reply only with fix-background-naming.", launch,
-    ).await.unwrap();
+        0,
+        "The user asked to fix background naming. Reply only with fix-background-naming.",
+        launch,
+    )
+    .await
+    .unwrap();
     assert_eq!(slug, "fix-background-naming");
 }
 
 #[tokio::test]
 async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settings() {
     let directory = tempfile::tempdir().unwrap();
-    let script = directory.path().join(if cfg!(windows) { "naming.ps1" } else { "naming.sh" });
+    let script = directory.path().join(if cfg!(windows) {
+        "naming.ps1"
+    } else {
+        "naming.sh"
+    });
     let args_file = directory.path().join("args.txt");
     if cfg!(windows) {
         std::fs::write(&script, format!(
@@ -57,23 +78,36 @@ async fn codex_background_naming_reads_the_final_file_and_preserves_saved_settin
              shift\ndone\nprintf wrong-stdout-answer\n",
             shell_words::quote(&args_file.to_string_lossy()),
         )).unwrap();
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
     let prefs = crate::preferences::AppPreferences::default();
     let mut plan = crate::preferences::launch_configurations::capture(
-        &prefs, "codex", &crate::preferences::launch_configurations::LaunchOverrides {
-            model: Some("gpt-6-luna".into()), effort: Some("low".into()), extra_args: None,
+        &prefs,
+        "codex",
+        &crate::preferences::launch_configurations::LaunchOverrides {
+            model: Some("gpt-6-luna".into()),
+            effort: Some("low".into()),
+            extra_args: None,
         },
-    ).unwrap();
+    )
+    .unwrap();
     plan.harness.executable = Some(script);
     let launch = naming_backend_env_from_plan(plan, &prefs).unwrap();
-    assert_eq!(summarize_and_rename_with(0, "fix background naming", launch).await.unwrap(), "fix-background-naming");
+    assert_eq!(
+        summarize_and_rename_with(0, "fix background naming", launch)
+            .await
+            .unwrap(),
+        "fix-background-naming"
+    );
     let args = std::fs::read_to_string(args_file).unwrap();
     let args: Vec<_> = args.lines().collect();
-    assert!(args.windows(2).any(|pair| pair == ["--model", "gpt-6-luna"]));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--model", "gpt-6-luna"]));
     assert!(args.contains(&"model_reasoning_effort=\"low\""));
     assert!(args.contains(&"--ephemeral"));
     assert_eq!(args.last(), Some(&"-"));
@@ -601,7 +635,10 @@ fn disambiguate_node_name_returns_base_when_free() {
 #[test]
 fn disambiguate_node_name_appends_next_free_suffix() {
     let taken = HashSet::from(["pr1-review-x".to_string(), "pr1-review-x-2".to_string()]);
-    assert_eq!(disambiguate_node_name("pr1-review-x", &taken), "pr1-review-x-3");
+    assert_eq!(
+        disambiguate_node_name("pr1-review-x", &taken),
+        "pr1-review-x-3"
+    );
 }
 
 /// A base already at the 50-char cap must still yield a valid slug after the
@@ -612,9 +649,17 @@ fn disambiguate_node_name_stays_within_the_slug_cap() {
     assert_eq!(base.len(), 50);
     let taken = HashSet::from([base.clone()]);
     let result = disambiguate_node_name(&base, &taken);
-    assert!(result.ends_with("-2"), "expected a -2 suffix, got {:?}", result);
+    assert!(
+        result.ends_with("-2"),
+        "expected a -2 suffix, got {:?}",
+        result
+    );
     assert!(result.len() <= 50, "must stay within the cap: {:?}", result);
-    assert!(SLUG_REGEX.is_match(&result), "must stay valid: {:?}", result);
+    assert!(
+        SLUG_REGEX.is_match(&result),
+        "must stay valid: {:?}",
+        result
+    );
 }
 
 #[test]
@@ -939,28 +984,43 @@ fn failed_backend_resolution_releases_rename_ownership_and_allows_repaired_confi
     let repo = MockRepo::with_name("bold-keen-brook");
     let prefs = crate::preferences::AppPreferences::default();
     let valid_plan = crate::preferences::launch_configurations::capture(
-        &prefs, "codex", &crate::preferences::launch_configurations::LaunchOverrides::default(),
-    ).unwrap();
+        &prefs,
+        "codex",
+        &crate::preferences::launch_configurations::LaunchOverrides::default(),
+    )
+    .unwrap();
     let buffer = "fix background naming\n".repeat(100);
     open_gate(node_id);
     on_output(node_id, &buffer);
 
     let mut invalid_plan = valid_plan.clone();
     invalid_plan.extra_args = Some("--json".into());
-    let error = prepare_rename_with(&repo, node_id, || naming_backend_env_from_plan(invalid_plan, &prefs))
-        .err().expect("extra arguments must fail background resolution");
+    let error = prepare_rename_with(&repo, node_id, || {
+        naming_backend_env_from_plan(invalid_plan, &prefs)
+    })
+    .err()
+    .expect("extra arguments must fail background resolution");
     assert!(error.contains("remove extra CLI arguments"), "{error}");
     {
         let states = naming();
         let state = states.get(&node_id).unwrap();
-        assert!(!state.renaming, "failed preflight must release rename ownership");
-        assert_eq!(state.attempts, 0, "configuration failures must not consume inference attempts");
+        assert!(
+            !state.renaming,
+            "failed preflight must release rename ownership"
+        );
+        assert_eq!(
+            state.attempts, 0,
+            "configuration failures must not consume inference attempts"
+        );
         assert!(state.buffering_ready);
         assert_eq!(state.buffer, buffer);
     }
 
-    let (trigger, _) = prepare_rename_with(&repo, node_id, || naming_backend_env_from_plan(valid_plan, &prefs))
-        .unwrap().expect("repairing configuration must let the same node retry");
+    let (trigger, _) = prepare_rename_with(&repo, node_id, || {
+        naming_backend_env_from_plan(valid_plan, &prefs)
+    })
+    .unwrap()
+    .expect("repairing configuration must let the same node retry");
     assert_eq!(trigger.buffer, buffer);
     assert!(naming().get(&node_id).unwrap().renaming);
     assert!(repo.updates.lock().unwrap().is_empty());
@@ -1662,13 +1722,16 @@ fn windows_install_paths_prefers_local_bin_over_npm() {
     );
 }
 
-/// `resolve_claude_binary` (the public resolver) must wire the
-/// `which`-miss arm to the Windows-install-paths fallback. Without
-/// this, the wiring "which says no → fall through to install paths"
+/// `resolve_claude_binary_in` (the resolver behind `resolve_claude_binary`)
+/// must wire the `which`-miss arm to the Windows-install-paths fallback.
+/// Without this, the wiring "which says no → fall through to install paths"
 /// is untested.
+///
+/// The lookup inputs are passed in, never written to the process environment:
+/// a rewritten `PATH` makes every concurrent test that spawns `git`, `node` or
+/// `powershell.exe` fail with "program not found" (issue #2109).
 #[test]
 fn resolve_claude_binary_falls_through_to_windows_install_paths() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().expect("create tempdir");
     let empty_path = tmp.path().join("empty_path");
     std::fs::create_dir_all(&empty_path).expect("empty PATH dir");
@@ -1679,22 +1742,14 @@ fn resolve_claude_binary_falls_through_to_windows_install_paths() {
     let empty_appdata = tmp.path().join("empty_appdata");
     std::fs::create_dir_all(&empty_appdata).expect("empty APPDATA dir");
 
-    // Force the which-arm to miss (PATH → empty) and isolate the
-    // resolver from any pre-existing real install (USERPROFILE /
-    // APPDATA → our temp dirs). All three vars are touched because
-    // the resolver reads all three; missing any one lets a
-    // parallel test's value bleed through and produce a false Ok.
-    with_env_vars(
-        &[
-            ("PATH", Some(empty_path.as_os_str())),
-            ("USERPROFILE", Some(tmp.path().as_os_str())),
-            ("APPDATA", Some(empty_appdata.as_os_str())),
-        ],
-        || {
-            let result = resolve_claude_binary();
-            assert_eq!(result.as_deref().map(|p| p.to_path_buf()), Ok(target));
-        },
-    );
+    // PATH misses, and USERPROFILE / APPDATA point at our temp dirs so a real
+    // install on the machine running the tests cannot bleed through.
+    let result = resolve_claude_binary_in(&ClaudeSearch {
+        path: Some(empty_path.into_os_string()),
+        userprofile: Some(tmp.path().to_string_lossy().into_owned()),
+        appdata: Some(empty_appdata.to_string_lossy().into_owned()),
+    });
+    assert_eq!(result, Ok(target));
 }
 
 /// When both arms miss, the error must point users at the
@@ -1704,37 +1759,31 @@ fn resolve_claude_binary_falls_through_to_windows_install_paths() {
 /// provider setting doesn't unblock a missing binary.
 #[test]
 fn resolve_claude_binary_error_does_not_mislead_to_settings() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().expect("create tempdir");
     let empty_path = tmp.path().join("empty_path");
     std::fs::create_dir_all(&empty_path).expect("empty PATH dir");
     let empty_appdata = tmp.path().join("empty_appdata");
     std::fs::create_dir_all(&empty_appdata).expect("empty APPDATA dir");
 
-    with_env_vars(
-        &[
-            ("PATH", Some(empty_path.as_os_str())),
-            ("USERPROFILE", Some(tmp.path().as_os_str())),
-            ("APPDATA", Some(empty_appdata.as_os_str())),
-        ],
-        || {
-            let err = resolve_claude_binary()
-                .expect_err("with no binary anywhere, the resolver must Err");
-            assert!(
-                err.contains("claude binary not found"),
-                "error must say what was missing; got: {}",
-                err
-            );
-            assert!(
-                err.contains("install Claude Code"),
-                "error must point at the actionable fix; got: {}",
-                err
-            );
-            assert!(
-                !err.contains("pick a different provider"),
-                "error must not blame Settings → Auto-naming for a missing binary; got: {}",
-                err
-            );
-        },
+    let err = resolve_claude_binary_in(&ClaudeSearch {
+        path: Some(empty_path.into_os_string()),
+        userprofile: Some(tmp.path().to_string_lossy().into_owned()),
+        appdata: Some(empty_appdata.to_string_lossy().into_owned()),
+    })
+    .expect_err("with no binary anywhere, the resolver must Err");
+    assert!(
+        err.contains("claude binary not found"),
+        "error must say what was missing; got: {}",
+        err
+    );
+    assert!(
+        err.contains("install Claude Code"),
+        "error must point at the actionable fix; got: {}",
+        err
+    );
+    assert!(
+        !err.contains("pick a different provider"),
+        "error must not blame Settings → Auto-naming for a missing binary; got: {}",
+        err
     );
 }

@@ -18,7 +18,8 @@
  * at compile time if a variant is added or renamed).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { preloadProbeTabs } from './helpers/preloadProbeTabs';
 import { act, render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { invoke } from '@tauri-apps/api/core';
@@ -135,6 +136,9 @@ beforeEach(() => {
     activeCircuitEditorId: null,
   });
 });
+
+// Load the lazy Probe tab chunks up front so rendering a tab does not wait on disk.
+beforeAll(preloadProbeTabs, 60_000);
 
 describe('Circuits Probe catalog contract (#1469)', () => {
   // -- Type-level exhaustiveness drift gate (#1469 follow-up) -------
