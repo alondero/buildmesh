@@ -1743,9 +1743,12 @@ fn continuation_is_current(
     revision: Option<&str>,
 ) -> bool {
     alive
-        && matches!(status, SessionStatus::Ready | SessionStatus::AwaitingInput)
+        && matches!(
+            status,
+            SessionStatus::Ready | SessionStatus::Completed | SessionStatus::AwaitingInput
+        )
         && view.context.source_agent_id() != Some(target)
-        && view.resolve_target_agent(node_id) == Some(target)
+        && view.continuation_target(node_id) == Some(target)
         && stamp.is_some()
         && stamp
             == view
@@ -1948,6 +1951,7 @@ pub(super) fn execute_effects(
             Effect::InjectPty {
                 node_id, prompt, ..
             } => {
+                let requests_result = report_contract::requests_result(view, node_id, prompt);
                 let prompt = report_contract::prompt(view, node_id, prompt);
                 let attempt = view.step(node_id).map_or(1, |s| s.attempt);
                 let intent = db::circuit::evidence::EffectIntent {
@@ -1967,18 +1971,17 @@ pub(super) fn execute_effects(
                         // stepper only emits AgentLost via observation,
                         // and a missing target here means the row is
                         // already gone, so a direct write is honest.
-                        let agent_alive = db::get_agent_node_by_id(target)
+                        let Some(target_node) = db::get_agent_node_by_id(target)
                             .ok()
                             .filter(|n| n.status != SessionStatus::Archived)
-                            .is_some();
-                        if !agent_alive {
+                        else {
                             let reason = format!(
                                 "target agent {} for step {} was lost before prompt injection",
                                 target, node_id
                             );
                             tracing::warn!("circuits: run {}: {}", active.run.id, reason);
                             return Err(reason);
-                        }
+                        };
                         if effect_batch.is_cancelled()
                             || db::get_circuit_run(active.run.id)
                                 .ok()
@@ -1994,6 +1997,23 @@ pub(super) fn execute_effects(
                             continue;
                         };
                         view.context.set("evidence.revision", revision.to_string());
+                        // The full prompt goes to its handoff file; the terminal
+                        // receives either the same text or a pointer to it. The
+                        // digest and the PTY write both use what is delivered.
+                        let staged = crate::circuit::handoff::stage_prompt(
+                            active.run.id,
+                            node_id,
+                            attempt,
+                            target_node.env,
+                            &prompt,
+                            requests_result,
+                        );
+                        let delivered_prompt = staged.delivered;
+                        crate::circuit::handoff::set_agent_turn(
+                            active.run.id,
+                            target,
+                            staged.turn.as_ref(),
+                        );
                         // Record the submission before the PTY write. Claude
                         // echoes the prompt back within milliseconds of Enter,
                         // and that echo only proves *this* submission if the
@@ -2004,7 +2024,7 @@ pub(super) fn execute_effects(
                             node_id,
                             attempt,
                             target,
-                            &prompt,
+                            &delivered_prompt,
                         ) {
                             Ok(revision) => {
                                 view.context.set("evidence.revision", revision.to_string())
@@ -2030,7 +2050,7 @@ pub(super) fn execute_effects(
                                 crate::circuit::delivery::write_prompt_to_pty_guarded(
                                     &crate::agent::process::PROCESS_REGISTRY,
                                     target,
-                                    &prompt,
+                                    &delivered_prompt,
                                     app,
                                     Some(&input),
                                 )
@@ -2118,10 +2138,18 @@ pub(super) fn execute_effects(
                     .context
                     .get(&format!("node.{node_id}.continuation.input"))
                     .ok_or_else(|| "Continuation lacks an input ownership stamp".to_string())?;
+                // The agent may owe a result file from an earlier turn. Archive it so the
+                // continuation cannot be judged from that stale report.
+                let prompt = crate::circuit::handoff::prepare_continuation(
+                    active.run.id,
+                    *target_agent_id,
+                    node.env,
+                    prompt,
+                );
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
                     *target_agent_id,
-                    prompt,
+                    &prompt,
                     app,
                     Some(expected),
                 ) {

@@ -2,6 +2,7 @@
 //! atomic [`commit_circuit_advance`] seam (spec #1205).
 
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 
 use crate::circuit::vocabulary::{RunState, StepStatus};
 use crate::db::SqlResult;
@@ -1555,6 +1556,37 @@ pub(crate) fn get_circuit_run_inner(
         })
     })?;
     rows.next().transpose()
+}
+
+/// Ids per `IN (...)` query, keeping each statement well under SQLite's bound-variable limit.
+const EXISTING_RUN_ID_CHUNK: usize = 500;
+
+/// The subset of `ids` that still has a circuit run row. Used by the handoff
+/// folder reconciliation to find folders whose run was deleted.
+pub fn existing_circuit_run_ids(ids: &[i64]) -> SqlResult<HashSet<i64>> {
+    let db = crate::db::read_conn();
+    existing_circuit_run_ids_inner(&db, ids)
+}
+
+/// Per-test isolated variant of [`existing_circuit_run_ids`] (issue #1691).
+pub(crate) fn existing_circuit_run_ids_inner(
+    db: &Connection,
+    ids: &[i64],
+) -> SqlResult<HashSet<i64>> {
+    let mut found = HashSet::new();
+    for chunk in ids.chunks(EXISTING_RUN_ID_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let mut stmt = db.prepare(&format!(
+            "SELECT id FROM autopilot_circuit_runs WHERE id IN ({placeholders})"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
+            row.get::<_, i64>(0)
+        })?;
+        for id in rows {
+            found.insert(id?);
+        }
+    }
+    Ok(found)
 }
 
 pub fn list_circuit_run_steps(run_id: i64) -> SqlResult<Vec<AutopilotCircuitRunStep>> {

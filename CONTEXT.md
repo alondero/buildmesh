@@ -215,6 +215,10 @@ _Avoid_: failed step, stalled step
 A human-attested outcome for a Circuit Step, recorded with a reason. It remains distinct from verified evidence and cannot satisfy separate permission or review-approval requirements.
 _Avoid_: verified outcome, skip
 
+**Handoff file**:
+The file through which a Circuit gives an agent its full prompt, and the file the agent writes its final result to when it has finished. The terminal receives only a short pointer to the prompt file when the prompt is long, so the full text never depends on a terminal paste.
+_Avoid_: prompt file, result file, attachment
+
 **Node Digest**:
 A coordinator-facing read summary of a single Agent Node answering "what's going on, and does it need feedback?". Layered: an always-available spine from Buildmesh's own DB (lifecycle `status`, "needs feedback" = `awaiting_input`) enriched, for harnesses with a wired transcript reader (currently Claude Code/Claude-compatible profiles, Codex, Cursor, AGY, Grok, and Command Code), with semantic content read from the agent's on-disk JSONL transcript. Non-supporting providers, or a transcript that fails to parse, degrade to the spine with the enrichment explicitly flagged unavailable (never silently omitted). Muse nodes may additionally carry **Observed Session Telemetry** when MSP token/context events have been ingested; that layer is omitted when there are no observations and is never a Usage Meter. The rendered terminal/TUI is deliberately **not** a digest source.
 _Avoid_: Node summary, status payload, snapshot

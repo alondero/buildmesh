@@ -16,6 +16,35 @@ pub(super) struct ClassifiedTurn {
     /// The gate deliberately did not classify this report because the agent is
     /// still working. The caller publishes `TurnParked`, not `TurnClassified`.
     pub(super) waiting_for_a_finished_turn: bool,
+    /// The finished turn owes a result file that is not there yet. Set only in
+    /// that case; the gate reminds the agent rather than classifying the turn.
+    pub(super) missing_result: Option<MissingResult>,
+}
+
+/// What the reminder needs: where the agent must save its result, and the
+/// turn, report and input the reminder is fenced to.
+pub(super) struct MissingResult {
+    pub path_for_agent: String,
+    pub stamp: String,
+    pub revision: String,
+    pub input_stamp: String,
+}
+
+/// The report to interpret for a turn that owes a result file: the file's text
+/// once it is written, otherwise the transcript report. The flag is `true` when
+/// the file is missing, blank or unreadable.
+fn report_from_result_file(
+    transcript_output: String,
+    result: std::io::Result<Option<String>>,
+) -> (String, bool) {
+    match result {
+        Ok(Some(text)) => (text, false),
+        Ok(None) => (transcript_output, true),
+        Err(error) => {
+            tracing::warn!("circuits: could not read the agent's result file: {error}");
+            (transcript_output, true)
+        }
+    }
 }
 
 pub(super) fn classify_step_turn(
@@ -78,14 +107,78 @@ pub(super) fn classify_step_turn(
                 output: String::new(),
                 continuation: None,
                 waiting_for_a_finished_turn: false,
+                missing_result: None,
             })
         }
     };
     let readiness::Candidate {
         binding,
-        output,
+        mut output,
         status,
     } = candidate;
+    let mut missing_path = None;
+    if let Some(path) = crate::circuit::handoff::expected_result(active.run.id, agent_node_id) {
+        let (report, missing) =
+            report_from_result_file(output, crate::circuit::handoff::read_result(&path));
+        output = report;
+        if missing {
+            tracing::info!(
+                "circuits: run {} step {node_id} agent {agent_node_id}: result file {} is missing or blank; keeping the transcript report",
+                active.run.id,
+                path.display()
+            );
+            missing_path = Some(path);
+        } else {
+            tracing::info!(
+                "circuits: run {} step {node_id} agent {agent_node_id}: interpreting the result file {}",
+                active.run.id,
+                path.display()
+            );
+        }
+    }
+    let superseded = || {
+        stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
+            || crate::agent::process::PROCESS_REGISTRY
+                .input_stamp(agent_node_id)
+                .as_deref()
+                != Some(binding.input_guard.input_stamp.as_str())
+            || binding
+                .input_guard
+                .report_guard
+                .as_ref()
+                .is_some_and(|report| !report.is_current())
+    };
+    // A finished turn that owes a result file is reminded, never classified from
+    // its transcript. Checked before readiness and classification, so the
+    // classifier is not consulted for it. An unfinished turn (still working, or
+    // waiting on a person) keeps the ordinary path.
+    let turn_finished = matches!(status, SessionStatus::Ready | SessionStatus::Completed);
+    let missing_result = match (missing_path, stamp.as_deref()) {
+        (Some(path), Some(stamp)) if turn_finished => Some(MissingResult {
+            path_for_agent: crate::circuit::handoff::agent_visible_path(&path, agent.env),
+            stamp: stamp.to_string(),
+            revision: binding.report_revision.clone(),
+            input_stamp: binding.input_guard.input_stamp.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(missing_result) = missing_result {
+        evaluator::note_evaluation(agent_node_id);
+        if superseded() {
+            return None;
+        }
+        return Some(ClassifiedTurn {
+            classifier_error: None,
+            observation_blocker: None,
+            agent_node_id,
+            classification: None,
+            output,
+            continuation: None,
+            waiting_for_a_finished_turn: false,
+            binding: Some(binding),
+            missing_result: Some(missing_result),
+        });
+    }
     let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
     let changed_revision = view
         .context
@@ -122,17 +215,7 @@ pub(super) fn classify_step_turn(
             classify_gate_report(view, node_id, status, &output, classify)
         }
     };
-    if stamp != db::agent_turn_stamp(agent_node_id).ok().flatten()
-        || crate::agent::process::PROCESS_REGISTRY
-            .input_stamp(agent_node_id)
-            .as_deref()
-            != Some(binding.input_guard.input_stamp.as_str())
-        || binding
-            .input_guard
-            .report_guard
-            .as_ref()
-            .is_some_and(|report| !report.is_current())
-    {
+    if superseded() {
         return None;
     }
     let mut classification = classification.filter(|value| {
@@ -180,6 +263,7 @@ pub(super) fn classify_step_turn(
         continuation,
         waiting_for_a_finished_turn: readiness.parks(),
         binding: Some(binding),
+        missing_result: None,
     })
 }
 
@@ -908,6 +992,7 @@ pub(super) fn observe_gates_with(
                     binding,
                     observation_blocker,
                     classifier_error,
+                    missing_result,
                 }) = source.classify(view, step)
                 {
                     if let Some(blocker) = observation_blocker {
@@ -926,6 +1011,39 @@ pub(super) fn observe_gates_with(
                                 .map(|binding| binding.report_revision.clone()),
                             node_id: step.node_id.clone(),
                             output,
+                        });
+                        continue;
+                    }
+                    if let Some(missing) = missing_result {
+                        // Attention is raised once per observed turn, on the event
+                        // the stepper exhausts (or cannot remind), not on every tick.
+                        // The stepper unverifies the step on this same event, so the
+                        // next tick is `Ignore` and this does not repeat.
+                        let decision = view.result_reminder_decision(
+                            &step.node_id,
+                            step.attempt,
+                            &missing.revision,
+                            &missing.stamp,
+                        );
+                        if matches!(
+                            decision,
+                            crate::circuit::stepper::ResultReminderDecision::Exhausted
+                                | crate::circuit::stepper::ResultReminderDecision::NotOwned
+                        ) {
+                            let issue = view
+                                .context
+                                .get("issue.number")
+                                .and_then(|number| number.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            source.blocked(agent_node_id, issue);
+                        }
+                        events.push(CircuitEvent::ResultFileMissing {
+                            node_id: step.node_id.clone(),
+                            attempt: step.attempt,
+                            result_path: missing.path_for_agent,
+                            stamp: missing.stamp,
+                            revision: missing.revision,
+                            input_stamp: missing.input_stamp,
                         });
                         continue;
                     }
@@ -1004,5 +1122,40 @@ mod classifier_selection_tests {
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
         preferences.default_provider = Some("opencode".into());
         assert_eq!(classifier_provider(&preferences), "claude:minimax");
+    }
+}
+
+#[cfg(test)]
+mod result_file_tests {
+    use super::report_from_result_file;
+
+    #[test]
+    fn a_written_result_file_replaces_the_transcript_report() {
+        let (output, missing) = report_from_result_file(
+            "transcript report".into(),
+            Ok(Some("final report\nBUILDMESH_HANDOFF_V1: READY".into())),
+        );
+        assert_eq!(output, "final report\nBUILDMESH_HANDOFF_V1: READY");
+        assert!(!missing);
+    }
+
+    #[test]
+    fn a_missing_result_file_keeps_the_transcript_report_and_is_missing() {
+        let (output, missing) = report_from_result_file("transcript report".into(), Ok(None));
+        assert_eq!(output, "transcript report");
+        assert!(missing);
+    }
+
+    #[test]
+    fn an_unreadable_result_file_keeps_the_transcript_report_and_is_missing() {
+        let (output, missing) = report_from_result_file(
+            "transcript report".into(),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "file is locked",
+            )),
+        );
+        assert_eq!(output, "transcript report");
+        assert!(missing);
     }
 }

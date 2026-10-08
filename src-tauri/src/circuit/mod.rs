@@ -35,6 +35,7 @@ pub mod compatibility;
 pub(crate) mod delivery;
 pub mod evaluator;
 pub mod finish;
+pub(crate) mod handoff;
 pub(crate) mod issue_dependencies;
 pub(crate) mod launch;
 pub mod security;
