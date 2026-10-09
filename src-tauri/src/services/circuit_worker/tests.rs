@@ -1875,6 +1875,106 @@ fn unverified_classifier_outage_keeps_its_retry_cooldown() {
     ));
 }
 
+/// A gate whose unchanged report already failed `failures` classifier calls,
+/// the last with `error`, as `record_classifier_failure` leaves its context.
+fn classifier_outage_view(failures: u32, error: &str) -> RunView {
+    let mut view = report_gate_view();
+    view.step_mut("finish_classifier").unwrap().status = StepStatus::Unverified;
+    for (key, value) in [
+        ("evaluated_attempt", "1".to_string()),
+        ("evaluated_output", "Finished.".to_string()),
+        ("classification", "unavailable".to_string()),
+        ("classifier_failures.1", failures.to_string()),
+        ("classifier_error.1", error.to_string()),
+    ] {
+        view.context
+            .set(&format!("node.finish_classifier.{key}"), value);
+    }
+    view
+}
+
+fn mcode_timeout() -> String {
+    format!("mcode: {}", evaluator::CLASSIFIER_TIMEOUT_MESSAGE)
+}
+
+fn report_retry_is_due(view: &RunView, since_evaluation_ms: u128) -> bool {
+    should_classify_report(
+        view,
+        "finish_classifier",
+        SessionStatus::AwaitingInput,
+        "Finished.",
+        Some(since_evaluation_ms),
+    )
+}
+
+/// Run 399: five minute-spaced timeouts parked the gate during a 28-minute
+/// provider stall. Each further timeout now waits longer before the next call.
+#[test]
+fn repeated_classifier_timeouts_widen_the_report_retry_cooldown() {
+    for (failures, wait_ms) in [(1, 60_000), (2, 180_000), (3, 600_000), (4, 1_200_000)] {
+        let view = classifier_outage_view(failures, &mcode_timeout());
+        assert!(
+            !report_retry_is_due(&view, wait_ms - 1),
+            "after {failures} timeouts the retry is not due {} ms in",
+            wait_ms - 1
+        );
+        assert!(
+            report_retry_is_due(&view, wait_ms),
+            "after {failures} timeouts the retry is due at {wait_ms} ms"
+        );
+    }
+}
+
+#[test]
+fn a_classifier_failure_that_is_not_a_timeout_keeps_the_fast_retry_cadence() {
+    let view = classifier_outage_view(
+        4,
+        "mcode: classifier exited with exit code: 4: not available",
+    );
+    assert!(!report_retry_is_due(&view, 59_999));
+    assert!(report_retry_is_due(&view, 60_000));
+}
+
+#[test]
+fn the_quiet_turn_watchdog_honours_the_same_timeout_back_off() {
+    let fresh = report_gate_view();
+    assert!(quiet_evaluation_is_due(&fresh, "finish_classifier", None));
+    assert!(!quiet_evaluation_is_due(
+        &fresh,
+        "finish_classifier",
+        Some(59_999)
+    ));
+    assert!(quiet_evaluation_is_due(
+        &fresh,
+        "finish_classifier",
+        Some(60_000)
+    ));
+
+    let timed_out = classifier_outage_view(2, &mcode_timeout());
+    assert!(!quiet_evaluation_is_due(
+        &timed_out,
+        "finish_classifier",
+        Some(179_999)
+    ));
+    assert!(quiet_evaluation_is_due(
+        &timed_out,
+        "finish_classifier",
+        Some(180_000)
+    ));
+    assert!(quiet_evaluation_is_due(
+        &timed_out,
+        "finish_classifier",
+        None
+    ));
+
+    let failed = classifier_outage_view(2, "mcode: authentication failed");
+    assert!(quiet_evaluation_is_due(
+        &failed,
+        "finish_classifier",
+        Some(60_000)
+    ));
+}
+
 #[test]
 fn circuit_classifier_exhaustion_survives_restart_and_new_reports() {
     let mut view = report_gate_view();

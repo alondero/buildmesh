@@ -73,6 +73,30 @@ use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
 
+/// Wait between classifier attempts for any failure that carries a diagnostic
+/// (bad login, missing binary, unrecognised verdict): the person can act on it,
+/// so it surfaces quickly.
+const CLASSIFIER_RETRY_COOLDOWN_MS: u128 = 60_000;
+
+/// Wait after the 1st, 2nd, 3rd... consecutive *timeout*. A timeout means the
+/// classifier CLI wedged, not that it refused. Run 399: every `mcode exec`
+/// hung in start-up for 28 minutes, then recovered by itself, but five
+/// minute-spaced attempts had already parked the gate. These waits total
+/// 34 minutes across the four gaps a 5-attempt budget has.
+const CLASSIFIER_TIMEOUT_COOLDOWNS_MS: [u128; 4] = [60_000, 180_000, 600_000, 1_200_000];
+
+/// How long to wait before the next classifier attempt, given how many have
+/// failed in a row and the last error. The failure budget itself
+/// ([`MAX_CLASSIFIER_FAILURES`]) and the explicit recheck after exhausting it
+/// are unchanged: this only spaces the attempts.
+pub(crate) fn classifier_retry_cooldown_ms(failures: u32, last_error: Option<&str>) -> u128 {
+    if !last_error.is_some_and(crate::circuit::evaluator::is_classifier_timeout) {
+        return CLASSIFIER_RETRY_COOLDOWN_MS;
+    }
+    let step = (failures.max(1) as usize - 1).min(CLASSIFIER_TIMEOUT_COOLDOWNS_MS.len() - 1);
+    CLASSIFIER_TIMEOUT_COOLDOWNS_MS[step]
+}
+
 // ---------------------------------------------------------------------------
 // State model — the pure mirror of the three ledger tables.
 //
@@ -2478,16 +2502,23 @@ fn record_classifier_failure(
     let failures = previous + 1;
     run.context.set(&key, failures.to_string());
     t.context_changed = true;
-    let diagnostic = run
+    let last_error = run
         .context
         .get(&format!("node.{node_id}.classifier_error.{attempt}"))
         .filter(|error| !error.is_empty())
+        .map(str::to_owned);
+    let diagnostic = last_error
+        .as_deref()
         .map(|error| format!(" Last failure: {error}"))
         .unwrap_or_default();
     if failures >= MAX_CLASSIFIER_FAILURES {
         unverify_step(run, t, node_id, format!("Classifier unavailable after {MAX_CLASSIFIER_FAILURES} attempts. Restore the configured classifier and recheck evidence.{diagnostic}"));
     } else {
-        let error = format!("Classifier unavailable; retrying after 60 seconds. Check the Circuit classifier provider in app settings if this persists.{diagnostic}");
+        let wait = describe_window(
+            classifier_retry_cooldown_ms(failures, last_error.as_deref()).min(i64::MAX as u128)
+                as i64,
+        );
+        let error = format!("Classifier unavailable; retrying after {wait}. Check the Circuit classifier provider in app settings if this persists.{diagnostic}");
         if let Some(step) = run.step_mut(node_id) {
             step.error = Some(error.clone());
         }

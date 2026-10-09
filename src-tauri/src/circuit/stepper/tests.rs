@@ -3235,6 +3235,100 @@ fn circuit_classifier_quiet_failure_spends_budget_without_inventing_report_evide
     assert_eq!(run.state, RunState::Running);
 }
 
+fn classifier_timeout_error() -> String {
+    format!(
+        "mcode: {}",
+        crate::circuit::evaluator::CLASSIFIER_TIMEOUT_MESSAGE
+    )
+}
+
+#[test]
+fn repeated_classifier_timeouts_back_off_while_other_failures_keep_the_fast_cadence() {
+    let timeout = classifier_timeout_error();
+    let schedule: Vec<u128> = (1..MAX_CLASSIFIER_FAILURES)
+        .map(|failures| classifier_retry_cooldown_ms(failures, Some(&timeout)))
+        .collect();
+    assert_eq!(schedule, [60_000, 180_000, 600_000, 1_200_000]);
+    assert_eq!(
+        classifier_retry_cooldown_ms(MAX_CLASSIFIER_FAILURES + 4, Some(&timeout)),
+        1_200_000,
+        "past the schedule the wait stays at its last step"
+    );
+    // A bad login, a missing binary or an unrecognised verdict fails with a
+    // diagnostic the person can act on: that is not worth waiting out.
+    for error in [
+        None,
+        Some("codex: authentication failed"),
+        Some("mcode: classifier exited with exit code: 4: Model is not available"),
+    ] {
+        for failures in 0..=MAX_CLASSIFIER_FAILURES {
+            assert_eq!(classifier_retry_cooldown_ms(failures, error), 60_000);
+        }
+    }
+}
+
+/// Run 399: every `mcode exec` launch between 12:17:57 and 12:46:21 UTC hung
+/// in start-up, then the provider healed on its own. Five attempts at a fixed
+/// minute parked the gate after about five of those 28 minutes.
+#[test]
+fn the_timeout_back_off_outlasts_the_stall_that_failed_run_399() {
+    let stall_ms: u128 = (28 * 60 + 24) * 1_000;
+    let timeout = classifier_timeout_error();
+    let waiting: u128 = (1..MAX_CLASSIFIER_FAILURES)
+        .map(|failures| classifier_retry_cooldown_ms(failures, Some(&timeout)))
+        .sum();
+    assert!(
+        waiting > stall_ms,
+        "the waits between {MAX_CLASSIFIER_FAILURES} timed-out attempts total {waiting} ms, \
+         shorter than the {stall_ms} ms outage"
+    );
+}
+
+#[test]
+fn the_checkpoint_states_the_real_wait_before_the_next_classifier_attempt() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let step_error = |run: &RunView| run.step("classify").unwrap().error.clone().unwrap();
+    let outage = |error: String| CircuitEvent::ClassifierUnavailable {
+        node_id: "classify".into(),
+        attempt: 1,
+        error,
+    };
+
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 1 minute."),
+        "{}",
+        step_error(&run)
+    );
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 3 minutes"),
+        "{}",
+        step_error(&run)
+    );
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 10 minutes"),
+        "{}",
+        step_error(&run)
+    );
+
+    // A different failure resets the wait to the fast cadence.
+    advance(&mut run, &outage("codex: authentication failed".into()));
+    assert!(
+        step_error(&run).contains("retrying after 1 minute."),
+        "{}",
+        step_error(&run)
+    );
+}
+
 /// Drive a gate_run from Pending up to the gate step existing. The
 /// gate's exact status depends on its kind (classifier/verification
 /// park Running; AutoRun completes instantly) — callers assert that.

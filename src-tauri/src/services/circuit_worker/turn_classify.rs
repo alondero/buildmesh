@@ -590,7 +590,8 @@ pub(super) fn should_classify_report(
         // verdict. That is not new evidence: retry the same report on the
         // outage budget. Changed report revisions are admitted by the caller.
         if view.context.get(&format!("{prefix}.classification")) == Some("unavailable") {
-            return since_evaluation_ms.is_none_or(|elapsed| elapsed >= 60_000);
+            let wait = classifier_retry_wait_ms(view, node_id);
+            return since_evaluation_ms.is_none_or(|elapsed| elapsed >= wait);
         }
         if step.status == StepStatus::Unverified
             && view
@@ -610,6 +611,37 @@ pub(super) fn should_classify_report(
         return false;
     }
     true
+}
+
+/// How long this gate must wait after its last failed classifier call. Derived
+/// from the persisted failure count and last error, so it survives restarts.
+pub(super) fn classifier_retry_wait_ms(view: &RunView, node_id: &str) -> u128 {
+    let Some(step) = view.step(node_id) else {
+        return crate::circuit::stepper::classifier_retry_cooldown_ms(0, None);
+    };
+    let failures = view
+        .context
+        .get(&format!(
+            "node.{node_id}.classifier_failures.{}",
+            step.attempt
+        ))
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(0);
+    let last_error = view
+        .context
+        .get(&format!("node.{node_id}.classifier_error.{}", step.attempt));
+    crate::circuit::stepper::classifier_retry_cooldown_ms(failures, last_error)
+}
+
+/// The lost-turn watchdog's gate on re-running inference for `node_id`: at
+/// least a quiet window, longer while the gate's classifier keeps timing out.
+pub(super) fn quiet_evaluation_is_due(
+    view: &RunView,
+    node_id: &str,
+    since_evaluation_ms: Option<u128>,
+) -> bool {
+    let wait = classifier_retry_wait_ms(view, node_id).max(LOST_TURN_QUIET_MS);
+    since_evaluation_ms.is_none_or(|elapsed| elapsed >= wait)
 }
 
 pub(super) fn classifier_budget_exhausted(view: &RunView, node_id: &str) -> bool {
@@ -877,9 +909,11 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
             }
             // Unknown/background evidence is retried at most once per minute,
             // including when a transcript changes without any PTY output.
-            if evaluator::millis_since_last_evaluation(agent_node_id)
-                .is_some_and(|elapsed| elapsed < LOST_TURN_QUIET_MS)
-            {
+            if !quiet_evaluation_is_due(
+                &view,
+                &step.node_id,
+                evaluator::millis_since_last_evaluation(agent_node_id),
+            ) {
                 continue;
             }
             evaluator::note_evaluation(agent_node_id);
