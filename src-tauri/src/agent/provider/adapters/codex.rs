@@ -63,16 +63,24 @@ fn base_flags_with_sandbox(sandbox: &str) -> Vec<String> {
     ]
 }
 
-/// Codex already launches hook commands through `cmd.exe /C` (Windows) or
-/// `$SHELL -lc` (Unix), then `env_clear()`s down to a Core inherit snapshot.
-/// Nested `cmd.exe /c "%BUILDMESH_PORT%"` therefore never expands and never
-/// sees stdin. Bake the loopback callback URL and let Codex's own shell run
-/// curl. Discard the HTTP response body and print `{}`: Codex Stop requires
+/// Codex launches hook commands through PowerShell (Windows; probed against
+/// 0.162, where `commandWindows` sees `$PSVersionTable` but not
+/// `%CMDCMDLINE%`) or `$SHELL -lc` (Unix), then `env_clear()`s down to a Core
+/// inherit snapshot. A cmd.exe-only construct (`& echo {}`, `2>NUL >NUL`) is
+/// therefore a PowerShell syntax error and shows as "Hook failed ... exited
+/// with code 1", and a nested `cmd.exe /c "%BUILDMESH_PORT%"` never expands
+/// and never sees stdin. Bake the loopback callback URL and let Codex's own
+/// shell run curl. Discard the HTTP response body and print `{}`: Codex Stop requires
 /// JSON on stdout. Attention callbacks are best-effort notifications, so a
 /// stopped server or stale node must not fail the Codex hook itself.
+///
+/// The command carries no quote characters (`printf {}`, not `printf '{}'`):
+/// it travels as a `-c` launch argument through shells that re-quote it, and
+/// Windows PowerShell 5.1 drops embedded double quotes on the way to a native
+/// program.
 fn attention_hook_unix_command(url: &str) -> String {
     format!(
-        "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf '{{}}'"
+        "curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; printf {{}}"
     )
 }
 
@@ -82,7 +90,7 @@ fn attention_hook_unix_command(url: &str) -> String {
 /// resolve `localhost` inside the distro and find nothing.
 fn attention_hook_wsl_shell_command(url: &str) -> String {
     format!(
-        "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf '{{}}'"
+        "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @- {url} 2>/dev/null || true; else curl -fsS --connect-timeout 2 --max-time 10 -o /dev/null -X POST --data-binary @- {url} 2>/dev/null || true; fi; printf {{}}"
     )
 }
 
@@ -1379,139 +1387,146 @@ fn discover_supported_install_uncached(env_type: EnvType) -> Result<CodexInstall
     })
 }
 
-/// Ensure `<project>/.codex/config.toml` enables the hooks feature
-/// (`[features] hooks = true` — `codex_hooks` is the legacy alias, issue
-/// #884). `toml_edit` preserves comments and formatting while the parsed
-/// document prevents duplicate keys or bracket-like comments from confusing
-/// the merge.
-fn ensure_hooks_feature_content(existing: &str) -> Result<String, String> {
-    let mut document = existing
-        .parse::<DocumentMut>()
-        .map_err(|error| format!("failed to parse Codex project config: {error}"))?;
-    let features = document
-        .as_table_mut()
-        .entry("features")
-        .or_insert(Item::Table(Table::new()))
-        .as_table_like_mut()
-        .ok_or_else(|| "Codex project config 'features' value must be a table".to_string())?;
-    if features
-        .get("hooks")
-        .and_then(Item::as_value)
-        .and_then(|item| item.as_bool())
-        == Some(true)
-        || features
-            .get("codex_hooks")
-            .and_then(Item::as_value)
-            .and_then(|item| item.as_bool())
-            == Some(true)
-    {
-        // Either spelling already enables the feature. Keep the user's
-        // spelling, formatting, and comments untouched.
-        return Ok(document.to_string());
-    }
+/// Longest prompt passed as a launch argument. The hook arguments take about
+/// 19,000 of Windows' 32,767 command-line characters once re-encoded; a prompt
+/// is encoded the same way (and a quote-heavy one doubles), so 2,000 characters
+/// keeps the worst case under the limit.
+const MAX_POSITIONAL_PREFILL_CHARS: usize = 2_000;
 
-    let key = if features.get("hooks").is_some() {
-        "hooks"
-    } else if features.get("codex_hooks").is_some() {
-        "codex_hooks"
-    } else {
-        features.insert("hooks", value(true));
-        return Ok(document.to_string());
-    };
+/// The Codex events Buildmesh listens to. Every event is catch-all except
+/// `PreToolUse`, which is matched to the native question tool; `PostToolUse`
+/// stays catch-all so an approved permission can correlate by tool name.
+const ATTENTION_HOOK_EVENTS: [&str; 7] = [
+    "SessionStart",
+    "Stop",
+    "PermissionRequest",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Interrupt",
+];
 
-    if let Some(existing_value) = features.get_mut(key).and_then(Item::as_value_mut) {
-        let decor = existing_value.decor().clone();
-        let mut replacement = toml_edit::Value::from(true);
-        *replacement.decor_mut() = decor;
-        *existing_value = replacement;
-    } else {
-        features.insert("hooks", value(true));
-    }
-    Ok(document.to_string())
+fn attention_hook_matcher(event: &str) -> Option<&'static str> {
+    (event == "PreToolUse").then_some("^request_user_input$")
 }
 
-/// Ensure `<project>/.codex/hooks.json` carries the seven attention webhooks.
-/// Codex's matcher/event schema nests hook entries one
-/// level deeper than Claude Code's (each event maps to matcher groups, each
-/// carrying a `hooks` array — issue #884). `PreToolUse` is matched to the
-/// native question tool; `PostToolUse` is catch-all so approved permissions
-/// can correlate by tool name. The helper is idempotent and preserves any
-/// unrelated top-level keys the user added.
-/// Return updated hooks JSON, or `None` when the existing document already
-/// contains the current Buildmesh handlers. The caller owns the runtime-aware
-/// read/write so WSL can batch guest file operations.
-fn ensure_hooks_json_content(
-    existing: &str,
-    hook: &serde_json::Value,
-) -> Result<Option<String>, String> {
-    let mut settings: serde_json::Value = if existing.is_empty() {
-        serde_json::json!({})
-    } else {
-        serde_json::from_str(existing).map_err(|e| format!("failed to parse hooks.json: {e}"))?
-    };
-    let Some(settings_object) = settings.as_object_mut() else {
-        return Err("hooks.json top level must be an object".to_string());
-    };
-    let hooks = settings_object
-        .entry("hooks")
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(events) = hooks.as_object_mut() else {
-        return Err("hooks.json 'hooks' value must be an object".to_string());
+/// Stand-in `command` for a Windows runtime. Codex on Windows runs
+/// `commandWindows` and never reads `command`, but the field is mandatory.
+/// Repeating the full callback there would double the launch's size, and on
+/// Windows the whole launch is re-encoded into one PowerShell script that has
+/// to fit in a 32,767-character process command line. The fallback to
+/// `command` that issue #2036 guards is a pre-0.131.0 Codex, which cannot
+/// deliver these hooks anyway (the attention capability needs 0.154.0).
+const WINDOWS_COMMAND_STUB: &str = "echo {}";
+
+fn attention_hook_launch_handler(node_id: i64, env_type: EnvType) -> serde_json::Value {
+    let mut handler = attention_hook_handler(node_id, env_type);
+    if matches!(env_type, EnvType::Windows | EnvType::WindowsInterop) {
+        handler["command"] = serde_json::json!(WINDOWS_COMMAND_STUB);
+    }
+    handler
+}
+
+/// A TOML string for a `-c` value. A literal (single-quoted) string keeps the
+/// argument free of double quotes, which Windows PowerShell 5.1 drops on the
+/// way to a native program; a value that cannot be literal falls back to an
+/// escaped basic string.
+fn toml_launch_string(value: &str) -> String {
+    if !value.contains(['\'', '\n', '\r']) {
+        return format!("'{value}'");
+    }
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
+fn attention_hook_toml_value(event: &str, handler: &serde_json::Value) -> String {
+    let fields = ["type", "command", "commandWindows", "statusMessage"]
+        .into_iter()
+        .filter_map(|key| {
+            handler[key]
+                .as_str()
+                .map(|value| format!("{key}={}", toml_launch_string(value)))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let matcher = attention_hook_matcher(event)
+        .map(|matcher| format!("matcher={},", toml_launch_string(matcher)))
+        .unwrap_or_default();
+    format!("[{{{matcher}hooks=[{{{fields}}}]}}]")
+}
+
+/// Deliver the attention hooks as per-launch `-c` config overrides instead of
+/// project files. From a git worktree Codex reads the *main checkout's*
+/// `.codex/hooks.json` and ignores the worktree's own, so a file written
+/// beside the node is never loaded and the main checkout's file would be
+/// shared by every worktree node. Launch arguments carry this node's id, work
+/// from any directory, and leave nothing behind to go stale. Codex combines
+/// them with the user's own `hooks.json` hooks instead of replacing those.
+fn attention_hook_launch_args(node_id: i64, env_type: EnvType) -> Vec<String> {
+    let handler = attention_hook_launch_handler(node_id, env_type);
+    let mut args = vec!["-c".to_string(), "features.hooks=true".to_string()];
+    for event in ATTENTION_HOOK_EVENTS {
+        args.push("-c".into());
+        args.push(format!(
+            "hooks.{event}={}",
+            attention_hook_toml_value(event, &handler)
+        ));
+    }
+    args
+}
+
+/// Remove Buildmesh's own handlers from the text of a `hooks.json`. Earlier
+/// versions wrote them there; launch arguments deliver them now, and a handler
+/// left behind would fire a second, stale callback for the same event (and
+/// can be an outright failing one: older shapes exit with code 1 in Codex's
+/// PowerShell). The user's own handlers and unrelated keys are untouched.
+/// Returns `None` when there is nothing to remove.
+fn strip_buildmesh_hook_handlers(existing: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut settings: serde_json::Value =
+        serde_json::from_str(existing).map_err(|e| format!("failed to parse hooks.json: {e}"))?;
+    let Some(events) = settings
+        .get_mut("hooks")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Ok(None);
     };
 
     let mut changed = false;
-    for event in [
-        "SessionStart",
-        "Stop",
-        "PermissionRequest",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PostToolUse",
-        "Interrupt",
-    ] {
-        let groups = events.entry(event).or_insert_with(|| serde_json::json!([]));
+    events.retain(|_, groups| {
         let Some(groups) = groups.as_array_mut() else {
-            return Err(format!("hooks.json event '{event}' must be an array"));
+            return true;
         };
-
-        let mut found = false;
-        for group in groups.iter_mut() {
-            let old_post_matcher = event == "PostToolUse"
-                && group.get("matcher").and_then(|value| value.as_str())
-                    == Some("^request_user_input$");
-            let Some(handlers) = group.get_mut("hooks").and_then(|v| v.as_array_mut()) else {
-                continue;
+        let before = groups.len();
+        groups.retain_mut(|group| {
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                return true;
             };
-            if let Some(index) = handlers.iter().position(is_buildmesh_hook_handler) {
-                if handlers[index] != *hook {
-                    handlers[index] = hook.clone();
-                    changed = true;
-                }
-                if old_post_matcher && handlers.iter().all(is_buildmesh_hook_handler) {
-                    if let Some(group) = group.as_object_mut() {
-                        group.remove("matcher");
-                        changed = true;
-                    }
-                }
-                found = true;
-                break;
+            let handlers_before = handlers.len();
+            handlers.retain(|handler| !is_buildmesh_hook_handler(handler));
+            if handlers.len() == handlers_before {
+                return true;
             }
-        }
-        if !found {
-            let mut group = serde_json::json!({ "hooks": [hook.clone()] });
-            if event == "PreToolUse" {
-                group["matcher"] = serde_json::json!("^request_user_input$");
-            }
-            groups.push(group);
             changed = true;
-        }
-    }
+            !handlers.is_empty()
+        });
+        before == 0 || !groups.is_empty()
+    });
     if !changed {
         return Ok(None);
     }
-    let content = serde_json::to_string_pretty(&settings)
-        .map_err(|e| format!("serialize hooks.json failed: {e}"))?;
-    Ok(Some(content))
+    serde_json::to_string_pretty(&settings)
+        .map(Some)
+        .map_err(|e| format!("serialize hooks.json failed: {e}"))
 }
 
 fn is_buildmesh_hook_handler(handler: &serde_json::Value) -> bool {
@@ -1526,6 +1541,24 @@ fn is_buildmesh_hook_handler(handler: &serde_json::Value) -> bool {
             })
 }
 
+/// The main checkout a linked git worktree belongs to, from the worktree's
+/// `.git` file (`gitdir: <main>/.git/worktrees/<name>`). `None` for an
+/// ordinary repository, where `.git` is a directory.
+fn linked_worktree_main_checkout(dir: &Path, distro: Option<&str>) -> Option<PathBuf> {
+    let git_file = dir.join(".git");
+    let content = read_runtime_files(&[&git_file], distro)
+        .ok()?
+        .into_iter()
+        .next()?;
+    let git_dir = content
+        .lines()
+        .find_map(|line| line.strip_prefix("gitdir:"))?
+        .trim()
+        .replace('\\', "/");
+    let (main, _) = git_dir.rsplit_once("/.git/worktrees/")?;
+    Some(PathBuf::from(main))
+}
+
 fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
@@ -1535,51 +1568,45 @@ fn write_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     temp.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
-fn ensure_codex_project_files(
+/// Clear Buildmesh's file-based hooks from the spawn directory and, for a
+/// linked worktree, from the main checkout Codex actually reads. Files are
+/// never created: only an existing `hooks.json` is rewritten, and only to drop
+/// Buildmesh's own entries. A `hooks.json` Codex cannot parse is left for
+/// Codex to report rather than failing the launch.
+fn retire_project_file_hooks(
     resolved: &ResolvedPath,
     runtime: &LaunchRuntime,
-    node_id: i64,
 ) -> Result<(), String> {
     let _guard = ATTENTION_CONFIG_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let distro = runtime_wsl_distro(resolved.env_type, runtime)?;
-    let project_dir = if distro.is_some() {
-        PathBuf::from(&resolved.spawn_path).join(".codex")
+    let spawn_dir = if distro.is_some() {
+        PathBuf::from(&resolved.spawn_path)
     } else {
-        PathBuf::from(&resolved.host_path).join(".codex")
+        PathBuf::from(&resolved.host_path)
     };
-    if distro.is_none() {
-        std::fs::create_dir_all(&project_dir)
-            .map_err(|e| format!("failed to create .codex dir: {e}"))?;
+    let mut hook_files = vec![spawn_dir.join(".codex").join("hooks.json")];
+    if let Some(main) = linked_worktree_main_checkout(&spawn_dir, distro.as_deref()) {
+        hook_files.push(main.join(".codex").join("hooks.json"));
     }
 
-    // Last-writer-wins: hooks.json bakes this node_id into the callback URL
-    // because Codex's hook runner env_clear()s BUILDMESH_*. Two Codex nodes
-    // sharing one worktree directory will redirect Node A's subsequent
-    // attention webhooks to whoever spawned last. Buildmesh worktrees are
-    // 1:1 with nodes today; do not relax that without a per-node hook path.
-    //
-    // Read and validate both files before writing either one. A malformed
-    // hooks.json must not leave a half-applied project configuration behind.
-    let config_path = project_dir.join("config.toml");
-    let hooks_path = project_dir.join("hooks.json");
-    let existing = read_runtime_files(&[&config_path, &hooks_path], distro.as_deref())?;
-    let config_existing = &existing[0];
-    let config_updated = ensure_hooks_feature_content(config_existing)?;
-    let hooks_existing = &existing[1];
-    let hooks_updated = ensure_hooks_json_content(
-        hooks_existing,
-        &attention_hook_handler(node_id, resolved.env_type),
-    )?;
-
-    let mut writes: Vec<(&Path, &str)> = Vec::new();
-    if config_updated != *config_existing {
-        writes.push((&config_path, &config_updated));
+    let paths: Vec<&Path> = hook_files.iter().map(PathBuf::as_path).collect();
+    let existing = read_runtime_files(&paths, distro.as_deref())?;
+    let mut rewritten: Vec<(&Path, String)> = Vec::new();
+    for (path, content) in paths.iter().zip(&existing) {
+        match strip_buildmesh_hook_handlers(content) {
+            Ok(Some(updated)) => rewritten.push((path, updated)),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("leaving {} untouched: {error}", path.display());
+            }
+        }
     }
-    if let Some(hooks_updated) = hooks_updated.as_ref() {
-        writes.push((&hooks_path, hooks_updated));
-    }
+    let writes: Vec<(&Path, &str)> = rewritten
+        .iter()
+        .map(|(path, content)| (*path, content.as_str()))
+        .collect();
     write_runtime_files(&writes, distro.as_deref())
 }
 
@@ -1741,13 +1768,20 @@ impl AgentProvider for CodexAdapter {
         ensure_codex_project_trusted(resolved, runtime)
     }
 
+    /// Hooks travel as launch arguments ([`Self::launch_hook_args`]); what is
+    /// left to do here is retiring the handlers earlier versions wrote into
+    /// project files.
     fn provision_attention_hooks(
         &self,
         resolved: &ResolvedPath,
         runtime: &LaunchRuntime,
-        node_id: i64,
+        _node_id: i64,
     ) -> Result<(), String> {
-        ensure_codex_project_files(resolved, runtime, node_id)
+        retire_project_file_hooks(resolved, runtime)
+    }
+
+    fn launch_hook_args(&self, node_id: i64, env_type: EnvType) -> Vec<String> {
+        attention_hook_launch_args(node_id, env_type)
     }
 
     fn wsl_passthrough_env(&self) -> &'static [&'static str] {
@@ -1782,11 +1816,16 @@ impl AgentProvider for CodexAdapter {
         // begins with a CLI flag is also unsafe as a positional argument. The
         // PTY path preserves the prompt as one pasted turn and is the safe
         // automated-launch mode.
+        //
+        // A long prompt is also unsafe as an argument: on Windows the launch is
+        // one re-encoded PowerShell script that already carries the attention
+        // hooks, and the whole of it has to fit a 32,767-character command line.
         let trimmed = text.trim_start();
         text.contains('\n')
             || text.contains('\r')
             || trimmed.starts_with('-')
             || trimmed.starts_with('+')
+            || text.chars().count() > MAX_POSITIONAL_PREFILL_CHARS
     }
 
     fn ready_for_initial_prompt(&self, tail: &str) -> bool {
@@ -2976,18 +3015,11 @@ mod tests {
         assert_eq!(min_version.as_deref(), Some(CODEX_MIN_HOOK_VERSION));
     }
 
-    fn read_hooks_json(project: &Path) -> serde_json::Value {
-        let content = std::fs::read_to_string(project.join(".codex").join("hooks.json"))
-            .expect("hooks.json not written");
-        serde_json::from_str(&content).expect("hooks.json is not valid JSON")
-    }
-
-    /// Every provisioned command must POST the hook's stdin JSON as the
-    /// request body: curl reads it from `@-`, the WSL relay from a quoted
-    /// `'@-'`, and the PowerShell callbacks from the console.
+    /// Every launch command must POST the hook's stdin JSON as the request
+    /// body: curl reads it from `@-`, and the PowerShell callbacks from the
+    /// console.
     fn forwards_hook_stdin(command: &str) -> bool {
         command.contains("--data-binary @-")
-            || command.contains("--data-binary '@-'")
             || (command.contains("[Console]::In.ReadToEnd()")
                 && command.contains("Invoke-WebRequest"))
     }
@@ -2998,69 +3030,149 @@ mod tests {
         crate::env::decode_powershell_command(command).unwrap_or_else(|| command.to_string())
     }
 
-    fn provision_codex(project: &Path) {
-        let path = project.to_string_lossy().into_owned();
-        let resolved = ResolvedPath {
-            host_path: path.clone(),
-            spawn_path: path.clone(),
-            raw_path: path,
-            env_type: EnvType::Windows,
-        };
-        CODEX
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 42)
-            .unwrap();
+    /// One `hooks.<Event>=…` launch argument, parsed by a real TOML parser.
+    struct LaunchHook {
+        event: String,
+        matcher: Option<String>,
+        fields: std::collections::BTreeMap<String, String>,
     }
 
-    /// Injection writes both files: the feature flag and all seven attention
-    /// webhooks in Codex's nested matcher/event
-    /// schema, POSTing the hook's stdin to the attention endpoint. The
-    /// request_user_input pre-hook remains narrowly matched, while
-    /// PostToolUse is catch-all so an approved permission for any tool can
-    /// clear its marker before the terminal Stop fallback.
+    fn launch_hooks(args: &[String]) -> Vec<LaunchHook> {
+        assert_eq!(
+            args.len() % 2,
+            0,
+            "every override is a `-c <key=value>` pair"
+        );
+        args.chunks(2)
+            .filter_map(|pair| {
+                assert_eq!(pair[0], "-c");
+                let (key, value) = pair[1].split_once('=')?;
+                let event = key.strip_prefix("hooks.")?;
+                let document: DocumentMut = format!("{key} = {value}")
+                    .parse()
+                    .unwrap_or_else(|e| panic!("{key} is not valid TOML: {e}\n{value}"));
+                let groups = document["hooks"][event].as_array().expect("event groups");
+                assert_eq!(groups.len(), 1, "{event}");
+                let group = groups.get(0).unwrap().as_inline_table().expect("group");
+                let handlers = group.get("hooks").and_then(|h| h.as_array()).unwrap();
+                assert_eq!(handlers.len(), 1, "{event}");
+                let handler = handlers.get(0).unwrap().as_inline_table().unwrap();
+                Some(LaunchHook {
+                    event: event.to_string(),
+                    matcher: group
+                        .get("matcher")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string),
+                    fields: handler
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.as_str().unwrap().to_string()))
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    /// Launch arguments carry all seven attention events, each POSTing the
+    /// hook's stdin to *this node's* callback. The question-tool pre-hook
+    /// stays narrowly matched, while PostToolUse is catch-all so an approved
+    /// permission for any tool can clear its marker before the terminal Stop
+    /// fallback.
     #[test]
-    fn inject_writes_config_and_hooks() {
-        let temp = TempDir::new().unwrap();
-        provision_codex(temp.path());
+    fn launch_args_deliver_every_attention_event_to_this_node() {
+        let args = attention_hook_launch_args(42, EnvType::Windows);
+        assert_eq!(&args[..2], ["-c", "features.hooks=true"]);
 
-        let config = std::fs::read_to_string(temp.path().join(".codex").join("config.toml"))
-            .expect("config.toml not written");
-        assert!(config.contains("[features]"), "config: {config}");
-        assert!(config.contains("hooks = true"), "config: {config}");
-
-        let hooks = read_hooks_json(temp.path());
-        for event in [
-            "SessionStart",
-            "Stop",
-            "PermissionRequest",
-            "UserPromptSubmit",
-            "PreToolUse",
-            "PostToolUse",
-            "Interrupt",
-        ] {
-            let command = hooks["hooks"][event][0]["hooks"][0]["command"]
-                .as_str()
-                .map(decoded_hook_command)
-                .unwrap_or_else(|| panic!("{event} hook missing: {hooks:#}"));
+        let hooks = launch_hooks(&args);
+        let events: Vec<_> = hooks.iter().map(|hook| hook.event.as_str()).collect();
+        assert_eq!(events, ATTENTION_HOOK_EVENTS);
+        for hook in &hooks {
+            let callback = decoded_hook_command(&hook.fields["commandWindows"]);
             assert!(
-                command.contains("/api/attention/"),
-                "{event} must POST to the attention endpoint: {command}"
+                callback.contains("/api/attention/42'"),
+                "{} must POST to node 42: {callback}",
+                hook.event
             );
             assert!(
-                forwards_hook_stdin(&command),
-                "{event} must forward the hook stdin as the POST body: {command}"
+                forwards_hook_stdin(&callback),
+                "{} must forward the hook stdin as the POST body: {callback}",
+                hook.event
             );
-            if event == "PreToolUse" {
-                assert_eq!(
-                    hooks["hooks"][event][0]["matcher"].as_str(),
-                    Some("^request_user_input$")
-                );
-            } else if event == "PostToolUse" {
-                assert!(
-                    hooks["hooks"][event][0].get("matcher").is_none(),
-                    "PostToolUse must be catch-all so approved permissions correlate"
-                );
+            assert_eq!(hook.fields["type"], "command");
+            assert_eq!(hook.fields["statusMessage"], BUILDMESH_HOOK_STATUS_MESSAGE);
+            let expected_matcher = (hook.event == "PreToolUse").then_some("^request_user_input$");
+            assert_eq!(hook.matcher.as_deref(), expected_matcher, "{}", hook.event);
+        }
+    }
+
+    /// Two nodes in one repository must never share a callback: each launch
+    /// names its own node and nothing is written to a shared file.
+    #[test]
+    fn concurrent_nodes_get_independent_callbacks() {
+        let a = launch_hooks(&attention_hook_launch_args(41, EnvType::Windows));
+        let b = launch_hooks(&attention_hook_launch_args(42, EnvType::Windows));
+        for (a, b) in a.iter().zip(&b) {
+            let a = decoded_hook_command(&a.fields["commandWindows"]);
+            let b = decoded_hook_command(&b.fields["commandWindows"]);
+            assert!(a.contains("/api/attention/41'") && !a.contains("/attention/42"));
+            assert!(b.contains("/api/attention/42'") && !b.contains("/attention/41"));
+        }
+    }
+
+    /// Windows PowerShell 5.1 drops double quotes passed to a native program,
+    /// and the whole launch is re-encoded into one PowerShell script that must
+    /// fit a 32,767-character process command line (UTF-16, then base64).
+    #[test]
+    fn windows_launch_args_are_quote_free_and_fit_the_command_line_budget() {
+        for env_type in [EnvType::Windows, EnvType::WindowsInterop] {
+            let args = attention_hook_launch_args(42, env_type);
+            assert!(
+                args.iter().all(|arg| !arg.contains('"')),
+                "{env_type:?}: {args:?}"
+            );
+            // `' '` between arguments plus the two quotes around each.
+            let script_chars: usize = args.iter().map(|arg| arg.len() + 3).sum();
+            let encoded_chars = script_chars * 2 * 4 / 3;
+            assert!(
+                encoded_chars < 20_000,
+                "{env_type:?}: hook arguments alone encode to {encoded_chars} of 32767 characters"
+            );
+            for hook in launch_hooks(&args) {
+                assert_eq!(hook.fields["command"], WINDOWS_COMMAND_STUB, "{env_type:?}");
             }
         }
+    }
+
+    /// A WSL runtime keeps a real `command` (its Linux Codex runs it, never
+    /// `commandWindows`) and, like Windows, stays free of quote characters.
+    #[test]
+    fn wsl_launch_args_carry_a_runnable_command_without_quotes() {
+        let args = attention_hook_launch_args(42, EnvType::Wsl);
+        assert!(args.iter().all(|arg| !arg.contains('"')), "{args:?}");
+        for hook in launch_hooks(&args) {
+            let command = &hook.fields["command"];
+            assert!(command.contains("/api/attention/42"), "{command}");
+            assert!(forwards_hook_stdin(command), "{command}");
+            assert!(command.ends_with("printf {}"), "{command}");
+        }
+    }
+
+    #[test]
+    fn long_single_line_prompts_go_through_the_pty_not_the_command_line() {
+        let short = "x".repeat(MAX_POSITIONAL_PREFILL_CHARS);
+        assert!(!CODEX.prefill_requires_pty(&short));
+        let long = "x".repeat(MAX_POSITIONAL_PREFILL_CHARS + 1);
+        assert!(CODEX.prefill_requires_pty(&long));
+    }
+
+    #[test]
+    fn toml_launch_string_prefers_literals_and_escapes_the_rest() {
+        assert_eq!(toml_launch_string("plain $x"), "'plain $x'");
+        // Backslashes and double quotes need no escaping inside a literal.
+        assert_eq!(toml_launch_string(r#"a"b\c"#), r#"'a"b\c'"#);
+        // A single quote or a newline forces the escaped basic form.
+        assert_eq!(toml_launch_string("it's"), r#""it's""#);
+        assert_eq!(toml_launch_string("it's \"a\\b\""), r#""it's \"a\\b\"""#);
+        assert_eq!(toml_launch_string("a\nb"), r#""a\nb""#);
     }
 
     #[test]
@@ -3068,7 +3180,7 @@ mod tests {
         let url = "http://localhost:1992/api/attention/42";
 
         let unix = attention_hook_unix_command(url);
-        assert!(unix.contains("2>/dev/null || true; printf '{}'"), "{unix}");
+        assert!(unix.contains("2>/dev/null || true; printf {}"), "{unix}");
 
         let windows = attention_hook_windows_fallback_command(url);
         let script = crate::env::decode_powershell_command(&windows)
@@ -3183,251 +3295,363 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
     }
 
-    /// Re-running injection over an already-correct project is a no-op.
-    #[test]
-    fn inject_is_idempotent() {
-        let temp = TempDir::new().unwrap();
-        provision_codex(temp.path());
-        let config_first =
-            std::fs::read_to_string(temp.path().join(".codex").join("config.toml")).unwrap();
-        let hooks_first = read_hooks_json(temp.path());
+    /// Codex 0.162 evaluates a hook's `commandWindows` in PowerShell, not
+    /// `cmd.exe` (probed from a real session: `$PSVersionTable` expands,
+    /// `%CMDCMDLINE%` does not). A callback that only parses under cmd.exe is
+    /// a PowerShell syntax error there and shows as "hook exited with code 1".
+    #[cfg(windows)]
+    fn run_like_codex(command: &str) -> std::process::Output {
+        use std::io::Write;
+        use std::process::Stdio;
 
-        provision_codex(temp.path());
-        let config_second =
-            std::fs::read_to_string(temp.path().join(".codex").join("config.toml")).unwrap();
-        assert_eq!(config_first, config_second);
-        assert_eq!(hooks_first, read_hooks_json(temp.path()));
+        let mut hook = crate::process_util::command_no_window("powershell.exe");
+        hook.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let mut child = hook.spawn().expect("spawn powershell.exe");
+        child
+            .stdin
+            .take()
+            .expect("hook stdin")
+            .write_all(br#"{"hook_event_name":"Stop"}"#)
+            .expect("write hook payload");
+        child.wait_with_output().expect("wait for hook")
     }
 
-    /// A user's existing config.toml keys survive; the flag lands under an
-    /// existing `[features]` section instead of duplicating it (a duplicate
-    /// table is a TOML parse error that would break Codex's whole config).
-    #[test]
-    fn config_merge_preserves_content_and_existing_features_section() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        std::fs::write(
-            codex_dir.join("config.toml"),
-            "model = \"gpt-5.2-codex\"\n\n[features]\nweb_search = true\n",
+    /// A loopback port nothing listens on, and one answering every request
+    /// `404` (a callback for a node Buildmesh no longer has).
+    #[cfg(windows)]
+    fn dead_and_not_found_urls() -> (String, String) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        server.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let Ok((mut stream, _)) = server.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                };
+                stream.set_nonblocking(false).ok();
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        (
+            format!("http://127.0.0.1:{dead_port}/api/attention/42"),
+            format!("http://127.0.0.1:{port}/api/attention/42"),
         )
-        .unwrap();
-
-        provision_codex(temp.path());
-
-        let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
-        assert!(
-            config.contains("model = \"gpt-5.2-codex\""),
-            "config: {config}"
-        );
-        assert!(config.contains("web_search = true"), "config: {config}");
-        assert!(config.contains("hooks = true"), "config: {config}");
-        assert_eq!(
-            config.matches("[features]").count(),
-            1,
-            "must not duplicate the [features] table: {config}"
-        );
     }
 
-    /// A config without a `[features]` section gets one appended, keeping the
-    /// user's content intact.
+    #[cfg(windows)]
     #[test]
-    fn config_merge_appends_features_section_when_missing() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        std::fs::write(codex_dir.join("config.toml"), "model = \"gpt-5.2-codex\"\n").unwrap();
-
-        provision_codex(temp.path());
-
-        let config = std::fs::read_to_string(codex_dir.join("config.toml")).unwrap();
-        assert!(config.contains("model = \"gpt-5.2-codex\""));
-        assert!(
-            config.contains("[features]\nhooks = true"),
-            "config: {config}"
-        );
+    fn windows_attention_hook_emits_json_after_callback_failure_in_codex_runner() {
+        let (dead, not_found) = dead_and_not_found_urls();
+        for url in [dead, not_found] {
+            // Rebuild both commands for the failure URL through the same
+            // constructors `attention_hook_handler` uses for the live port.
+            for (field, command) in [
+                (
+                    "command",
+                    attention_hook_default_command(&url, EnvType::Windows),
+                ),
+                ("commandWindows", attention_hook_windows_command(&url)),
+            ] {
+                let output = run_like_codex(&command);
+                assert!(
+                    output.status.success(),
+                    "{field} against {url} exited {:?}: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout).trim(),
+                    "{}",
+                    "{field} against {url}"
+                );
+            }
+        }
     }
 
-    /// Injection only owns the `hooks` key of hooks.json — unrelated keys the
-    /// user added survive.
+    /// Verbatim shapes earlier Buildmesh versions left in project
+    /// `.codex/hooks.json` files. They must stay red in the runner: if this
+    /// ever passes, `run_like_codex` has stopped being a faithful detector.
+    #[cfg(windows)]
     #[test]
-    fn hooks_json_merge_preserves_unrelated_keys() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        std::fs::write(codex_dir.join("hooks.json"), r#"{"custom":"kept"}"#).unwrap();
-
-        provision_codex(temp.path());
-
-        let hooks = read_hooks_json(temp.path());
-        assert_eq!(hooks["custom"], "kept");
-        assert!(hooks["hooks"]["Stop"].is_array());
+    fn legacy_windows_callbacks_fail_in_codex_runner() {
+        let (_dead, not_found) = dead_and_not_found_urls();
+        let flags = "-fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @-";
+        let cases = [
+            (
+                "env-var callback",
+                "cmd.exe /c \"curl -sf -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\"".to_string(),
+                None,
+            ),
+            (
+                "unguarded curl",
+                format!("curl.exe {flags} {not_found}"),
+                None,
+            ),
+            (
+                // cmd.exe-only `&` separator: a PowerShell parse error.
+                "cmd.exe `& echo {}` suffix",
+                format!("curl.exe {flags} {not_found} 2>NUL >NUL & echo {{}}"),
+                Some(1),
+            ),
+        ];
+        for (name, command, expected_code) in cases {
+            let output = run_like_codex(&command);
+            assert!(
+                !output.status.success(),
+                "{name} unexpectedly passed in the Codex runner"
+            );
+            if let Some(code) = expected_code {
+                assert_eq!(output.status.code(), Some(code), "{name}");
+            }
+        }
     }
 
+    /// Verbatim handler shapes earlier Buildmesh versions left in project
+    /// `.codex/hooks.json` files.
+    fn legacy_handlers() -> Vec<(String, serde_json::Value)> {
+        let flags = "-fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @-";
+        let url = "http://localhost:1992/api/attention/42";
+        let posix = "if command -v curl.exe >/dev/null 2>&1; then curl.exe -fsS -o NUL -X POST --data-binary @- http://localhost:1992/api/attention/42 2>/dev/null || true; fi; printf '{}'";
+        vec![
+            (
+                "env-var callback, no statusMessage".into(),
+                serde_json::json!({
+                    "type": "command",
+                    "command": "cmd.exe /c \"curl -sf -X POST --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID%\"",
+                }),
+            ),
+            (
+                "unguarded curl".into(),
+                serde_json::json!({
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": format!("curl.exe {flags} {url}"),
+                    "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
+                }),
+            ),
+            (
+                "cmd.exe `& echo {}` suffix".into(),
+                serde_json::json!({
+                    "type": "command",
+                    "command": posix,
+                    "commandWindows": format!("curl.exe {flags} {url} 2>NUL >NUL & echo {{}}"),
+                    "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
+                }),
+            ),
+            (
+                "encoded PowerShell".into(),
+                attention_hook_handler(42, EnvType::Windows),
+            ),
+        ]
+    }
+
+    /// Retiring drops every Buildmesh shape and nothing else: a user's own
+    /// handler (even one sharing a matcher group with a Buildmesh handler),
+    /// their other events and unrelated top-level keys all survive.
     #[test]
-    fn hooks_json_merge_preserves_existing_event_handlers() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        std::fs::write(
-            codex_dir.join("hooks.json"),
-            r#"{
-                "description": "user config",
+    fn retiring_removes_only_buildmesh_handlers_from_hooks_json() {
+        let mine = serde_json::json!({ "type": "command", "command": "echo mine" });
+        for (name, legacy) in legacy_handlers() {
+            let existing = serde_json::json!({
+                "extra": { "keep": true },
                 "hooks": {
-                    "Stop": [{"matcher":".*","hooks":[{"type":"command","command":"user-stop"}]}],
-                    "PermissionRequest": [{"matcher":"Bash","hooks":[{"type":"command","command":"user-permission"}]}]
-                }
-            }"#,
-        )
-        .unwrap();
+                    "Stop": [{ "matcher": "m", "hooks": [legacy.clone(), mine.clone()] }],
+                    "SessionStart": [{ "hooks": [legacy.clone()] }],
+                    "PreCompact": [{ "hooks": [mine.clone()] }],
+                    "Untouched": [],
+                },
+            });
 
-        provision_codex(temp.path());
-
-        let hooks = read_hooks_json(temp.path());
-        assert_eq!(hooks["description"], "user config");
-        assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            hooks["hooks"]["PermissionRequest"]
-                .as_array()
+            let updated = strip_buildmesh_hook_handlers(&existing.to_string())
                 .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(
-            hooks["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "user-stop"
-        );
-        assert_eq!(
-            hooks["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
-            "user-permission"
-        );
-        assert!(hooks["hooks"]["Stop"]
+                .unwrap_or_else(|| panic!("{name}: a Buildmesh handler must be removed"));
+            let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
+
+            assert_eq!(
+                updated,
+                serde_json::json!({
+                    "extra": { "keep": true },
+                    "hooks": {
+                        "Stop": [{ "matcher": "m", "hooks": [mine.clone()] }],
+                        "PreCompact": [{ "hooks": [mine.clone()] }],
+                        "Untouched": [],
+                    },
+                }),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn retiring_a_file_without_buildmesh_handlers_changes_nothing() {
+        let mine = serde_json::json!({
+            "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "echo mine" }] }] }
+        });
+        for existing in ["", "{}", r#"{"hooks":{}}"#, &mine.to_string()] {
+            assert_eq!(strip_buildmesh_hook_handlers(existing).unwrap(), None);
+        }
+    }
+
+    fn resolved_windows(dir: &Path) -> ResolvedPath {
+        let path = dir.to_string_lossy().into_owned();
+        ResolvedPath {
+            host_path: path.clone(),
+            spawn_path: path.clone(),
+            raw_path: path,
+            env_type: EnvType::Windows,
+        }
+    }
+
+    fn retire(dir: &Path) {
+        CODEX
+            .provision_attention_hooks(&resolved_windows(dir), &LaunchRuntime::default(), 42)
+            .unwrap();
+    }
+
+    fn write_hooks(dir: &Path, handlers: &[serde_json::Value]) -> std::path::PathBuf {
+        let codex = dir.join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let path = codex.join("hooks.json");
+        let document = serde_json::json!({ "hooks": { "Stop": [{ "hooks": handlers }] } });
+        std::fs::write(&path, document.to_string()).unwrap();
+        path
+    }
+
+    fn stop_handlers(path: &Path) -> Vec<serde_json::Value> {
+        let document: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        document["hooks"]["Stop"]
             .as_array()
-            .unwrap()
-            .iter()
-            .any(|group| {
-                group["hooks"]
-                    .as_array()
-                    .unwrap()
+            .map(|groups| {
+                groups
                     .iter()
-                    .any(is_buildmesh_hook_handler)
-            }));
+                    .flat_map(|group| group["hooks"].as_array().cloned().unwrap_or_default())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Provisioning is what clears a project that an older Buildmesh wrote:
+    /// the stale handlers go, the user's stay.
+    #[test]
+    fn provisioning_clears_stale_handlers_from_the_spawn_directory() {
+        let temp = TempDir::new().unwrap();
+        let mine = serde_json::json!({ "type": "command", "command": "echo mine" });
+        let mut handlers: Vec<_> = legacy_handlers().into_iter().map(|(_, h)| h).collect();
+        handlers.push(mine.clone());
+        let path = write_hooks(temp.path(), &handlers);
+
+        retire(temp.path());
+
+        assert_eq!(stop_handlers(&path), vec![mine]);
+    }
+
+    /// Provisioning never creates Codex project files: hooks come from the
+    /// launch arguments, so a clean project stays clean.
+    #[test]
+    fn provisioning_creates_no_codex_project_files() {
+        let temp = TempDir::new().unwrap();
+        retire(temp.path());
+        assert!(!temp.path().join(".codex").exists());
     }
 
     #[test]
-    fn inject_migrates_old_post_tool_matcher_to_catch_all() {
+    fn provisioning_leaves_an_unparseable_hooks_file_for_codex_to_report() {
         let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        let old_hook = attention_hook_handler(42, EnvType::Windows);
-        let old = serde_json::json!({
-            "hooks": {
-                "PostToolUse": [{
-                    "matcher": "^request_user_input$",
-                    "hooks": [old_hook]
-                }]
-            }
-        });
-        std::fs::write(
-            codex_dir.join("hooks.json"),
-            serde_json::to_string(&old).unwrap(),
-        )
-        .unwrap();
-
-        provision_codex(temp.path());
-
-        let hooks = read_hooks_json(temp.path());
-        assert!(hooks["hooks"]["PostToolUse"][0].get("matcher").is_none());
-    }
-
-    /// Issue #2036 upgrade path: a node provisioned by an older Buildmesh has
-    /// the bash-script `command` on disk. That handler still carries the
-    /// Buildmesh `statusMessage`, so re-provisioning has to replace it in
-    /// place — appending a second handler would leave cmd.exe parsing the
-    /// script forever.
-    #[test]
-    fn stale_windows_command_is_replaced_not_duplicated() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        let stale = serde_json::json!({
-            "hooks": {
-                "Stop": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": attention_hook_wsl_shell_command("http://localhost:1992/api/attention/42"),
-                        "commandWindows": attention_hook_windows_command("http://localhost:1992/api/attention/42"),
-                        "statusMessage": BUILDMESH_HOOK_STATUS_MESSAGE,
-                    }]
-                }]
-            }
-        });
-        std::fs::write(
-            codex_dir.join("hooks.json"),
-            serde_json::to_string(&stale).unwrap(),
-        )
-        .unwrap();
-
-        provision_codex(temp.path());
-
-        let hooks = read_hooks_json(temp.path());
-        let handlers = hooks["hooks"]["Stop"][0]["hooks"]
-            .as_array()
-            .expect("Stop handlers");
-        assert_eq!(
-            handlers.len(),
-            1,
-            "a stale Buildmesh handler must be replaced, not duplicated: {hooks:#}"
-        );
-        let url = format!(
-            "http://localhost:{}/api/attention/42",
-            crate::http_server::current_http_port()
-        );
-        let expected = attention_hook_default_command(&url, EnvType::Windows);
-        assert_eq!(
-            handlers[0]["command"].as_str(),
-            Some(expected.as_str()),
-            "Stop must be re-provisioned with the cmd-runnable callback: {handlers:#?}"
-        );
-    }
-
-    #[test]
-    fn hooks_json_merge_does_not_overwrite_malformed_user_file() {
-        let temp = TempDir::new().unwrap();
-        let codex_dir = temp.path().join(".codex");
-        std::fs::create_dir_all(&codex_dir).unwrap();
-        let path = codex_dir.join("hooks.json");
+        let codex = temp.path().join(".codex");
+        std::fs::create_dir_all(&codex).unwrap();
+        let path = codex.join("hooks.json");
         std::fs::write(&path, "{not json").unwrap();
 
-        let error = ensure_hooks_json_content(
-            &std::fs::read_to_string(&path).unwrap(),
-            &attention_hook_handler(42, EnvType::Windows),
-        )
-        .unwrap_err();
-        assert!(error.contains("parse hooks.json"));
+        retire(temp.path());
+
         assert_eq!(std::fs::read_to_string(path).unwrap(), "{not json");
     }
 
+    /// From a linked worktree Codex loads the main checkout's `hooks.json`,
+    /// so that is the file whose stale Buildmesh handlers have to go.
     #[test]
-    fn config_feature_merge_replaces_false_without_duplicate_keys() {
-        let existing =
-            "model = \"gpt-5.2-codex\"\n\n[features]\nhooks = false\nweb_search = true\n";
-        let updated = ensure_hooks_feature_content(existing).unwrap();
-        assert_eq!(updated.matches("hooks =").count(), 1);
-        assert!(updated.contains("hooks = true"));
-        assert!(updated.contains("web_search = true"));
-        assert!(updated.contains("model = \"gpt-5.2-codex\""));
+    fn provisioning_clears_the_main_checkout_that_a_worktree_session_reads() {
+        let temp = TempDir::new().unwrap();
+        let main = temp.path().join("main");
+        let worktree = main.join(".claude").join("worktrees").join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let git_dir = format!(
+            "{}/.git/worktrees/wt",
+            main.to_string_lossy().replace('\\', "/")
+        );
+        std::fs::write(worktree.join(".git"), format!("gitdir: {git_dir}\n")).unwrap();
+        let mine = serde_json::json!({ "type": "command", "command": "echo mine" });
+        let stale = legacy_handlers().remove(2).1;
+        let main_hooks = write_hooks(&main, &[stale.clone(), mine.clone()]);
+        let worktree_hooks = write_hooks(&worktree, &[stale]);
+
+        retire(&worktree);
+
+        assert_eq!(stop_handlers(&main_hooks), vec![mine]);
+        assert!(stop_handlers(&worktree_hooks).is_empty());
     }
 
     #[test]
-    fn config_feature_merge_leaves_existing_true_aliases_untouched() {
-        for existing in [
-            "[features]\nhooks = true # user enabled\n",
-            "[features]\ncodex_hooks = true # legacy user setting\n",
+    fn linked_worktree_main_checkout_reads_the_git_file() {
+        let temp = TempDir::new().unwrap();
+
+        let plain = temp.path().join("plain");
+        std::fs::create_dir_all(plain.join(".git")).unwrap();
+        assert_eq!(linked_worktree_main_checkout(&plain, None), None);
+        assert_eq!(
+            linked_worktree_main_checkout(&temp.path().join("missing"), None),
+            None
+        );
+
+        let linked = temp.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        for (gitdir, main) in [
+            (
+                "gitdir: F:/src/pixelpath/.git/worktrees/wt",
+                "F:/src/pixelpath",
+            ),
+            (
+                r"gitdir: F:\src\pixelpath\.git\worktrees\wt",
+                "F:/src/pixelpath",
+            ),
+            (
+                "gitdir: /home/alice/repo/.git/worktrees/a-b",
+                "/home/alice/repo",
+            ),
         ] {
-            let updated = ensure_hooks_feature_content(existing).unwrap();
-            assert_eq!(updated, existing);
+            std::fs::write(linked.join(".git"), format!("{gitdir}\n")).unwrap();
+            assert_eq!(
+                linked_worktree_main_checkout(&linked, None),
+                Some(std::path::PathBuf::from(main)),
+                "{gitdir}"
+            );
         }
+        // A submodule's gitdir is not a linked worktree.
+        std::fs::write(linked.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        assert_eq!(linked_worktree_main_checkout(&linked, None), None);
     }
 
     #[test]
@@ -3530,20 +3754,6 @@ trust_level = "trusted"
     }
 
     #[test]
-    fn config_feature_merge_preserves_inline_comments_and_bracket_comments() {
-        let existing = r#"# [ignored]
-[features]
-hooks = false # needs manual review
-web_search = true
-"#;
-        let updated = ensure_hooks_feature_content(existing).unwrap();
-        let document = updated.parse::<DocumentMut>().unwrap();
-        assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
-        assert!(updated.contains("# needs manual review"));
-        assert!(updated.contains("# [ignored]"));
-    }
-
-    #[test]
     fn malformed_project_trust_toml_is_rejected_without_a_rewrite() {
         let existing = "[projects.\"broken\"\ntrust_level = \"untrusted\"\n";
         let error = ensure_project_trust_content(existing, "broken", EnvType::Windows).unwrap_err();
@@ -3641,22 +3851,18 @@ web_search = true
         }
     }
 
+    /// The field a runtime really executes: Windows runs `commandWindows`
+    /// (its `command` is a stub), WSL's Linux Codex runs `command`.
     #[test]
-    fn windows_hook_is_not_double_wrapped_and_does_not_rely_on_process_env() {
-        let temp = TempDir::new().unwrap();
-        provision_codex(temp.path());
-        let hooks = read_hooks_json(temp.path());
-        for event in ["Stop", "PermissionRequest", "SessionStart"] {
-            let handler = &hooks["hooks"][event][0]["hooks"][0];
-            let command = handler["command"]
-                .as_str()
-                .map(decoded_hook_command)
-                .unwrap_or_else(|| panic!("{event} command missing: {hooks:#}"));
-            let windows = handler["commandWindows"]
-                .as_str()
-                .map(decoded_hook_command)
-                .unwrap_or_else(|| panic!("{event} commandWindows missing: {hooks:#}"));
-            for (field, value) in [("command", &command), ("commandWindows", &windows)] {
+    fn launch_hooks_are_not_double_wrapped_and_do_not_rely_on_process_env() {
+        for (env_type, field) in [
+            (EnvType::Windows, "commandWindows"),
+            (EnvType::Wsl, "command"),
+        ] {
+            for hook in launch_hooks(&attention_hook_launch_args(42, env_type)) {
+                let event = hook.event.as_str();
+                let value = decoded_hook_command(&hook.fields[field]);
+                let value = &value;
                 assert!(
                     !value.contains("cmd.exe") && !value.contains("sh -c"),
                     "{event} {field} must not nest a shell Codex already launches: {value}"
@@ -3700,7 +3906,7 @@ web_search = true
             crate::env::decode_powershell_command(&wsl).is_none(),
             "a WSL Codex parses `command` with $SHELL -lc, never PowerShell: {wsl}"
         );
-        assert!(wsl.contains("printf '{}'"), "{wsl}");
+        assert!(wsl.ends_with("printf {}"), "{wsl}");
 
         // Every runtime whose Codex is a Windows binary gets the cmd-runnable
         // callback in both fields.

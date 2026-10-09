@@ -125,6 +125,9 @@ pub fn build_spawn_command_prepared(
     // is the orchestrator's knowledge (the pairing's verified endpoint
     // identity), so it cannot live in the adapter recipe.
     let mut recipe = prepared.recipe;
+    recipe
+        .base_args
+        .extend(adapter.launch_hook_args(session_id, resolved.env_type));
     if let crate::agent::launch_routing::PreparedLaunchRouting::CodexProxy {
         profile_name,
         descriptor,
