@@ -78,6 +78,8 @@ use turn_classify::{quiet_turn_is_current, QuietClassifierFailure, QuietTurnEvid
 mod observe_parity_tests;
 #[cfg(test)]
 mod observer_decision_tests;
+#[cfg(all(test, unix))]
+mod verification_signal_tests;
 use crate::db;
 use crate::models::SessionStatus;
 use crate::process_util::run_worker_pass;
@@ -1666,13 +1668,11 @@ fn run_verification_command(
             job.terminate();
         }
         crate::process_util::kill_process_tree(child.id());
-        #[cfg(unix)]
-        {
-            let group = format!("-{}", child.id());
-            let _ = crate::process_util::command_no_window("kill")
-                .args(["-KILL", &group])
-                .status();
-        }
+        // The shell is its own process-group leader (`process_group(0)` above).
+        // Signal that group with kill(2). Shelling out to procps `kill` with a
+        // negative id drops every digit but the first, and a leading 1 becomes
+        // "every process we can signal" — the CI runner included (issue #2103).
+        crate::process_util::kill_process_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
     };
