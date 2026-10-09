@@ -314,14 +314,20 @@ fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz/corpus/http_request")
 }
 
-/// Every corpus file, with its name. A file with no entry in [`SEEDS`] is a
-/// regression nobody pinned — `corpus_files_all_have_a_pinned_outcome` fails.
+/// Every `*.bin` corpus file, with its name. A seed with no entry in
+/// [`SEEDS`] is a regression nobody pinned — `corpus_files_all_have_a_pinned_outcome`
+/// fails. Only regular `.bin` files are read: a stray directory or a `.DS_Store`
+/// in the corpus directory is not a seed, and trying to read one would panic
+/// the run instead of leaving the corpus alone.
 fn load_corpus() -> Vec<(String, Vec<u8>)> {
     let dir = corpus_dir();
     let mut entries: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read corpus dir {}: {e}", dir.display()))
-        .map(|entry| {
+        .filter_map(|entry| {
             let path = entry.expect("corpus entry").path();
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                return None;
+            }
             let name = path
                 .file_name()
                 .expect("corpus file name")
@@ -329,15 +335,15 @@ fn load_corpus() -> Vec<(String, Vec<u8>)> {
                 .into_owned();
             let bytes = std::fs::read(&path)
                 .unwrap_or_else(|e| panic!("read corpus {}: {e}", path.display()));
-            (name, bytes)
+            Some((name, bytes))
         })
         .collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
     assert!(
         !entries.is_empty(),
-        "corpus dir {} is empty — the target would be an empty harness",
+        "no *.bin seeds in {} — the target would be an empty harness",
         dir.display()
     );
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
 }
 

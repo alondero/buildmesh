@@ -18,4 +18,4 @@ Adding a seed means adding its expected outcome to the harness's pinned table;
 an unpinned corpus file fails the run, so a seed can never sit in the directory
 without someone saying what it is for. The invariants, the knobs, and why this
 is not a `cargo-fuzz` target are in
-[`docs/development/remote-access.md`](../../../docs/development/remote-access.md#fuzzing-the-request-read-path).
+[`docs/development/remote-access.md`](../../docs/development/remote-access.md#fuzzing-the-request-read-path).
