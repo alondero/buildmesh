@@ -37,6 +37,12 @@ export type SpawnOption = Pick<
   capabilities?: ProviderInfo['capabilities'];
   configuration?: ProviderInfo['configuration'];
   unavailable_reason?: ProviderInfo['unavailable_reason'];
+  /**
+   * Resolved launch permission mode for this row's harness (issue #2151),
+   * in the harness's own words. The Spawn Menu renders it on the native
+   * row so the choice is visible where a person chooses a harness.
+   */
+  effective_permission?: ProviderInfo['effective_permission'];
 };
 
 /**
@@ -57,6 +63,7 @@ export function mapBackendProviders(backend: ProviderInfo[]): SpawnOption[] {
     capabilities: p.capabilities,
     configuration: p.configuration,
     unavailable_reason: p.unavailable_reason,
+    effective_permission: p.effective_permission,
     label: p.label,
     icon: p.icon,
     harness_id: p.harness_id,

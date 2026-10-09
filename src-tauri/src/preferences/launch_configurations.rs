@@ -309,6 +309,18 @@ fn resolve_plan(
                 mesh: None,
                 application: app.and_then(|c| c.effort.as_deref()),
             },
+            // Issue #2151, review round 1: launch recipes carry no
+            // permission slot of their own, and the plan carries none
+            // either — the per-harness Settings default resolves live at
+            // spawn time (never frozen into a recipe or plan), same as a
+            // direct spawn. Feeding a permission layer into
+            // `resolve_agent_config` here would compute a value the plan
+            // cannot project, so it is deliberately absent.
+            permission_mode: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: None,
+            },
         },
         extra.as_deref(),
     );
@@ -593,6 +605,7 @@ mod tests {
             HarnessConfigValue {
                 model: Some("minimax/application-default".into()),
                 effort: None,
+                permission_mode: None,
             },
         );
         let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
@@ -730,6 +743,7 @@ mod tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("sonnet".into()),
                 effort: Some("high".into()),
+                permission_mode: None,
             },
         );
         prefs
@@ -812,6 +826,7 @@ mod tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("app".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let plan = resolve(&prefs, "claude", &Default::default()).unwrap();

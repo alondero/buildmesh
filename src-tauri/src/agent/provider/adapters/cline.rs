@@ -809,6 +809,7 @@ mod tests {
                     model: Some("unbiased/pareto".to_string()),
                     effort: Some("xhigh".to_string()),
                     extra_args: Some("--verbose".to_string()),
+                    permission_mode: None,
                 };
                 let input = HarnessLaunchInput {
                     platform: *platform,

@@ -33,6 +33,7 @@ pub fn normalize_harness_default(raw: HarnessConfigValue) -> HarnessConfigValue 
     HarnessConfigValue {
         model: trim_to_none(raw.model.as_deref()),
         effort: trim_to_none(raw.effort.as_deref()),
+        permission_mode: trim_to_none(raw.permission_mode.as_deref()),
     }
 }
 
@@ -46,7 +47,7 @@ fn trim_to_none(s: Option<&str>) -> Option<String> {
 }
 
 /// Validate a harness default against the selected harness's capability
-/// contract. Three rules (issue #1148 acceptance criteria 5):
+/// contract. Rules (issue #1148 acceptance criteria 5, plus #2151):
 ///
 /// * **Unknown harness id** → `Err`. The harness profile id must resolve to
 ///   a known adapter (built-in or user-added); an unrecognised id is refused
@@ -60,6 +61,10 @@ fn trim_to_none(s: Option<&str>) -> Option<String> {
 ///   harness's `EffortControlKind::allowed` list is the single contract; a
 ///   value not in it is refused at the write boundary (issue #1148 AC #5
 ///   "Accept only values allowed by that harness's effort-control kind").
+/// * **Permission mode outside the harness's vocabulary** → `Err` (issue
+///   #2151). The harness's `permission_modes` list is the single contract;
+///   a value not in it — including any value for a harness with no modes —
+///   is refused at the write boundary.
 ///
 /// Model values are trimmed and checked against the adapter's reference
 /// syntax; model availability remains the harness's responsibility. A blank
@@ -94,6 +99,19 @@ pub fn validate_harness_default(
                     ));
                 }
             }
+        }
+    }
+    if let Some(mode) = normalized.permission_mode.as_deref() {
+        if !caps.permission_modes.iter().any(|m| m.id == mode) {
+            let allowed: Vec<&str> = caps
+                .permission_modes
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect();
+            return Err(format!(
+                "permission mode '{mode}' is not allowed for harness '{profile_id}' \
+                 (allowed: {allowed:?})"
+            ));
         }
     }
     Ok(normalized)

@@ -74,7 +74,7 @@
 //! `TranscriptFormat::Mcode`, so the Coordinator Node Digest rich layer,
 //! the archived-node resume picker, and circuit assistant reports all work.
 
-use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
+use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode, PermissionModeOption};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -766,12 +766,30 @@ impl AgentProvider for McodeAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — mcode's TUI accepts no permission flag, so
+        // there is no approval argv to strip. Full Access is enforced by
+        // the `config.yaml` pin (`pin_full_access`), not by argv.
         SpawnRecipe {
             binary: "mcode",
             base_args: vec![],
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
         }
+    }
+
+    /// Issue #2151: mcode's TUI accepts no permission flag, so the mode
+    /// set is a singleton — Full Access via the `permissionMode:
+    /// bypassPermissions` pin in `<dataDir>/config.yaml`
+    /// ([`pin_permission_mode`]). There is no prompt entry to offer: the
+    /// pin is machine-global (shared with the user's standalone `mcode`
+    /// sessions), so merely skipping the pin would not restore prompts
+    /// once a previous spawn pinned it. Settings shows this enforced
+    /// mode explicitly rather than a choice.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![PermissionModeOption::unattended(
+            "Full Access (permissionMode: bypassPermissions)",
+            "Pinned in mcode's config.yaml on every spawn — the TUI has no permission flag.",
+        )]
     }
 
     fn supports_resume(&self) -> bool {
@@ -1159,6 +1177,7 @@ mod tests {
             model: Some("minimax/MiniMax-M3#variant".to_string()),
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
             let prepared = default_prepare(
@@ -1190,6 +1209,7 @@ mod tests {
             model: Some("minimax/MiniMax-M3".to_string()),
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
             let prepared = default_prepare(
@@ -1222,6 +1242,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         for session in [
             SessionIdModeRef::None,

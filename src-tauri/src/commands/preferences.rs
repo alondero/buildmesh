@@ -911,6 +911,9 @@ fn read_mesh_legacy(mesh_id: i64) -> Result<Option<HarnessConfigValue>, String> 
     let legacy = HarnessConfigValue {
         model: row.model.clone(),
         effort: row.effort.clone(),
+        // The legacy mesh row has no permission column (issue #2151 adds
+        // only the application-layer slot).
+        permission_mode: None,
     };
     Ok(if legacy.model.is_some() || legacy.effort.is_some() {
         Some(legacy)

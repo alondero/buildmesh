@@ -89,6 +89,7 @@ export const HARNESS_CATALOG = {
         "result_output": "stdout",
         "supports_provider_routing": false
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "allowed": [
           "low",
@@ -99,6 +100,18 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "agy",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--dangerously-skip-permissions"
+        },
+        {
+          "description": "Antigravity asks for approval like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": true,
@@ -136,6 +149,7 @@ export const HARNESS_CATALOG = {
         "result_output": "stdout",
         "supports_provider_routing": true
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "allowed": [
           "low",
@@ -148,6 +162,18 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "anthropic",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--dangerously-skip-permissions"
+        },
+        {
+          "description": "Claude Code asks for approval like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": true,
@@ -174,6 +200,7 @@ export const HARNESS_CATALOG = {
         "macos"
       ],
       "background_inference": null,
+      "default_permission_mode": null,
       "effort_control": {
         "allowed": [
           "none",
@@ -186,6 +213,7 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "cline",
       "is_plain_terminal": false,
+      "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": true,
@@ -223,6 +251,7 @@ export const HARNESS_CATALOG = {
         "result_output": "last_message_file",
         "supports_provider_routing": false
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "allowed": [
           "none",
@@ -236,6 +265,18 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "codex",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Approvals off (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--ask-for-approval never"
+        },
+        {
+          "description": "Codex asks for approval like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": true,
@@ -263,6 +304,7 @@ export const HARNESS_CATALOG = {
         "result_output": "result_json_lines",
         "supports_provider_routing": false
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "allowed": [
           "low",
@@ -273,6 +315,18 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "commandcode",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off — permission prompts pre-approved (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--yolo"
+        },
+        {
+          "description": "Command Code asks for confirmation like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
       "supports_effort_override": true,
@@ -300,11 +354,24 @@ export const HARNESS_CATALOG = {
         "macos"
       ],
       "background_inference": null,
+      "default_permission_mode": "unattended",
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "cursor",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Commands allowed unless denied (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--force"
+        },
+        {
+          "description": "Cursor asks for approval like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": false,
@@ -325,11 +392,13 @@ export const HARNESS_CATALOG = {
         "macos"
       ],
       "background_inference": null,
+      "default_permission_mode": null,
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "dsh",
       "is_plain_terminal": false,
+      "permission_modes": [],
       "produces_readable_transcript": false,
       "requires_attention_hook": false,
       "supports_effort_override": false,
@@ -350,11 +419,13 @@ export const HARNESS_CATALOG = {
         "macos"
       ],
       "background_inference": null,
+      "default_permission_mode": null,
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "freebuff",
       "is_plain_terminal": false,
+      "permission_modes": [],
       "produces_readable_transcript": false,
       "requires_attention_hook": false,
       "supports_effort_override": false,
@@ -392,6 +463,7 @@ export const HARNESS_CATALOG = {
         "result_output": "stdout",
         "supports_provider_routing": false
       },
+      "default_permission_mode": null,
       "effort_control": {
         "allowed": [
           "none",
@@ -406,6 +478,7 @@ export const HARNESS_CATALOG = {
       },
       "harness_id": "grok",
       "is_plain_terminal": false,
+      "permission_modes": [],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": true,
@@ -443,11 +516,13 @@ export const HARNESS_CATALOG = {
         "result_output": "assistant_json_lines",
         "supports_provider_routing": false
       },
+      "default_permission_mode": null,
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "kimi",
       "is_plain_terminal": false,
+      "permission_modes": [],
       "produces_readable_transcript": false,
       "requires_attention_hook": true,
       "supports_effort_override": false,
@@ -481,11 +556,19 @@ export const HARNESS_CATALOG = {
         "result_output": "last_message_file",
         "supports_provider_routing": false
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "mcode",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Pinned in mcode's config.yaml on every spawn — the TUI has no permission flag.",
+          "id": "unattended",
+          "label": "Full Access (permissionMode: bypassPermissions)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": false,
@@ -506,11 +589,24 @@ export const HARNESS_CATALOG = {
         "windows"
       ],
       "background_inference": null,
+      "default_permission_mode": "unattended",
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "muse",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Prompts off + Muse's own OS sandbox off (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--disable-approval --disable-sandbox"
+        },
+        {
+          "description": "Muse asks for approval like a human-launched session (its own OS sandbox stays on).",
+          "id": "prompt",
+          "label": "Prompts on (no flags)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": false,
       "supports_effort_override": false,
@@ -546,11 +642,24 @@ export const HARNESS_CATALOG = {
         "result_output": "open_code_json_lines",
         "supports_provider_routing": false
       },
+      "default_permission_mode": "unattended",
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "opencode",
       "is_plain_terminal": false,
+      "permission_modes": [
+        {
+          "description": "Auto-approve (today's behavior; required for unattended runs).",
+          "id": "unattended",
+          "label": "--auto"
+        },
+        {
+          "description": "OpenCode asks for approval like a human-launched session.",
+          "id": "prompt",
+          "label": "Prompts on (no flag)"
+        }
+      ],
       "produces_readable_transcript": true,
       "requires_attention_hook": true,
       "supports_effort_override": false,
@@ -571,11 +680,13 @@ export const HARNESS_CATALOG = {
         "linux"
       ],
       "background_inference": null,
+      "default_permission_mode": null,
       "effort_control": {
         "kind": "none"
       },
       "harness_id": "terminal",
       "is_plain_terminal": true,
+      "permission_modes": [],
       "produces_readable_transcript": false,
       "requires_attention_hook": false,
       "supports_effort_override": false,

@@ -2236,13 +2236,16 @@ mod reviewer_tests {
         let circuit =
             create_autopilot_circuit_inner(&db, mesh.id, "Review", "", &graph.to_json().unwrap())
                 .unwrap();
-        let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.reviewer_provider = Some("codex".into());
+        let mut prefs = crate::preferences::AppPreferences {
+            reviewer_provider: Some("codex".into()),
+            ..Default::default()
+        };
         prefs.harness_defaults.insert(
             "codex".into(),
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let run = create_circuit_run_prepared_locked(
@@ -2310,13 +2313,16 @@ mod reviewer_tests {
             crate::models::SessionStatus::Ready,
         )
         .unwrap();
-        let mut preferences = crate::preferences::AppPreferences::default();
-        preferences.reviewer_provider = Some("codex".into());
+        let mut preferences = crate::preferences::AppPreferences {
+            reviewer_provider: Some("codex".into()),
+            ..Default::default()
+        };
         preferences.harness_defaults.insert(
             "codex".into(),
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(
@@ -2453,13 +2459,16 @@ mod reviewer_tests {
             crate::models::SessionStatus::Ready,
         )
         .unwrap();
-        let mut preferences = crate::preferences::AppPreferences::default();
-        preferences.reviewer_provider = Some("codex".into());
+        let mut preferences = crate::preferences::AppPreferences {
+            reviewer_provider: Some("codex".into()),
+            ..Default::default()
+        };
         preferences.harness_defaults.insert(
             "codex".into(),
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(

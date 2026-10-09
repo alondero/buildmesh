@@ -183,7 +183,11 @@ Launch mode is a real boundary, not a label. Under **Skip permissions** the
 harness auto-approves tool calls, so a permission request is impossible by
 construction — that is why Cursor and Antigravity signal completion and
 background work but never a permission prompt. Under **Permission ask** the
-harness can raise a genuine approval signal.
+harness can raise a genuine approval signal. The posture shown is each
+harness's default launch; **Settings → Harnesses → Agent Harness defaults →
+Permission mode** can switch a supporting harness between its auto and prompt
+postures (see [Harness permission modes](../user-guide.md#harness-permission-modes)),
+which moves that harness between these two rows' event behavior.
 
 ## Review-circuit eligibility
 

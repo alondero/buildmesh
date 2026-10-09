@@ -163,6 +163,7 @@ mod tests {
                 model: Some("deepseek-chat".into()),
                 effort: None,
                 extra_args: None,
+                permission_mode: None,
             },
             prefill: None,
             sandbox: false,
