@@ -34,6 +34,7 @@ export function AccountsPane() {
     accounts,
     setAccounts,
     keyedCatalog,
+    keysInPreferences,
     loadRouting,
     loadAccounts,
     loadProviders,
@@ -179,6 +180,7 @@ export function AccountsPane() {
             <AccountCard
               key={account.id}
               account={account}
+              keyInPreferences={keysInPreferences.has(account.id)}
               onSave={handleSaveAccount}
               onRemove={handleRemoveAccount}
               onDirtyChange={d => siteDirtyChange(`account-${account.id}`, d)}

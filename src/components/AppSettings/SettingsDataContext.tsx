@@ -99,7 +99,11 @@ export interface SettingsData {
   loadPreferences: () => Promise<api.AppPreferences | null>;
   loadRouting: () => Promise<api.ProviderInfo[] | null>;
   loadProviders: () => Promise<api.ProviderInfo[] | null>;
-  loadAccounts: () => Promise<{ accountList: api.ProviderAccount[]; catalog: api.ProviderAccount[] } | null>;
+  loadAccounts: () => Promise<{
+    accountList: api.ProviderAccount[];
+    catalog: api.ProviderAccount[];
+    keysInPreferences: string[] | null;
+  } | null>;
   loadPairings: () => Promise<{
     effective: api.ProviderPairing[];
     verifications: api.PairingVerification[];
@@ -126,6 +130,11 @@ export interface SettingsData {
    *  the accounts load; only the Providers pane's add-form consumes it,
    *  but it is one IPC payload with `accounts`, so it travels with them. */
   keyedCatalog: ProviderAccount[];
+  /** Issue #2154 — account ids whose API key is persisted in
+   *  `preferences.json` because the OS credential store could not be used,
+   *  so the Accounts pane can say so on the affected card. `null` until the
+   *  probe answers, and `null` again if it fails: unknown is not safe. */
+  keysInPreferences: Set<string>;
   /** The live provider list (spawn menu + routing choices), shared: the
    *  Providers pane feeds the routing pickers and the Harnesses pane lists
    *  the spawn-menu order. */
@@ -192,6 +201,7 @@ export function SettingsDataProvider({
 }) {
   const [accounts, setAccounts] = useState<ProviderAccount[]>([]);
   const [keyedCatalog, setKeyedCatalog] = useState<ProviderAccount[]>([]);
+  const [keysInPreferences, setKeysInPreferences] = useState<Set<string>>(new Set());
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [routingProviders, setRoutingProviders] = useState<ProviderInfo[]>([]);
   const [preferences, setPreferences] = useState<api.AppPreferences | null>(null);
@@ -220,9 +230,13 @@ export function SettingsDataProvider({
     onCoordinatorLoaded: (data) => setCoordinator(data),
     onDevicesLoaded: (list) => setDevices(list),
     onNetworkLoaded: (data) => setNetwork(data),
-    onAccountsLoaded: ({ accountList, catalog }) => {
+    onAccountsLoaded: ({ accountList, catalog, keysInPreferences }) => {
       setAccounts(accountList);
       setKeyedCatalog(Array.isArray(catalog) ? catalog : []);
+      // Issue #2154 — a failed probe leaves the set empty, which hides the
+      // notice rather than showing it for every account. The alternative
+      // (treating unknown as "on disk") would cry wolf on every card.
+      setKeysInPreferences(new Set(keysInPreferences ?? []));
     },
     onProvidersLoaded: (list) => setProviders(list),
     getHostPairingVerifications,
@@ -296,6 +310,7 @@ export function SettingsDataProvider({
       accounts,
       setAccounts,
       keyedCatalog,
+      keysInPreferences,
       providers,
       setProviders,
       routingProviders,
@@ -323,6 +338,7 @@ export function SettingsDataProvider({
       retryResource,
       accounts,
       keyedCatalog,
+      keysInPreferences,
       providers,
       routingProviders,
       error,

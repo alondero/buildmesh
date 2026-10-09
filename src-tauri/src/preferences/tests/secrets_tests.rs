@@ -438,3 +438,162 @@ fn a_stale_key_in_the_backup_never_overwrites_the_newer_stored_key() {
         );
     });
 }
+
+/// Issue #2154 — only the accounts whose key is actually on disk are
+/// reported, so the Settings notice lands on the affected card and nowhere
+/// else. Both acceptance states in one test, driven through the real
+/// `save` / `update` boundary.
+///
+/// The assertion is on the *reported id list* and on the file's real bytes,
+/// not on the in-memory `ProviderAccount` — after hydration a key from the
+/// file is indistinguishable from one from the store, which is exactly why
+/// the production code reads the file.
+///
+/// Note the shape of the degraded case: `externalize` re-offers **every**
+/// secret on **every** save, so a store that refuses writes strands every
+/// keyed account's key on disk, not just the one that changed. That is the
+/// honest answer — the notice should name each account whose key is exposed.
+#[test]
+fn only_the_accounts_whose_key_is_on_disk_are_reported() {
+    with_temp_dir(|tmp| {
+        // Healthy: the store accepts both keys, so nothing is on disk and
+        // Settings must show no notice at all. `anthropic` is a keyless
+        // self-auth built-in and must never appear.
+        save(prefs_with(vec![
+            keyed_account("minimax", Some(KEY)),
+            keyed_account("custom", Some("sk-CUSTOM-0007")),
+        ]))
+        .unwrap();
+        restart(tmp);
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            Vec::<String>::new(),
+            "a key the store accepted is not in preferences.json, so no notice is due"
+        );
+
+        // Degraded: the store refuses, so the next save strands that key on
+        // disk. The file is the evidence, not the in-memory struct.
+        test_support::fail_writes(true);
+        update(|prefs| {
+            let custom = prefs
+                .provider_accounts
+                .iter_mut()
+                .find(|a| a.id == "custom")
+                .expect("custom account");
+            custom.api_key = Some("sk-CUSTOM-NEW-0008".to_string());
+        })
+        .unwrap();
+        restart(tmp);
+        assert!(
+            file_text(&tmp.join("preferences.json")).contains("sk-CUSTOM-NEW-0008"),
+            "a refused key must stay on disk so it is not lost"
+        );
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            vec!["custom".to_string(), "minimax".to_string()],
+            "both keyed accounts are exposed by a store that refuses writes"
+        );
+
+        // Recovered: the store accepts the next write, every key leaves the
+        // file, and the notice must go away on its own — it must not latch.
+        test_support::fail_writes(false);
+        update(|prefs| prefs.default_provider = Some("minimax".into())).unwrap();
+        restart(tmp);
+        assert!(!file_text(&tmp.join("preferences.json")).contains("sk-CUSTOM-NEW-0008"));
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            Vec::<String>::new(),
+            "once the keys are stored, the notice must clear"
+        );
+    });
+}
+
+/// Issue #2154 — a plaintext copy left in the last-known-good backup is still
+/// on disk, so it is still reported. Both files are written from the same
+/// bytes, so a person told "your key is not in your file" while it sits in
+/// the backup has been told a falsehood.
+///
+/// Each phase calls `load` first, because that is what production does
+/// (`get_provider_accounts` reads preferences, and the accounts load calls it
+/// before probing) and it is `load` that runs the backup scrub.
+#[test]
+fn a_key_left_only_in_the_backup_is_still_reported() {
+    with_temp_dir(|tmp| {
+        save(prefs_with(vec![keyed_account("minimax", Some(KEY))])).unwrap();
+        let backup = tmp.join("preferences.json.bak");
+
+        let put_key_in_backup = || {
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&backup).unwrap()).unwrap();
+            value["provider_accounts"][0]["api_key"] = serde_json::json!(KEY);
+            std::fs::write(&backup, value.to_string()).unwrap();
+        };
+
+        put_key_in_backup();
+        restart(tmp);
+        load().expect("load");
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            Vec::<String>::new(),
+            "the load-time scrub cleared the backup, so nothing is on disk"
+        );
+
+        // Now an exposure the scrub cannot clear: the store holds nothing
+        // for this slot (the key was cleared, so the entry was deleted) and
+        // an older build's backup still carries a plaintext copy. `load`
+        // tries to move it out, the store refuses, so it stays on disk — and
+        // the notice must appear rather than hide the exposure.
+        update(|prefs| prefs.provider_accounts[0].api_key = None).unwrap();
+        assert!(test_support::stored_values().is_empty());
+        put_key_in_backup();
+        test_support::fail_writes(true);
+        restart(tmp);
+        load().expect("load");
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            vec!["minimax".to_string()],
+            "a key still sitting in the backup must be reported"
+        );
+        test_support::fail_writes(false);
+    });
+}
+
+/// Issue #2154 — the deprecated flat `minimax_api_key` is the effective key of
+/// the `minimax` account only when that account has none of its own, so the
+/// notice must land on `minimax` in that case — and must not fire when the
+/// account's own (stored) key is what the app actually uses.
+#[test]
+fn the_deprecated_flat_key_is_reported_against_the_minimax_account() {
+    with_temp_dir(|tmp| {
+        let mut prefs = prefs_with(vec![]);
+        prefs.minimax_api_key = Some(LEGACY_KEY.to_string());
+        save(prefs).unwrap();
+
+        test_support::fail_writes(true);
+        update(|prefs| prefs.default_provider = Some("minimax".into())).unwrap();
+        restart(tmp);
+        // `load` runs the scrub, which the refused store cannot perform — so
+        // this is the production ordering, not just a cache reset.
+        load().expect("load");
+        assert!(
+            file_text(&tmp.join("preferences.json")).contains(LEGACY_KEY),
+            "a refused legacy key must stay on disk"
+        );
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            vec!["minimax".to_string()],
+            "the legacy flat key is reported against the account it feeds"
+        );
+
+        // Recovered: the scrub moves it out and the notice clears. This also
+        // pins that no stale `true` survives the state change.
+        test_support::fail_writes(false);
+        restart(tmp);
+        load().expect("load");
+        assert_eq!(
+            super::super::resolver::provider_accounts_with_keys_in_preferences(),
+            Vec::<String>::new(),
+            "the scrub clears the legacy key once the store is usable again"
+        );
+    });
+}

@@ -137,7 +137,7 @@ fn with_cache_mut<R>(f: impl FnOnce(&mut Option<AppPreferences>) -> R) -> R {
     f(&mut g)
 }
 
-fn preferences_path() -> Result<PathBuf, String> {
+pub(crate) fn preferences_path() -> Result<PathBuf, String> {
     app_data_dir()
         .map(|d| d.join("preferences.json"))
         .ok_or_else(|| "preferences module not initialized".to_string())

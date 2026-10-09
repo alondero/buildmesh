@@ -228,6 +228,84 @@ pub(crate) fn hydrate(prefs: &mut AppPreferences) -> bool {
     plaintext_in_file
 }
 
+/// Provider-account ids whose API key is persisted in plaintext in `path`
+/// rather than in the credential store.
+///
+/// Reads the **raw file**, not the hydrated preferences: this answers "is this
+/// key sitting on disk right now", which is the question the Settings notice
+/// asks, and the raw bytes are the only place that distinction still exists
+/// (after [`hydrate`] the key looks identical whichever side it came from).
+/// A missing, unreadable, or unparseable file reports nothing — this is a
+/// notice, so it must never fail the caller's read.
+fn account_ids_with_keys_in_file(path: &std::path::Path) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Ok(raw) = std::fs::read(path) else {
+        return ids;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return ids;
+    };
+    let accounts = value.get("provider_accounts").and_then(|v| v.as_array());
+    if let Some(accounts) = accounts {
+        for account in accounts {
+            let Some(id) = account.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if account
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .is_some_and(|k| !k.is_empty())
+            {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    // The deprecated flat field is the *effective* key of the `minimax`
+    // account only when that account carries none of its own — the same fold
+    // [`super::resolver::provider_accounts`] applies, so the notice lands on
+    // the account whose key is actually the one left on disk.
+    let legacy_on_disk = value
+        .get("minimax_api_key")
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| !k.is_empty());
+    let minimax_has_own_key = accounts.is_some_and(|accounts| {
+        accounts.iter().any(|account| {
+            account.get("id").and_then(|v| v.as_str()) == Some("minimax")
+                && account
+                    .get("api_key")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|k| !k.is_empty())
+        })
+    });
+    if legacy_on_disk && !minimax_has_own_key {
+        ids.insert("minimax".to_string());
+    }
+    ids
+}
+
+/// Every provider-account id whose API key is persisted in a
+/// `preferences.json` file instead of the OS credential store — the
+/// credential store refused it, so the key stayed on disk (issue #2154).
+///
+/// Covers the primary file **and** its last-known-good backup: they are
+/// written from the same bytes, so a store that refused the write leaves the
+/// secret in both, and a user told "this key is not in your file" while it
+/// sits in the backup would be told a falsehood.
+///
+/// Sorted, so the Settings list is stable between reads.
+pub(crate) fn account_ids_with_keys_on_disk() -> Vec<String> {
+    let Ok(primary) = super::storage::preferences_path() else {
+        return Vec::new();
+    };
+    let mut ids = account_ids_with_keys_in_file(&primary);
+    ids.extend(account_ids_with_keys_in_file(
+        &super::recovery::backup_path(&primary),
+    ));
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    ids
+}
+
 /// The copy of `prefs` that may be serialized to `preferences.json`.
 ///
 /// Stores every secret and strips the ones the store accepted. `previous` is
