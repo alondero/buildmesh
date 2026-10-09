@@ -4,14 +4,14 @@
 //! `crate::models::Mesh` / ts-rs `export_to` paths stay stable.
 
 mod agent;
-mod mesh;
-mod git;
 mod circuit;
+mod git;
+mod mesh;
 
 pub use agent::*;
-pub use mesh::*;
-pub use git::*;
 pub use circuit::*;
+pub use git::*;
+pub use mesh::*;
 
 /// Re-export the wire-level Agent Harness configuration value type from
 /// the private `preferences` module so the public API can expose it
@@ -52,10 +52,15 @@ mod tests {
     #[test]
     fn mesh_wire_contract_excludes_retired_automation_settings() {
         let mesh = sample_mesh();
-        for object in [serde_json::to_value(&mesh).unwrap(), serde_json::to_value(MeshRow::from(&mesh)).unwrap()] {
+        for object in [
+            serde_json::to_value(&mesh).unwrap(),
+            serde_json::to_value(MeshRow::from(&mesh)).unwrap(),
+        ] {
             let object = object.as_object().unwrap();
             assert!(object.contains_key("circuit_run_capacity"));
-            assert!(!object.keys().any(|key| key.starts_with("autopilot_") || key.starts_with("loop_")));
+            assert!(!object
+                .keys()
+                .any(|key| key.starts_with("autopilot_") || key.starts_with("loop_")));
         }
     }
 
@@ -79,7 +84,6 @@ mod tests {
         assert_eq!(cfg.root_run_command, None);
         // Wayfinder #990 / ticket #991 — looping autopilot config mirrors
         // through MeshRow::from exactly like the other Mesh fields.
-
     }
 
     /// #802 — a mesh that DID configure per-context commands must round-trip
@@ -90,7 +94,10 @@ mod tests {
         mesh.root_build_command = Some("cargo build --workspace".to_string());
         mesh.root_run_command = Some("cargo run -p app".to_string());
         let cfg = MeshRow::from(&mesh);
-        assert_eq!(cfg.root_build_command.as_deref(), Some("cargo build --workspace"));
+        assert_eq!(
+            cfg.root_build_command.as_deref(),
+            Some("cargo build --workspace")
+        );
         assert_eq!(cfg.root_run_command.as_deref(), Some("cargo run -p app"));
     }
 
@@ -100,8 +107,6 @@ mod tests {
         mesh.name = String::new();
         assert_eq!(MeshRow::from(&mesh).name, None);
     }
-
-
 
     /// Regression test for issue #457: `AgentNode::default()` exists so future
     /// optional columns only need to be added to the struct, not to 8 test
@@ -134,7 +139,10 @@ mod tests {
         assert_eq!(n.position, 0);
         // DateTime<Utc>::default() == UNIX epoch — not "now", but a
         // well-defined placeholder that won't accidentally match a real row.
-        assert_eq!(n.created_at, chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap());
+        assert_eq!(
+            n.created_at,
+            chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap()
+        );
     }
 
     /// Companion to the above: a partially-overridden literal must compile
@@ -193,7 +201,6 @@ mod tests {
         // Wayfinder #990 / ticket #991 — looping autopilot config: zero /
         // default per Option A (issue #518), with the `#[default]` enum
         // variant on the autopilot_mode carrying its pre-v30 behaviour.
-
     }
 
     /// Companion to the above: a partially-overridden literal must compile
@@ -278,19 +285,55 @@ mod tests {
         // MiniMax and Kimi were retired from the legacy enum (#538) — Claude-compatible
         // endpoints are now harness profiles whose per-account env is injected separately
         // by the unified `anthropic` adapter via `claude_direct_recipe`.
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "claude.exe");
-        assert_eq!(Provider::Agy.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "agy");
-        assert_eq!(Provider::OpenCode.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "opencode");
-        assert_eq!(Provider::Codex.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "codex");
+        assert_eq!(
+            Provider::Anthropic
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "claude.exe"
+        );
+        assert_eq!(
+            Provider::Agy
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "agy"
+        );
+        assert_eq!(
+            Provider::OpenCode
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "opencode"
+        );
+        assert_eq!(
+            Provider::Codex
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "codex"
+        );
         // Plain terminal spawns the OS-preferred shell directly — powershell.exe on Windows
         // host, routed through wsl.exe by spawn_environment::wrap when env_type is WSL.
-        assert_eq!(Provider::Terminal.adapter().spawn_recipe(Platform::Windows, EnvType::Windows).binary, "powershell.exe");
+        assert_eq!(
+            Provider::Terminal
+                .adapter()
+                .spawn_recipe(Platform::Windows, EnvType::Windows)
+                .binary,
+            "powershell.exe"
+        );
     }
 
     #[test]
     fn provider_adapter_recipe_macos_anthropic_uses_claude() {
         use crate::agent::provider::Platform;
-        assert_eq!(Provider::Anthropic.adapter().spawn_recipe(Platform::Macos, EnvType::Windows).binary, "claude");
+        assert_eq!(
+            Provider::Anthropic
+                .adapter()
+                .spawn_recipe(Platform::Macos, EnvType::Windows)
+                .binary,
+            "claude"
+        );
     }
 
     #[test]
@@ -312,9 +355,8 @@ mod tests {
         assert!(Provider::Kimi.adapter().supports_model_override());
         assert!(Provider::Kimi.adapter().requires_attention_hook());
         assert!(Provider::Mcode.adapter().supports_resume());
-        // Issue #1179: mcode's interactive TUI rejects `--model`, so the
-        // override is no longer advertised.
-        assert!(!Provider::Mcode.adapter().supports_model_override());
+        // mcode 0.6.5 accepts a session-only model override in the TUI.
+        assert!(Provider::Mcode.adapter().supports_model_override());
         // Issue #1797: the Agent-Plugin attention hook is provisioned and
         // `Stop` delivery was validated against a live 0.4.12 TUI.
         assert!(Provider::Mcode.adapter().requires_attention_hook());

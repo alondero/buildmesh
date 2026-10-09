@@ -18,16 +18,14 @@
 //! silently discarded. `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
 //!
-//! **No model override** (issue #1179). `mcode` exposes `--model
-//! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
-//! the harness always launches rejects it. Previously this adapter
-//! advertised `supports_model_override() == true` while emitting a
-//! `--model` flag the active recipe did not accept — the resolver
-//! passed the value through, the spawn path appended it, and the TUI
-//! surfaced an upstream rejection. The coherent choice (recorded in
-//! the issue thread) is to keep the interactive TUI as the supported
-//! mode and drop the override. A future `mcode exec`-based launch
-//! mode (with its own lifecycle work) would re-advertise the flag.
+//! **Model override** uses `--model <provider/model>` for the launched
+//! session, including `--session <id>` resumes. References may include
+//! `#variant`; the adapter validates their syntax before save and spawn,
+//! restricting each part to ASCII letters, digits, `.`, `_` and `-` so the
+//! Windows Cmd wrapper cannot interpret model text. Accepted references are
+//! forwarded unchanged. An omitted model
+//! leaves mcode's own default intact, and the override does not change its
+//! global model configuration.
 //!
 //! **Prefill** is the trailing positional `[prompt]` — there is no `--prefill`
 //! flag. We override `prefill_args()` to return the text as a single positional
@@ -61,9 +59,8 @@
 //! `Ok(())` with no side effects.
 //!
 //! **Full Access** is pinned on every spawn. mcode's TUI accepts no permission
-//! flag — `mcode --help` offers `--model`, `--lane`, `--session`,
-//! `--continue` and `--tui-mode` and nothing else; `--permission` exists on
-//! `mcode exec` only, which we never spawn — and mcode reads no environment
+//! flag in the installed help; `--permission` exists on `mcode exec` only,
+//! which we never spawn for interactive nodes — and mcode reads no environment
 //! variable for the mode. The sole lever is the `permissionMode` key in
 //! `<dataDir>/config.yaml`, so [`pin_permission_mode`] sets it to
 //! `bypassPermissions` (Full Access) alongside the attention plugin. This
@@ -78,7 +75,9 @@
 //! the archived-node resume picker, and circuit assistant reports all work.
 
 use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::windows_attention_command;
 use crate::models::EnvType;
@@ -143,6 +142,7 @@ const MCODE_PLUGIN_DESCRIPTION: &str =
 /// Per-handler timeout, in seconds (the mcode 0.4+ unit; the v0.3.x spec used
 /// milliseconds and 0.4+ accepts either — we pin one).
 const MCODE_HOOK_TIMEOUT_SECONDS: u64 = 5;
+const _: () = assert!(MCODE_HOOK_TIMEOUT_SECONDS > 0);
 
 /// Events Buildmesh provisions into the mcode plugin manifest. `Stop` (turn
 /// finished) is the validated signal that drives Node Digest turn completion.
@@ -458,7 +458,11 @@ fn pin_permission_mode(data_root: &Path) -> Result<bool, String> {
     // The line ending this document already uses. mcode itself writes LF
     // (`yaml.dump` never emits CRLF), but a Windows user who hand-edited the
     // file must not get it silently half-converted.
-    let eol = if existing.contains("\r\n") { "\r\n" } else { "\n" };
+    let eol = if existing.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
 
     let Some((key_line, comment)) = find_top_level_key(&existing, MCODE_PERMISSION_MODE_KEY) else {
         let mut out = existing;
@@ -469,7 +473,9 @@ fn pin_permission_mode(data_root: &Path) -> Result<bool, String> {
             // Blank separator so the appended key reads as its own setting.
             out.push_str(eol);
         }
-        out.push_str(&format!("{MCODE_PERMISSION_MODE_KEY}: {MCODE_PERMISSION_MODE_VALUE}{eol}"));
+        out.push_str(&format!(
+            "{MCODE_PERMISSION_MODE_KEY}: {MCODE_PERMISSION_MODE_VALUE}{eol}"
+        ));
         return write_pinned_config(&path, &out);
     };
 
@@ -502,11 +508,15 @@ fn find_top_level_key<'a>(text: &'a str, key: &str) -> Option<(&'a str, &'a str)
         let line = line.strip_suffix('\r').unwrap_or(line);
         // A top-level key starts at column 0, so an indented `permissionMode`
         // is some other mapping's key and a `#`-led line is a comment.
-        let Some(rest) = line.strip_prefix(key) else { continue };
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
         // The character right after the name must be a `:` (optionally
         // spaced) — this is what rejects a longer sibling key.
         let rest = rest.trim_start_matches([' ', '\t']);
-        let Some(value_and_comment) = rest.strip_prefix(':') else { continue };
+        let Some(value_and_comment) = rest.strip_prefix(':') else {
+            continue;
+        };
         return Some((line, trailing_comment(value_and_comment)));
     }
     None
@@ -527,7 +537,10 @@ fn trailing_comment(value_and_comment: &str) -> &str {
         if i != 0 && !bytes[i - 1].is_ascii_whitespace() {
             continue;
         }
-        let start = (0..i).rev().find(|j| !bytes[*j].is_ascii_whitespace()).map_or(0, |j| j + 1);
+        let start = (0..i)
+            .rev()
+            .find(|j| !bytes[*j].is_ascii_whitespace())
+            .map_or(0, |j| j + 1);
         return &value_and_comment[start..];
     }
     ""
@@ -538,7 +551,10 @@ fn trailing_comment(value_and_comment: &str) -> &str {
 /// `permissionMode:  bypassPermissions ` counts as already pinned.
 fn already_pinned(line: &str, comment: &str, value: &str) -> bool {
     let value_end = line.len().saturating_sub(comment.len());
-    line[..value_end].split_once(':').map(|(_, found)| found.trim() == value).unwrap_or(false)
+    line[..value_end]
+        .split_once(':')
+        .map(|(_, found)| found.trim() == value)
+        .unwrap_or(false)
 }
 
 /// Persist the pinned config and report that the write happened.
@@ -658,9 +674,7 @@ fn ensure_plugin_manifest(path: &Path, handler: &serde_json::Value) -> Result<()
             // would conflict with the live mutable borrow.
             let group_kind = settings_kind(group);
             let group_array = group.as_array_mut().ok_or_else(|| {
-                format!(
-                    "mcode plugin manifest `hooks.{event}` must be an array; got {group_kind}"
-                )
+                format!("mcode plugin manifest `hooks.{event}` must be an array; got {group_kind}")
             })?;
             if let Some(existing) = group_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
                 if *existing != *handler {
@@ -764,11 +778,35 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
-    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
-        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
-        spawn.base_args = ["exec", "--input", "-", "--input-format", "text", "--permission", "smart", "--max-steps", "1", "--timeout", "30s"].map(str::to_owned).to_vec();
-        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::LastMessageFile))
+        spawn.base_args = [
+            "exec",
+            "--input",
+            "-",
+            "--input-format",
+            "text",
+            "--permission",
+            "smart",
+            "--max-steps",
+            "1",
+            "--timeout",
+            "30s",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        Some(BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::Stdin,
+            BackgroundResultOutput::LastMessageFile,
+        ))
     }
 
     fn auto_resume_on_startup(&self) -> bool {
@@ -855,21 +893,38 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
-    /// `false` — the interactive TUI recipe (`mcode [--session <id>]
-    /// [<prompt>]`) does not accept `--model`. The flag exists on
-    /// `mcode exec`, but Buildmesh does not launch that subcommand. See
-    /// the module doc for the issue #1179 product decision.
+    /// The interactive CLI accepts a session-only `--model` override (0.6.5).
     fn supports_model_override(&self) -> bool {
-        false
+        true
+    }
+
+    fn validate_model_override(&self, model: &str) -> Result<(), String> {
+        // A conservative identifier alphabet keeps references literal when
+        // the Windows .cmd shim is launched through cmd.exe.
+        let identifier = |value: &str| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        };
+        let valid = model.split_once('/').is_some_and(|(provider, selection)| {
+            let (name, variant) = selection
+                .split_once('#')
+                .map_or((selection, None), |(name, variant)| (name, Some(variant)));
+            identifier(provider) && identifier(name) && variant.is_none_or(identifier)
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err("MiniMax Code model reference must use provider/model or provider/model#variant; each part allows only ASCII letters, digits, '.', '_' and '-'".into())
+        }
     }
 
     fn supports_extra_args(&self) -> bool {
         // Issue #1358: mcode's interactive TUI still accepts arbitrary
         // CLI flags as positional args (it's a runtime, not a
-        // vocab-restricted CLI like Codex). The masking defaults are
-        // conservative on `supports_model_override` and
-        // `supports_effort_override` (mcode's TUI rejects them) but
-        // permissive on extras.
+        // vocab-restricted CLI like Codex). Effort controls remain
+        // unsupported; model selection uses the dedicated override.
         true
     }
 
@@ -1028,28 +1083,23 @@ mod tests {
         assert!(MCODE.supports_prefill());
     }
 
-    /// Issue #1179: mcode does not advertise a model override. Even if a
-    /// resolved value somehow reached the launch helper, the prepared
-    /// recipe must never carry a `--model` flag — the interactive TUI
-    /// rejects it. The capability descriptor and the recipe are
-    /// required to agree.
     #[test]
-    fn supports_resume_but_no_model_override_after_issue_1179() {
+    fn supports_resume_and_session_model_override() {
         assert!(MCODE.supports_resume());
-        assert!(!MCODE.supports_model_override());
+        assert!(MCODE.supports_model_override());
     }
 
     /// Pin the capability descriptor end-to-end: the harness-id,
-    /// `supports_model_override = false`, and the absence of effort
+    /// model override support, and the absence of effort
     /// controls. Drift here means the Spawn Menu or autopilot
     /// compatibility gate will misroute mcode.
     #[test]
-    fn capabilities_descriptor_drops_model_and_effort() {
+    fn capabilities_descriptor_supports_model_without_effort() {
         let caps = MCODE.capabilities();
         assert_eq!(caps.harness_id, "mcode");
         assert!(caps.supports_resume);
         assert!(caps.supports_prefill);
-        assert!(!caps.supports_model_override);
+        assert!(caps.supports_model_override);
         assert!(!caps.supports_effort_override);
         // Issue #1797 — the hook is provisioned and Stop delivery was
         // validated against a live 0.4.12 TUI.
@@ -1103,64 +1153,97 @@ mod tests {
         }
     }
 
-    /// The recipe for the default launch mode — even with a (hypothetical)
-    /// resolved model in the input — must contain no `--model` flag.
     #[test]
-    fn mcode_interactive_recipe_never_carries_model_arg() {
-        // Defence in depth: even if a caller bypassed the resolver mask
-        // and stuffed a model into ResolvedAgentConfig, the prepared
-        // recipe must not include --model, because the harness
-        // advertised `supports_model_override = false`.
+    fn mcode_interactive_recipe_carries_model_before_positional_prompt() {
         let config = ResolvedAgentConfig {
-            model: Some("minimax/MiniMax-Text-01".to_string()),
+            model: Some("minimax/MiniMax-M3#variant".to_string()),
             effort: None,
             extra_args: None,
         };
-        let input = HarnessLaunchInput {
-            platform: Platform::Macos,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::None,
-            config: &config,
-            prefill: None,
-            sandbox: false,
-        };
-        let prepared = default_prepare(&MCODE, input);
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "mcode interactive recipe must never carry --model (issue #1179); got {:?}",
-            prepared.recipe.base_args
-        );
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform,
+                    runtime: EnvType::Windows,
+                    session: SessionIdModeRef::None,
+                    config: &config,
+                    prefill: Some("Review this workspace"),
+                    sandbox: false,
+                },
+            );
+            assert_eq!(
+                prepared.recipe.base_args,
+                vec![
+                    "--model",
+                    "minimax/MiniMax-M3#variant",
+                    "Review this workspace",
+                ]
+            );
+            assert_eq!(prepared.recipe.windows_shell, shell_for(platform));
+        }
     }
 
-    /// Cross-check the resume-mode recipe: it uses the `--session`
-    /// positional and the TUI never receives `--model` even when a model
-    /// is in the resolved config.
     #[test]
-    fn mcode_resume_recipe_carries_session_not_model() {
+    fn mcode_resume_recipe_carries_session_and_model_before_prompt() {
         let config = ResolvedAgentConfig {
-            model: Some("minimax/MiniMax-Text-01".to_string()),
+            model: Some("minimax/MiniMax-M3".to_string()),
             effort: None,
             extra_args: None,
         };
-        let input = HarnessLaunchInput {
-            platform: Platform::Windows,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("abc-123"),
-            config: &config,
-            prefill: None,
-            sandbox: false,
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform,
+                    runtime: EnvType::Windows,
+                    session: SessionIdModeRef::Resume("mvs_abc123"),
+                    config: &config,
+                    prefill: Some("Continue the review"),
+                    sandbox: false,
+                },
+            );
+            assert_eq!(
+                prepared.recipe.base_args,
+                vec![
+                    "--session",
+                    "mvs_abc123",
+                    "--model",
+                    "minimax/MiniMax-M3",
+                    "Continue the review",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn mcode_recipe_without_model_preserves_native_default() {
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: None,
+            extra_args: None,
         };
-        let prepared = default_prepare(&MCODE, input);
-        assert!(
-            prepared.recipe.base_args.contains(&"--session".to_string()),
-            "mcode resume must include --session, got {:?}",
-            prepared.recipe.base_args
-        );
-        assert!(prepared.recipe.base_args.contains(&"abc-123".to_string()));
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "mcode resume must not carry --model"
-        );
+        for session in [
+            SessionIdModeRef::None,
+            SessionIdModeRef::Resume("mvs_abc123"),
+        ] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform: Platform::Windows,
+                    runtime: EnvType::Windows,
+                    session,
+                    config: &config,
+                    prefill: None,
+                    sandbox: false,
+                },
+            );
+            let expected = match session {
+                SessionIdModeRef::None => vec![],
+                _ => vec!["--session", "mvs_abc123"],
+            };
+            assert_eq!(prepared.recipe.base_args, expected);
+        }
     }
 
     #[test]
@@ -1455,7 +1538,10 @@ mod tests {
         let first = provision(101);
         assert!(first.contains("/api/attention/mcode"), "{first}");
         let second = provision(202);
-        assert_eq!(first, second, "another spawn cannot redirect an existing process");
+        assert_eq!(
+            first, second,
+            "another spawn cannot redirect an existing process"
+        );
         assert_eq!(provision(101), first);
 
         // The merge never accumulates handlers across nodes.
@@ -1811,7 +1897,10 @@ defaultModelThinking:
     #[test]
     fn pin_preserves_a_trailing_comment_on_the_key_line() {
         let home = tempfile::tempdir().unwrap();
-        seed_config(home.path(), "permissionMode: ask  # deliberately strict\nlogLevel: info\n");
+        seed_config(
+            home.path(),
+            "permissionMode: ask  # deliberately strict\nlogLevel: info\n",
+        );
 
         assert_eq!(pin_permission_mode(home.path()), Ok(true));
 
@@ -1825,7 +1914,8 @@ defaultModelThinking:
     #[test]
     fn pin_leaves_every_other_line_untouched() {
         let home = tempfile::tempdir().unwrap();
-        let original = REALISTIC_CONFIG.replace("logLevel: info\n", "logLevel: info\npermissionMode: auto\n");
+        let original =
+            REALISTIC_CONFIG.replace("logLevel: info\n", "logLevel: info\npermissionMode: auto\n");
         seed_config(home.path(), &original);
 
         assert_eq!(pin_permission_mode(home.path()), Ok(true));
@@ -1844,7 +1934,10 @@ defaultModelThinking:
         // some other mapping; rewriting it would corrupt an unrelated part of
         // the user's config.
         let home = tempfile::tempdir().unwrap();
-        seed_config(home.path(), "provider:\n  minimax:\n    permissionMode: ask\n");
+        seed_config(
+            home.path(),
+            "provider:\n  minimax:\n    permissionMode: ask\n",
+        );
 
         assert_eq!(pin_permission_mode(home.path()), Ok(true));
 
@@ -1862,7 +1955,10 @@ defaultModelThinking:
     #[test]
     fn pin_does_not_match_a_key_that_merely_starts_the_same() {
         let home = tempfile::tempdir().unwrap();
-        seed_config(home.path(), "permissionModeOverride: keep\npermissionModes: keep\n");
+        seed_config(
+            home.path(),
+            "permissionModeOverride: keep\npermissionModes: keep\n",
+        );
 
         assert_eq!(pin_permission_mode(home.path()), Ok(true));
 
@@ -1915,8 +2011,14 @@ defaultModelThinking:
         assert_eq!(pin_permission_mode(home.path()), Ok(true));
 
         let after = std::fs::read_to_string(config_path(home.path())).unwrap();
-        assert_eq!(after, "logLevel: info\r\npermissionMode: bypassPermissions\r\n");
-        assert!(!after.replace("\r\n", "").contains('\n'), "no bare LF may be introduced; got {after:?}");
+        assert_eq!(
+            after,
+            "logLevel: info\r\npermissionMode: bypassPermissions\r\n"
+        );
+        assert!(
+            !after.replace("\r\n", "").contains('\n'),
+            "no bare LF may be introduced; got {after:?}"
+        );
     }
 
     #[test]
@@ -1945,12 +2047,18 @@ defaultModelThinking:
         // the compile-time gate.
         let home = tempfile::tempdir().unwrap();
         seed_config(home.path(), REALISTIC_CONFIG);
-        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o000))
-            .unwrap();
+        std::fs::set_permissions(
+            config_path(home.path()),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
 
         let result = pin_permission_mode(home.path());
-        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(
+            config_path(home.path()),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
 
         assert!(
             result.is_err(),
@@ -1974,7 +2082,10 @@ defaultModelThinking:
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(tmp_files.is_empty(), "atomic write must not leave .tmp residue; found {tmp_files:?}");
+        assert!(
+            tmp_files.is_empty(),
+            "atomic write must not leave .tmp residue; found {tmp_files:?}"
+        );
     }
 
     /// The pin runs on every spawn next to the attention provisioner, so the
@@ -1986,7 +2097,10 @@ defaultModelThinking:
 
         let manifest = provision_test_home(home.path(), EnvType::Windows);
 
-        assert!(manifest.exists(), "the attention plugin must still be provisioned alongside the pin");
+        assert!(
+            manifest.exists(),
+            "the attention plugin must still be provisioned alongside the pin"
+        );
         let after = std::fs::read_to_string(config_path(home.path())).unwrap();
         assert!(
             after.contains("permissionMode: bypassPermissions"),
@@ -1999,8 +2113,11 @@ defaultModelThinking:
     fn provision_attention_hooks_still_provisions_when_the_config_is_unreadable() {
         let home = tempfile::tempdir().unwrap();
         seed_config(home.path(), REALISTIC_CONFIG);
-        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o000))
-            .unwrap();
+        std::fs::set_permissions(
+            config_path(home.path()),
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .unwrap();
 
         let path = home.path().to_string_lossy().to_string();
         let result = MCODE.provision_attention_hooks(
@@ -2016,8 +2133,11 @@ defaultModelThinking:
             },
             7,
         );
-        std::fs::set_permissions(config_path(home.path()), std::os::unix::fs::PermissionsExt::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(
+            config_path(home.path()),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
 
         assert!(
             result.is_ok(),
@@ -2046,10 +2166,6 @@ defaultModelThinking:
             MCODE_PROVISIONED_EVENTS,
             &["SessionStart", "Stop", "PermissionRequest"],
             "SessionStart is provisioned for capture without publishing Ready, but remains unvalidated; Stop completes a turn"
-        );
-        assert!(
-            MCODE_HOOK_TIMEOUT_SECONDS > 0,
-            "hook timeout must be positive: {MCODE_HOOK_TIMEOUT_SECONDS}"
         );
     }
 

@@ -490,7 +490,7 @@ export const HARNESS_CATALOG = {
       "requires_attention_hook": true,
       "supports_effort_override": false,
       "supports_extra_args": true,
-      "supports_model_override": false,
+      "supports_model_override": true,
       "supports_passive_turn_watcher": false,
       "supports_prefill": true,
       "supports_resume": true

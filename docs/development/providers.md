@@ -361,5 +361,14 @@ deliberately-set names above ever drift in.
 
 ## Saved Spawn Configurations
 
+Model-reference syntax belongs to the harness adapter through
+`AgentProvider::validate_model_override`. Configuration and harness-default writes
+invoke it after normalization; interactive command composition and background
+launch resolution check the final model again. This catches Circuit overrides
+and stored snapshots that bypass save validation. MiniMax Code restricts
+`provider/model[#variant]` parts to ASCII letters, digits, `.`, `_` and `-` so
+Windows Cmd cannot split or expand the reference. Syntax validation does not
+prove account availability or CLI-version compatibility.
+
 `preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
 

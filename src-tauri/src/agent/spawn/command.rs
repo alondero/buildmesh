@@ -22,13 +22,14 @@ use std::borrow::Cow;
 /// effort values (issue #1149). The caller runs
 /// [`crate::agent::capabilities::resolve_agent_config`] with the harness's
 /// capability descriptor and the per-field cascade inputs; this function
-/// forwards the resolved values verbatim and never re-consults capability
+/// validates adapter-owned model syntax and forwards accepted values verbatim,
+/// without re-consulting capability
 /// flags. Empty / whitespace inputs and unsupported values are masked before
 /// they reach here.
 ///
-/// `Err` means the spawn cannot be assembled safely — today only a macOS
-/// Seatbelt profile-write failure, which must not degrade into an unsandboxed
-/// launch (#2034). The caller surfaces it as a spawn error.
+/// `Err` means the spawn cannot be assembled safely, including an invalid model
+/// reference or a macOS Seatbelt profile-write failure, which must not degrade
+/// into an unsandboxed launch (#2034). The caller surfaces it as a spawn error.
 #[allow(clippy::too_many_arguments)]
 pub fn build_spawn_command(
     resolved: &env::ResolvedPath,
@@ -96,6 +97,9 @@ pub fn build_spawn_command_prepared(
         _ => Cow::Borrowed(config),
     };
     let config = routed_config.as_ref();
+    if let Some(model) = config.model.as_deref() {
+        adapter.validate_model_override(model)?;
+    }
 
     // Compose the harness's launch contribution: recipe + capability
     // descriptor + env policy, all from the same adapter. The
@@ -127,11 +131,17 @@ pub fn build_spawn_command_prepared(
         ..
     } = routing
     {
-        recipe.base_args.extend(["--profile".into(), profile_name.clone()]);
+        recipe
+            .base_args
+            .extend(["--profile".into(), profile_name.clone()]);
         if descriptor.reasoning_effort == Some(true) {
             // Unknown model names otherwise suppress Codex's reasoning field entirely.
-            recipe.base_args.extend(["-c".into(), "model_supports_reasoning_summaries=true".into(),
-                "-c".into(), "model_reasoning_summary=\"none\"".into()]);
+            recipe.base_args.extend([
+                "-c".into(),
+                "model_supports_reasoning_summaries=true".into(),
+                "-c".into(),
+                "model_reasoning_summary=\"none\"".into(),
+            ]);
         }
     }
 
@@ -325,13 +335,7 @@ pub(crate) fn resolve_spawn_config(
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
-        cascade_inputs_for(
-            explicit_model,
-            explicit_effort,
-            None,
-            None,
-            app_default,
-        ),
+        cascade_inputs_for(explicit_model, explicit_effort, None, None, app_default),
         explicit_extra_args,
     )
 }

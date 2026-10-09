@@ -4,6 +4,9 @@
 account access change over time; use each installed harness's own catalog or
 model picker as the final source for a saved configuration.
 
+MiniMax Code's interactive model override was checked on native Windows with
+`mcode.cmd 0.6.5`; macOS, Linux and WSL remain unverified.
+
 ## How Buildmesh passes model strings
 
 Buildmesh only passes a Launch Configuration's **Model** value to harnesses
@@ -35,6 +38,7 @@ configuration, and CLI version can change the available set.
 | **Command Code** | `--model <value>` | Use an ID in Command Code's model registry. Current examples include `deepseek/deepseek-v4-flash`, `claude-sonnet-5`, `gpt-6-sol`, `moonshotai/Kimi-K2.7-Code`, and `z-ai/glm-5.3-flash`. Unknown IDs are rejected. The registry accepts a full ID or its suffix after `/`, case-insensitively. | Run `cmd --list-models` (on Windows Buildmesh launches `cmdc`, but the documented Command Code command is `cmd`). The output matches the `/model` picker. See the [Command Code model reference](https://commandcode.ai/docs/reference/cli/models) and the [Buildmesh adapter](../../src-tauri/src/agent/provider/adapters/commandcode.rs). |
 | **Meta Muse** | `--model <value>` | Official IDs include `muse-spark-1.3`, `muse-spark-1.3-contributor`, `muse-spark-1.2`, `muse-spark-1.2-contributor`, and `muse-spark-1.1`. The CLI accepts an arbitrary string locally, but the model must still be available to the configured Meta account/API. | Use `/models` in Muse Code. The [Muse Code configuration guide](https://dev.meta.ai/docs/muse-code/configuration), [Meta model overview](https://dev.meta.ai/docs/overview), and [Muse changelog](https://dev.meta.ai/docs/muse-code/changelog) list current model behavior. See the [Muse adapter](../../src-tauri/src/agent/provider/adapters/muse.rs). |
 | **Cline** | `--model <value>` | The model ID is interpreted by Cline's selected provider. Direct-provider IDs can be bare model IDs such as `claude-sonnet-5`; a gateway such as Cline's provider may use qualified IDs such as `anthropic/claude-sonnet-4-6`. Buildmesh sends the model but does not add Cline's `--provider` option. | Configure the provider in Cline first, then copy a model ID from that provider's catalog/configuration. Use `cline --help` for the active CLI flags and `cline config` to inspect its setup. See the [Cline CLI reference](https://github.com/cline/cline/blob/main/docs/cli/cli-reference.mdx), [model ID guide](https://github.com/cline/cline/blob/main/docs/api/models.mdx), and [Buildmesh Cline adapter](../../src-tauri/src/agent/provider/adapters/cline.rs). |
+| **MiniMax Code** | `--model <value>` | Use `provider/model`, optionally followed by `#variant`, with ASCII letters, digits, `.`, `_` and `-` in each part. Native Windows `mcode.cmd 0.6.5` interactive help advertises a session-only override, including with `--session <id>`; macOS, Linux and WSL are unverified. | Use `/model` in the TUI to find models available to your account; `/provider` and `mcode provider list --json` inspect configured providers. See the [MiniMax CLI model references](https://agent.minimax.io/docs/cli/features#model-references) and the [Buildmesh adapter](../../src-tauri/src/agent/provider/adapters/mcode.rs). Buildmesh has no model-flag version gate; older CLIs without the flag reject launches with a model. Check/update the exact launched executable or clear both model settings; see [troubleshooting](../troubleshooting.md#minimax-code-rejects-a-configured-model). |
 
 ## Harnesses without a Buildmesh model override
 
@@ -42,7 +46,6 @@ These harnesses do not accept a model value from Buildmesh Launch Configurations
 
 | Harness | Why Launch Configurations cannot set the model | Upstream model selection |
 |---|---|---|
-| **MiniMax Code** | Buildmesh starts MiniMax Code's interactive TUI. Its `--model` flag belongs to the separate `mcode exec` mode, which Buildmesh does not launch. | Use `/provider` in the TUI or run `mcode provider list --json` to inspect configured providers and model IDs. Headless IDs use `provider-id/model-id`. See the [MiniMax Code CLI](https://github.com/MiniMax-AI/minimax-code/blob/main/README.md), [examples](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/examples.md), and [demo](https://github.com/MiniMax-AI/minimax-code/blob/main/docs/demo.md), plus the [Buildmesh adapter](../../src-tauri/src/agent/provider/adapters/mcode.rs). |
 | **DeepSeek Harness** | Buildmesh launches `dsh` without advertising a model override; provider and model selection belong to the harness profile. | Select a model in DeepSeek Harness **Settings → Models**. Its built-in DeepSeek provider currently documents `deepseek-flash` and `deepseek-v4-pro`; custom providers have their own model IDs. No public CLI model-list command is documented. See the [provider guide](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers), [DeepSeek provider package](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/llm/llm-deepseek/README.md), and [API updates](https://api-docs.deepseek.com/updates/). This is separate from Buildmesh's DeepSeek provider routes for Claude Code and Codex. See the [Buildmesh adapter](../../src-tauri/src/agent/provider/adapters/dsh.rs). |
 | **Freebuff** | Buildmesh does not expose a model override for this harness. | Choose a model in Freebuff's picker. Current source-catalog examples include `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6-luna`, `mimo/mimo-v2.6-pro`, and `meta/muse-spark-1.3-contributor`. A bundled Freebuff release may contain an older catalog; use its picker. See the [Freebuff repository](https://github.com/CodebuffAI/freebuff), [model catalog](https://github.com/CodebuffAI/freebuff/blob/main/common/src/constants/freebuff-models.ts), and [Buildmesh adapter](../../src-tauri/src/agent/provider/adapters/freebuff.rs). |
 | **Terminal** | Terminal is a shell, not an LLM harness, so there is no model argument or model catalog. | None. See the [Buildmesh Terminal adapter](../../src-tauri/src/agent/provider/adapters/terminal.rs). |
@@ -55,6 +58,6 @@ that row's live selector/list. If using a custom or proxied endpoint, use the
 model identifier that endpoint expects. A model that the CLI accepts may still
 be unavailable to the selected account or route.
 
-For MiniMax Code, DeepSeek Harness, or Freebuff, save the model in that
+For DeepSeek Harness or Freebuff, save the model in that
 harness's own provider/profile settings or use its model picker; Buildmesh
 cannot store a per-launch model for those interactive launch modes.

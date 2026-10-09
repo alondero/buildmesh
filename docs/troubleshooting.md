@@ -293,6 +293,34 @@ Check these in order:
 Never work around a certificate warning by disabling browser security on a
 shared network. Remote access exposes terminal content and input.
 
+## MiniMax Code rejects a configured model
+
+Buildmesh passes the Launch Configuration's **Model** as the session-only
+`--model` option, including when resuming. The interactive flag was verified on
+native Windows with `mcode.cmd 0.6.5`; macOS, Linux and WSL are unverified.
+Buildmesh has no model-flag version gate. The accepted compatibility risk is that
+an older CLI without interactive `--model` rejects the launch inside the terminal.
+
+Check `--version` and `--help` using the **exact executable Buildmesh launches**,
+recorded as `executable` in its MiniMax Code harness profile in `preferences.json`.
+For native Windows, invoke that full `.cmd` path from PowerShell, for example
+`& 'C:\path\to\mcode.cmd' --version` and `& 'C:\path\to\mcode.cmd' --help`.
+Plain `mcode` in Git Bash can select a different extensionless shim and report a
+different version. For WSL, use the selected distribution's executable; for
+macOS/Linux, use the resolved native executable. If its interactive help has no
+`--model`, run that same executable with `update` or clear the model settings.
+
+Use mcode's `/model` picker to find a model available to your account and enter
+its full `provider/model` reference, optionally with `#variant`. Buildmesh accepts
+only ASCII letters, digits, `.`, `_` and `-` in each part. Invalid references,
+including shell characters, fail before spawning even if they came from a
+Circuit override or a previously stored default. Replace or clear that value.
+Clearing the configuration's Model field restores the application default from
+**Settings → Launch Configurations**, in the **Agent Harness defaults** section,
+then mcode's own default. Clear the MiniMax Code default there too to omit
+`--model` entirely. See the
+[MiniMax CLI docs](https://agent.minimax.io/docs/cli/features#model-references).
+
 ## My standalone `mcode` sessions now run in Full Access
 
 Expected. When you launch a MiniMax Code node, Buildmesh sets

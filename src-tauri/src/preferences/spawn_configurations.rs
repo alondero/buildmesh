@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 use tauri::Emitter;
+use ts_rs::TS;
 
 use super::{AppPreferences, HarnessConfigValue};
 
@@ -134,7 +134,10 @@ pub fn save_value(value: SpawnConfiguration) -> Result<SpawnConfiguration, Strin
     save_with_route(value, None)
 }
 
-pub fn save_with_route(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<SpawnConfiguration, String> {
+pub fn save_with_route(
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<SpawnConfiguration, String> {
     // Issue #1948: time persistence here rather than at the call sites so
     // every save path (desktop command, mobile HTTP route) reports
     // separately from the spawn-menu refresh the frontend runs next
@@ -153,14 +156,24 @@ pub fn save_with_route(value: SpawnConfiguration, route: Option<super::ProviderP
     result
 }
 
-fn save_with_route_inner(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<SpawnConfiguration, String> {
+fn save_with_route_inner(
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<SpawnConfiguration, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
     value.resolved = None;
     super::storage::try_update(|prefs| {
         prepare_route(prefs, &value, route.clone())?;
-        value.generated = prefs.spawn_configurations.iter().find(|c| c.id == value.id)
-            .and_then(|c| c.generated.clone()).map(|mut g| { g.user_owned = true; g });
+        value.generated = prefs
+            .spawn_configurations
+            .iter()
+            .find(|c| c.id == value.id)
+            .and_then(|c| c.generated.clone())
+            .map(|mut g| {
+                g.user_owned = true;
+                g
+            });
         if let Some(existing) = prefs
             .spawn_configurations
             .iter_mut()
@@ -178,36 +191,75 @@ fn save_with_route_inner(value: SpawnConfiguration, route: Option<super::Provide
 
 /// Only creation is accepted here: editing a shared route belongs to Advanced Provider Routes.
 /// The caller's preference transaction also owns saving the configuration.
-fn prepare_route(prefs: &mut AppPreferences, value: &SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<(), String> {
-    let Some(mut route) = route else { return Ok(()); };
+fn prepare_route(
+    prefs: &mut AppPreferences,
+    value: &SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<(), String> {
+    let Some(mut route) = route else {
+        return Ok(());
+    };
     if value.spawn_option_id != format!("{}:{}", route.harness_id, route.provider_id) {
         return Err("Provider Route does not match the configuration".into());
     }
-    if let Some(existing) = prefs.provider_pairings.iter().find(|p| p.harness_id == route.harness_id && p.provider_id == route.provider_id) {
-        if existing != &route { return Err("Provider Route changed; reopen the configuration to use its current settings".into()); }
+    if let Some(existing) = prefs
+        .provider_pairings
+        .iter()
+        .find(|p| p.harness_id == route.harness_id && p.provider_id == route.provider_id)
+    {
+        if existing != &route {
+            return Err(
+                "Provider Route changed; reopen the configuration to use its current settings"
+                    .into(),
+            );
+        }
         return Ok(());
     }
-    let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id)
+    let account = prefs
+        .provider_accounts
+        .iter()
+        .find(|a| a.id == route.provider_id)
         .ok_or("Provider account is missing; add its credential in Providers")?;
-    if !account.enabled || account.api_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
+    if !account.enabled
+        || account
+            .api_key
+            .as_deref()
+            .is_none_or(|key| key.trim().is_empty())
+    {
         return Err("Enable this provider and add its credential in Providers".into());
     }
     if !super::provider_surfaces(account).contains(&route.surface) {
         return Err("Provider does not support this API surface".into());
     }
     route.base_url = route.base_url.map(|url| url.trim().to_string());
-    if route.model_tiers.default.as_deref().is_none_or(|model| model.trim().is_empty()) {
+    if route
+        .model_tiers
+        .default
+        .as_deref()
+        .is_none_or(|model| model.trim().is_empty())
+    {
         route.model_tiers.default = value.model.clone();
     }
-    let url = reqwest::Url::parse(route.base_url.as_deref().unwrap_or("")).map_err(|_| "Enter a valid provider endpoint URL")?;
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-        return Err("Provider endpoint must use HTTPS without credentials, query, or fragment".into());
+    let url = reqwest::Url::parse(route.base_url.as_deref().unwrap_or(""))
+        .map_err(|_| "Enter a valid provider endpoint URL")?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(
+            "Provider endpoint must use HTTPS without credentials, query, or fragment".into(),
+        );
     }
     super::upsert_provider_pairing(prefs, route);
     Ok(())
 }
 
-pub fn verify_draft(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<super::PairingVerification, String> {
+pub fn verify_draft(
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<super::PairingVerification, String> {
     let mut value = validate(value)?;
     normalize_id(&mut value);
     let mut prefs = super::load()?;
@@ -216,14 +268,32 @@ pub fn verify_draft(value: SpawnConfiguration, route: Option<super::ProviderPair
     prefs.spawn_configurations.push(value.clone());
     let plan = super::launch_configurations::resolve_for_edit(&prefs, &value.id)?;
     let route = plan.route.ok_or("Select a proxied provider to verify")?;
-    if route.surface != super::ApiSurface::OpenAI { return Err("This route does not require Responses verification".into()); }
-    let account = prefs.provider_accounts.iter().find(|a| a.id == route.provider_id).ok_or("Provider account is missing")?;
-    crate::services::provider_verification::verify_route_blocking(&route, account, plan.harness.runtime.unwrap_or(crate::models::EnvType::Windows))
+    if route.surface != super::ApiSurface::OpenAI {
+        return Err("This route does not require Responses verification".into());
+    }
+    let account = prefs
+        .provider_accounts
+        .iter()
+        .find(|a| a.id == route.provider_id)
+        .ok_or("Provider account is missing")?;
+    crate::services::provider_verification::verify_route_blocking(
+        &route,
+        account,
+        plan.harness
+            .runtime
+            .unwrap_or(crate::models::EnvType::Windows),
+    )
 }
 
 #[tauri::command]
-pub async fn verify_launch_configuration(value: SpawnConfiguration, route: Option<super::ProviderPairing>) -> Result<super::PairingVerification, String> {
-    crate::commands::run_blocking("verify_launch_configuration", move || verify_draft(value, route)).await
+pub async fn verify_launch_configuration(
+    value: SpawnConfiguration,
+    route: Option<super::ProviderPairing>,
+) -> Result<super::PairingVerification, String> {
+    crate::commands::run_blocking("verify_launch_configuration", move || {
+        verify_draft(value, route)
+    })
+    .await
 }
 
 fn normalize_id(value: &mut SpawnConfiguration) {
@@ -243,7 +313,11 @@ pub fn delete_spawn_configuration(app: tauri::AppHandle, id: String) -> Result<(
 pub fn delete_value(id: &str) -> Result<(), String> {
     super::update(|prefs| {
         prefs.spawn_configurations.retain(|c| c.id != id);
-        if !prefs.deleted_launch_configurations.iter().any(|deleted| deleted == id) {
+        if !prefs
+            .deleted_launch_configurations
+            .iter()
+            .any(|deleted| deleted == id)
+        {
             prefs.deleted_launch_configurations.push(id.into());
         }
     })?;
@@ -267,6 +341,37 @@ mod tests {
     }
 
     #[test]
+    fn mcode_configuration_rejects_shell_characters_and_accepts_variants() {
+        let mut value = configuration("mcode");
+        value.model = Some(" minimax/MiniMax-M3#variant ".into());
+        assert_eq!(
+            validate(value.clone()).unwrap().model.as_deref(),
+            Some("minimax/MiniMax-M3#variant")
+        );
+
+        value.model = Some("minimax/M3&echo x".into());
+        assert!(validate(value).unwrap_err().contains("model reference"));
+
+        let mut prefs = AppPreferences::default();
+        let valid = super::super::HarnessConfigValue {
+            model: Some(" minimax/MiniMax-M3#variant ".into()),
+            effort: None,
+        };
+        super::super::upsert_harness_default(&mut prefs, "mcode", valid).unwrap();
+        let saved = prefs.clone();
+        let invalid = super::super::HarnessConfigValue {
+            model: Some("minimax/%PATH%".into()),
+            effort: None,
+        };
+        assert!(
+            super::super::upsert_harness_default(&mut prefs, "mcode", invalid)
+                .unwrap_err()
+                .contains("model reference")
+        );
+        assert_eq!(prefs, saved);
+    }
+
+    #[test]
     fn configuration_and_pairing_save_atomically_and_preserve_other_routes() {
         let tmp = tempfile::tempdir().unwrap();
         super::super::init_for_tests(tmp.path().into());
@@ -277,13 +382,18 @@ mod tests {
         super::super::save(prefs.clone()).unwrap();
         let endpoint = super::super::first_class_surfaces("minimax").remove(0);
         let route = super::super::ProviderPairing {
-            harness_id: "claude".into(), provider_id: "minimax".into(), surface: endpoint.surface,
-            base_url: Some(endpoint.base_url), model_tiers: endpoint.model_tiers,
+            harness_id: "claude".into(),
+            provider_id: "minimax".into(),
+            surface: endpoint.surface,
+            base_url: Some(endpoint.base_url),
+            model_tiers: endpoint.model_tiers,
         };
         let mut value = configuration("claude:minimax");
         value.model = Some("MiniMax-M2.7-highspeed".into());
         value.effort = Some("high".into());
-        assert!(save_with_route(value.clone(), Some(route.clone())).unwrap_err().contains("Effort"));
+        assert!(save_with_route(value.clone(), Some(route.clone()))
+            .unwrap_err()
+            .contains("Effort"));
         prefs = super::super::load().unwrap();
         assert!(prefs.provider_pairings.is_empty());
         assert!(prefs.spawn_configurations.is_empty());
@@ -294,7 +404,9 @@ mod tests {
         assert_eq!(prefs.spawn_configurations, vec![saved]);
         let mut changed = route;
         changed.base_url = Some("https://other.example/v1".into());
-        assert!(save_with_route(value, Some(changed)).unwrap_err().contains("changed"));
+        assert!(save_with_route(value, Some(changed))
+            .unwrap_err()
+            .contains("changed"));
         assert_eq!(super::super::load().unwrap(), prefs);
         super::super::reset_for_tests();
     }

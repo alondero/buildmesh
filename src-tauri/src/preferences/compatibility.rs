@@ -18,8 +18,8 @@ use super::model::{
     ApiSurface, AppPreferences, HarnessConfigValue, ModelTiers, ProviderAccount, ProviderPairing,
 };
 use super::resolver::{
-    claude_harness_id, harness_capabilities_for, provider_accounts,
-    provider_pairings,
+    claude_harness_id, harness_capabilities_for, provider_accounts, provider_pairings,
+    resolve_harness_provider,
 };
 use crate::agent::capabilities::EffortControlKind;
 
@@ -40,7 +40,9 @@ pub fn normalize_harness_default(raw: HarnessConfigValue) -> HarnessConfigValue 
 /// [`normalize_harness_default`] doesn't reach into
 /// `agent::capabilities::normalize_non_empty` (a private seam there).
 fn trim_to_none(s: Option<&str>) -> Option<String> {
-    s.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    s.map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 /// Validate a harness default against the selected harness's capability
@@ -59,10 +61,9 @@ fn trim_to_none(s: Option<&str>) -> Option<String> {
 ///   value not in it is refused at the write boundary (issue #1148 AC #5
 ///   "Accept only values allowed by that harness's effort-control kind").
 ///
-/// Model values pass through after trimming — there is no harness-side model
-/// vocabulary; the harness either accepts the override or the resolver's
-/// `supports_model_override` flag drops it on the spawn path. A blank model
-/// collapses to `None` here so the storage-shape invariant
+/// Model values are trimmed and checked against the adapter's reference
+/// syntax; model availability remains the harness's responsibility. A blank
+/// model collapses to `None` here so the storage-shape invariant
 /// (`is_empty → no entry`) keeps working.
 pub fn validate_harness_default(
     profile_id: &str,
@@ -71,6 +72,11 @@ pub fn validate_harness_default(
     let caps = harness_capabilities_for(profile_id)
         .ok_or_else(|| format!("unknown harness id '{profile_id}'"))?;
     let normalized = normalize_harness_default(raw);
+    if let Some(model) = normalized.model.as_deref() {
+        resolve_harness_provider(profile_id)
+            .adapter()
+            .validate_model_override(model)?;
+    }
     match &caps.effort_control {
         EffortControlKind::None => {
             if normalized.effort.is_some() {
@@ -110,7 +116,9 @@ pub fn upsert_harness_default(
     if validated.is_empty() {
         prefs.harness_defaults.remove(profile_id);
     } else {
-        prefs.harness_defaults.insert(profile_id.to_string(), validated);
+        prefs
+            .harness_defaults
+            .insert(profile_id.to_string(), validated);
     }
     Ok(())
 }
@@ -240,7 +248,12 @@ fn resolve_provider_env_with(
             // strands Cline's own `ANTHROPIC_API_KEY` reader with an
             // empty string and breaks authentication.
             if harness_id == "cline" {
-                cline_consumer_env(pairing.surface, pairing.base_url.as_deref(), account.api_key.as_deref(), &pairing.model_tiers)
+                cline_consumer_env(
+                    pairing.surface,
+                    pairing.base_url.as_deref(),
+                    account.api_key.as_deref(),
+                    &pairing.model_tiers,
+                )
             } else {
                 surface_env(
                     pairing.surface,
@@ -289,8 +302,8 @@ pub fn preflight_resolve_provider_env(spawn_option_id: &str) -> Result<(), Strin
             let Some(account) = accounts.iter().find(|a| a.id == spawn_option_id) else {
                 return Ok(());
             };
-            let pairing = stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id())
-                .cloned();
+            let pairing =
+                stored_claude_anthropic_pairing(account, &pairings, &claude_harness_id()).cloned();
             (pairing, account.id.clone())
         }
     };
@@ -319,7 +332,12 @@ pub(crate) fn preflight_pairing_env(
     if pairing.surface != ApiSurface::Anthropic {
         return Ok(());
     }
-    if pairing.model_tiers.default.as_deref().is_none_or(|s| s.is_empty()) {
+    if pairing
+        .model_tiers
+        .default
+        .as_deref()
+        .is_none_or(|s| s.is_empty())
+    {
         return Err(format!(
             "Custom Claude-compatible endpoint '{account_id}' requires the 'Default model' tier to be set. Open the Harnesses page and configure it (e.g. 'anthropic/claude-3-5-sonnet-latest' for Claude via OpenRouter)."
         ));
@@ -492,10 +510,19 @@ fn anthropic_surface_env(
             let opus = model(&tiers.opus).unwrap_or_else(|| primary.clone());
             for (k, v) in [
                 ("ANTHROPIC_SMALL_FAST_MODEL", fast.clone()),
-                ("ANTHROPIC_DEFAULT_SONNET_MODEL", model(&tiers.sonnet).unwrap_or_else(|| primary.clone())),
+                (
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    model(&tiers.sonnet).unwrap_or_else(|| primary.clone()),
+                ),
                 ("ANTHROPIC_DEFAULT_OPUS_MODEL", opus.clone()),
-                ("ANTHROPIC_DEFAULT_FABLE_MODEL", model(&tiers.fable).unwrap_or(opus)),
-                ("ANTHROPIC_DEFAULT_HAIKU_MODEL", model(&tiers.haiku).unwrap_or(fast)),
+                (
+                    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                    model(&tiers.fable).unwrap_or(opus),
+                ),
+                (
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    model(&tiers.haiku).unwrap_or(fast),
+                ),
             ] {
                 env.push((k.to_string(), v));
             }
@@ -686,15 +713,20 @@ mod tests {
             &[ApiSurface::Anthropic, ApiSurface::OpenAI]
         );
         for harness in ["anthropic", "claude", "codex", "opencode", "terminal"] {
-            assert!(fallback_surfaces(harness).is_empty(), "{harness} must not fall back");
+            assert!(
+                fallback_surfaces(harness).is_empty(),
+                "{harness} must not fall back"
+            );
         }
     }
 
     // ----- Issue #1773 review — Cline consumer-aware env emission -----
 
     fn anthropic_pairing(base_url: Option<&str>) -> ProviderPairing {
-        let mut tiers = ModelTiers::default();
-        tiers.default = Some("anthropic/claude-3-5-sonnet-latest".into());
+        let tiers = ModelTiers {
+            default: Some("anthropic/claude-3-5-sonnet-latest".into()),
+            ..Default::default()
+        };
         ProviderPairing {
             harness_id: "claude".into(),
             provider_id: "minimax".into(),
@@ -705,8 +737,10 @@ mod tests {
     }
 
     fn openai_pairing(base_url: Option<&str>) -> ProviderPairing {
-        let mut tiers = ModelTiers::default();
-        tiers.default = Some("gpt-4o-mini".into());
+        let tiers = ModelTiers {
+            default: Some("gpt-4o-mini".into()),
+            ..Default::default()
+        };
         ProviderPairing {
             harness_id: "codex".into(),
             provider_id: "minimax".into(),
@@ -723,11 +757,7 @@ mod tests {
     #[test]
     fn cline_anthropic_default_endpoint_sets_anthropic_api_key() {
         let stored = vec![anthropic_pairing(None)];
-        let env = resolve_provider_env_with(
-            "cline:minimax",
-            &[account("minimax")],
-            &stored,
-        );
+        let env = resolve_provider_env_with("cline:minimax", &[account("minimax")], &stored);
         let key = env
             .iter()
             .find(|(k, _)| k == "ANTHROPIC_API_KEY")
@@ -746,7 +776,8 @@ mod tests {
             env
         );
         assert!(
-            env.iter().all(|(k, _)| k != "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            env.iter()
+                .all(|(k, _)| k != "ANTHROPIC_DEFAULT_SONNET_MODEL"),
             "Cline must not receive Claude Code per-tier alias env; got {:?}",
             env
         );
@@ -760,11 +791,7 @@ mod tests {
     #[test]
     fn cline_anthropic_custom_endpoint_sets_anthropic_api_key_not_blank() {
         let stored = vec![anthropic_pairing(Some("https://openrouter.ai/api/v1"))];
-        let env = resolve_provider_env_with(
-            "cline:minimax",
-            &[account("minimax")],
-            &stored,
-        );
+        let env = resolve_provider_env_with("cline:minimax", &[account("minimax")], &stored);
         let key = env
             .iter()
             .find(|(k, _)| k == "ANTHROPIC_API_KEY")
@@ -808,11 +835,7 @@ mod tests {
     #[test]
     fn cline_openai_custom_endpoint_sets_openai_api_key() {
         let stored = vec![openai_pairing(Some("https://api.deepseek.com/v1"))];
-        let env = resolve_provider_env_with(
-            "cline:minimax",
-            &[account("minimax")],
-            &stored,
-        );
+        let env = resolve_provider_env_with("cline:minimax", &[account("minimax")], &stored);
         let key = env
             .iter()
             .find(|(k, _)| k == "OPENAI_API_KEY")
@@ -841,11 +864,7 @@ mod tests {
     #[test]
     fn claude_anthropic_custom_endpoint_still_uses_auth_token_trap() {
         let stored = vec![anthropic_pairing(Some("https://openrouter.ai/api/v1"))];
-        let env = resolve_provider_env_with(
-            "claude:minimax",
-            &[account("minimax")],
-            &stored,
-        );
+        let env = resolve_provider_env_with("claude:minimax", &[account("minimax")], &stored);
         let api_key = env
             .iter()
             .find(|(k, _)| k == "ANTHROPIC_API_KEY")

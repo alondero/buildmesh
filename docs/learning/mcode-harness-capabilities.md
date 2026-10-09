@@ -4,8 +4,8 @@ description: MiniMax Code (mcode) capability review against Buildmesh's harness 
 metadata:
   type: reference
   harness: mcode
-  mcode_version: 0.4.12 (@minimax-ai/code)
-  date: 2026-09-20
+  mcode_version: 0.6.5 (model CLI); 0.4.12 (attention validation)
+  date: 2026-10-09
   attention_validation: Stop validated 2026-09-20 against installed 0.4.12;
     SessionStart provisioned for identity capture but delivery unvalidated
     against the installed TUI as of 2026-10-01
@@ -25,6 +25,8 @@ issue #1797). The Circuit compatibility gate is open for mcode.
 |---|---|
 | `@minimax-ai/code@0.4.12` npm bundle (`cli.js` + `chunks/*.js` strings) | Shipped CLI: data-dir resolution, session layout, plugin scan, hook payload |
 | Installed `mcode 0.4.12` driven on Windows, 2026-09-20 | Live `exec` and interactive-TUI runs against a local listener (issue #1797) |
+| Installed `mcode 0.6.5` on Windows, 2026-10-09 | `mcode --version` and interactive `mcode --help`: `-m, --model <provider/model>` selects the model for this Session only |
+| [MiniMax CLI features](https://agent.minimax.io/docs/cli/features#model-references) | Model reference syntax: `provider/model`, optionally `#variant` |
 | `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-v0.4-spec.md`, `docs/plugin-compatibility.md`) | The mcode 0.4.0+ plugin format: `.claude-plugin/plugin.json`, inline `hooks` |
 | `MiniMax-AI/minimax-code-plugins` (`proposals/hooks-detailed-spec.md`, `examples/hello-mcode-hooks`) | The superseded v0.3.x Agent-Plugin format (`io.minimax.mcode/hooks/hooks.json`) |
 | `src-tauri/src/agent/provider/adapters/mcode.rs` | Current Buildmesh adapter |
@@ -49,13 +51,33 @@ interactive TUI over PTY, no harness-owned worktree flag.
 | `auto_resume_on_startup` | `true` | |
 | `self_assigns_session_id` | `true` | A delivered callback binds session id plus workspace. `Stop` delivery was observed live; `SessionStart` is provisioned but unvalidated, so identity is not established at startup. |
 | `supports_prefill` | `true` | Trailing positional `[prompt]`, no `--prefill` flag |
-| `supports_model_override` | `false` | Issue #1179: `--model` exists only on `mcode exec`, never the launched TUI |
-| `effort_control` | `None` | Same reason — the TUI rejects effort flags |
+| `supports_model_override` | `true` | Interactive `mcode 0.6.5` accepts session-only `--model <provider/model>`; supersedes the older limitation in issue #1179 |
+| `effort_control` | `None` | The TUI has no supported effort override |
 | `requires_attention_hook` | `true` | `Stop` delivered from a live 0.4.12 TUI (#1797); `SkipPermissions`, `TurnCompleted` only — see below |
 | `attention_capability` | `Hook { events: [turn_completed], launch_mode: skip_permissions, min_version: "0.4.12" }` | Buildmesh launches mcode with an auto-approving policy, so no permission signal is claimed |
 | `produces_readable_transcript` | `true` | Canonical `messages.jsonl` via `TranscriptFormat::Mcode` (this change) |
 | Shell | `WindowsShell::Cmd` on Windows, `Direct` elsewhere | Correct — `.cmd` shim on Windows, native binary on macOS/Linux |
 | Launch mode | Interactive TUI | Correct — PTY backend supports full-screen rendering |
+
+## Session model selection
+
+The native Windows `mcode.cmd 0.6.5` interactive help advertises `--model`
+alongside `--session` and `--continue`, so model selection does not require
+changing to `mcode exec`.
+Buildmesh validates the `provider/model[#variant]` syntax and accepts only ASCII
+letters, digits, `.`, `_` and `-` in each part to prevent Windows Cmd parsing or
+expansion. Validation is adapter-owned and runs on configuration/default saves
+and before spawn, including Circuit overrides. Accepted references are forwarded
+unchanged on fresh and resumed launches, before the trailing positional prompt. Saved configurations
+override native defaults; an absent model retains the existing default cascade.
+This option applies to the session without changing mcode's global model default.
+macOS, Linux and WSL remain unverified. No runtime model-flag version gate is
+added: the accepted compatibility risk is that older installations lacking the
+interactive option reject launches with a model inside the terminal. Update the
+exact executable Buildmesh launches or clear the configuration and harness-default
+models; see [troubleshooting](../troubleshooting.md#minimax-code-rejects-a-configured-model).
+This help-level check does not validate inference for every account/model
+combination or extend the separate attention evidence.
 
 ## Transcript — wired (this change)
 
@@ -192,9 +214,8 @@ provisioned.
 
 ### Pinning Full Access
 
-The TUI accepts no permission flag — `mcode --help` offers `--model`, `--lane`,
-`--session`, `--continue` and `--tui-mode` and nothing else. `--permission`
-exists on `mcode exec` only, which Buildmesh never spawns, and mcode reads no
+The installed TUI help exposes no permission flag. `--permission` exists on
+`mcode exec` only, which Buildmesh never spawns for interactive nodes, and mcode reads no
 environment variable for the mode (enumerated across the installed 0.5.5
 bundle). The sole lever is the top-level `permissionMode` key in
 `<dataDir>/config.yaml`, validated against

@@ -424,7 +424,7 @@ The current built-in catalog is:
 | Grok Code | Yes | Hook | Cross-runtime hooks need working Windows/WSL networking |
 | Cursor | Yes | Hook | Effort control is not available through Buildmesh |
 | Kimi Code | Yes | Hook | Needs Kimi Code 0.27.0 or newer; has no transcript reader |
-| MiniMax Code | Yes | Hook | Attention reports completed turns; the TUI rejects model/effort flags and is launched in Full Access |
+| MiniMax Code | Yes | Hook | Attention reports completed turns; supports session model selection, no effort override; launched in Full Access |
 | DeepSeek Harness | Yes | None | Use the terminal for progress when no signal is available |
 | Command Code | Yes | Passive watcher | Transcript-based lifecycle support is available. If typing does nothing, see [Command Code does not accept typing](troubleshooting.md#command-code-does-not-accept-typing) |
 | Freebuff | Yes | None | Model and effort overrides are not available |
@@ -624,6 +624,23 @@ See MiniMax's [Codex guide](https://platform.minimax.io/docs/token-plan/codex) a
 Model identifiers and argument formats vary by harness, provider, and account;
 see [Supported model strings](research/supported-model-strings.md) for current
 examples and each harness's live model-list command or picker.
+
+For **MiniMax Code**, enter the model reference from mcode's `/model` picker
+as `provider/model` (or `provider/model#variant`) in the configuration's
+**Model** field. The selected model applies to fresh and resumed sessions
+without changing mcode's global model default. Buildmesh accepts ASCII letters,
+digits, `.`, `_` and `-` in each reference part; other characters are rejected
+when saving or launching so Windows command parsing cannot alter the reference.
+Leave the field blank to inherit MiniMax Code's **Model** from
+**Settings → Launch Configurations**, in the **Agent Harness defaults** section,
+then mcode's own default. Previously stored MiniMax Code model defaults now take
+effect too; replace or clear invalid defaults in that section.
+The interactive flag was verified on native Windows with `mcode.cmd 0.6.5`;
+macOS, Linux and WSL are unverified. Buildmesh does not gate this flag by CLI
+version: older installations without interactive `--model` will reject a launch
+with a model. Update the executable Buildmesh launches or clear both model fields;
+see [MiniMax Code model troubleshooting](troubleshooting.md#minimax-code-rejects-a-configured-model).
+MiniMax Code has no configurable effort control. See the [MiniMax CLI model reference docs](https://agent.minimax.io/docs/cli/features#model-references).
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
