@@ -233,8 +233,9 @@ Validated against OpenCode **1.18.3** on Windows (native `.cmd` via
 `cmd.exe /c`; Linux/macOS spawn direct). No controlled live Circuit run
 has been performed for this provider, so Circuit execution stays
 visibly **unsupported/Unverified** — the observer policy records this
-explicitly (`services::circuit_worker::observer_policy`, `opencode`
-arm) rather than falling through to the generic fallback.
+explicitly (the OpenCode adapter's `circuit_observation` declaration,
+rendered by `services::circuit_worker::observer_policy`) rather than falling
+through to the generic fallback.
 
 | Fact | Verdict |
 |---|---|

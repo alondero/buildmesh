@@ -55,12 +55,12 @@ use crate::circuit::stepper::{
     advance, CircuitEvent, RunState, RunView, StepStatus, StepView, Transition,
 };
 mod admission;
-mod codex_observer;
 mod github;
 #[cfg(test)]
 mod github_recovery_tests;
 mod jobs;
 pub(crate) mod native_hooks;
+mod native_pull;
 mod observation;
 pub(crate) mod observer_policy;
 pub(crate) mod readiness;
@@ -1352,14 +1352,14 @@ fn advance_and_persist_observed_event(
         Ok(turn_boundary_changed) => Ok((transition, turn_boundary_changed)),
         Err(TransitionPersistFailure::FreshnessRejected(error)) => {
             let Some(fallback_event) =
-                codex_observer::freshness_rejection_recheck(&before_observation, event)
+                native_pull::freshness_rejection_recheck(&before_observation, event)
             else {
                 *view = before_observation;
                 return Err(TransitionPersistFailure::FreshnessRejected(error));
             };
             *view = before_observation.clone();
             tracing::info!(
-                "circuits: run {} Codex recheck rejected by freshness fence; retaining Unverified state",
+                "circuits: run {} native recheck rejected by freshness fence; retaining Unverified state",
                 view.run_id
             );
             let fallback_transition = advance(view, &fallback_event);

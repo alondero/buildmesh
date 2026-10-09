@@ -320,9 +320,7 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                     ),
                     None => (
                         "Agent record unavailable".to_string(),
-                        crate::services::circuit_worker::observer_policy::for_provider(
-                            "missing-agent",
-                        ),
+                        crate::services::circuit_worker::observer_policy::for_missing_agent(),
                     ),
                 };
                 let deadline_ms = view.evidence_deadline_ms(&step.node_id);

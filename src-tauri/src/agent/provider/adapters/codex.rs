@@ -1,6 +1,11 @@
+use super::hook_contract;
 use crate::agent::capabilities::{EffortControlKind, CODEX_EFFORT_ALLOWED, CODEX_EFFORT_KEY};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
+use crate::circuit::strategy::{
+    FinalReportSource, HookPush, NativePull, ObservationStrategy, OwnedWorkCoverage, PullSource,
+    PushSource, ReconciliationPolicy, StrategyNotes, TurnIdentity,
 };
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
@@ -16,6 +21,8 @@ use toml_edit::{value, DocumentMut, Item, Table};
 
 pub struct CodexAdapter;
 pub static CODEX: CodexAdapter = CodexAdapter;
+
+const CODEX_OWNERSHIP_LIMIT: &str = "Codex recorded a completed foreground turn, but its rollout cannot verify all owned child and background work. Inspect the agent and Recheck evidence; this turn does not establish assigned-work completion.";
 
 /// Native `request_user_input` hooks were verified against Codex 0.154.0.
 /// Older binaries may accept the config but omit the callbacks Buildmesh uses
@@ -1663,6 +1670,43 @@ impl AgentProvider for CodexAdapter {
 
     fn auto_resume_on_startup(&self) -> bool {
         true
+    }
+
+    /// Codex rollout completion establishes only the foreground turn. The
+    /// rollout does not expose a complete child/background registry, including
+    /// work started by code-mode calls, so it cannot establish ownership
+    /// coverage. Hooks deliver requests and lifecycle receipts but carry no
+    /// prompt echo, so they never bind a recorded submission.
+    fn circuit_observation(&self) -> ObservationStrategy {
+        ObservationStrategy {
+            push: PushSource::Hooks(HookPush {
+                parse: |value| hook_contract::parse("codex", false, value),
+                source: "codex_native_hook",
+                request_source: "codex_request_hook",
+                ownership_gap: None,
+            }),
+            pull: PullSource::NativeTurnCompletion(NativePull {
+                source: "codex_rollout_task_complete",
+                recheck_source: "codex_rollout_foreground_recheck",
+                label: "Codex",
+                ownership_limit: CODEX_OWNERSHIP_LIMIT,
+            }),
+            turn_identity: TurnIdentity::NativeToken,
+            owned_work: OwnedWorkCoverage::Unavailable {
+                reason: "rollouts do not expose a complete child/background registry",
+            },
+            final_report: FinalReportSource::PullMessage,
+            reconciliation: ReconciliationPolicy {
+                yielded_budget_ms: 60_000,
+            },
+            passive_watcher: None,
+            notes: StrategyNotes {
+                foreground: "Identity-bound rollout task_complete pull",
+                owned_work: "rollouts do not expose a complete child/background registry",
+                final_report: "Scrubbed task_complete response; oversized or missing records remain unavailable",
+                reconciliation: "Bounded native rollout pull with session, turn, input and timestamp fences",
+            },
+        }
     }
 
     fn requires_attention_hook(&self) -> bool {

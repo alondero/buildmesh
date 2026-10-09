@@ -2,6 +2,10 @@ use crate::agent::capabilities::EffortControlKind;
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
+use crate::circuit::strategy::{
+    FinalReportSource, HookPush, NativeHook, ObservationStrategy, OwnedWorkCoverage, PullSource,
+    PushSource, ReconciliationPolicy, StrategyNotes, TurnIdentity,
+};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::path::Path;
@@ -21,7 +25,12 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("hooks.json");
-    let tmp = path.with_file_name(format!("{}.{}.{}.tmp", file_name, std::process::id(), counter));
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ));
 
     {
         use std::io::Write;
@@ -32,7 +41,11 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!("atomic_write: failed to clean up temp file {:?}: {}", tmp, rm_err);
+            tracing::warn!(
+                "atomic_write: failed to clean up temp file {:?}: {}",
+                tmp,
+                rm_err
+            );
         }
         return Err(e);
     }
@@ -49,7 +62,9 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 /// rather than adding a second `cmd.exe /c` or `sh -c` wrapper.
 fn hook_command(platform: Platform) -> String {
     if platform == Platform::Windows {
-        if let Some(command) = crate::env::windows_attention_command(None) { return format!("{command} & echo {{\"decision\":\"allow\"}}"); }
+        if let Some(command) = crate::env::windows_attention_command(None) {
+            return format!("{command} & echo {{\"decision\":\"allow\"}}");
+        }
     }
     let command = match platform {
         Platform::Windows => {
@@ -61,7 +76,14 @@ fn hook_command(platform: Platform) -> String {
                 .to_string()
         }
     };
-    if cfg!(windows) { command } else { command.replace("$(command -v curl.exe || command -v curl)", crate::env::unix_attention_curl()) }
+    if cfg!(windows) {
+        command
+    } else {
+        command.replace(
+            "$(command -v curl.exe || command -v curl)",
+            crate::env::unix_attention_curl(),
+        )
+    }
 }
 
 /// Ensure `<project>/.agents/hooks.json` carries the Stop attention webhook
@@ -76,10 +98,18 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
         Ok(content) => serde_json::from_str(&content)
             .map_err(|e| format!("invalid agy hooks.json at {}: {e}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(format!("failed to read agy hooks.json at {}: {e}", path.display())),
+        Err(e) => {
+            return Err(format!(
+                "failed to read agy hooks.json at {}: {e}",
+                path.display()
+            ))
+        }
     };
     if !settings.is_object() {
-        return Err(format!("agy hooks.json at {} must be a JSON object", path.display()));
+        return Err(format!(
+            "agy hooks.json at {} must be a JSON object",
+            path.display()
+        ));
     }
 
     // Stop fires the moment a turn ends. The simple shape — AGY's harness
@@ -99,9 +129,142 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Antigravity (`agy`) `Stop` receipts (issue #1901).
+///
+/// Validated against agy 1.2.11 on Windows interactive sessions (`-p`
+/// print mode emits no `Stop` hook, so hook evidence covers only
+/// Buildmesh-launched PTY sessions): the provisioned `.agents/hooks.json`
+/// `Stop` hook pipes `{conversationId, executionNum, fullyIdle,
+/// terminationReason, error, workspacePaths, transcriptPath,
+/// artifactDirectoryPath, modelName}` (1.2.x also sends
+/// `hookEventName: "Stop"`) to the attention route. What the shape
+/// provably lacks decides the adapter:
+/// - No per-turn token (`executionNum` is an opaque 0-based step counter,
+///   not identity) → `turn_id` stays `None`; receipts are session-fenced
+///   but never turn-fenced, hence never authoritative. The counter is still
+///   retained as `execution_num` so consecutive turns hash to distinct
+///   receipt source ids instead of colliding in history deduplication.
+/// - No child/background registry → `active_work` stays `None`; every
+///   `Stop` carries `OwnershipUnavailable` so a settled foreground turn
+///   can never verify owned work.
+/// - No inline report text → `final_report` stays `None`.
+/// - Subagent `Stop`s carry their own `conversationId`, so they fence as
+///   a different session downstream and can never complete the parent.
+///
+/// Only `Stop` is accepted; under `--dangerously-skip-permissions` AGY
+/// installs no `PreToolUse` gate, so no other event is validated.
+fn parse_circuit_hook(value: &serde_json::Value) -> Option<NativeHook> {
+    let named = value
+        .get("hook_event_name")
+        .or_else(|| value.get("hookEventName"))
+        .or_else(|| value.get("hookName"))
+        .and_then(|name| name.as_str());
+    // Canonicalize through the same UUID gate the attention route uses
+    // before writing `cli_session_id`: downstream identity comparison is
+    // exact, so an uppercase or mixed-case `conversationId` must fence as
+    // the same session (issue #1901 review). A non-UUID value is malformed.
+    let conversation: Option<String> = value
+        .get("conversationId")
+        .or_else(|| value.get("conversation_id"))
+        .and_then(|id| id.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .and_then(|id| crate::http::request::parse_session_id_for_provider("agy", id));
+    // AGY always ships its conversation id on `Stop`; a `Stop` without one
+    // is malformed, never turn evidence for whichever node it reached.
+    let conversation = conversation?;
+    let event = match named {
+        Some(name) if name.eq_ignore_ascii_case("stop") => "Stop",
+        Some(_) => return None,
+        None => {
+            // Shape-keyed `Stop`: pre-`hookEventName` payloads carry no
+            // event key, so require the AGY `Stop` markers alongside the
+            // conversation id rather than treating any JSON as a turn end.
+            let marked = [
+                "fullyIdle",
+                "fully_idle",
+                "terminationReason",
+                "termination_reason",
+                "transcriptPath",
+                "transcript_path",
+                "executionNum",
+                "execution_num",
+            ]
+            .iter()
+            .any(|key| value.get(key).is_some());
+            if marked {
+                "Stop"
+            } else {
+                return None;
+            }
+        }
+    };
+    let background_busy = value
+        .get("fullyIdle")
+        .or_else(|| value.get("fully_idle"))
+        .and_then(|idle| idle.as_bool())
+        == Some(false);
+    let execution_num = value
+        .get("executionNum")
+        .or_else(|| value.get("execution_num"))
+        .and_then(|num| num.as_i64());
+    let termination_reason = value
+        .get("terminationReason")
+        .or_else(|| value.get("termination_reason"))
+        .and_then(|reason| reason.as_str())
+        .filter(|reason| !reason.trim().is_empty())
+        .map(str::to_owned);
+    Some(NativeHook {
+        session_id: Some(conversation),
+        turn_id: None,
+        event: event.into(),
+        child_id: None,
+        active_work: None,
+        final_report: None,
+        human_fact: None,
+        background_busy,
+        execution_num,
+        termination_reason,
+        provider: Some("agy".into()),
+        prompt_digest: None,
+    })
+}
+
+const AGY_OWNERSHIP_GAP: &str = "Antigravity exposes no child/background registry; a settled foreground turn cannot verify owned work. Inspect the agent and Recheck evidence.";
+
 impl AgentProvider for AgyAdapter {
     fn id(&self) -> &'static str {
         "agy"
+    }
+
+    /// Validated against agy 1.2.11 on Windows interactive sessions (issue
+    /// #1901). `-p` print mode emits no `Stop` hook, so hook evidence covers
+    /// only Buildmesh-launched PTY sessions.
+    fn circuit_observation(&self) -> ObservationStrategy {
+        ObservationStrategy {
+            push: PushSource::Hooks(HookPush {
+                parse: parse_circuit_hook,
+                source: "agy_native_hook",
+                request_source: "agy_request_hook",
+                ownership_gap: Some(AGY_OWNERSHIP_GAP),
+            }),
+            pull: PullSource::None,
+            turn_identity: TurnIdentity::None,
+            owned_work: OwnedWorkCoverage::Unavailable {
+                reason: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
+            },
+            final_report: FinalReportSource::TranscriptOrTerminal,
+            reconciliation: ReconciliationPolicy {
+                yielded_budget_ms: 30_000,
+            },
+            passive_watcher: None,
+            notes: StrategyNotes {
+                foreground: "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
+                owned_work: "Antigravity exposes no child/background registry; settled turns cannot verify owned work",
+                final_report: "Transcript or PTY text may inform interpretation; complete native report unavailable",
+                reconciliation: "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
+            },
+        }
     }
 
     fn ui(&self) -> UiMeta {
@@ -125,11 +288,30 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
-    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
-        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
-        spawn.base_args = ["--output-format", "text", "--disable-slash-commands", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
-        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Argument { flag: "--print".into() }, BackgroundResultOutput::Stdout))
+        spawn.base_args = [
+            "--output-format",
+            "text",
+            "--disable-slash-commands",
+            "--dangerously-skip-permissions",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        Some(BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::Argument {
+                flag: "--print".into(),
+            },
+            BackgroundResultOutput::Stdout,
+        ))
     }
 
     fn produces_readable_transcript(&self) -> bool {
@@ -157,7 +339,10 @@ impl AgentProvider for AgyAdapter {
         use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
         use crate::agent::session_lifecycle::LifecycleKind;
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::BackgroundRunning,
+            ],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: Some("workspace trust".into()),
             min_version: Some("1.0.0".into()),
@@ -187,7 +372,13 @@ impl AgentProvider for AgyAdapter {
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
         let hooks_path = agents_dir.join("hooks.json");
-        let platform = if resolved.env_type == EnvType::Wsl { Platform::Linux } else if resolved.env_type == EnvType::WindowsInterop { Platform::Windows } else { Platform::current() };
+        let platform = if resolved.env_type == EnvType::Wsl {
+            Platform::Linux
+        } else if resolved.env_type == EnvType::WindowsInterop {
+            Platform::Windows
+        } else {
+            Platform::current()
+        };
         ensure_hooks_json(&hooks_path, &hook_command(platform))
     }
 
@@ -246,7 +437,10 @@ impl AgentProvider for AgyAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::agy_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -313,8 +507,7 @@ mod tests {
             raw_path: path,
             env_type: EnvType::Windows,
         };
-        AGY
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
+        AGY.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
@@ -543,15 +736,40 @@ mod tests {
     #[test]
     fn hook_command_uses_platform_env_syntax() {
         let original = hook_command(Platform::Windows);
-        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
-        assert!(win.starts_with(if crate::env::is_wsl_host() { "$OutputEncoding" } else { "curl.exe " }), "win: {win}");
+        let win =
+            crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
+        assert!(
+            win.starts_with(if crate::env::is_wsl_host() {
+                "$OutputEncoding"
+            } else {
+                "curl.exe "
+            }),
+            "win: {win}"
+        );
         assert!(!win.contains("cmd.exe /c"), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_SESSION_ID" } else { "%BUILDMESH_SESSION_ID%" }), "win: {win}");
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_PORT"
+            } else {
+                "%BUILDMESH_PORT%"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_SESSION_ID"
+            } else {
+                "%BUILDMESH_SESSION_ID%"
+            }),
+            "win: {win}"
+        );
 
         for platform in [Platform::Macos, Platform::Linux] {
             let unix = hook_command(platform);
-            assert!(unix.starts_with(crate::env::unix_attention_curl()), "unix: {unix}");
+            assert!(
+                unix.starts_with(crate::env::unix_attention_curl()),
+                "unix: {unix}"
+            );
             assert!(!unix.contains("sh -c"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
@@ -566,12 +784,30 @@ mod tests {
     #[test]
     fn hook_command_is_bare_and_fail_open() {
         let original = hook_command(Platform::Windows);
-        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
+        let win =
+            crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
         assert!(!win.starts_with("cmd.exe /c"), "win: {win}");
         assert!(!win.starts_with('"') && !win.ends_with('"'), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "--exec curl" } else { "curl.exe" }), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
-        assert!(original.contains("echo {\"decision\":\"allow\"}"), "win: {win}");
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "--exec curl"
+            } else {
+                "curl.exe"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_PORT"
+            } else {
+                "%BUILDMESH_PORT%"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            original.contains("echo {\"decision\":\"allow\"}"),
+            "win: {win}"
+        );
 
         let unix = hook_command(Platform::Linux);
         assert!(!unix.starts_with("sh -c"), "unix: {unix}");
@@ -606,7 +842,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(tmp_files.is_empty(), "found leftover tmp files: {tmp_files:?}");
+        assert!(
+            tmp_files.is_empty(),
+            "found leftover tmp files: {tmp_files:?}"
+        );
     }
 
     /// Issue #1367: Verify that user-defined sibling namespaces in

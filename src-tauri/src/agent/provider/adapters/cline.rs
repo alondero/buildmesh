@@ -385,6 +385,34 @@ impl AgentProvider for ClineAdapter {
         "cline"
     }
 
+    /// Issue #1902: Cline 3.0.62 (Windows npm `.cmd` resolved through
+    /// `cmd.exe /c`; macOS/Linux direct) was inspected, not assumed. Its
+    /// file-hook layer dispatches `agent_end` from `afterRun` **only** when
+    /// `result.status === "completed"`, so a completed turn is a real
+    /// attention signal. What that payload cannot do is decide a Circuit
+    /// step: it carries `taskId` (the session) but no turn id, no prompt
+    /// echo and no input stamp, so no Buildmesh submission can be
+    /// correlated, and the shutdown event is not a clean exit:
+    /// `SessionShutdown` maps to `session_shutdown`, but 3.0.62 wires it only
+    /// into the abort branch of `afterRun`, where the session is still live.
+    /// Ownership is absent too: Buildmesh never passes Cline's own background
+    /// surfaces (`--kanban`, `-z`/`--zen`, `--team-name`), so no registry
+    /// reaches us. It therefore declares no Circuit hook source — a validated
+    /// turn signal opens the attention gate while Circuit execution stays
+    /// visibly Unverified until a controlled live run exists.
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        use crate::circuit::strategy::{ObservationStrategy, StrategyNotes};
+        ObservationStrategy {
+            notes: StrategyNotes {
+                foreground: "Cline 3.0.62 (Windows npm .cmd via cmd.exe /c; macOS/Linux direct) has no validated Circuit lifecycle adapter; the agent_end TaskComplete file hook marks a completed turn but carries no turn id, prompt echo or input stamp, and Cline dispatches no clean-exit event",
+                owned_work: "Cline exposes no child/background registry to Buildmesh (its --kanban/--zen/--team-name surfaces are never passed); unknown child/background work never establishes completion",
+                final_report: "Transcript (<cline data dir>/sessions/<id>/<id>.messages.json) or PTY text may inform interpretation; complete native report unavailable",
+                reconciliation: "Attention turn receipts only (agent_end -> TurnCompleted) and status/report discovery; Cline yields no native Circuit receipt, so unsupported lifecycle remains unverified",
+            },
+            ..ObservationStrategy::UNWIRED
+        }
+    }
+
     fn ui(&self) -> UiMeta {
         UiMeta {
             label: "Cline".into(),

@@ -230,3 +230,58 @@ fn canonical_fields_win_over_conflicting_aliases_in_production_normalization() {
     );
     assert_eq!(raw, original);
 }
+
+#[test]
+fn circuit_receipts_follow_the_trusted_nodes_own_harness_strategy() {
+    // The route trusts the node's stored provider, never the payload. Proxied
+    // accounts execute their harness; a harness with no declared Circuit hook
+    // yields lifecycle attention but never a Circuit receipt (issue #2128).
+    let stop = json!({"hook_event_name":"Stop", "session_id":"session", "turn_id":"t1",
+        "last_assistant_message":"done"});
+    let receipt_provider = |stored: &str| {
+        let provider = normalizers::provider_for(stored);
+        normalizers::normalize(Some(&stop), &provider, |_| Some(0))
+            .native_hook
+            .map(|hook| hook.provider.unwrap_or_default())
+    };
+    assert_eq!(receipt_provider("anthropic").as_deref(), Some("anthropic"));
+    assert_eq!(
+        receipt_provider("claude:minimax").as_deref(),
+        Some("anthropic")
+    );
+    assert_eq!(receipt_provider("codex").as_deref(), Some("codex"));
+    assert_eq!(
+        receipt_provider("codex:openrouter").as_deref(),
+        Some("codex")
+    );
+    for stored in [
+        "opencode",
+        "opencode:account",
+        "grok",
+        "mcode",
+        "cline",
+        "kimi",
+        "cursor",
+        "future-harness:account",
+        "",
+    ] {
+        assert_eq!(receipt_provider(stored), None, "{stored:?}");
+    }
+}
+
+#[test]
+fn malformed_antigravity_stop_cannot_reach_another_harnesss_circuit_state() {
+    // A Stop without a valid conversation id is malformed for Antigravity and
+    // produces no receipt; the same bytes on a Claude node follow Claude's own
+    // contract and record Claude as the parser, so no Antigravity yield or
+    // ownership vocabulary can attach to it.
+    let malformed =
+        json!({"hookEventName":"Stop", "conversationId":"not-a-uuid", "fullyIdle":false});
+    let agy = normalizers::normalize(Some(&malformed), "agy", |_| Some(0));
+    assert!(agy.native_hook.is_none());
+    let claude = normalizers::normalize(Some(&malformed), "anthropic", |_| Some(0));
+    if let Some(hook) = claude.native_hook {
+        assert_eq!(hook.provider.as_deref(), Some("anthropic"));
+        assert!(!hook.background_busy);
+    }
+}

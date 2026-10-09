@@ -1,5 +1,13 @@
-//! Capabilities of the observation strategies actually wired into Circuits.
+//! Operator diagnostics for the observation strategy a harness declares.
 //! Harness execution support does not imply lifecycle or ownership authority.
+//!
+//! Everything here is rendered from the adapter's own
+//! [`ObservationStrategy`](crate::circuit::strategy::ObservationStrategy), the
+//! same declaration the worker executes (issue #2128). The typed `coverage` is
+//! the machine-readable contract; the strings are display text derived from it,
+//! so a prose prefix never stands in for a capability.
+
+use crate::circuit::strategy::{ObservationCoverage, ObservationStrategy, OwnedWorkCoverage};
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitObserverCapabilities.ts")]
@@ -11,114 +19,53 @@ pub struct CircuitObserverCapabilities {
     pub reconciliation: String,
     pub yielded_budget_ms: u32,
     pub active_budget_ms: u32,
+    pub coverage: ObservationCoverage,
 }
 
 pub(crate) fn for_agent(agent: &crate::models::AgentNode) -> CircuitObserverCapabilities {
-    let harness = agent
+    let stored = agent
         .launch_configuration
         .as_ref()
         .and_then(|configuration| configuration.resolved.as_ref())
         .map(|plan| plan.harness.harness.as_str())
         .unwrap_or(agent.provider.as_str());
-    for_provider(harness)
+    for_provider(stored)
 }
 
+/// Diagnostics for a stored provider string: a harness id, a custom harness
+/// profile, or a proxied `harness:account` option. Unknown harnesses render as
+/// unwired.
 pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
-    let id = crate::agent::harness_catalog::HARNESS_PROFILE_ALIASES
-        .iter()
-        .find(|(alias, _)| *alias == provider)
-        .map(|(_, id)| *id)
-        .unwrap_or(provider);
-    let (foreground, owned_work, final_report, reconciliation, yielded_budget_ms) = match id {
-        // Issue #1902: Cline 3.0.62 (Windows npm `.cmd` resolved through
-        // `cmd.exe /c`; macOS/Linux direct) was inspected, not assumed.
-        // Cline's file-hook layer dispatches `agent_end` from `afterRun`
-        // **only** when `result.status === "completed"`, so a completed turn
-        // is a real attention signal. What that payload cannot do is decide
-        // a Circuit step: it carries `taskId` (the session) but no turn id,
-        // no prompt echo and no input stamp, so no Buildmesh submission can
-        // be correlated, and the shutdown event is not a clean exit:
-        // `SessionShutdown` maps to `session_shutdown`, but 3.0.62 wires it
-        // only into the abort branch of `afterRun`, where the session is
-        // still live. Ownership is absent too: Buildmesh never passes
-        // Cline's own background surfaces (`--kanban`, `-z`/`--zen`,
-        // `--team-name`), so no registry reaches us, and
-        // `NativeHook::parse_value` gates Cline out, so this provider
-        // produces no native Circuit receipt at all. A validated turn signal
-        // therefore opens the attention gate while Circuit execution stays
-        // visibly Unverified until a controlled live run exists.
-        "cline" => (
-            "Unavailable: Cline 3.0.62 (Windows npm .cmd via cmd.exe /c; macOS/Linux direct) has no validated Circuit lifecycle adapter; the agent_end TaskComplete file hook marks a completed turn but carries no turn id, prompt echo or input stamp, and Cline dispatches no clean-exit event",
-            "Unavailable: Cline exposes no child/background registry to Buildmesh (its --kanban/--zen/--team-name surfaces are never passed); unknown child/background work never establishes completion",
-            "Transcript (<cline data dir>/sessions/<id>/<id>.messages.json) or PTY text may inform interpretation; complete native report unavailable",
-            "Attention turn receipts only (agent_end -> TurnCompleted) and status/report discovery; Cline yields no native Circuit receipt, so unsupported lifecycle remains unverified",
-            30_000,
-        ),
-        // Issue #1899: OpenCode 1.18.3 (Windows `.cmd` via `cmd.exe /c`,
-        // Linux/macOS direct spawn) was inspected, not assumed. Its project
-        // plugin forwards `session.idle` / `question.asked` /
-        // `permission.asked` (plus capture-only `session.created`) and its
-        // `opencode.db` SQLite store yields a readable transcript/report —
-        // but no event carries a turn/input fence and no pull source exposes
-        // a turn completion or a complete child/background registry. Every
-        // string below stays `Unavailable:`-prefixed so Circuit execution
-        // remains visibly unsupported/Unverified for this provider; a live
-        // controlled run is still required before any of these may claim
-        // authority.
-        "opencode" => (
-            "Unavailable: OpenCode 1.18.3 (Windows .cmd via cmd.exe /c; Linux/macOS direct) has no validated Circuit lifecycle adapter; the session.idle plugin hook carries no turn/input fence and cannot establish foreground termination",
-            "Unavailable: OpenCode exposes no complete child/background registry to Buildmesh; unknown child/background work never establishes completion",
-            "Transcript (opencode.db SQLite) or PTY text may inform interpretation; complete native report unavailable",
-            "Status and report discovery only; unsupported lifecycle remains unverified",
-            30_000,
-        ),
-        // Issue #1898: Claude Code's documented hook contract supplies both
-        // halves needed to tie a turn to a Buildmesh submission —
-        // `UserPromptSubmit` carries the verbatim `prompt` the harness says
-        // it received plus a `prompt_id` turn token (v2.1.196+), and `Stop`
-        // carries that same token. Buildmesh binds the token to a submission
-        // it recorded, and only while that submission is still the newest
-        // one for the agent, so a delayed, duplicate, prior-turn or
-        // cross-run hook cannot acknowledge a different submission. No live
-        // environment has exercised this yet, so delivery is stated as
-        // unverified rather than claimed.
-        "anthropic" => (
-            "UserPromptSubmit prompt echo bound to a recorded submission, then prompt_id inherited by Stop; receipts without a provable binding stay reduced confidence; live delivery unverified",
-            "Child hooks and explicit task/cron registries; missing coverage remains unverified",
-            "Scrubbed Stop response when supplied; otherwise unavailable",
-            "Durable hook receipt replay bound through the recorded submission; no authoritative ownership pull is available",
-            90_000,
-        ),
-        "codex" => (
-            "Identity-bound rollout task_complete pull",
-            "Unavailable: rollouts do not expose a complete child/background registry",
-            "Scrubbed task_complete response; oversized or missing records remain unavailable",
-            "Bounded native rollout pull with session, turn, input and timestamp fences",
-            60_000,
-        ),
-        // Validated against agy 1.2.11 on Windows interactive sessions
-        // (issue #1901). `-p` print mode emits no `Stop` hook, so hook
-        // evidence covers only Buildmesh-launched PTY sessions.
-        "agy" => (
-            "Stop-hook turn receipts (fullyIdle settled vs background-busy); session-fenced with no per-turn token, never authoritative",
-            "Unavailable: Antigravity exposes no child/background registry; settled turns cannot verify owned work",
-            "Transcript or PTY text may inform interpretation; complete native report unavailable",
-            "Durable Stop receipt replay with session and incarnation fences; input fencing is unavailable (no UserPromptSubmit binding), freshness recheck parks Unverified",
-            30_000,
-        ),
-        _ => (
-            "Unavailable: no authoritative Circuit lifecycle adapter is wired",
-            "Unavailable: no authoritative Circuit ownership adapter is wired",
-            "Transcript or PTY text may inform interpretation; complete native report unavailable",
-            "Status and report discovery only; unsupported lifecycle remains unverified",
-            30_000,
-        ),
+    let id = crate::circuit::strategy::provider_for_stored(provider)
+        .map_or(provider, |resolved| resolved.adapter().id());
+    render(id, &crate::circuit::strategy::for_stored(provider))
+}
+
+/// Diagnostics for a step whose agent record no longer exists.
+pub(crate) fn for_missing_agent() -> CircuitObserverCapabilities {
+    render("missing-agent", &ObservationStrategy::UNWIRED)
+}
+
+fn render(harness: &str, strategy: &ObservationStrategy) -> CircuitObserverCapabilities {
+    let notes = &strategy.notes;
+    let foreground = if strategy.has_foreground_source() {
+        notes.foreground.to_owned()
+    } else {
+        format!("Unavailable: {}", notes.foreground)
+    };
+    let owned_work = match strategy.owned_work {
+        OwnedWorkCoverage::Unavailable { .. } => format!("Unavailable: {}", notes.owned_work),
+        OwnedWorkCoverage::HookRegistry => notes.owned_work.to_owned(),
     };
     CircuitObserverCapabilities {
-        harness: id.into(), foreground: foreground.into(), owned_work: owned_work.into(),
-        final_report: final_report.into(),
-        reconciliation: format!("{reconciliation}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage."),
-        yielded_budget_ms, active_budget_ms: super::observation::ACTIVE_WAIT_MS as u32,
+        harness: harness.into(),
+        foreground,
+        owned_work,
+        final_report: notes.final_report.into(),
+        reconciliation: format!("{}. Stable yielded transcript reports can advance after input/session freshness checks and known-work checks; this does not establish complete native ownership coverage.", notes.reconciliation),
+        yielded_budget_ms: strategy.reconciliation.yielded_budget_ms,
+        active_budget_ms: super::observation::ACTIVE_WAIT_MS as u32,
+        coverage: strategy.coverage(),
     }
 }
 
@@ -127,22 +74,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn circuit_policy_covers_every_harness_without_borrowing_another_parser() {
+    fn circuit_policy_is_rendered_from_each_harnesss_own_declaration() {
+        use crate::circuit::strategy::OwnedWorkKind;
         for provider in crate::models::Provider::all() {
             let id = provider.adapter().id();
+            let strategy = provider.adapter().circuit_observation();
             let policy = for_provider(id);
             assert_eq!(policy.harness, id);
             assert!(policy.yielded_budget_ms > 0 && policy.yielded_budget_ms <= 90_000);
+            // The typed coverage is the contract; the strings are derived.
+            assert_eq!(policy.coverage, strategy.coverage(), "{id}");
+            assert_eq!(
+                policy.yielded_budget_ms, strategy.reconciliation.yielded_budget_ms,
+                "{id}: the budget the worker waits on is the one displayed"
+            );
+            assert_eq!(
+                policy.foreground.starts_with("Unavailable:"),
+                !strategy.has_foreground_source(),
+                "{id}"
+            );
+            assert_eq!(
+                policy.owned_work.starts_with("Unavailable:"),
+                policy.coverage.owned_work == OwnedWorkKind::Unavailable,
+                "{id}"
+            );
             if id == "opencode" {
-                // Issue #1899: explicit unsupported contract. Still
-                // `Unavailable:`-prefixed (Circuit execution stays
-                // Unverified), but records the inspected version, platform,
+                // Issue #1899: explicit unsupported contract. No Circuit
+                // source is declared (Circuit execution stays Unverified), but
+                // the provenance records the inspected version, platform,
                 // hook/pull sources, and the missing ownership registry
                 // instead of the generic fallback.
-                assert!(
-                    policy.foreground.starts_with("Unavailable:"),
-                    "opencode foreground must stay unavailable"
-                );
+                assert!(!strategy.has_foreground_source());
                 assert!(
                     policy.foreground.contains("OpenCode"),
                     "must record the inspected harness version"
@@ -151,10 +113,7 @@ mod tests {
                     policy.foreground.contains("session.idle"),
                     "must name the hook source that was inspected"
                 );
-                assert!(
-                    policy.owned_work.starts_with("Unavailable:"),
-                    "opencode ownership must stay unavailable"
-                );
+                assert_eq!(policy.coverage.owned_work, OwnedWorkKind::Unavailable);
                 assert!(
                     policy.owned_work.contains("child/background"),
                     "must state the ownership coverage gap"
@@ -164,11 +123,8 @@ mod tests {
                 // Issue #1902: same explicit-unsupported shape for Cline.
                 // A validated *turn* signal (`agent_end` -> `TurnCompleted`)
                 // must not leak into a claim about foreground termination or
-                // ownership, so both halves stay `Unavailable:`-prefixed.
-                assert!(
-                    policy.foreground.starts_with("Unavailable:"),
-                    "cline foreground must stay unavailable"
-                );
+                // ownership, so neither half declares Circuit coverage.
+                assert!(!strategy.has_foreground_source());
                 assert!(
                     policy.foreground.contains("Cline 3.0.62"),
                     "must record the inspected harness version"
@@ -177,10 +133,7 @@ mod tests {
                     policy.foreground.contains("agent_end"),
                     "must name the hook source that was inspected"
                 );
-                assert!(
-                    policy.owned_work.starts_with("Unavailable:"),
-                    "cline ownership must stay unavailable"
-                );
+                assert_eq!(policy.coverage.owned_work, OwnedWorkKind::Unavailable);
                 assert!(
                     policy.owned_work.contains("child/background"),
                     "must state the ownership coverage gap"
@@ -197,7 +150,53 @@ mod tests {
                 );
             }
         }
-        assert!(for_provider("codex").owned_work.starts_with("Unavailable:"));
+        assert_eq!(
+            for_provider("codex").coverage.owned_work,
+            OwnedWorkKind::Unavailable
+        );
+        assert_eq!(
+            for_provider("anthropic").coverage.owned_work,
+            OwnedWorkKind::HookRegistry
+        );
+    }
+
+    fn node_for(provider: &str) -> crate::models::AgentNode {
+        crate::models::AgentNode {
+            provider: provider.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn proxied_provider_accounts_are_diagnosed_as_their_executing_harness() {
+        // Issue #2128: the diagnostics must name the strategy the worker will
+        // actually run. A proxied row ("claude:minimax") executes Claude Code,
+        // so it must not read as an unwired harness.
+        for (stored, harness) in [
+            ("claude:minimax", "anthropic"),
+            ("codex:openrouter", "codex"),
+            ("agy", "agy"),
+        ] {
+            let policy = for_agent(&node_for(stored));
+            assert_eq!(policy.harness, harness, "{stored}");
+            assert_ne!(
+                policy.coverage.push,
+                crate::circuit::strategy::PushKind::None,
+                "{stored} executes {harness}, which wires a Circuit hook strategy"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_providers_stay_unwired_rather_than_borrowing_another_strategy() {
+        for stored in ["future-harness", "future-harness:account", ""] {
+            let policy = for_agent(&node_for(stored));
+            assert_eq!(
+                policy.coverage,
+                ObservationStrategy::UNWIRED.coverage(),
+                "{stored:?} must not inherit another harness's strategy"
+            );
+        }
     }
 
     #[test]
@@ -216,8 +215,9 @@ mod tests {
             policy.foreground.contains("never authoritative"),
             "foreground disclaims completion authority"
         );
-        assert!(
-            policy.owned_work.starts_with("Unavailable:"),
+        assert_eq!(
+            policy.coverage.owned_work,
+            crate::circuit::strategy::OwnedWorkKind::Unavailable,
             "ownership stays unavailable"
         );
         assert!(policy.owned_work.contains("no child/background registry"));

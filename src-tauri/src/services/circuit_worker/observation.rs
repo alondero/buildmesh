@@ -236,7 +236,7 @@ pub(super) fn observe_with(view: &RunView, source: &mut impl Observations) -> Ve
                 | SessionStatus::Ready
                 | SessionStatus::Completed => {
                     source.project_agent(view, step, &n, &mut events);
-                    if let Some(event) = source.codex(view, step, &n) {
+                    if let Some(event) = source.pull(view, step, &n) {
                         events.push(event);
                     }
                 }
@@ -552,7 +552,7 @@ pub(super) trait Observations {
         agent: &crate::models::AgentNode,
         events: &mut Vec<CircuitEvent>,
     );
-    fn codex(
+    fn pull(
         &mut self,
         view: &RunView,
         step: &StepView,
@@ -598,13 +598,13 @@ impl Observations for LiveObservations<'_> {
         observe_agent_projection(view, step, agent, events);
     }
 
-    fn codex(
+    fn pull(
         &mut self,
         view: &RunView,
         step: &StepView,
         agent: &crate::models::AgentNode,
     ) -> Option<CircuitEvent> {
-        codex_observer::observe(view, step, agent)
+        native_pull::observe(view, step, agent)
     }
 
     fn error_tail(&mut self, id: i64) -> String {
