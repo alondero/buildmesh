@@ -237,6 +237,7 @@ mod tests {
                     mesh: None,
                     application: None,
                 },
+                permission_mode: crate::agent::capabilities::FieldInputs::default(),
             },
             None,
         );
@@ -554,6 +555,7 @@ mod tests {
                         model: Some("MiniMax-M3".into()),
                         effort: Some(effort.into()),
                         extra_args: None,
+                        permission_mode: None,
                     },
                     None,
                     false,

@@ -295,6 +295,26 @@ The Claude-backed family does not declare its own value at all:
 `src-tauri/src/agent/provider/mod.rs`, which pins `Direct`, so a new
 Claude-backed adapter inherits the right shell instead of restating it.
 
+### Launch permission modes are adapter-owned, not a Buildmesh policy
+
+`spawn_recipe` is bare of approval flags (issue #2151): no adapter keeps a
+hidden unattended argv. The effective permission mode — the stored
+per-harness Settings default, else the harness's unattended default —
+contributes the harness's own flag(s) in `default_prepare`
+(`AgentProvider::permission_args`), spliced at the front of `base_args`
+exactly where the base recipe used to carry them (behind a leading `resume`
+subcommand token for `spawn_recipe_for_resume` adapters, so today's argv
+order is preserved byte-for-byte). The descriptor the Settings card and the
+Spawn Menu render (`permission_modes`, `default_permission_mode` on
+`HarnessCapabilities`) comes from the same adapter methods, so the UI and
+the argv cannot disagree; `capability_recipe_coherence` pins the agreement
+per adapter. Harnesses with no flag expose no modes, and mcode's Full Access
+is a singleton mode (a `config.yaml` pin, not argv). Static descriptors such
+as the attention launch mode describe the unattended launch: a harness
+switched to prompt mode in Settings can raise approval prompts. The orchestrator's
+sandbox toggle and the attention-hook trust bypass are separate controls and
+stay in their own layers.
+
 The binary the shell invokes is the absolute path discovery resolved, not a
 bare stem. A GUI-launched app (Finder/Dock on macOS, Start Menu on Windows)
 inherits a restricted process `PATH` that omits user-managed directories

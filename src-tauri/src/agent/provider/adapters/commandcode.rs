@@ -26,18 +26,21 @@
 //! PTY capture is disabled (`captures_session_id_from_pty: false`) and session
 //! IDs are captured via post-spawn directory polling (`after_fresh_spawn`).
 //!
-//! **Permissions (`--yolo`, issue #1419)**:
-//! The recipe carries `--yolo` so spawned agents run with permission prompts
-//! pre-approved. Without it the CLI stops on every tool call waiting for
-//! interactive confirmation, which blocks unattended agent loops — the same
-//! role `--dangerously-skip-permissions` plays for the AGY/Claude-backed
-//! adapters.
+//! **Permissions (`--yolo`, issue #1419, setting in issue #2151)**:
+//! The unattended permission mode contributes `--yolo` so spawned agents run
+//! with permission prompts pre-approved. Without it the CLI stops on every
+//! tool call waiting for interactive confirmation, which blocks unattended
+//! agent loops — the same role `--dangerously-skip-permissions` plays for
+//! the AGY/Claude-backed adapters. The bare `spawn_recipe` carries no
+//! approval flags; `permission_args` owns the choice.
 //!
 //! **Model, effort & prefill**:
 //! Accepts `--model <name>` for model overrides, `--effort <low|medium|high>`
 //! for reasoning effort, and positional prompt text for prefill queries.
 
-use crate::agent::capabilities::{EffortControlKind, COMMANDCODE_EFFORT_ALLOWED};
+use crate::agent::capabilities::{
+    EffortControlKind, PermissionModeOption, COMMANDCODE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
+};
 use crate::agent::provider::{AgentProvider, Platform, SpawnRecipe, UiMeta, WindowsShell};
 use crate::models::EnvType;
 
@@ -77,11 +80,37 @@ impl AgentProvider for CommandCodeAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform, env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--yolo` via `permission_args` in
+        // `default_prepare`.
         SpawnRecipe {
             binary: binary_for(platform, env_type),
-            base_args: vec!["--yolo".into()],
+            base_args: Vec::new(),
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Command Code's own `--yolo` flag
+    /// through. Unattended keeps today's behavior.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--yolo",
+                "Prompts off — permission prompts pre-approved (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Command Code asks for confirmation like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--yolo".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -275,11 +304,12 @@ mod tests {
     fn spawn_recipe_cmd_on_windows_native() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(recipe.binary, "cmdc");
-        assert_eq!(
-            recipe.base_args,
-            vec!["--yolo".to_string()],
-            "Windows native recipe must carry --yolo so unattended agents \
-             don't block on permission prompts; got {:?}",
+        // Issue #2151: the base recipe is bare — `--yolo` comes from the
+        // effective permission mode in `default_prepare`, never from a
+        // hidden argv.
+        assert!(
+            recipe.base_args.is_empty(),
+            "Windows native base recipe must carry no approval flags; got {:?}",
             recipe.base_args
         );
         assert!(
@@ -293,10 +323,10 @@ mod tests {
     fn spawn_recipe_direct_on_macos() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Macos, EnvType::Windows);
         assert_eq!(recipe.binary, "cmd");
-        assert_eq!(
-            recipe.base_args,
-            vec!["--yolo".to_string()],
-            "macOS recipe must carry --yolo; got {:?}",
+        // Issue #2151: bare base recipe (see windows-native pin above).
+        assert!(
+            recipe.base_args.is_empty(),
+            "macOS base recipe must carry no approval flags; got {:?}",
             recipe.base_args
         );
         assert!(
@@ -310,10 +340,10 @@ mod tests {
     fn spawn_recipe_direct_on_linux() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Linux, EnvType::Windows);
         assert_eq!(recipe.binary, "cmd");
-        assert_eq!(
-            recipe.base_args,
-            vec!["--yolo".to_string()],
-            "Linux recipe must carry --yolo; got {:?}",
+        // Issue #2151: bare base recipe (see windows-native pin above).
+        assert!(
+            recipe.base_args.is_empty(),
+            "Linux base recipe must carry no approval flags; got {:?}",
             recipe.base_args
         );
         assert!(
@@ -327,10 +357,10 @@ mod tests {
     fn spawn_recipe_wsl_uses_cmd_binary() {
         let recipe = COMMANDCODE.spawn_recipe(Platform::Windows, EnvType::Wsl);
         assert_eq!(recipe.binary, "cmd");
-        assert_eq!(
-            recipe.base_args,
-            vec!["--yolo".to_string()],
-            "WSL recipe must carry --yolo; got {:?}",
+        // Issue #2151: bare base recipe (see windows-native pin above).
+        assert!(
+            recipe.base_args.is_empty(),
+            "WSL base recipe must carry no approval flags; got {:?}",
             recipe.base_args
         );
     }
@@ -442,8 +472,9 @@ mod tests {
             sandbox: false,
         };
         let prepared = default_prepare(&COMMANDCODE, input);
-        // `--yolo` is the always-on base flag (issue #1419); `--resume <id>`
-        // is appended by `default_prepare` after the base recipe (issue #1500).
+        // Issue #2151: the unattended permission default contributes
+        // `--yolo` at the front (where the base recipe used to carry it,
+        // issue #1419); `--resume <id>` follows (issue #1500).
         assert_eq!(
             prepared.recipe.base_args,
             vec![
@@ -454,12 +485,66 @@ mod tests {
         );
     }
 
+    /// Issue #2151 regression pin: changing the permission-mode setting
+    /// changes the argv of the next spawn. The default (no stored value)
+    /// keeps today's unattended `--yolo`; prompt drops it.
+    #[test]
+    fn permission_mode_changes_argv_of_next_spawn() {
+        use crate::agent::capabilities::{PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED};
+
+        fn prepared_argv(mode: Option<&str>) -> Vec<String> {
+            let config = ResolvedAgentConfig {
+                model: None,
+                effort: None,
+                extra_args: None,
+                permission_mode: mode.map(str::to_string),
+            };
+            let input = HarnessLaunchInput {
+                platform: Platform::Linux,
+                runtime: EnvType::Windows,
+                session: SessionIdModeRef::None,
+                config: &config,
+                prefill: None,
+                sandbox: false,
+            };
+            default_prepare(&COMMANDCODE, input).recipe.base_args
+        }
+
+        // No stored value: today's unattended behavior is preserved.
+        assert!(
+            prepared_argv(None).contains(&"--yolo".to_string()),
+            "default spawn must carry --yolo"
+        );
+        // Explicit unattended: same flag.
+        assert!(
+            prepared_argv(Some(PERMISSION_MODE_UNATTENDED)).contains(&"--yolo".to_string()),
+            "unattended spawn must carry --yolo"
+        );
+        // Prompt: the flag is gone, the binary is unchanged.
+        let prompt_argv = prepared_argv(Some(PERMISSION_MODE_PROMPT));
+        assert!(
+            !prompt_argv.iter().any(|a| a == "--yolo"),
+            "prompt spawn must not carry --yolo; got {prompt_argv:?}"
+        );
+        // The mode descriptor the setting UI renders stays in sync with
+        // the argv the spawn path emits.
+        let modes = COMMANDCODE.permission_modes();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].id, PERMISSION_MODE_UNATTENDED);
+        assert!(modes[0].label.contains("--yolo"));
+        assert_eq!(
+            COMMANDCODE.default_permission_mode().as_deref(),
+            Some(PERMISSION_MODE_UNATTENDED)
+        );
+    }
+
     #[test]
     fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
         let config = ResolvedAgentConfig {
             model: Some("taste-1".to_string()),
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

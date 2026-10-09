@@ -57,17 +57,19 @@
 //! flattens CR/LF to spaces so a multi-line handover cannot split the
 //! `cmd.exe` command line.
 //!
-//! **Permission policy**: `--auto` is baked into the base recipe. Mirrors
-//! how AGY's `--dangerously-skip-permissions` is wired — a session-wide
-//! policy the harness applies for the whole invocation, not a per-call
-//! toggle. The orchestrator's outer sandbox (macOS Seatbelt, Windows
-//! restricted-token, mesh-level toggle) is the independent OS-level
-//! containment layer.
+//! **Permission policy** (issue #2151): the unattended mode contributes
+//! `--auto` via `permission_args`. Mirrors how AGY's
+//! `--dangerously-skip-permissions` is wired — a session-wide policy the
+//! harness applies for the whole invocation, not a per-call toggle. The
+//! bare `spawn_recipe` carries no approval flags; the orchestrator's outer
+//! sandbox (macOS Seatbelt, Windows restricted-token, mesh-level toggle)
+//! is the independent OS-level containment layer.
 
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::agent::capabilities::{PermissionModeOption, PERMISSION_MODE_UNATTENDED};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -215,11 +217,37 @@ impl AgentProvider for OpenCodeAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--auto` via `permission_args` in
+        // `default_prepare`.
         SpawnRecipe {
             binary: "opencode",
-            base_args: vec!["--auto".into()],
+            base_args: Vec::new(),
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes OpenCode's own `--auto` flag through.
+    /// Unattended keeps today's behavior.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--auto",
+                "Auto-approve (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "OpenCode asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--auto".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -403,7 +431,13 @@ mod tests {
     fn spawn_recipe_direct_on_macos() {
         let recipe = OPENCODE.spawn_recipe(Platform::Macos, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
-        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
+        // Issue #2151: bare base recipe — `--auto` comes from the
+        // effective permission mode in `default_prepare`.
+        assert!(
+            recipe.base_args.is_empty(),
+            "base recipe must carry no approval flags; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "macOS must use WindowsShell::Direct — got {:?}",
@@ -415,7 +449,12 @@ mod tests {
     fn spawn_recipe_direct_on_linux() {
         let recipe = OPENCODE.spawn_recipe(Platform::Linux, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
-        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
+        // Issue #2151: bare base recipe (see macOS pin above).
+        assert!(
+            recipe.base_args.is_empty(),
+            "base recipe must carry no approval flags; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Direct),
             "Linux must use WindowsShell::Direct — got {:?}",
@@ -431,7 +470,12 @@ mod tests {
     fn spawn_recipe_cmd_on_windows() {
         let recipe = OPENCODE.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(recipe.binary, "opencode");
-        assert_eq!(recipe.base_args, vec!["--auto".to_string()]);
+        // Issue #2151: bare base recipe (see macOS pin above).
+        assert!(
+            recipe.base_args.is_empty(),
+            "base recipe must carry no approval flags; got {:?}",
+            recipe.base_args
+        );
         assert!(
             matches!(recipe.windows_shell, WindowsShell::Cmd),
             "Windows must use WindowsShell::Cmd for the .cmd shim — got {:?}",
@@ -526,18 +570,19 @@ mod tests {
         assert_eq!(args, vec!["--model", "anthropic/claude-sonnet-4-5"]);
     }
 
-    /// `--auto` is the OpenCode analogue of AGY's
-    /// `--dangerously-skip-permissions` — see the module docstring. This
-    /// test pins the exact argv so a future edit that smuggles an extra
-    /// flag in (e.g. `--auto --garbage`) trips here, not at runtime.
+    /// Issue #2151: the base recipe is bare — `--auto` is the OpenCode
+    /// analogue of AGY's `--dangerously-skip-permissions` (see the module
+    /// docstring) and now comes from the effective permission mode in
+    /// `default_prepare`. This test pins the bare argv so a future edit
+    /// that smuggles an extra flag in (e.g. `--auto --garbage`) trips
+    /// here, not at runtime.
     #[test]
-    fn spawn_recipe_carries_auto_flag_on_every_platform() {
+    fn spawn_recipe_carries_no_hidden_flags_on_every_platform() {
         for platform in [Platform::Windows, Platform::Linux, Platform::Macos] {
             let recipe = OPENCODE.spawn_recipe(platform, EnvType::Windows);
-            assert_eq!(
-                recipe.base_args,
-                vec!["--auto".to_string()],
-                "OpenCode base recipe must be exactly `[\"--auto\"]` on {platform:?}; got {:?}",
+            assert!(
+                recipe.base_args.is_empty(),
+                "OpenCode base recipe must be bare on {platform:?}; got {:?}",
                 recipe.base_args
             );
         }
@@ -800,10 +845,9 @@ mod tests {
         .as_deref()
     }
 
-    /// Resume recipe is `opencode --auto --session <id>` — the base
-    /// recipe's `--auto` (issue #1297) survives the `default_prepare`
-    /// composition, and the resume adds `--session <id>` (flag, not
-    /// subcommand) on top.
+    /// Resume argv is `--auto` (unattended permission default, issue
+    /// #2151 — where the base recipe used to carry it) plus `--session
+    /// <id>` (flag, not subcommand, issue #1297).
     #[test]
     fn resume_recipe_carries_session_flag() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -834,10 +878,11 @@ mod tests {
         );
     }
 
-    /// Fresh spawn argv order: `--auto` (base recipe) → `--model <id>` →
-    /// `--prompt <text>`. No session-assign flag (self-assign). Pin the
-    /// exact vector so a future reorder that pushes `--auto` past
-    /// `--model` (or drops it) trips here, not in production.
+    /// Fresh spawn argv order: `--auto` (unattended permission default,
+    /// issue #2151) → `--model <id>` → `--prompt <text>`. No
+    /// session-assign flag (self-assign). Pin the exact vector so a
+    /// future reorder that pushes `--auto` past `--model` (or drops it)
+    /// trips here, not in production.
     #[test]
     fn fresh_recipe_forwards_model_and_prompt_without_session_id() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -847,6 +892,7 @@ mod tests {
             model: Some("anthropic/claude-sonnet-4-5".to_string()),
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

@@ -6,5 +6,12 @@ import type { EffortControlKind } from "./EffortControlKind";
  * [`crate::agent::capabilities::HarnessCapabilities`] so the IPC command
  * doesn't have to serialize the full descriptor (which includes
  * platform-list + attention capability that the UI doesn't render).
+ *
+ * Deliberately model + effort only (issue #2151, review round 1): there
+ * is no permission cascade view — permission has no mesh/explicit layers
+ * to cascade, and the Settings UI reads the full `HarnessCapabilities`
+ * for the mode list — so mask fields for it would be write-only wire
+ * weight. The spawn path masks permission separately in
+ * `agent::capabilities::resolve_agent_config`.
  */
 export type CapabilityMaskForResolver = { supports_model_override: boolean, effort_control: EffortControlKind, };

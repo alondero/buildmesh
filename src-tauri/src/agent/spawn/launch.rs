@@ -164,7 +164,7 @@ pub(super) async fn launch_process(
         // `non_empty_trim` collapse happens inside `resolve_agent_config`
         // / `resolve_extra_args` so whitespace-only inputs cascade-fall.
         explicit_extra_args.as_deref(),
-        app_default.as_ref().filter(|_| !frozen),
+        frozen_application_default(app_default.as_ref(), frozen).as_ref(),
     );
     timer.checkpoint("before_command_build");
     // A sandbox-setup failure must not reach the PTY at all, so the error is
@@ -282,4 +282,67 @@ pub(super) async fn launch_process(
         writer,
         job,
     })
+}
+
+/// Application default as seen by the resolver when the node carries a
+/// frozen (persisted) resolved configuration (issue #2151, review round
+/// 1). A frozen node drops the live model/effort defaults so the saved
+/// values win — but permission mode has no saved slot (it is kept out of
+/// every frozen artifact on purpose), so the live per-harness Settings
+/// default still applies to the next spawn. Without this carve-out a
+/// frozen node would silently keep launching unattended after the person
+/// switched the harness to prompt mode.
+fn frozen_application_default(
+    app_default: Option<&crate::preferences::HarnessConfigValue>,
+    frozen: bool,
+) -> Option<crate::preferences::HarnessConfigValue> {
+    match (app_default, frozen) {
+        (Some(default), true) => Some(crate::preferences::HarnessConfigValue {
+            model: None,
+            effort: None,
+            permission_mode: default.permission_mode.clone(),
+        }),
+        (Some(default), false) => Some(default.clone()),
+        (None, _) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue #2151 review round 1: the frozen carve-out. A frozen node
+    /// keeps the live permission default (no saved slot exists) while
+    /// the saved model/effort win.
+    #[test]
+    fn frozen_node_keeps_live_permission_default() {
+        let live = crate::preferences::HarnessConfigValue {
+            model: Some("opus-4".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("prompt".into()),
+        };
+        let carved = frozen_application_default(Some(&live), true).expect("kept");
+        assert_eq!(carved.model, None);
+        assert_eq!(carved.effort, None);
+        assert_eq!(carved.permission_mode.as_deref(), Some("prompt"));
+    }
+
+    #[test]
+    fn unfrozen_node_passes_application_default_through() {
+        let live = crate::preferences::HarnessConfigValue {
+            model: Some("opus-4".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("prompt".into()),
+        };
+        let passed = frozen_application_default(Some(&live), false).expect("kept");
+        assert_eq!(passed.model.as_deref(), Some("opus-4"));
+        assert_eq!(passed.effort.as_deref(), Some("high"));
+        assert_eq!(passed.permission_mode.as_deref(), Some("prompt"));
+    }
+
+    #[test]
+    fn absent_default_stays_absent_when_frozen() {
+        assert!(frozen_application_default(None, true).is_none());
+        assert!(frozen_application_default(None, false).is_none());
+    }
 }
