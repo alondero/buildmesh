@@ -86,9 +86,10 @@ The [October 2026 six-harness reliability audit](../archive/2026-10/circuit-harn
 is historical context. Current qualification gaps remain: there is no 30-session
 live soak across the six target harnesses, no measured per-harness callback
 delivery rate, and no evidence establishing a 99% autonomous Circuit completion
-rate. Qualification metrics are tracked in #2127; consolidating harness-owned
-observation strategies and diagnostics is tracked in #2128. Historical signal
-health and fixture tests cannot establish that target.
+rate. Qualification metrics are tracked in #2127. Harness-owned observation
+strategies and diagnostics (#2128) are described under
+[Harness-owned observation strategies](#harness-owned-observation-strategies).
+Historical signal health and fixture tests cannot establish that target.
 
 Terminal input attribution is streaming: focus notifications and cursor-position
 responses do not change the input generation or invent a draft, including when
@@ -157,6 +158,44 @@ writes nothing. Every emitted `StepWrite` becomes a `step_transition` row, and a
 not append identical ledger rows. It is not a substitute for the blocker key:
 this one only suppresses a repeated *write*, while re-judgement is decided by the
 worker gate above.
+
+## Harness-owned observation strategies
+
+Each harness adapter declares one typed `ObservationStrategy`
+(`circuit::strategy`, exposed as `AgentProvider::circuit_observation()`). It
+normalizes vendor facts into the observation vocabulary above and nothing more:
+freshness, requests, known-work blockers and authorization stay with the shared
+Circuit policy, and an adapter cannot authorize progression. There is no
+`supports_autopilot` flag.
+
+| Part | Meaning | Who executes it |
+|---|---|---|
+| Push | The adapter's hook parser (`HookParser`) plus the observation sources it records, and an optional explicit ownership gap for a settled turn that reports no registry | Attention route calls the parser for the node's own harness; `native_hooks` normalizes the result |
+| Pull | A validated native turn-completion read with its own source names, label and ownership limit | `native_pull` re-reads it while a step is unsettled |
+| Identity | `TurnIdentity`: none, native token, or token plus a prompt echo bound to a recorded submission | Diagnostics; the fences themselves remain shared |
+| Owned work | Unavailable (with reason) or hook registry | Diagnostics and the ownership fact a settled turn records |
+| Final report | Transcript/terminal only, hook message, or pull message | Diagnostics |
+| Reconciliation | The bounded yielded-report budget | Watchdog wait observation |
+| Passive watcher | The transcript watcher a recovered node must reattach | `restart` |
+
+Today Claude Code and Antigravity declare hooks, Codex declares hooks and a
+rollout pull, Command Code and Muse declare a passive watcher, and every other
+harness (including MiniMax Code, OpenCode, Grok and Cline) is unwired, so its
+missing evidence stays explicit and Circuit execution stays Unverified.
+
+The strategy is chosen from the node's own harness. A node with a launch
+snapshot is read as the executor frozen in that snapshot, so remapping a profile
+afterwards cannot make the pull read another harness's transcript; otherwise a
+harness id, custom harness profile or proxied `harness:account` option resolves
+to the harness that executes it. An unknown harness stays unwired rather than
+falling back to Claude. Resolving a stored provider reads preferences, so the
+evidence history records which provider each row needs and resolves it only
+after releasing its database connection. A persisted receipt records the adapter that parsed it, so a replay
+after restart reads it with that same declaration. The operator diagnostics
+(`observer_policy`) are rendered from the same declaration; its typed
+`coverage` is the contract and the prose fields are display text with the
+inspected version and platform. Adding a harness means declaring a strategy in
+its adapter, not editing the worker.
 
 ## Scheduling contract
 

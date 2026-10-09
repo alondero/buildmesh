@@ -120,7 +120,7 @@ pub(super) fn normalize(
     // Native receipts have their own strict ownership contract; malformed ordinary
     // callbacks cannot create a receipt or mutate Circuit state.
     let native_hook = payload.as_ref().and(raw).and_then(|value| {
-        crate::services::circuit_worker::native_hooks::NativeHook::parse_value(provider, value)
+        crate::circuit::strategy::for_recorded_adapter(Some(provider)).parse_hook(value)
     });
     Normalized {
         payload,

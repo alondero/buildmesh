@@ -2,6 +2,7 @@
 //! watcher attachment stay outside the injected reconciliation decisions.
 use super::observation::{agent_lookup_for_observation, observed_agent_for_step};
 use super::*;
+use crate::circuit::strategy::PassiveWatcher;
 
 pub(super) fn restore_run_evaluators(view: &RunView) {
     // Spawn steps complete at the first yield, but keep owning their agent
@@ -26,32 +27,16 @@ pub(super) fn release_run_evaluators(view: &RunView) {
     }
 }
 
-/// The passive turn watcher a recovered, already-live node must (re)attach.
-///
-/// Command Code (issue #1407) and Muse (issue #1709) both deliver their turn
-/// signal through a transcript watcher rather than an attention hook, so a
-/// restarted circuit must reattach the matching watcher — recovering the
-/// identity alone leaves the node unobservable. Every other harness either has
-/// an attention hook or no transcript to watch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ObserverRestart {
-    CommandCode,
-    Muse,
-}
-
 /// Which passive observer a recovered node needs, or `None` when its harness
-/// has no transcript watcher. Pure so the per-harness dispatch is unit-testable
-/// without an `AppHandle`.
-pub(super) fn observer_restart(node: &crate::models::AgentNode) -> Option<ObserverRestart> {
+/// has no transcript watcher. Command Code (issue #1407) and Muse (issue #1709)
+/// deliver their turn signal through a transcript watcher rather than an
+/// attention hook, so a restarted circuit must reattach the matching watcher —
+/// recovering the identity alone leaves the node unobservable. The harness
+/// declares its watcher in its observation strategy; this is pure so the
+/// dispatch is unit-testable without an `AppHandle`.
+pub(super) fn observer_restart(node: &crate::models::AgentNode) -> Option<PassiveWatcher> {
     node.cli_session_id.as_deref().filter(|id| !id.is_empty())?;
-    match crate::preferences::resolve_harness_provider(&node.provider)
-        .adapter()
-        .id()
-    {
-        "commandcode" => Some(ObserverRestart::CommandCode),
-        "muse" => Some(ObserverRestart::Muse),
-        _ => None,
-    }
+    crate::circuit::strategy::for_agent(node).passive_watcher
 }
 
 /// Reattach the passive observer a recovered node needs. Split from the
@@ -68,8 +53,8 @@ pub(super) fn restart_passive_observer_with(
     let session_id = node.cli_session_id.as_deref().unwrap_or_default();
     let path = crate::env::node_working_path(node).spawn_path;
     match restart {
-        ObserverRestart::CommandCode => start_commandcode(session_id, &path),
-        ObserverRestart::Muse => start_muse(session_id, &path),
+        PassiveWatcher::CommandCode => start_commandcode(session_id, &path),
+        PassiveWatcher::Muse => start_muse(session_id, &path),
     }
 }
 

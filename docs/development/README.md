@@ -98,6 +98,13 @@ requests.
 - Update the Rust adapter and its capability inventory (`capabilities()` /
   the trait methods it composes). Add the `Provider` variant,
   `BUILTIN_HARNESS_IDS` entry, and `inspector_label` match arm.
+- Declare the harness's Circuit observation strategy in the adapter
+  (`circuit_observation()`): the hook parser, native pull, identity and
+  owned-work coverage, report source and reconciliation budget it really
+  supports. The default is unwired; the Circuit worker and its diagnostics both
+  read this declaration, so do not add a harness-name branch under
+  `services/circuit_worker` (see
+  [Circuit session observation](circuit-session-observation.md#harness-owned-observation-strategies)).
 - Do not hand-edit a TypeScript capability table. Run `cargo test` from
   `src-tauri/` so `HarnessCapabilitiesTable.ts` regenerates; CI's
   `git diff --exit-code src/types/generated` is the drift gate (ADR-0037).

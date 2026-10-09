@@ -1,261 +1,24 @@
 //! Native hook receipt. The attention route owns transport/session validation;
-//! this adapter preserves only lifecycle/ownership fields and the final report.
+//! the harness adapter's observation strategy owns the vendor payload shape
+//! (`crate::circuit::strategy`). This module preserves the lifecycle/ownership
+//! facts and the final report, and normalizes them into Circuit observations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct NativeHook {
-    pub session_id: Option<String>,
-    pub turn_id: Option<String>,
-    pub event: String,
-    pub child_id: Option<String>,
-    pub active_work: Option<BTreeSet<String>>,
-    pub final_report: Option<String>,
-    /// Antigravity `Stop` with `fullyIdle: false`: the turn yielded while
-    /// harness-owned background work is still in flight (issue #1901).
-    /// Never set by the Claude/Codex parsers below.
-    #[serde(default)]
-    pub background_busy: bool,
-    /// Antigravity `executionNum`: an opaque 0-based step counter, not a
-    /// turn identity token. Retained so consecutive settled turns from one
-    /// session hash to distinct receipt source ids instead of colliding
-    /// into the history deduplicator (issue #1901 review). Never set by
-    /// the Claude/Codex parsers below.
-    #[serde(default)]
-    pub execution_num: Option<i64>,
-    /// Antigravity `terminationReason` (e.g. `model_stop`,
-    /// `NO_TOOL_CALL`): opaque triage telemetry, never a decision input.
-    /// Never set by the Claude/Codex parsers below.
-    #[serde(default)]
-    pub termination_reason: Option<String>,
-    #[serde(default)]
-    pub human_fact: Option<crate::circuit::observation::ObservedWorkFact>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    /// SHA-256 of the verbatim `prompt` Claude Code echoes on
-    /// `UserPromptSubmit` (issue #1898). This is the only native field that
-    /// can identify *which* Buildmesh submission a turn acknowledges: the
-    /// text Buildmesh wrote is the text the harness reports receiving.
-    /// Retained only alongside a turn token — the content proof and the turn
-    /// name are only useful together. Absent for every other event, provider
-    /// and payload shape, and an absent digest means "cannot prove
-    /// submission", never "assume it matched". The prompt text itself is
-    /// never retained.
-    #[serde(default)]
-    pub prompt_digest: Option<String>,
-}
+pub(crate) use crate::circuit::strategy::{submission_digest, NativeHook};
 
-/// SHA-256 of the exact prompt text Buildmesh wrote into the PTY. The
-/// submission record and the `UserPromptSubmit` echo must both be hashed
-/// through this helper so an equal digest is a real byte-for-byte match
-/// rather than two independently defined fingerprints.
-pub(crate) fn submission_digest(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    format!("{:x}", Sha256::digest(text.as_bytes()))
-}
-
+#[cfg(test)]
 impl NativeHook {
-    #[cfg(test)]
+    /// Parse with the strategy of the harness that owns `provider`. A harness
+    /// that declares no hooks never yields a receipt.
     pub(crate) fn parse(provider: &str, body: &[u8]) -> Option<Self> {
         let value: serde_json::Value = serde_json::from_slice(body).ok()?;
         Self::parse_value(provider, &value)
     }
 
     pub(crate) fn parse_value(provider: &str, value: &serde_json::Value) -> Option<Self> {
-        if provider == "agy" {
-            return parse_agy(value);
-        }
-        if !matches!(provider, "claude" | "claude_code" | "anthropic" | "codex") {
-            return None;
-        }
-        let claude_family = matches!(provider, "claude" | "claude_code" | "anthropic");
-        let event = value
-            .get("hook_event_name")
-            .or_else(|| value.get("hookEventName"))
-            .or_else(|| value.get("hookName"))?
-            .as_str()?;
-        let human_fact = human_fact(value);
-        // Codex's PermissionRequest contract has no stable request id. Keep
-        // the event as an uncorrelated permission wait instead of dropping
-        // it or inventing a correlation token.
-        if human_fact.is_none()
-            && !matches!(
-                event,
-                "UserPromptSubmit"
-                    | "Stop"
-                    | "SubagentStart"
-                    | "SubagentStop"
-                    | "PermissionRequest"
-                    | "StopFailure"
-            )
-        {
-            return None;
-        }
-        let token = |key: &str| {
-            value
-                .get(key)
-                .and_then(|v| v.as_str())
-                .filter(|v| !v.is_empty())
-                .map(str::to_owned)
-        };
-        // The turn token naming the prompt the harness is processing. Claude
-        // Code's documented spelling is `prompt_id`; the other aliases are
-        // the shapes sibling harnesses use for the same fact.
-        let turn_id = ["prompt_id", "promptId", "turn_id"]
-            .iter()
-            .find_map(|key| token(key));
-        let active_work = (|| {
-            let tasks = value.get("background_tasks")?.as_array()?;
-            let crons = value.get("session_crons")?.as_array()?;
-            let mut active = BTreeSet::new();
-            for (prefix, items) in [("task", tasks), ("cron", crons)] {
-                for item in items {
-                    let id = item.get("id")?.as_str()?.trim();
-                    if id.is_empty() {
-                        return None;
-                    }
-                    active.insert(format!("{prefix}:{id}"));
-                }
-            }
-            Some(active)
-        })();
-        Some(Self {
-            session_id: token("session_id")
-                .or_else(|| token("sessionId"))
-                .or_else(|| token("sessionID"))
-                .or_else(|| token("conversationId"))
-                .or_else(|| token("conversation_id"))
-                .or_else(|| token("taskId")),
-            turn_id: turn_id.clone(),
-            event: event.into(),
-            child_id: token("agent_id"),
-            human_fact,
-            background_busy: false,
-            execution_num: None,
-            termination_reason: None,
-            provider: Some(provider.into()),
-            active_work,
-            prompt_digest: (claude_family && event == "UserPromptSubmit" && turn_id.is_some())
-                .then(|| {
-                    value
-                        .get("prompt")
-                        .and_then(|text| text.as_str())
-                        // An empty echo identifies nothing: accepting one
-                        // would be a bare turn token with no content proof.
-                        .filter(|text| !text.is_empty())
-                        .map(submission_digest)
-                })
-                .flatten(),
-            final_report: if event == "Stop" {
-                token("last_assistant_message")
-                    .map(|text| crate::secret_scrubber::SecretScrubber::scrub(&text))
-            } else {
-                None
-            },
-        })
+        crate::circuit::strategy::for_stored(provider).parse_hook(value)
     }
-}
-
-/// Antigravity (`agy`) `Stop` receipts (issue #1901).
-///
-/// Validated against agy 1.2.11 on Windows interactive sessions (`-p`
-/// print mode emits no `Stop` hook, so hook evidence covers only
-/// Buildmesh-launched PTY sessions): the provisioned `.agents/hooks.json`
-/// `Stop` hook pipes `{conversationId, executionNum, fullyIdle,
-/// terminationReason, error, workspacePaths, transcriptPath,
-/// artifactDirectoryPath, modelName}` (1.2.x also sends
-/// `hookEventName: "Stop"`) to the attention route. What the shape
-/// provably lacks decides the adapter:
-/// - No per-turn token (`executionNum` is an opaque 0-based step counter,
-///   not identity) → `turn_id` stays `None`; receipts are session-fenced
-///   but never turn-fenced, hence never authoritative. The counter is still
-///   retained as `execution_num` so consecutive turns hash to distinct
-///   receipt source ids instead of colliding in history deduplication.
-/// - No child/background registry → `active_work` stays `None`; every
-///   `Stop` carries `OwnershipUnavailable` so a settled foreground turn
-///   can never verify owned work.
-/// - No inline report text → `final_report` stays `None`.
-/// - Subagent `Stop`s carry their own `conversationId`, so they fence as
-///   a different session downstream and can never complete the parent.
-///
-/// Only `Stop` is accepted; under `--dangerously-skip-permissions` AGY
-/// installs no `PreToolUse` gate, so no other event is validated.
-fn parse_agy(value: &serde_json::Value) -> Option<NativeHook> {
-    let named = value
-        .get("hook_event_name")
-        .or_else(|| value.get("hookEventName"))
-        .or_else(|| value.get("hookName"))
-        .and_then(|name| name.as_str());
-    // Canonicalize through the same UUID gate the attention route uses
-    // before writing `cli_session_id`: downstream identity comparison is
-    // exact, so an uppercase or mixed-case `conversationId` must fence as
-    // the same session (issue #1901 review). A non-UUID value is malformed.
-    let conversation: Option<String> = value
-        .get("conversationId")
-        .or_else(|| value.get("conversation_id"))
-        .and_then(|id| id.as_str())
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .and_then(|id| crate::http::request::parse_session_id_for_provider("agy", id));
-    // AGY always ships its conversation id on `Stop`; a `Stop` without one
-    // is malformed, never turn evidence for whichever node it reached.
-    let conversation = conversation?;
-    let event = match named {
-        Some(name) if name.eq_ignore_ascii_case("stop") => "Stop",
-        Some(_) => return None,
-        None => {
-            // Shape-keyed `Stop`: pre-`hookEventName` payloads carry no
-            // event key, so require the AGY `Stop` markers alongside the
-            // conversation id rather than treating any JSON as a turn end.
-            let marked = [
-                "fullyIdle",
-                "fully_idle",
-                "terminationReason",
-                "termination_reason",
-                "transcriptPath",
-                "transcript_path",
-                "executionNum",
-                "execution_num",
-            ]
-            .iter()
-            .any(|key| value.get(key).is_some());
-            if marked {
-                "Stop"
-            } else {
-                return None;
-            }
-        }
-    };
-    let background_busy = value
-        .get("fullyIdle")
-        .or_else(|| value.get("fully_idle"))
-        .and_then(|idle| idle.as_bool())
-        == Some(false);
-    let execution_num = value
-        .get("executionNum")
-        .or_else(|| value.get("execution_num"))
-        .and_then(|num| num.as_i64());
-    let termination_reason = value
-        .get("terminationReason")
-        .or_else(|| value.get("termination_reason"))
-        .and_then(|reason| reason.as_str())
-        .filter(|reason| !reason.trim().is_empty())
-        .map(str::to_owned);
-    Some(NativeHook {
-        session_id: Some(conversation),
-        turn_id: None,
-        event: event.into(),
-        child_id: None,
-        active_work: None,
-        final_report: None,
-        human_fact: None,
-        background_busy,
-        execution_num,
-        termination_reason,
-        provider: Some("agy".into()),
-        prompt_digest: None,
-    })
 }
 
 /// Stable deduplication identity for a hook receipt: the hook payload plus
@@ -273,79 +36,6 @@ pub(crate) fn receipt_source_id(
             serde_json::to_vec(&(hook, session_incarnation)).map_err(|e| e.to_string())?
         )
     ))
-}
-
-// This is the Claude/Codex hook request contract already accepted by the
-// attention route. Tool names identify request kind, never request identity.
-fn human_fact(value: &serde_json::Value) -> Option<crate::circuit::observation::ObservedWorkFact> {
-    use crate::circuit::observation::{HumanWaitKind as Kind, ObservedWorkFact as Fact};
-    let event = value
-        .get("hook_event_name")
-        .or_else(|| value.get("hookEventName"))
-        .or_else(|| value.get("hookName"))?
-        .as_str()?;
-    let request_id = [
-        "request_id",
-        "tool_use_id",
-        "toolUseId",
-        "requestId",
-        "requestID",
-        "elicitation_id",
-        "toolCallId",
-        "tool_call_id",
-        "callId",
-        "call_id",
-        "permissionID",
-        "permission_id",
-    ]
-    .iter()
-    .find_map(|key| {
-        value
-            .get(key)
-            .and_then(|v| v.as_str())
-            .filter(|v| !v.trim().is_empty())
-    })?;
-    let tool = value
-        .get("tool_name")
-        .or_else(|| value.get("toolName"))
-        .and_then(|v| v.as_str());
-    let wait_kind = match tool {
-        Some("AskUserQuestion" | "request_user_input" | "ask_user_question") => Kind::Question,
-        Some("ExitPlanMode") => Kind::ReviewApproval,
-        _ => Kind::Permission,
-    };
-    match event {
-        "PermissionRequest" => Some(Fact::HumanWaitRequested {
-            wait_kind: Kind::Permission,
-            request_id: request_id.into(),
-        }),
-        "PreToolUse"
-            if matches!(
-                tool,
-                Some(
-                    "AskUserQuestion" | "request_user_input" | "ask_user_question" | "ExitPlanMode"
-                )
-            ) =>
-        {
-            Some(Fact::HumanWaitRequested {
-                wait_kind,
-                request_id: request_id.into(),
-            })
-        }
-        "PostToolUse" => Some(Fact::ToolResponse {
-            wait_kind,
-            request_id: request_id.into(),
-        }),
-        "PostToolUseFailure" => Some(Fact::ToolFailed {
-            wait_kind,
-            request_id: request_id.into(),
-        }),
-        "PermissionResult" => Some(Fact::HumanResponse {
-            wait_kind: Kind::Permission,
-            request_id: request_id.into(),
-        }),
-        _ => None,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +221,10 @@ fn normalize(
     let mut expected = identity.clone();
     expected.session_id = current_session;
     expected.session_incarnation = current_incarnation;
+    // The strategy of the harness that parsed this hook. A receipt names its
+    // adapter, so replay never consults mutable profile preferences and a hook
+    // can only be read with its own harness's declaration.
+    let strategy = crate::circuit::strategy::for_recorded_adapter(receipt.hook.provider.as_deref());
     let human_fact = receipt.hook.human_fact.clone();
     let authoritative = ((receipt.turn_fenced
         && (receipt.submission_correlated || human_fact.is_some()))
@@ -550,7 +244,7 @@ fn normalize(
     }
     match receipt.hook.event.as_str() {
         "UserPromptSubmit" => facts.push(Fact::Working),
-        // `background_busy` is only ever set by the AGY parser above; the
+        // `background_busy` is only ever set by a parser whose harness reports a yield with background work; the
         // harness signalled the turn yielded while owned background work is
         // still in flight, so this is yield evidence, not a settled turn.
         "Stop" => facts.push(if receipt.hook.background_busy {
@@ -585,34 +279,30 @@ fn normalize(
             facts.push(Fact::OwnershipSnapshot {
                 active_work: active_work.into_iter().collect(),
             });
-        } else if receipt.hook.provider.as_deref() == Some("agy") {
-            // Validated absence (issue #1901): Antigravity exposes no
+        } else if let Some(reason) = strategy.hooks().and_then(|hooks| hooks.ownership_gap) {
+            // Validated absence (issue #1901): the harness exposes no
             // child/background registry, so a settled foreground turn must
             // park the step Unverified instead of implying no owned work.
             facts.push(Fact::OwnershipUnavailable {
-                reason: "Antigravity exposes no child/background registry; a settled foreground turn cannot verify owned work. Inspect the agent and Recheck evidence.".into(),
+                reason: reason.into(),
             });
         } else {
             facts.push(Fact::Unavailable);
         }
     }
+    let source = strategy.hooks().map_or("unwired_native_hook", |hooks| {
+        if receipt.hook.human_fact.is_some() {
+            hooks.request_source
+        } else {
+            hooks.source
+        }
+    });
     let observations = facts
         .into_iter()
         .enumerate()
         .map(|(index, fact)| CircuitObservation {
             identity: identity.clone(),
-            source: if receipt.hook.human_fact.is_some() {
-                format!(
-                    "{}_request_hook",
-                    receipt.hook.provider.as_deref().unwrap_or("claude")
-                )
-            } else if receipt.hook.provider.as_deref() == Some("codex") {
-                "codex_native_hook".into()
-            } else if receipt.hook.provider.as_deref() == Some("agy") {
-                "agy_native_hook".into()
-            } else {
-                "claude_native_hook".into()
-            },
+            source: source.into(),
             source_id: Some(format!("{}:{index}", receipt.source_id)),
             observed_at_ms: receipt.received_at_ms,
             authoritative,
@@ -646,6 +336,7 @@ fn normalize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn claude_prompt_echo_is_the_only_native_submission_evidence() {
@@ -2201,5 +1892,132 @@ mod tests {
             "native_receipt_agent_deleted"
         );
         assert!(matches!(&deleted_observations[0].fact, Fact::Unavailable));
+    }
+
+    // ----- Strategy seam (issue #2128) -------------------------------------
+    //
+    // These cross the production seam from a persisted receipt back to
+    // observations: `resolve_receipt` is what the worker runs after a restart,
+    // and it must read each receipt with the strategy of the harness that
+    // parsed it, not with whatever the node's profile preferences say today.
+
+    fn replayed(
+        persisted_hook: &serde_json::Value,
+    ) -> Vec<crate::circuit::observation::CircuitObservation> {
+        let receipt = serde_json::json!({
+            "agent_node_id": 9,
+            "input_stamp": null,
+            "session_incarnation": "7",
+            "source_id": "receipt-1",
+            "received_at_ms": 5,
+            "turn_fenced": false,
+            "hook": persisted_hook,
+        });
+        let entry = crate::db::circuit::evidence::CircuitHistoryEntry {
+            id: 10,
+            node_id: Some("work".into()),
+            attempt: Some(1),
+            kind: "native_hook_received".into(),
+            detail: receipt.to_string(),
+            source: None,
+            disposition: None,
+            observed_at: String::new(),
+        };
+        let super::super::CircuitEvent::ObservationBatch { observations, .. } =
+            resolve_receipt(1, entry, |_| {
+                Ok((Some("session".into()), Some("7".into()), None))
+            })
+            .unwrap()
+        else {
+            panic!("native batch expected")
+        };
+        observations
+    }
+
+    fn persisted_stop(provider: Option<&str>) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": "session", "turn_id": null, "event": "Stop", "child_id": null,
+            "active_work": null, "final_report": null, "provider": provider,
+        })
+    }
+
+    #[test]
+    fn replay_reads_a_receipt_with_the_strategy_that_parsed_it() {
+        use crate::circuit::observation::ObservedWorkFact as Fact;
+        let ownership_gap = |provider: &str| {
+            replayed(&persisted_stop(Some(provider)))
+                .into_iter()
+                .find_map(|o| match o.fact {
+                    Fact::OwnershipUnavailable { reason } => Some(reason),
+                    _ => None,
+                })
+        };
+        for (provider, source) in [
+            ("anthropic", "claude_native_hook"),
+            ("claude", "claude_native_hook"),
+            ("codex", "codex_native_hook"),
+            ("agy", "agy_native_hook"),
+        ] {
+            let observations = replayed(&persisted_stop(Some(provider)));
+            assert!(
+                observations.iter().all(|o| o.source == source),
+                "{provider} replays as {source}"
+            );
+        }
+        // Only Antigravity's declaration states an ownership gap; Claude and
+        // Codex leave a registry-less Stop merely unknown.
+        assert!(ownership_gap("agy").unwrap().contains("Antigravity"));
+        assert!(ownership_gap("anthropic").is_none());
+        assert!(ownership_gap("codex").is_none());
+    }
+
+    #[test]
+    fn replay_of_a_receipt_from_an_unwired_or_unrecorded_harness_borrows_no_strategy() {
+        use crate::circuit::observation::ObservedWorkFact as Fact;
+        for provider in [Some("opencode"), Some("future-harness"), None] {
+            let observations = replayed(&persisted_stop(provider));
+            assert!(
+                observations
+                    .iter()
+                    .all(|o| o.source == "unwired_native_hook"),
+                "{provider:?} must not replay as Claude, Codex or Antigravity"
+            );
+            assert!(observations.iter().all(|o| !o.authoritative));
+            assert!(
+                !observations
+                    .iter()
+                    .any(|o| matches!(o.fact, Fact::OwnershipUnavailable { .. })),
+                "{provider:?} must not inherit another harness's ownership statement"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hook_survives_persistence_and_replays_identically_after_a_restart() {
+        // Persist through the real serde shape (what `receive_native_hook`
+        // stores), reload it as the restarted worker would, and compare the
+        // facts to the pre-restart normalization for each declaring harness.
+        let cases = [
+            ("anthropic", br#"{"hook_event_name":"Stop","session_id":"session","prompt_id":"t1","last_assistant_message":"done"}"#.as_slice()),
+            ("codex", br#"{"hook_event_name":"Stop","session_id":"session","turn_id":"t1","last_assistant_message":"done"}"#.as_slice()),
+            ("agy", br#"{"hookEventName":"Stop","conversationId":"550e8400-e29b-41d4-a716-446655440000","executionNum":1,"fullyIdle":false}"#.as_slice()),
+        ];
+        for (provider, body) in cases {
+            let hook = NativeHook::parse(provider, body).unwrap();
+            let persisted = serde_json::to_value(&hook).unwrap();
+            let reloaded: NativeHook = serde_json::from_value(persisted.clone()).unwrap();
+            assert_eq!(reloaded, hook, "{provider}: persistence is lossless");
+            let facts = |observations: Vec<crate::circuit::observation::CircuitObservation>| {
+                observations
+                    .into_iter()
+                    .map(|o| (o.source, format!("{:?}", o.fact)))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                facts(replayed(&persisted)),
+                facts(replayed(&serde_json::to_value(&reloaded).unwrap())),
+                "{provider}: replay is deterministic"
+            );
+        }
     }
 }

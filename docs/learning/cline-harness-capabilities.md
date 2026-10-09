@@ -412,8 +412,9 @@ directly). Because the npm package ships a compiled bundle rather than the
 
 No controlled live Circuit run has been performed for this provider, so
 Circuit execution stays visibly **unsupported/Unverified**. The observer
-policy records that explicitly (`services::circuit_worker::observer_policy`,
-`cline` arm) rather than falling through to the generic fallback.
+policy records that explicitly (the Cline adapter's `circuit_observation`
+declaration, rendered by `services::circuit_worker::observer_policy`) rather
+than falling through to the generic fallback.
 
 The file-hook config table maps exactly:
 

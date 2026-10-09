@@ -89,11 +89,30 @@ impl AgentProvider for CommandCodeAdapter {
         true
     }
 
-    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
-        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
-        spawn.base_args = ["--print", "--output-format", "json", "--max-turns", "1", "--trust"].map(str::to_owned).to_vec();
-        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Stdin, BackgroundResultOutput::ResultJsonLines))
+        spawn.base_args = [
+            "--print",
+            "--output-format",
+            "json",
+            "--max-turns",
+            "1",
+            "--trust",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        Some(BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::Stdin,
+            BackgroundResultOutput::ResultJsonLines,
+        ))
     }
 
     fn auto_resume_on_startup(&self) -> bool {
@@ -104,8 +123,14 @@ impl AgentProvider for CommandCodeAdapter {
         false
     }
 
-    fn supports_passive_turn_watcher(&self) -> bool {
-        true
+    /// Command Code (issue #1407) delivers its turn signal through a
+    /// transcript watcher rather than an attention hook, so a restarted
+    /// Circuit must reattach that watcher. It has no Circuit-native receipt.
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        crate::circuit::strategy::ObservationStrategy {
+            passive_watcher: Some(crate::circuit::strategy::PassiveWatcher::CommandCode),
+            ..crate::circuit::strategy::ObservationStrategy::UNWIRED
+        }
     }
 
     fn on_spawn_activated(&self, node_id: i64) {
@@ -176,7 +201,10 @@ impl AgentProvider for CommandCodeAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::commandcode_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -192,16 +220,19 @@ impl AgentProvider for CommandCodeAdapter {
         let spawn_path = spawn_path.to_string();
         let app = app.clone();
         Box::pin(async move {
-            if let Err(error) = crate::services::commandcode_watcher::start_for_resumed_session_async(
-                node_id,
-                &session_id,
-                &spawn_path,
-                env_type,
-                app,
-            )
-            .await
+            if let Err(error) =
+                crate::services::commandcode_watcher::start_for_resumed_session_async(
+                    node_id,
+                    &session_id,
+                    &spawn_path,
+                    env_type,
+                    app,
+                )
+                .await
             {
-                tracing::warn!("commandcode watcher: could not resume watch for node {node_id}: {error}");
+                tracing::warn!(
+                    "commandcode watcher: could not resume watch for node {node_id}: {error}"
+                );
             }
         })
     }
@@ -327,10 +358,7 @@ mod tests {
         let args = COMMANDCODE.resume_args("3fadada6-e0a3-44a2-ab68-ce1ecf7207a9");
         assert_eq!(
             args,
-            vec![
-                "--resume",
-                "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"
-            ]
+            vec!["--resume", "3fadada6-e0a3-44a2-ab68-ce1ecf7207a9"]
         );
     }
 
@@ -366,7 +394,10 @@ mod tests {
         assert_eq!(
             COMMANDCODE.effort_control(),
             EffortControlKind::Closed {
-                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: COMMANDCODE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
         assert!(COMMANDCODE.supports_extra_args());
@@ -391,7 +422,10 @@ mod tests {
         assert_eq!(
             caps.effort_control,
             crate::agent::capabilities::EffortControlKind::Closed {
-                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: COMMANDCODE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
     }

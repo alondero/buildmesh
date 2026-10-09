@@ -22,6 +22,7 @@ pub mod model_node_review;
 pub mod observation;
 pub(crate) mod report_admission;
 pub mod stepper;
+pub mod strategy;
 pub mod vocabulary;
 
 #[cfg(test)]
