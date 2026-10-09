@@ -1,0 +1,6034 @@
+//! Tests for the pure stepper (extracted from `stepper.rs`, issue #2155).
+//!
+//! `advance` needs no database, PTY or process, so these tests build a
+//! `RunView`, feed it events, and assert the returned writes and effects.
+//! The module stays a child of `circuit::stepper` so `use super::*` reaches
+//! the same items as before; only its review surface moves.
+
+use super::*;
+use crate::circuit::model::OpenPrPolicy;
+use crate::circuit::model::{CircuitEdge, CircuitNode, GithubActionKind};
+use crate::circuit::test_support::{
+    advance_with_completion_evidence, advance_with_report_evidence,
+};
+
+fn spawn_kind(prompt: &str) -> CircuitNodeKind {
+    CircuitNodeKind::SpawnAgentNode {
+        prompt: prompt.into(),
+        name: None,
+        provider: None,
+        model: None,
+        effort: None,
+        extra_args: None,
+        timeout_seconds: None,
+    }
+}
+
+fn inject_kind(prompt: &str) -> CircuitNodeKind {
+    CircuitNodeKind::InjectPty {
+        prompt: prompt.into(),
+        target_node_id: None,
+    }
+}
+
+fn agent_finished(agent_node_id: i64, success: bool) -> CircuitEvent {
+    CircuitEvent::AgentFinished {
+        agent_node_id,
+        success,
+        output: None,
+    }
+}
+
+// -- fixtures -------------------------------------------------------------
+
+/// A minimal trigger → spawn → notify chain, built inline so the
+/// fixture is independent of [`CircuitGraph::walking_skeleton`]'s
+/// canonical shape (which has its own end-to-end test below).
+fn linear_run() -> RunView {
+    let mut ctx = CircuitContext::new();
+    ctx.with_circuit(7, "nightly-sweep", 3);
+    ctx.with_run(42);
+    RunView {
+        run_id: 42,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "trigger".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "spawn".into(),
+                    kind: spawn_kind("fix it"),
+                },
+                CircuitNode {
+                    id: "notify".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "done {{circuit.name}}".into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "trigger".into(),
+                    to: "spawn".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "spawn".into(),
+                    to: "notify".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: ctx,
+        steps: vec![],
+    }
+}
+
+fn capacity(agent_free: i64) -> Capacity {
+    Capacity {
+        agent_free_slots: agent_free,
+    }
+}
+
+fn tick(m: i64) -> CircuitEvent {
+    CircuitEvent::Tick(capacity(m))
+}
+
+fn status_of(run: &RunView, node: &str) -> StepStatus {
+    run.step(node).map(|s| s.status).expect("step should exist")
+}
+
+// -- trigger --------------------------------------------------------------
+
+#[test]
+fn manual_trigger_starts_run_and_completes_trigger_roots() {
+    let mut run = linear_run();
+    let t = advance(&mut run, &CircuitEvent::Triggered);
+    assert!(t.run_state_changed);
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(t.step_writes.len(), 1);
+    assert_eq!(t.step_writes[0].node_id, "trigger");
+    assert_eq!(t.step_writes[0].status, StepStatus::Completed);
+    assert_eq!(status_of(&run, "trigger"), StepStatus::Completed);
+    // No scheduling happens without a Tick — every start is
+    // capacity-checked.
+    assert!(t.effects.is_empty());
+    assert!(run.step("spawn").is_none());
+}
+
+#[test]
+fn trigger_is_idempotent_on_an_already_running_run() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let second = advance(&mut run, &CircuitEvent::Triggered);
+    assert!(!second.run_state_changed);
+    assert!(second.is_empty());
+}
+
+#[test]
+fn every_trigger_kind_root_auto_completes_on_manual_fire() {
+    // Trigger Now fires the circuit regardless of which trigger kind
+    // its blueprint declares — the user is the trigger.
+    for kind in [
+        CircuitNodeKind::Manual,
+        CircuitNodeKind::Interval {
+            interval_seconds: 60,
+        },
+        CircuitNodeKind::GithubIssueLabel {
+            label: "buildmesh:run".into(),
+        },
+        CircuitNodeKind::GithubPullRequestLabel {
+            label: "review".into(),
+        },
+    ] {
+        let mut run = linear_run();
+        run.graph.nodes[0].kind = kind;
+        advance(&mut run, &CircuitEvent::Triggered);
+        assert_eq!(status_of(&run, "trigger"), StepStatus::Completed);
+    }
+}
+
+// -- scheduling & capacity --------------------------------------------------
+
+#[test]
+fn first_tick_schedules_spawn_when_the_agent_slot_is_free() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(1));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert_eq!(
+        t.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "spawn".to_string()
+        }]
+    );
+}
+
+#[test]
+fn step_capacity_wait_tracks_agent_slot_changes_and_admission_without_tick_noise() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(0));
+    let read = |run: &RunView| {
+        serde_json::from_str::<serde_json::Value>(
+            run.context.get("node.spawn.capacity_wait").unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(read(&run), serde_json::json!({"agent_limit":true}));
+    let unchanged = advance(&mut run, &tick(0));
+    assert!(unchanged.is_empty());
+    let admitted = advance(&mut run, &tick(1));
+    assert_eq!(read(&run), serde_json::json!({"agent_limit":false}));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert_eq!(admitted.effects.len(), 1);
+}
+
+#[test]
+fn spawn_queues_when_mesh_agent_slots_are_exhausted() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(0));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
+    assert!(t.effects.is_empty(), "queued steps emit no spawn effect");
+}
+
+#[test]
+fn non_agent_steps_start_when_no_agent_slot_is_free() {
+    // ADR 0042: no step slots exist, so only a spawn can park. A plain
+    // action chain runs to completion even with the agent lease empty.
+    let mut run = linear_run();
+    run.graph.nodes[1].kind = CircuitNodeKind::Notify {
+        message: "no agent needed".to_string(),
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(0));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn queued_step_promotes_fifo_when_a_mesh_slot_frees() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(0));
+    let t = advance(&mut run, &tick(1));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert_eq!(
+        t.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "spawn".to_string()
+        }]
+    );
+}
+
+#[test]
+fn queued_step_stays_parked_until_an_agent_slot_frees() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(0)); // agent slots gone → queue
+    let t = advance(&mut run, &tick(0)); // still gone
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Queued);
+    assert!(t.effects.is_empty());
+}
+
+#[test]
+fn re_tick_with_a_running_step_is_a_no_op() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    let again = advance(&mut run, &tick(1));
+    assert!(again.is_empty(), "re-tick must be a no-op: {:?}", again);
+}
+
+// -- agent lifecycle --------------------------------------------------------
+
+#[test]
+fn observation_blockers_are_typed_deduplicated_and_attempt_scoped() {
+    use super::super::observation::CircuitObservationBlocker;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let event = |attempt, agent_node_id, blocker| CircuitEvent::ObservationDeferred {
+        node_id: "spawn".into(),
+        attempt,
+        agent_node_id,
+        blocker,
+    };
+    let rejected = advance(
+        &mut run,
+        &event(2, 900, CircuitObservationBlocker::InputDraft),
+    );
+    assert!(rejected.is_empty());
+    assert!(advance(
+        &mut run,
+        &event(1, 901, CircuitObservationBlocker::InputDraft)
+    )
+    .is_empty());
+    let first = advance(
+        &mut run,
+        &event(1, 900, CircuitObservationBlocker::InputUncertain),
+    );
+    assert_eq!(run.step("spawn").unwrap().status, StepStatus::Unverified);
+    assert_eq!(
+        run.context.get("node.spawn.observation_blocker"),
+        Some("{\"kind\":\"input_uncertain\"}")
+    );
+    assert_eq!(first.step_writes.len(), 1);
+    assert!(first.classifications.is_empty());
+    assert!(first.effects.is_empty());
+    assert!(advance(
+        &mut run,
+        &event(1, 900, CircuitObservationBlocker::InputUncertain)
+    )
+    .is_empty());
+    let updated = advance(
+        &mut run,
+        &event(1, 900, CircuitObservationBlocker::HumanResponseRequired),
+    );
+    assert_eq!(updated.step_writes.len(), 1);
+    assert!(run
+        .step("spawn")
+        .unwrap()
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("question or permission"));
+}
+
+#[test]
+fn known_background_work_keeps_the_step_running_with_an_explicit_blocker() {
+    use super::super::observation::CircuitObservationBlocker;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+
+    let transition = advance(
+        &mut run,
+        &CircuitEvent::ObservationDeferred {
+            node_id: "spawn".into(),
+            attempt: 1,
+            agent_node_id: 900,
+            blocker: CircuitObservationBlocker::KnownWorkOutstanding,
+        },
+    );
+
+    assert_eq!(run.step("spawn").unwrap().status, StepStatus::Running);
+    assert_eq!(run.step("spawn").unwrap().error, None);
+    assert_eq!(
+        run.context.get("node.spawn.observation_blocker"),
+        Some(r#"{"kind":"known_work_outstanding"}"#)
+    );
+    assert!(transition.classifications.is_empty());
+    assert!(transition.effects.is_empty());
+}
+
+#[test]
+fn work_evidence_conflicts_keep_session_observation_guidance() {
+    use super::super::observation::{CircuitObservationBlocker, WorkEvidence};
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    run.context.set(
+        "node.spawn.evidence.1",
+        serde_json::to_string(&WorkEvidence {
+            conflicted: true,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+
+    let blocker = run.report_blocker("spawn").unwrap();
+    assert_eq!(blocker, CircuitObservationBlocker::EvidenceConflict);
+    assert_eq!(
+        blocker.message(),
+        "Session observations conflict or cannot be read. Inspect the evidence and recheck; interpretation cannot resolve an identity conflict."
+    );
+}
+
+#[test]
+fn scoped_observations_require_all_owned_work_and_reject_late_completion() {
+    use super::super::observation::*;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let identity = ObservationIdentity {
+        run_id: run.run_id,
+        step_id: "spawn".into(),
+        attempt: run.step("spawn").unwrap().attempt,
+        agent_node_id: 900,
+        session_incarnation: Some("generation-1".into()),
+        session_id: Some("session-1".into()),
+        turn_id: Some("turn-1".into()),
+        report_revision: None,
+    };
+    let event = |fact, sequence: i64| CircuitEvent::Observed {
+        expected: identity.clone(),
+        observation: Box::new(CircuitObservation {
+            identity: identity.clone(),
+            source: "native-hook".into(),
+            source_id: Some(sequence.to_string()),
+            observed_at_ms: sequence,
+            authoritative: true,
+            fact,
+        }),
+    };
+    for (sequence, fact) in [
+        ObservedWorkFact::OwnedStarted {
+            work_id: "child".into(),
+        },
+        ObservedWorkFact::Yielded,
+        ObservedWorkFact::ForegroundTerminated,
+        ObservedWorkFact::AssignedWorkCompleted,
+        ObservedWorkFact::OwnershipCovered,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let transition = advance(&mut run, &event(fact, sequence as i64));
+        assert!(transition.effects.is_empty());
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+        assert_eq!(
+            transition.observations[0].disposition,
+            ObservationDisposition::Accepted
+        );
+    }
+    let completion = event(
+        ObservedWorkFact::OwnedTerminated {
+            work_id: "child".into(),
+        },
+        6,
+    );
+    let mut cancelled = run.clone();
+    cancelled.state = RunState::Cancelled;
+    let rejected = advance(&mut cancelled, &completion);
+    assert_eq!(cancelled.state, RunState::Cancelled);
+    assert!(rejected.effects.is_empty());
+    assert_eq!(
+        rejected.observations[0].disposition,
+        ObservationDisposition::Rejected
+    );
+    let completed = advance(&mut run, &completion);
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+    assert!(matches!(&completed.effects[..], [Effect::Notify { .. }]));
+}
+
+#[test]
+fn reduced_confidence_yield_is_not_completion_and_input_wait_never_expires() {
+    use super::super::observation::*;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let identity = ObservationIdentity {
+        run_id: run.run_id,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: None,
+        session_id: None,
+        turn_id: None,
+        report_revision: None,
+    };
+    let observation = CircuitObservation {
+        identity: identity.clone(),
+        source: "projection".into(),
+        source_id: Some("input-1".into()),
+        observed_at_ms: 1,
+        authoritative: false,
+        fact: ObservedWorkFact::NeedsInput,
+    };
+    let t = advance(
+        &mut run,
+        &CircuitEvent::Observed {
+            expected: identity,
+            observation: Box::new(observation),
+        },
+    );
+    assert_eq!(
+        t.observations[0].disposition,
+        ObservationDisposition::ReducedConfidence
+    );
+    assert!(t.effects.is_empty());
+    for now_ms in [0, 86_400_000] {
+        let t = advance(
+            &mut run,
+            &CircuitEvent::WaitObserved {
+                node_id: "spawn".into(),
+                attempt: 1,
+                now_ms,
+                progress: None,
+                observed: true,
+                explicit_budget: false,
+                reason: "Waiting for input".into(),
+                timeout_ms: 60_000,
+            },
+        );
+        assert!(t.effects.is_empty());
+        assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    }
+}
+
+#[test]
+fn circuit_generic_working_does_not_resolve_a_permission_wait() {
+    use super::super::observation::*;
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let identity = ObservationIdentity {
+        run_id: run.run_id,
+        step_id: "spawn".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("incarnation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("turn".into()),
+        report_revision: None,
+    };
+    for (index, fact) in [
+        ObservedWorkFact::PermissionRequested,
+        ObservedWorkFact::Working,
+        ObservedWorkFact::ForegroundTerminated,
+        ObservedWorkFact::OwnershipCovered,
+        ObservedWorkFact::AssignedWorkCompleted,
+        ObservedWorkFact::OwnershipUnavailable {
+            reason: "registry missing".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(CircuitObservation {
+                    identity: identity.clone(),
+                    source: "native".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: index as i64,
+                    authoritative: true,
+                    fact,
+                }),
+            },
+        );
+        assert!(transition.effects.is_empty());
+    }
+    assert_eq!(run.context.get("node.spawn.human_wait"), Some("1"));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert_eq!(run.evidence_deadline_ms("spawn"), None);
+    let callback = advance(&mut run, &agent_finished(900, true));
+    assert!(callback.effects.is_empty());
+    assert_eq!(
+        status_of(&run, "spawn"),
+        StepStatus::Running,
+        "readiness cannot replace an active human wait with uncertainty"
+    );
+}
+
+#[test]
+fn circuit_legacy_success_cannot_bypass_owned_work_evidence() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let transition = advance(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    assert_eq!(run.state, RunState::Running);
+    assert!(transition.effects.is_empty());
+    assert!(run.step("notify").is_none());
+}
+
+#[test]
+fn lost_agent_releases_an_unverified_run() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    advance(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Unverified);
+    let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
+    assert_eq!(run.state, RunState::Failed);
+    assert!(transition.run_state_changed);
+}
+
+#[test]
+fn circuit_agent_loss_retains_the_checkpoint_that_preceded_removal() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    run.step_mut("spawn").unwrap().status = StepStatus::Unverified;
+    let checkpoint = "Classifier unavailable after 5 attempts. Restore the configured classifier and recheck evidence.";
+    run.step_mut("spawn").unwrap().error = Some(checkpoint.into());
+    let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+    let reason = run.step("spawn").unwrap().error.as_deref().unwrap();
+    assert!(reason.contains("900"));
+    assert!(reason.contains(checkpoint));
+    assert_eq!(transition.step_writes[0].error, Some(Some(reason.into())));
+    assert_eq!(run.state, RunState::Failed);
+}
+
+#[test]
+fn circuit_failure_cancels_siblings_without_claiming_their_agents_were_closed() {
+    let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("a", 11);
+    run.attach_agent_node("b", 12);
+    let transition = advance(&mut run, &agent_finished(11, false));
+    assert_eq!(
+        run.step("a").unwrap().error.as_deref(),
+        Some("piloted agent node reported error")
+    );
+    assert_eq!(
+        run.step("b").unwrap().error.as_deref(),
+        Some("Cancelled because the circuit run failed.")
+    );
+    assert!(transition
+        .step_writes
+        .iter()
+        .any(|write| write.node_id == "b"
+            && write.error == Some(Some("Cancelled because the circuit run failed.".into()))));
+}
+
+#[test]
+fn agent_error_releases_running_and_unverified_source_gates() {
+    for status in [StepStatus::Running, StepStatus::Unverified] {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        run.step_mut("classify").unwrap().status = status;
+        let transition = advance(&mut run, &agent_finished(900, false));
+        assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
+        assert_eq!(run.state, RunState::Failed);
+        assert!(transition.run_state_changed);
+    }
+}
+
+#[test]
+fn agent_finished_completes_the_bound_spawn_step_and_unblocks_successors() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+    // Notify is a non-agent successor — cascades immediately.
+    assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+    assert_eq!(
+        t.effects,
+        vec![Effect::Notify {
+            message: "done nightly-sweep".to_string()
+        }]
+    );
+}
+
+#[test]
+fn simple_linear_run_lands_completed_end_to_end() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert_eq!(run.state, RunState::Completed);
+    assert!(run.steps.iter().all(|s| s.status.is_terminal()));
+}
+
+/// The canonical blueprint the Probe tab creates: the prompt rides
+/// InjectPty (not spawn prefill), so a full run walks
+/// trigger → spawn → AgentFinished → AgentReady(inject) → notify.
+#[test]
+fn canonical_walking_skeleton_lands_completed_through_pty_injection() {
+    let mut ctx = CircuitContext::new();
+    ctx.with_circuit(7, "nightly-sweep", 3);
+    ctx.with_run(42);
+    let mut run = RunView {
+        run_id: 42,
+        graph: CircuitGraph::walking_skeleton("fix the flaky test"),
+        state: RunState::Pending,
+        context: ctx,
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    run.attach_agent_node("spawn", 900);
+
+    // The agent finishes its fresh boot turn; inject schedules but
+    // must not fire until the process is observed live.
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert!(t.effects.is_empty(), "injection waits for AgentReady");
+    assert_eq!(status_of(&run, "inject"), StepStatus::Running);
+
+    // Downstream work waits for the durable delivery acknowledgement.
+    let t = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject".to_string(),
+        },
+    );
+    assert_eq!(
+        t.effects,
+        vec![Effect::InjectPty {
+            node_id: "inject".to_string(),
+            prompt: "fix the flaky test".to_string(),
+            target_node_id: None,
+        },]
+    );
+    assert_eq!(status_of(&run, "inject"), StepStatus::Running);
+    assert!(run.step("notify").is_none());
+    assert!(advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject".into()
+        }
+    )
+    .effects
+    .is_empty());
+    let delivered = advance(
+        &mut run,
+        &CircuitEvent::PromptDelivered {
+            node_id: "inject".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        delivered.effects,
+        vec![Effect::Notify {
+            message: "Circuit run started nightly-sweep".into()
+        }]
+    );
+    assert_eq!(status_of(&run, "inject"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+
+    // The next worker tick observes that the injection transition has
+    // no remaining work and records the terminal run state. No PTY
+    // effect is emitted from this completion-only transition.
+    let completion = advance(&mut run, &tick(1));
+    assert!(completion.effects.is_empty());
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn agent_error_fails_the_spawn_step_and_the_run_fail_fast() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(900, false));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Failed);
+    assert_eq!(run.state, RunState::Failed);
+    assert!(t.run_state_changed);
+    assert!(
+        run.step("notify").is_none(),
+        "successors must not start after failure"
+    );
+}
+
+#[test]
+fn closing_the_piloted_node_mid_run_cancels_its_step_and_fails_the_run() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
+    assert_eq!(run.state, RunState::Failed);
+    let w = t.step_writes.last().unwrap();
+    assert_eq!(w.status, StepStatus::Cancelled);
+    assert_eq!(w.outcome, Some(Some(StepOutcome::Cancelled)));
+}
+
+#[test]
+fn agent_lost_cancels_a_lineage_only_step_whose_own_agent_node_id_is_null() {
+    // Regression for the live incident (buildmesh mesh 65, runs 3/5/6):
+    // `InjectPty` / `LlmTurnClassifier` / `CloseAgentNode` carry their
+    // target via the spawn-step lineage, not on the step row itself.
+    // The per-tick observer emits `AgentLost { agent_node_id }` with
+    // the resolved lineage id; the stepper must walk the lineage to
+    // match. Without the lineage fallback (the previous bug), the
+    // orphaned `InjectPty` step stayed `running` forever, holding a
+    // `circuit_run_capacity` slot.
+    //
+    // Layout: trigger → spawn → inject_pty(→spawn). Spawn owns the
+    // piloted agent; `inject` references it via lineage only.
+    let mut run = RunView {
+        run_id: 99,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "trigger".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "spawn".into(),
+                    kind: spawn_kind("fix it"),
+                },
+                CircuitNode {
+                    id: "inject".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "follow-up".into(),
+                        target_node_id: Some("spawn".into()),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "trigger".into(),
+                    to: "spawn".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "spawn".into(),
+                    to: "inject".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Running,
+        context: CircuitContext::new(),
+        steps: vec![
+            StepView {
+                node_id: "trigger".into(),
+                status: StepStatus::Completed,
+                outcome: Some(StepOutcome::Completed),
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+            },
+            StepView {
+                node_id: "spawn".into(),
+                status: StepStatus::Completed,
+                outcome: Some(StepOutcome::Completed),
+                error: None,
+                agent_node_id: Some(900),
+                attempt: 1,
+            },
+            StepView {
+                node_id: "inject".into(),
+                status: StepStatus::Running,
+                outcome: None,
+                error: None,
+                agent_node_id: None,
+                attempt: 1,
+            },
+        ],
+    };
+    let t = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 900 });
+    assert_eq!(
+        status_of(&run, "inject"),
+        StepStatus::Cancelled,
+        "lineage-only step must be cancelled by AgentLost for its target spawn's agent"
+    );
+    assert_eq!(run.state, RunState::Failed);
+    let w = t.step_writes.last().unwrap();
+    assert_eq!(w.node_id, "inject");
+    assert_eq!(w.status, StepStatus::Cancelled);
+}
+
+#[test]
+fn agent_lost_for_a_nonexistent_lineage_target_is_a_no_op() {
+    // Defensive: an AgentLost with a `agent_node_id` that doesn't
+    // match any running step's direct id OR lineage must produce no
+    // step writes — the orphan-detection helper can only emit
+    // AgentLost for agents that were actually bound, but a future
+    // caller could pass anything.
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let t = advance(
+        &mut run,
+        &CircuitEvent::AgentLost {
+            agent_node_id: 999_999,
+        },
+    );
+    assert!(
+        t.step_writes.is_empty(),
+        "AgentLost for an unknown agent must be a no-op; got {:?}",
+        t.step_writes
+    );
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+}
+
+#[test]
+fn agent_lost_for_the_borrowed_source_cancels_active_work_with_its_checkpoint() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 88);
+    run.context.set("source.agent_id", "77");
+    let checkpoint = "Classifier unavailable after five attempts.";
+    run.step_mut("spawn").unwrap().error = Some(checkpoint.into());
+
+    let transition = advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 77 });
+
+    assert_eq!(run.state, RunState::Failed);
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Cancelled);
+    assert!(
+        run.step("spawn")
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains(checkpoint),
+        "the source-loss cancellation must retain the step's preceding checkpoint"
+    );
+    assert!(
+        transition
+            .step_writes
+            .iter()
+            .any(|write| write.node_id == "spawn"),
+        "source loss must durably terminalize active work"
+    );
+}
+
+#[test]
+fn a_failed_run_sweeps_its_still_running_siblings_so_slots_are_not_leaked() {
+    // Fan-out: a errors while b is mid-flight. The failure must also
+    // cancel b — otherwise its piloted agent keeps consuming a mesh
+    // slot the counters no longer attribute to this (failed) run.
+    let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "b"), StepStatus::Running);
+    run.attach_agent_node("a", 11);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    assert_eq!(run.state, RunState::Failed);
+    assert_eq!(status_of(&run, "b"), StepStatus::Cancelled);
+    assert!(
+        t.step_writes
+            .iter()
+            .any(|w| w.node_id == "b" && w.status == StepStatus::Cancelled),
+        "the sibling cancellation must be persisted"
+    );
+}
+
+#[test]
+fn cascade_starts_every_eligible_non_agent_successor() {
+    // spawn → (notify, notify-b): completing the spawn makes both
+    // successors eligible, and with no step budget (ADR 0042) the
+    // cascade starts both rather than waiting a tick for the second.
+    let mut run = linear_run();
+    run.graph.nodes.push(CircuitNode {
+        id: "notify-b".to_string(),
+        kind: CircuitNodeKind::Notify {
+            message: "b".to_string(),
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "spawn".to_string(),
+        to: "notify-b".to_string(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("spawn", 900);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    let started = ["notify", "notify-b"]
+        .iter()
+        .filter(|n| matches!(run.step(n), Some(s) if s.status == StepStatus::Completed))
+        .count();
+    assert_eq!(started, 2, "every eligible plain successor starts together");
+    assert_eq!(t.effects.len(), 2);
+}
+
+#[test]
+fn lifecycle_events_for_unknown_agents_are_no_ops() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    let before = run.clone();
+    advance_with_completion_evidence(&mut run, &agent_finished(12345, true));
+    advance(
+        &mut run,
+        &CircuitEvent::AgentLost {
+            agent_node_id: 67890,
+        },
+    );
+    assert_eq!(run, before, "unrelated events must not mutate the run");
+}
+
+// -- inject -------------------------------------------------------------------
+
+fn two_step_inject_run() -> RunView {
+    // trigger → spawn → inject → final, built explicitly so the
+    // spawn step has exactly one successor.
+    let mut run = linear_run();
+    run.graph.nodes.clear();
+    run.graph.edges.clear();
+    run.graph.nodes.push(CircuitNode {
+        id: "trigger".into(),
+        kind: CircuitNodeKind::Manual,
+    });
+    run.graph.nodes.push(CircuitNode {
+        id: "spawn".into(),
+        kind: spawn_kind("fix it"),
+    });
+    run.graph.nodes.push(CircuitNode {
+        id: "inject".to_string(),
+        kind: inject_kind("now wrap up {{circuit.name}}"),
+    });
+    run.graph.nodes.push(CircuitNode {
+        id: "final".to_string(),
+        kind: CircuitNodeKind::Notify {
+            message: "done".to_string(),
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "trigger".into(),
+        to: "spawn".into(),
+        condition: Default::default(),
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "spawn".to_string(),
+        to: "inject".to_string(),
+        condition: Default::default(),
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "inject".to_string(),
+        to: "final".to_string(),
+        condition: Default::default(),
+    });
+    run
+}
+
+#[test]
+fn inject_waits_for_agent_ready_then_fires_resolved_prompt() {
+    let mut run = two_step_inject_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(3));
+    run.attach_agent_node("spawn", 900);
+    // Spawn finished → inject schedules but must NOT fire yet (no
+    // live process observed).
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "inject"), StepStatus::Running);
+
+    let t = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject".to_string(),
+        },
+    );
+    // A write request cannot authorize downstream work before delivery.
+    assert_eq!(
+        t.effects,
+        vec![Effect::InjectPty {
+            node_id: "inject".to_string(),
+            prompt: "now wrap up nightly-sweep".to_string(),
+            target_node_id: None,
+        },]
+    );
+    assert_eq!(status_of(&run, "inject"), StepStatus::Running);
+    assert!(run.step("final").is_none());
+    let delivered = advance(
+        &mut run,
+        &CircuitEvent::PromptDelivered {
+            node_id: "inject".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        delivered.effects,
+        vec![Effect::Notify {
+            message: "done".into()
+        }]
+    );
+    assert_eq!(status_of(&run, "inject"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "final"), StepStatus::Completed);
+}
+
+#[test]
+fn prompt_dispatch_survives_restart_without_replay_or_stale_acknowledgement() {
+    let mut run = two_step_inject_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(3));
+    run.attach_agent_node("spawn", 900);
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    let ready = CircuitEvent::AgentReady {
+        node_id: "inject".into(),
+    };
+    assert_eq!(advance(&mut run, &ready).effects.len(), 1);
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    assert!(advance(&mut run, &ready).is_empty());
+    assert!(advance(
+        &mut run,
+        &CircuitEvent::PromptDelivered {
+            node_id: "inject".into(),
+            attempt: 2
+        }
+    )
+    .is_empty());
+    assert_eq!(status_of(&run, "inject"), StepStatus::Running);
+    let uncertain = advance(
+        &mut run,
+        &CircuitEvent::EffectUncertain {
+            node_id: "inject".into(),
+            attempt: 1,
+            reason: "write interrupted".into(),
+        },
+    );
+    assert_eq!(status_of(&run, "inject"), StepStatus::Unverified);
+    assert_eq!(run.state, RunState::Running);
+    assert!(uncertain.effects.is_empty());
+    assert!(run.step("final").is_none());
+    assert!(advance(
+        &mut run,
+        &CircuitEvent::PromptDelivered {
+            node_id: "inject".into(),
+            attempt: 1
+        }
+    )
+    .is_empty());
+    assert!(advance(&mut run, &ready).is_empty());
+}
+
+#[test]
+fn agent_ready_for_an_unscheduled_step_is_a_no_op() {
+    let mut run = two_step_inject_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject".to_string(),
+        },
+    );
+    assert!(t.is_empty());
+    assert!(run.step("inject").is_none());
+}
+
+#[test]
+fn inject_without_any_prior_spawn_fails_fast() {
+    let mut run = linear_run();
+    run.graph.nodes.insert(
+        1,
+        CircuitNode {
+            id: "early-inject".to_string(),
+            kind: inject_kind("hi"),
+        },
+    );
+    run.graph.edges.insert(
+        0,
+        CircuitEdge {
+            from: "trigger".to_string(),
+            to: "early-inject".to_string(),
+            condition: Default::default(),
+        },
+    );
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "early-inject"), StepStatus::Failed);
+    assert_eq!(run.state, RunState::Failed);
+    assert!(
+        t.effects
+            .iter()
+            .all(|e| !matches!(e, Effect::InjectPty { .. })),
+        "no injection may fire without a spawned agent"
+    );
+}
+
+// -- joins ---------------------------------------------------------------------
+
+fn fan_out_run(join_kind: CircuitNodeKind) -> RunView {
+    RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "a".into(),
+                    kind: spawn_kind("pa"),
+                },
+                CircuitNode {
+                    id: "b".into(),
+                    kind: spawn_kind("pb"),
+                },
+                CircuitNode {
+                    id: "j".into(),
+                    kind: join_kind,
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "a".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "b".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "j".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "b".into(),
+                    to: "j".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    }
+}
+
+#[test]
+fn all_completed_join_executes_only_when_every_branch_finished() {
+    let mut run = fan_out_run(CircuitNodeKind::AllCompleted);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "a"), StepStatus::Running);
+    assert_eq!(status_of(&run, "b"), StepStatus::Running);
+    assert!(run.step("j").is_none(), "join must wait while branches run");
+
+    run.attach_agent_node("a", 11);
+    advance_with_completion_evidence(&mut run, &agent_finished(11, true));
+    assert!(run.step("j").is_none(), "all_completed still waits for b");
+
+    run.attach_agent_node("b", 12);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(12, true));
+    assert_eq!(status_of(&run, "j"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+    assert!(t.run_state_changed);
+}
+
+#[test]
+fn any_completed_join_executes_when_one_branch_finishes() {
+    let mut run = fan_out_run(CircuitNodeKind::AnyCompleted);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("a", 11);
+    run.attach_agent_node("b", 12);
+    advance_with_completion_evidence(&mut run, &agent_finished(11, true));
+    assert_eq!(status_of(&run, "j"), StepStatus::Completed);
+
+    // b still runs — the join fired but the run can't be terminal
+    // while a step is live.
+    assert_eq!(run.state, RunState::Running);
+    advance_with_completion_evidence(&mut run, &agent_finished(12, true));
+    assert_eq!(run.state, RunState::Completed);
+}
+
+// -- conditional edges ----------------------------------------------------------
+
+#[test]
+fn failed_parent_does_not_traverse_an_on_completed_edge() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "work".into(),
+                    kind: spawn_kind("p"),
+                },
+                CircuitNode {
+                    id: "on-green".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "green".into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "work".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "work".into(),
+                    to: "on-green".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Completed),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("work", 5);
+    advance_with_completion_evidence(&mut run, &agent_finished(5, false));
+    assert_eq!(run.state, RunState::Failed);
+    assert!(
+        run.step("on-green").is_none(),
+        "an OnOutcome(Completed) edge must not traverse on failure"
+    );
+}
+
+// -- gate execution (milestone 2, #1207) -----------------------------------------
+
+#[test]
+fn llm_classifier_parks_running_until_classified() {
+    // The milestone-1 behavior (fail with "not executed until a later
+    // milestone") is replaced in #1207: the gate waits for the seam.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    assert_eq!(run.state, RunState::Running);
+}
+
+#[test]
+fn classifier_without_any_prior_spawn_fails_fast() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    run.graph.nodes.retain(|n| n.id != "work");
+    run.graph.edges.retain(|e| e.from != "work");
+    run.graph.edges.push(CircuitEdge {
+        from: "trigger".into(),
+        to: "classify".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "classify"), StepStatus::Failed);
+    assert_eq!(run.state, RunState::Failed);
+    let _ = t;
+}
+
+// -- GithubAction execution (milestone 3, issue #1208) -------------------------
+
+#[test]
+fn github_action_completes_instantly_and_emits_the_call_effect_with_templates() {
+    // Milestone 3: a GithubAction step is instant-completing like
+    // Notify — the HTTP call happens in the seam after the commit.
+    // The raw templates ride the effect; resolution is the seam's
+    // job (execution time, not decision time).
+    let mut run = linear_run();
+    run.graph.nodes.push(CircuitNode {
+        id: "label".into(),
+        kind: CircuitNodeKind::GithubAction {
+            action: GithubActionKind::AddLabel,
+            open_pr_policy: None,
+            label: Some("in-progress".into()),
+            comment: None,
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "spawn".into(),
+        to: "label".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    // The spawn is still running, so the label step's edge is unmet.
+    assert!(run.step("label").is_none());
+
+    run.attach_agent_node("spawn", 900);
+    // Completing the spawn cascades straight into the plain GitHub step:
+    // no step slot gates it, so it need not wait for the next Tick.
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "label"), StepStatus::Running);
+    let call = Effect::CallGithub {
+        node_id: "label".to_string(),
+        action: GithubActionKind::AddLabel,
+        label: Some("in-progress".to_string()),
+        comment: None,
+    };
+    assert!(
+        t.effects.contains(&call),
+        "the completion cascade must emit the call: {:?}",
+        t.effects
+    );
+    let next = advance(&mut run, &tick(1));
+    assert!(
+        !next.effects.contains(&call),
+        "the next Tick must not fire the call a second time"
+    );
+    // Worker delivers the successful GitHub action result
+    advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "label".into(),
+            success: true,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: None,
+        },
+    );
+    assert_eq!(status_of(&run, "label"), StepStatus::Completed);
+}
+
+/// trigger -> verify (ConfirmPrMerged) -> merged / unmerged, so the routing
+/// of a "not merged" answer is observable without the review blueprint.
+fn confirm_merged_run() -> RunView {
+    let notify = |id: &str, message: &str| CircuitNode {
+        id: id.into(),
+        kind: CircuitNodeKind::Notify {
+            message: message.into(),
+        },
+    };
+    let edge = |from: &str, to: &str, condition| CircuitEdge {
+        from: from.into(),
+        to: to.into(),
+        condition,
+    };
+    RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "verify".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::ConfirmPrMerged,
+                        open_pr_policy: None,
+                        label: None,
+                        comment: None,
+                    },
+                },
+                notify("merged", "merged"),
+                notify("unmerged", "not merged: {{merge.unconfirmed_reason}}"),
+            ],
+            edges: vec![
+                edge("t", "verify", Default::default()),
+                edge(
+                    "verify",
+                    "merged",
+                    EdgeCondition::OnOutcome(StepOutcome::Completed),
+                ),
+                edge(
+                    "verify",
+                    "unmerged",
+                    EdgeCondition::OnOutcome(StepOutcome::Failed),
+                ),
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    }
+}
+
+fn github_result(node_id: &str, success: bool, error: Option<&str>) -> CircuitEvent {
+    CircuitEvent::GithubActionResult {
+        node_id: node_id.into(),
+        success,
+        pr_number: success.then_some(314),
+        pr_url: None,
+        pr_head_ref: None,
+        pr_title: None,
+        error: error.map(str::to_string),
+    }
+}
+
+#[test]
+fn an_unmerged_pr_is_a_routed_outcome_that_does_not_fail_the_run() {
+    let mut run = confirm_merged_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let started = advance(&mut run, &tick(2));
+    assert!(started.effects.iter().any(|effect| matches!(effect,
+        Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
+            if node_id == "verify")));
+
+    let answered = advance(
+        &mut run,
+        &github_result(
+            "verify",
+            false,
+            Some("PR #314 is still open and has not been merged"),
+        ),
+    );
+    let settled = advance(&mut run, &tick(2));
+
+    assert_eq!(status_of(&run, "verify"), StepStatus::Completed);
+    assert_eq!(
+        run.step("verify").unwrap().outcome,
+        Some(StepOutcome::Failed),
+        "the answer is routed as the Failed outcome"
+    );
+    assert!(
+        run.step("merged").is_none(),
+        "the merged branch is not taken"
+    );
+    assert_eq!(status_of(&run, "unmerged"), StepStatus::Completed);
+    assert_eq!(
+        run.state,
+        RunState::Completed,
+        "the run is handed back, not failed"
+    );
+    assert_eq!(
+        run.context.get("merge.unconfirmed_reason"),
+        Some("PR #314 is still open and has not been merged")
+    );
+    let message =
+        answered
+            .effects
+            .iter()
+            .chain(&settled.effects)
+            .find_map(|effect| match effect {
+                Effect::Notify { message } => Some(message.clone()),
+                _ => None,
+            });
+    assert!(
+        message.is_some_and(|m| m.contains("still open")),
+        "the person is told why: {:?} / {:?}",
+        answered.effects,
+        settled.effects
+    );
+}
+
+#[test]
+fn a_merged_pr_takes_the_completed_branch() {
+    let mut run = confirm_merged_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(2));
+    advance(&mut run, &github_result("verify", true, None));
+    advance(&mut run, &tick(2));
+
+    assert_eq!(status_of(&run, "merged"), StepStatus::Completed);
+    assert!(run.step("unmerged").is_none());
+    assert_eq!(run.context.get("merge.unconfirmed_reason"), None);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn other_github_actions_still_fail_the_run_when_they_fail() {
+    let mut run = linear_run();
+    run.graph.nodes.push(CircuitNode {
+        id: "comment".into(),
+        kind: CircuitNodeKind::GithubAction {
+            action: GithubActionKind::PostComment,
+            open_pr_policy: None,
+            label: None,
+            comment: Some("hi".into()),
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "spawn".into(),
+        to: "comment".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    advance(&mut run, &tick(5));
+    advance(&mut run, &github_result("comment", false, Some("403")));
+    assert_eq!(status_of(&run, "comment"), StepStatus::Failed);
+    assert_eq!(run.state, RunState::Failed);
+}
+
+#[test]
+fn github_action_chain_advances_and_completes_with_action_result() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "comment".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::PostComment,
+                        open_pr_policy: None,
+                        label: None,
+                        comment: Some("started {{issue.number}}".into()),
+                    },
+                },
+            ],
+            edges: vec![CircuitEdge {
+                from: "t".into(),
+                to: "comment".into(),
+                condition: Default::default(),
+            }],
+        },
+        state: RunState::Pending,
+        context: {
+            let mut ctx = CircuitContext::new();
+            ctx.set("issue.number", "42");
+            ctx
+        },
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(2));
+    assert_eq!(status_of(&run, "comment"), StepStatus::Running);
+    assert_eq!(
+        t.effects,
+        vec![Effect::CallGithub {
+            node_id: "comment".to_string(),
+            action: GithubActionKind::PostComment,
+            label: None,
+            comment: Some("started {{issue.number}}".to_string()),
+        }]
+    );
+    advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "comment".into(),
+            success: true,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: None,
+        },
+    );
+    assert_eq!(status_of(&run, "comment"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn interrupted_github_action_remains_unverified_without_automatic_replay() {
+    let mut run = linear_run();
+    run.graph.nodes.push(CircuitNode {
+        id: "label".into(),
+        kind: CircuitNodeKind::GithubAction {
+            action: GithubActionKind::AddLabel,
+            open_pr_policy: None,
+            label: Some("reviewing".into()),
+            comment: None,
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "spawn".into(),
+        to: "label".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    let first = advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    let replay = advance(
+        &mut run,
+        &CircuitEvent::GithubActionRetry {
+            node_id: "label".into(),
+        },
+    );
+
+    assert!(!first.effects.is_empty());
+    assert!(
+        replay.effects.is_empty(),
+        "a restart cannot prove the remote action was not applied"
+    );
+    assert_eq!(status_of(&run, "label").as_db_str(), "unverified");
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(run.step("label").unwrap().attempt, 1);
+    assert!(run
+        .step("label")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("external action"));
+}
+
+// -- pending-run guard ------------------------------------------------------------
+
+#[test]
+fn pending_run_does_not_schedule_from_ticks_alone() {
+    let mut run = linear_run();
+    let t = advance(&mut run, &tick(9));
+    assert!(t.is_empty());
+    assert_eq!(run.state, RunState::Pending);
+}
+
+#[test]
+fn instant_action_chain_executes_entirely_within_one_tick() {
+    // Trigger → notify-a → notify-b → notify-c: every link completes
+    // instantly, so one Tick must run the whole chain — not one node
+    // per 2-second tick.
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "a".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "a".into(),
+                    },
+                },
+                CircuitNode {
+                    id: "b".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "b".into(),
+                    },
+                },
+                CircuitNode {
+                    id: "c".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "c".into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "a".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "a".into(),
+                    to: "b".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "b".into(),
+                    to: "c".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(1));
+    for n in ["a", "b", "c"] {
+        assert_eq!(
+            status_of(&run, n),
+            StepStatus::Completed,
+            "node {n} must finish in the same tick"
+        );
+    }
+    assert_eq!(run.state, RunState::Completed);
+    assert_eq!(
+        t.effects,
+        vec![
+            Effect::Notify {
+                message: "a".to_string()
+            },
+            Effect::Notify {
+                message: "b".to_string()
+            },
+            Effect::Notify {
+                message: "c".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
+fn instant_chain_waits_on_a_running_spawn_edge_not_a_slot() {
+    // trigger → spawn → notify: the spawn is a real agent step, so the
+    // downstream notify waits for its completion event. The only gate
+    // is the DAG edge — there is no step slot to hold.
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(1));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+    assert!(
+        run.step("notify").is_none(),
+        "notify must wait for the spawn's completion edge"
+    );
+    assert!(matches!(
+        t.effects.first(),
+        Some(Effect::SpawnAgentNode { .. })
+    ));
+}
+
+#[test]
+fn empty_graph_never_marks_completed() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![],
+            edges: vec![],
+        },
+        state: RunState::Running,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &tick(9));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "an empty blueprint must not auto-complete"
+    );
+}
+
+// -- DB string round-trips ---------------------------------------------------------
+
+#[test]
+fn run_state_db_strings_round_trip() {
+    for s in [
+        RunState::Pending,
+        RunState::Running,
+        RunState::Paused,
+        RunState::Completed,
+        RunState::Failed,
+        RunState::Cancelled,
+    ] {
+        assert_eq!(RunState::from_db_str(s.as_db_str()), s);
+    }
+    assert_eq!(RunState::from_db_str("garbage"), RunState::Pending);
+    assert!(RunState::Cancelled.is_terminal());
+    assert!(!RunState::Paused.is_terminal());
+}
+
+#[test]
+fn step_status_db_strings_match_the_pending_slot_vocabulary() {
+    assert_eq!(StepStatus::Queued.as_db_str(), "pending_slot");
+    for s in [
+        StepStatus::Queued,
+        StepStatus::Running,
+        StepStatus::Blocked,
+        StepStatus::Completed,
+        StepStatus::Failed,
+        StepStatus::Cancelled,
+    ] {
+        assert_eq!(StepStatus::from_db_str(s.as_db_str()), s);
+    }
+    assert_eq!(StepStatus::from_db_str("garbage"), StepStatus::Queued);
+}
+
+// -- milestone-2 gates (#1207) ----------------------------------------------
+
+/// A trigger → spawn → GATE blueprint with one Notify branch per
+/// routing outcome, wired `OnOutcome(...)`.
+fn gate_run(gate_id: &str, kind: CircuitNodeKind, branches: &[(StepOutcome, &str)]) -> RunView {
+    let mut ctx = CircuitContext::new();
+    ctx.with_circuit(7, "gates", 5);
+    ctx.with_run(42);
+    let mut nodes = vec![
+        CircuitNode {
+            id: "trigger".into(),
+            kind: CircuitNodeKind::Manual,
+        },
+        CircuitNode {
+            id: "work".into(),
+            kind: spawn_kind("p"),
+        },
+        CircuitNode {
+            id: gate_id.to_string(),
+            kind,
+        },
+    ];
+    let mut edges = vec![
+        CircuitEdge {
+            from: "trigger".into(),
+            to: "work".into(),
+            condition: Default::default(),
+        },
+        CircuitEdge {
+            from: "work".to_string(),
+            to: gate_id.to_string(),
+            condition: Default::default(),
+        },
+    ];
+    for (outcome, branch_id) in branches {
+        nodes.push(CircuitNode {
+            id: branch_id.to_string(),
+            kind: CircuitNodeKind::Notify {
+                message: branch_id.to_string(),
+            },
+        });
+        edges.push(CircuitEdge {
+            from: gate_id.to_string(),
+            to: branch_id.to_string(),
+            condition: EdgeCondition::OnOutcome(*outcome),
+        });
+    }
+    RunView {
+        run_id: 42,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes,
+            edges,
+        },
+        state: RunState::Pending,
+        context: ctx,
+        steps: vec![],
+    }
+}
+
+fn wait_observed(now_ms: i64, progress: Option<&str>) -> CircuitEvent {
+    wait_observed_with(now_ms, progress, 900_000)
+}
+
+/// `observed` follows the report revision: a step that has never produced
+/// a readable report is the never-observed case the fast fail exists for.
+fn wait_observed_with(now_ms: i64, progress: Option<&str>, timeout_ms: i64) -> CircuitEvent {
+    wait_observed_event(now_ms, progress, progress.is_some(), timeout_ms, false)
+}
+
+/// A late session identity with no readable report: observed flips true
+/// without a progress change or a budget reset.
+fn wait_observed_identity(now_ms: i64, timeout_ms: i64) -> CircuitEvent {
+    wait_observed_event(now_ms, None, true, timeout_ms, false)
+}
+
+fn wait_observed_event(
+    now_ms: i64,
+    progress: Option<&str>,
+    observed: bool,
+    timeout_ms: i64,
+    explicit_budget: bool,
+) -> CircuitEvent {
+    CircuitEvent::WaitObserved {
+        node_id: "classify".into(),
+        attempt: 1,
+        now_ms,
+        progress: progress.map(str::to_string),
+        observed,
+        explicit_budget,
+        reason: "No readable report".into(),
+        timeout_ms,
+    }
+}
+
+#[test]
+fn circuit_displayed_deadline_matches_effective_first_observation_and_human_waits() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &wait_observed_event(1000, None, false, 7_200_000, false),
+    );
+    assert_eq!(run.evidence_deadline_ms("classify"), Some(901_000));
+    let mut explicit = run.clone();
+    advance(
+        &mut explicit,
+        &wait_observed_event(1001, None, false, 7_200_000, true),
+    );
+    assert_eq!(explicit.evidence_deadline_ms("classify"), Some(7_201_000));
+    for field in ["human_wait", "classification"] {
+        let mut waiting = run.clone();
+        waiting.context.set(
+            &format!("node.classify.{field}"),
+            if field == "human_wait" {
+                "1"
+            } else {
+                "blocked"
+            },
+        );
+        assert_eq!(waiting.evidence_deadline_ms("classify"), None);
+        advance(
+            &mut waiting,
+            &wait_observed_event(9_000_000, None, false, 7_200_000, false),
+        );
+        assert_eq!(
+            waiting.step("classify").unwrap().status,
+            StepStatus::Running
+        );
+    }
+    advance(
+        &mut run,
+        &wait_observed_event(901_000, None, false, 7_200_000, false),
+    );
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Unverified);
+    assert_eq!(run.evidence_deadline_ms("classify"), None);
+}
+
+#[test]
+fn circuit_wait_deadline_survives_restart_and_ignores_repeated_reports() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed(10_000, Some("report-1")));
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    let idle = advance(&mut run, &wait_observed(909_999, Some("report-1")));
+    assert!(
+        idle.is_empty(),
+        "polls and the same report must not renew the deadline or rewrite diagnostics"
+    );
+    let expired = advance(&mut run, &wait_observed(910_000, Some("report-1")));
+    assert!(!expired.run_state_changed);
+    assert!(expired.effects.is_empty());
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Recheck"));
+}
+
+#[test]
+fn circuit_wait_progress_and_explicit_resume_allow_more_time_but_stale_attempts_do_not() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed(0, Some("a")));
+    advance(&mut run, &wait_observed(899_999, Some("b")));
+    advance(&mut run, &wait_observed(900_000, Some("b")));
+    assert_eq!(run.state, RunState::Running);
+    advance(&mut run, &CircuitEvent::Paused);
+    assert!(advance(&mut run, &wait_observed(10_000_000, None)).is_empty());
+    advance(&mut run, &CircuitEvent::Resumed);
+    advance(&mut run, &wait_observed(10_000_000, None));
+    assert_eq!(run.state, RunState::Running);
+    run.step_mut("classify").unwrap().attempt = 2;
+    assert!(advance(&mut run, &wait_observed(20_000_000, None)).is_empty());
+    run.state = RunState::from_db_str("cancelled");
+    assert!(advance(&mut run, &wait_observed(30_000_000, None)).is_empty());
+}
+
+#[test]
+fn circuit_approval_waits_for_the_user_without_expiring() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::CollaboratorCheck {
+            require_approval: true,
+        },
+        &[(StepOutcome::Completed, "done")],
+    );
+    fire_to_gate(&mut run, "classify");
+    assert_eq!(status_of(&run, "classify"), StepStatus::Blocked);
+    advance(&mut run, &wait_observed(0, None));
+    let waiting = advance(&mut run, &wait_observed(86_400_000, None));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Blocked);
+    assert!(waiting.effects.is_empty());
+    assert!(run.step("done").is_none());
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "classify".into(),
+        },
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Completed);
+}
+
+#[test]
+fn circuit_yield_after_long_work_gets_its_own_recovery_window() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let mut active = wait_observed(0, None);
+    if let CircuitEvent::WaitObserved { timeout_ms, .. } = &mut active {
+        *timeout_ms = 7_200_000;
+    }
+    advance(&mut run, &active);
+    advance(&mut run, &wait_observed(1_200_000, None));
+    assert_eq!(run.state, RunState::Running);
+    advance(&mut run, &wait_observed(2_099_999, None));
+    assert_eq!(run.state, RunState::Running);
+    advance(&mut run, &wait_observed(2_100_000, None));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+}
+
+#[test]
+fn circuit_unobserved_agent_becomes_unverified_at_the_first_observation_window() {
+    // A busy agent that never produces a session identity or a readable
+    // report must not burn the full 120-minute active-wait budget
+    // (issue #1791). The explicit 120-minute budget here proves the fast
+    // fail — not the ordinary timeout — ends the run.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed_with(0, None, 7_200_000));
+    advance(&mut run, &wait_observed_with(899_999, None, 7_200_000));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "one millisecond short of the window stays running"
+    );
+    advance(&mut run, &wait_observed_with(900_000, None, 7_200_000));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("no session identity"));
+}
+
+#[test]
+fn circuit_observed_agent_keeps_the_active_budget_after_the_window() {
+    // Any observed report lifts the fast fail and restores the long
+    // budget: a legitimately slow harness is not penalised.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed_with(0, None, 7_200_000));
+    advance(
+        &mut run,
+        &wait_observed_with(900_000, Some("rev-1"), 7_200_000),
+    );
+    assert_eq!(run.state, RunState::Running);
+    advance(
+        &mut run,
+        &wait_observed_with(1_800_000, Some("rev-1"), 7_200_000),
+    );
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "an observed agent keeps the 120-minute budget"
+    );
+}
+
+#[test]
+fn circuit_late_session_identity_lifts_the_fast_fail_without_a_report() {
+    // A session identity captured after a silent start is still an
+    // observation even though no report revision ever arrives, so the
+    // step keeps its active budget past the fast-fail window.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed_with(0, None, 7_200_000));
+    advance(&mut run, &wait_observed_identity(600_000, 7_200_000));
+    assert_eq!(run.state, RunState::Running);
+    advance(&mut run, &wait_observed_with(1_000_000, None, 7_200_000));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the late identity is sticky, not a progress reset"
+    );
+}
+
+#[test]
+fn circuit_explicit_step_budget_takes_precedence_over_the_fast_fail() {
+    // #1219: an authored per-step budget is the authority on when to give
+    // up, so an unobserved agent on a 30-minute budget waits it out
+    // instead of being failed at the 15-minute default window.
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let budget = |now_ms| wait_observed_event(now_ms, None, false, 1_800_000, true);
+    advance(&mut run, &budget(0));
+    advance(&mut run, &budget(900_000));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the 15-minute window does not preempt an explicit budget"
+    );
+    advance(&mut run, &budget(1_799_999));
+    assert_eq!(run.state, RunState::Running);
+    advance(&mut run, &budget(1_800_000));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("Evidence window ended after 30 minutes"));
+}
+
+#[test]
+fn circuit_sub_minute_evidence_window_is_reported_in_seconds() {
+    // Run 335 parked its classifier on a 30-second window and told the
+    // operator "Evidence window ended after 0 minutes" (integer minutes).
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &wait_observed_with(0, Some("rev-1"), 30_000));
+    advance(&mut run, &wait_observed_with(30_000, Some("rev-1"), 30_000));
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    let error = run.step("classify").unwrap().error.clone().unwrap();
+    assert!(
+        error.contains("Evidence window ended after 30 seconds:"),
+        "{error}"
+    );
+    assert!(!error.contains("0 minutes"), "{error}");
+}
+
+#[test]
+fn circuit_whole_minute_evidence_window_uses_singular_and_plural_minutes() {
+    for (budget_ms, expected) in [
+        (60_000, "after 1 minute:"),
+        (1_800_000, "after 30 minutes:"),
+        (90_000, "after 90 seconds:"),
+    ] {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[],
+        );
+        fire_to_gate(&mut run, "classify");
+        advance(&mut run, &wait_observed_with(0, Some("rev-1"), budget_ms));
+        advance(
+            &mut run,
+            &wait_observed_with(budget_ms, Some("rev-1"), budget_ms),
+        );
+        let error = run.step("classify").unwrap().error.clone().unwrap();
+        assert!(error.contains(expected), "{budget_ms}: {error}");
+    }
+}
+
+#[test]
+fn circuit_pending_continuation_replays_but_uncertain_delivery_does_not() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            stamp: "100:yield".into(),
+            revision: "r".into(),
+            input_stamp: "1:0".into(),
+        },
+    );
+    let claimed = advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Continue)),
+    );
+    assert!(claimed
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::ContinueAgentTurn { .. })));
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("claimed")
+    );
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationDelivered {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("delivered")
+    );
+    run.context
+        .set("node.classify.continuation.delivery", "pending");
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    let retry = CircuitEvent::ContinuationRetry {
+        node_id: "classify".into(),
+        attempt: 1,
+    };
+    run.context
+        .set("node.classify.continuation.delivery", "pending");
+    run.context.set("node.classify.recheck_only", "1");
+    assert!(
+        advance(&mut run, &retry).effects.is_empty(),
+        "evidence rechecks cannot replay a pending prompt"
+    );
+    run.context.set("node.classify.recheck_only", "0");
+    assert_eq!(advance(&mut run, &retry).effects.len(), 1);
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("claimed")
+    );
+    run.context
+        .set("node.classify.continuation.delivery", "claimed");
+    assert!(advance(&mut run, &retry).effects.is_empty());
+    run.context
+        .set("node.classify.continuation.delivery", "pending");
+    run.step_mut("classify").unwrap().attempt = 2;
+    assert!(advance(&mut run, &retry).effects.is_empty());
+}
+
+#[test]
+fn circuit_continuation_is_bounded_deduplicated_and_never_answers_a_blocker() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            stamp: "100:yield".into(),
+            revision: "report".into(),
+            input_stamp: "1:0".into(),
+        },
+    );
+    for report in 0..3 {
+        let event = CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "classify".into(),
+            classification: Some(Classification::Continue),
+            output: Some(format!("Next task {report}")),
+        };
+        let event = crate::circuit::test_support::bind_report_evidence(&mut run, &event);
+        let t = advance(&mut run, &event);
+        assert_eq!(
+            t.effects
+                .iter()
+                .filter(|e| matches!(e, Effect::ContinueAgentTurn { .. }))
+                .count(),
+            usize::from(report < 2)
+        );
+        run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+        assert!(advance(&mut run, &event).is_empty());
+    }
+    assert!(advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Blocked))
+    )
+    .effects
+    .is_empty());
+    assert!(advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Working))
+    )
+    .effects
+    .is_empty());
+    run.context.set("source.agent_id", "900");
+    run.context.set("node.classify.continuations.1", "0");
+    let borrowed = advance_with_report_evidence(
+        &mut run,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "classify".into(),
+            classification: Some(Classification::Continue),
+            output: Some("Next borrowed task".into()),
+        },
+    );
+    assert!(
+        borrowed.effects.is_empty(),
+        "the source is borrowed, not ours to continue"
+    );
+}
+
+#[test]
+fn exhausted_owned_continuations_park_without_failing_or_dispatching() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            stamp: "100:yield".into(),
+            revision: "report".into(),
+            input_stamp: "1:0".into(),
+        },
+    );
+    run.context.set("node.classify.continuations.1", "2");
+    let t = advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Continue)),
+    );
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert!(t.effects.is_empty());
+}
+
+fn result_file_missing(node_id: &str, attempt: i32, revision: &str) -> CircuitEvent {
+    CircuitEvent::ResultFileMissing {
+        node_id: node_id.into(),
+        attempt,
+        result_path: "C:/runs/run-42/classify-attempt1.result.md".into(),
+        stamp: "100:yield".into(),
+        revision: revision.into(),
+        input_stamp: "1:0".into(),
+    }
+}
+
+#[test]
+fn missing_result_file_gets_two_reminders_per_attempt_then_is_unverified() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    assert!(
+        advance(&mut run, &result_file_missing("classify", 2, "report-0"))
+            .effects
+            .is_empty(),
+        "a result event for another attempt is ignored"
+    );
+
+    let first = advance(&mut run, &result_file_missing("classify", 1, "report-1"));
+    assert_eq!(
+        first.effects,
+        vec![Effect::ContinueAgentTurn {
+            node_id: "classify".into(),
+            target_agent_id: 900,
+            prompt: "Save your final report, ending with the required result line, to C:/runs/run-42/classify-attempt1.result.md now using UTF-8 (overwrite it). The file is missing, blank, or not valid UTF-8. In Windows PowerShell, use Set-Content -Encoding UTF8. Do not redo the work.".into(),
+        }]
+    );
+    assert_eq!(
+        run.context.get("node.classify.result_reminders.1"),
+        Some("1")
+    );
+    assert_eq!(
+        run.context.get("node.classify.continuation.delivery"),
+        Some("claimed")
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    assert_eq!(
+        run.step("classify").unwrap().error.as_deref(),
+        Some("Agent finished without saving its result file; reminder 1 of 2 sent.")
+    );
+
+    assert!(
+        advance(&mut run, &result_file_missing("classify", 1, "report-1"))
+            .effects
+            .is_empty(),
+        "the same report is not reminded twice"
+    );
+
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationDelivered {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    let second = advance(&mut run, &result_file_missing("classify", 1, "report-2"));
+    assert_eq!(second.effects.len(), 1);
+    assert_eq!(
+        run.context.get("node.classify.result_reminders.1"),
+        Some("2")
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationDelivered {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+    let third = advance(&mut run, &result_file_missing("classify", 1, "report-3"));
+    assert!(third.effects.is_empty());
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    let error = run.step("classify").unwrap().error.clone().unwrap();
+    assert_eq!(
+        error,
+        "Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md after 2 reminders. Ask it to save the result, or inspect its report."
+    );
+}
+
+fn result_file_missing_at(
+    node_id: &str,
+    attempt: i32,
+    revision: &str,
+    stamp: &str,
+) -> CircuitEvent {
+    CircuitEvent::ResultFileMissing {
+        node_id: node_id.into(),
+        attempt,
+        result_path: "C:/runs/run-42/classify-attempt1.result.md".into(),
+        stamp: stamp.into(),
+        revision: revision.into(),
+        input_stamp: "1:0".into(),
+    }
+}
+
+fn delivered(node_id: &str) -> CircuitEvent {
+    CircuitEvent::ContinuationDelivered {
+        node_id: node_id.into(),
+        attempt: 1,
+    }
+}
+
+/// Production keeps the transcript revision across turns that add nothing
+/// to the report; the lifecycle stamp is what changes. Each new turn that
+/// still lacks the file must spend a reminder, then exhaust the step.
+#[test]
+fn reminders_follow_each_new_turn_even_when_the_report_revision_is_unchanged() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+
+    let first = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+    assert_eq!(first.effects.len(), 1, "reminder 1 is sent");
+    advance(&mut run, &delivered("classify"));
+
+    let second = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s2"));
+    assert_eq!(
+        second.effects.len(),
+        1,
+        "a new turn with the same report is reminded again"
+    );
+    assert_eq!(
+        run.context.get("node.classify.result_reminders.1"),
+        Some("2")
+    );
+    advance(&mut run, &delivered("classify"));
+
+    let third = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s3"));
+    assert!(third.effects.is_empty());
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert_eq!(
+        run.step("classify").unwrap().error.as_deref(),
+        Some("Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md after 2 reminders. Ask it to save the result, or inspect its report.")
+    );
+}
+
+/// The same observation seen again while the reminder is in flight or
+/// already delivered is one unanswered turn, not a new one.
+#[test]
+fn the_same_observation_after_a_delivered_reminder_is_ignored() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+    advance(&mut run, &delivered("classify"));
+
+    let again = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+    assert!(again.effects.is_empty());
+    assert!(again.step_writes.is_empty());
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    assert_eq!(
+        run.context.get("node.classify.result_reminders.1"),
+        Some("1")
+    );
+}
+
+/// An undeliverable reminder changes nothing about the turn, so observing
+/// the same turn again must end the step instead of looping on it.
+#[test]
+fn an_undeliverable_reminder_is_not_retried_for_the_same_observation() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+    advance(
+        &mut run,
+        &CircuitEvent::ContinuationObsolete {
+            node_id: "classify".into(),
+            attempt: 1,
+        },
+    );
+
+    let again = advance(&mut run, &result_file_missing_at("classify", 1, "r1", "s1"));
+    assert!(again.effects.is_empty(), "no second reminder is sent");
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    let error = run.step("classify").unwrap().error.clone().unwrap();
+    assert!(
+        error.contains("could not be delivered"),
+        "unexpected reason: {error}"
+    );
+}
+
+fn reminder_run() -> RunView {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    run
+}
+
+#[test]
+fn result_reminder_decision_ignores_runs_steps_and_attempts_that_are_not_waiting() {
+    let mut run = reminder_run();
+    let decide = |run: &RunView, node: &str, attempt: i32| {
+        run.result_reminder_decision(node, attempt, "r1", "s1")
+    };
+    assert_eq!(
+        decide(&run, "classify", 1),
+        ResultReminderDecision::Remind(1)
+    );
+    assert_eq!(decide(&run, "nope", 1), ResultReminderDecision::Ignore);
+    assert_eq!(decide(&run, "classify", 2), ResultReminderDecision::Ignore);
+
+    run.context
+        .set("node.classify.continuation.delivery", "claimed");
+    assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+    run.context
+        .set("node.classify.continuation.delivery", "delivered");
+
+    run.step_mut("classify").unwrap().status = StepStatus::Unverified;
+    assert_eq!(
+        decide(&run, "classify", 1),
+        ResultReminderDecision::Remind(1)
+    );
+    run.step_mut("classify").unwrap().status = StepStatus::Completed;
+    assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+    run.step_mut("classify").unwrap().status = StepStatus::Running;
+
+    run.state = RunState::Paused;
+    assert_eq!(decide(&run, "classify", 1), ResultReminderDecision::Ignore);
+}
+
+#[test]
+fn result_reminder_decision_treats_the_recorded_observation_as_already_seen() {
+    let mut run = reminder_run();
+    run.context
+        .set("node.classify.result_reminder_revision", "r1");
+    run.context.set("node.classify.result_reminder_stamp", "s1");
+
+    run.context
+        .set("node.classify.continuation.delivery", "delivered");
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::Ignore,
+        "the same observation after a delivered reminder is not a new turn"
+    );
+
+    run.context
+        .set("node.classify.continuation.delivery", "obsolete");
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::Exhausted,
+        "an undeliverable reminder cannot be retried for the same observation"
+    );
+
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s2"),
+        ResultReminderDecision::Remind(1),
+        "a new turn (new stamp) is a new observation"
+    );
+}
+
+#[test]
+fn result_reminder_decision_counts_reminders_and_refuses_borrowed_agents() {
+    let mut run = reminder_run();
+    run.context.set("node.classify.result_reminders.1", "1");
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::Remind(2)
+    );
+
+    run.context.set("node.classify.result_reminders.1", "2");
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::Exhausted
+    );
+    run.context
+        .set("node.classify.result_reminder_revision", "r1");
+    run.context.set("node.classify.result_reminder_stamp", "s1");
+    run.context
+        .set("node.classify.continuation.delivery", "delivered");
+    assert_eq!(
+        run.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::Ignore,
+        "a spent step is not exhausted again for an observation already answered"
+    );
+
+    let mut borrowed = reminder_run();
+    borrowed.context.set("source.agent_id", "900");
+    assert_eq!(
+        borrowed.result_reminder_decision("classify", 1, "r1", "s1"),
+        ResultReminderDecision::NotOwned
+    );
+}
+
+#[test]
+fn missing_result_file_of_a_borrowed_source_agent_is_not_reminded() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    run.context.set("source.agent_id", "900");
+
+    let t = advance(&mut run, &result_file_missing("classify", 1, "report-1"));
+    assert!(t.effects.is_empty(), "the source is borrowed, not ours");
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert_eq!(
+        run.step("classify").unwrap().error.as_deref(),
+        Some("Agent finished without saving its result file to C:/runs/run-42/classify-attempt1.result.md; the agent is not owned by this circuit, so no reminder was sent.")
+    );
+    assert_eq!(run.context.get("node.classify.result_reminders.1"), None);
+}
+
+#[test]
+fn missing_result_file_of_a_spawn_step_reminds_the_agent_the_step_owns() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Running);
+
+    let t = advance(&mut run, &result_file_missing("spawn", 1, "report-1"));
+    assert!(matches!(
+        t.effects.as_slice(),
+        [Effect::ContinueAgentTurn {
+            target_agent_id: 900,
+            ..
+        }]
+    ));
+    assert_eq!(
+        run.context.get("node.spawn.continuation.delivery"),
+        Some("claimed")
+    );
+}
+
+#[test]
+fn pending_permission_blocks_lifecycle_completion_and_status_inference_cannot_clear_it() {
+    use super::super::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact as Fact,
+    };
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(2));
+    run.attach_agent_node("work", 900);
+    let identity = ObservationIdentity {
+        run_id: 42,
+        step_id: "work".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("turn".into()),
+        report_revision: None,
+    };
+    for (index, (fact, authoritative)) in [
+        (
+            Fact::OwnedStarted {
+                work_id: "child".into(),
+            },
+            true,
+        ),
+        (Fact::ForegroundTerminated, true),
+        (Fact::PermissionRequested, true),
+        (Fact::Working, false),
+        (
+            Fact::OwnedTerminated {
+                work_id: "child".into(),
+            },
+            true,
+        ),
+        (Fact::OwnershipCovered, true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let result = advance(
+            &mut run,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(CircuitObservation {
+                    identity: identity.clone(),
+                    source: "native".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: index as i64,
+                    authoritative,
+                    fact,
+                }),
+            },
+        );
+        assert!(result.effects.is_empty());
+    }
+    assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    assert_eq!(run.context.get("node.work.human_wait"), Some("1"));
+    assert!(run.step("classify").is_none());
+}
+
+#[test]
+fn background_evidence_does_not_end_a_permission_wait() {
+    use super::super::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact as Fact,
+    };
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let identity = ObservationIdentity {
+        run_id: 42,
+        step_id: "classify".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("turn".into()),
+        report_revision: None,
+    };
+    for (index, fact) in [
+        Fact::PermissionRequested,
+        Fact::OwnedStarted {
+            work_id: "child".into(),
+        },
+        Fact::OwnedTerminated {
+            work_id: "child".into(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        advance(
+            &mut run,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(CircuitObservation {
+                    identity: identity.clone(),
+                    source: "native".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: index as i64,
+                    authoritative: true,
+                    fact,
+                }),
+            },
+        );
+        assert_eq!(run.context.get("node.classify.human_wait"), Some("1"));
+    }
+    advance(&mut run, &wait_observed(1000, None));
+    advance(&mut run, &wait_observed(10_000_000, None));
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    assert_eq!(run.state, RunState::Running);
+}
+
+#[test]
+fn lifecycle_handoff_cannot_release_a_sibling_effect_before_task_interpretation() {
+    use super::super::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact as Fact,
+    };
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    run.graph.nodes.push(CircuitNode {
+        id: "publish".into(),
+        kind: CircuitNodeKind::Notify {
+            message: "Published".into(),
+        },
+    });
+    run.graph.edges.push(CircuitEdge {
+        from: "work".into(),
+        to: "publish".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(2));
+    run.attach_agent_node("work", 900);
+    let identity = ObservationIdentity {
+        run_id: 42,
+        step_id: "work".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("prompt".into()),
+        report_revision: None,
+    };
+    for (index, fact) in [Fact::ForegroundTerminated, Fact::OwnershipCovered]
+        .into_iter()
+        .enumerate()
+    {
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::Observed {
+                expected: identity.clone(),
+                observation: Box::new(CircuitObservation {
+                    identity: identity.clone(),
+                    source: "native".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: index as i64,
+                    authoritative: true,
+                    fact,
+                }),
+            },
+        );
+        assert!(transition.effects.is_empty());
+    }
+    assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    assert!(run.step("publish").is_none());
+    assert!(run.step("classify").is_none());
+}
+
+#[test]
+fn native_owned_work_snapshot_is_atomic_and_only_hands_off_to_task_interpretation() {
+    use super::super::observation::{
+        CircuitObservation, ObservationIdentity, ObservedWorkFact as Fact,
+    };
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(2));
+    run.attach_agent_node("work", 900);
+    let identity = ObservationIdentity {
+        run_id: 42,
+        step_id: "work".into(),
+        attempt: 1,
+        agent_node_id: 900,
+        session_incarnation: Some("generation".into()),
+        session_id: Some("session".into()),
+        turn_id: Some("prompt".into()),
+        report_revision: None,
+    };
+    let batch = |receipt_id: i64, facts: Vec<Fact>| CircuitEvent::ObservationBatch {
+        receipt_id,
+        expected: identity.clone(),
+        stale: false,
+        input_guard: None,
+        observations: facts
+            .into_iter()
+            .enumerate()
+            .map(|(index, fact)| CircuitObservation {
+                identity: identity.clone(),
+                source: "claude_native_hook".into(),
+                source_id: Some(format!("{receipt_id}:{index}")),
+                observed_at_ms: receipt_id,
+                authoritative: true,
+                fact,
+            })
+            .collect(),
+    };
+    advance(
+        &mut run,
+        &batch(
+            1,
+            vec![
+                Fact::ForegroundTerminated,
+                Fact::OwnershipSnapshot {
+                    active_work: vec!["child-a".into()],
+                },
+            ],
+        ),
+    );
+    assert_eq!(status_of(&run, "work"), StepStatus::Running);
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    let changed_children = advance(
+        &mut run,
+        &batch(
+            2,
+            vec![
+                Fact::OwnedTerminated {
+                    work_id: "child-a".into(),
+                },
+                Fact::OwnershipSnapshot {
+                    active_work: vec!["child-b".into()],
+                },
+            ],
+        ),
+    );
+    assert!(changed_children.effects.is_empty());
+    assert_eq!(
+        status_of(&run, "work"),
+        StepStatus::Running,
+        "no intermediate fact may finish the step before the complete snapshot applies"
+    );
+    let text = "Complete final review response\n\nWith every finding preserved.";
+    advance(
+        &mut run,
+        &batch(
+            3,
+            vec![
+                Fact::AssistantReport {
+                    text: text.into(),
+                    revision: "report-3".into(),
+                },
+                Fact::OwnedTerminated {
+                    work_id: "child-b".into(),
+                },
+                Fact::OwnershipSnapshot {
+                    active_work: vec![],
+                },
+            ],
+        ),
+    );
+    assert_eq!(status_of(&run, "work"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "native lifecycle evidence is not a task verdict"
+    );
+    assert_eq!(run.context.get("node.work.output"), Some(text));
+    assert_eq!(run.context.get("observer.receipt_cursor"), Some("3"));
+}
+
+#[test]
+fn circuit_classifier_outage_has_a_durable_retry_budget() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    for attempt in 1..=5 {
+        advance_with_report_evidence(&mut run, &classified("classify", None));
+        run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+        assert_eq!(run.state, RunState::Running);
+        assert_eq!(
+            status_of(&run, "classify"),
+            if attempt < 5 {
+                StepStatus::Running
+            } else {
+                StepStatus::Unverified
+            }
+        );
+    }
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains(&format!("{MAX_CLASSIFIER_FAILURES} attempts")));
+    let t = advance(&mut run, &classified("classify", None));
+    assert!(!t.context_changed);
+    assert_eq!(
+        run.context.get("node.classify.classifier_failures.1"),
+        Some("5")
+    );
+}
+
+#[test]
+fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 2,
+            error: "stale error".into(),
+        },
+    );
+    assert_eq!(run.context.get("node.classify.classifier_error.2"), None);
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: "claude: Failed to authenticate: OAuth session expired".into(),
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.classifier_error.1"),
+        Some("claude: Failed to authenticate: OAuth session expired")
+    );
+    for _ in 0..5 {
+        advance(&mut run, &classified("classify", None));
+    }
+    run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("OAuth session expired"));
+
+    let step = run.step_mut("classify").unwrap();
+    step.attempt = 2;
+    step.status = StepStatus::Running;
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierUnavailable {
+            node_id: "classify".into(),
+            attempt: 2,
+            error: "codex: new attempt failed".into(),
+        },
+    );
+    assert_eq!(
+        run.context.get("node.classify.classifier_error.1"),
+        Some("claude: Failed to authenticate: OAuth session expired")
+    );
+    assert_eq!(
+        run.context.get("node.classify.classifier_error.2"),
+        Some("codex: new attempt failed")
+    );
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("codex: new attempt failed"));
+    assert!(!run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("OAuth session expired"));
+}
+
+#[test]
+fn circuit_classifier_quiet_failure_spends_budget_without_inventing_report_evidence() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let event = CircuitEvent::ClassifierUnavailable {
+        node_id: "classify".into(),
+        attempt: 1,
+        error: "codex: authentication failed".into(),
+    };
+    for _ in 0..5 {
+        let transition = advance(&mut run, &event);
+        assert!(transition.classifications.is_empty());
+        assert!(transition.effects.is_empty());
+        assert!(run.context.get("node.classify.evaluated_output").is_none());
+        run.context = CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap();
+    }
+    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
+    assert_eq!(
+        run.context.get("node.classify.classifier_failures.1"),
+        Some("5")
+    );
+    assert!(run
+        .step("classify")
+        .unwrap()
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("codex: authentication failed"));
+    assert!(!advance(&mut run, &event).context_changed);
+    assert_eq!(run.state, RunState::Running);
+}
+
+/// Drive a gate_run from Pending up to the gate step existing. The
+/// gate's exact status depends on its kind (classifier/verification
+/// park Running; AutoRun completes instantly) — callers assert that.
+fn fire_to_gate(run: &mut RunView, gate_id: &str) {
+    advance(run, &CircuitEvent::Triggered);
+    advance(run, &tick(5));
+    run.attach_agent_node("work", 900);
+    advance_with_completion_evidence(run, &agent_finished(900, true));
+    assert!(
+        run.step(gate_id).is_some(),
+        "gate {} must have started",
+        gate_id
+    );
+}
+
+fn classified(node_id: &str, c: Option<Classification>) -> CircuitEvent {
+    classified_with_output(node_id, c, None)
+}
+
+fn classified_with_output(
+    node_id: &str,
+    c: Option<Classification>,
+    output: Option<&str>,
+) -> CircuitEvent {
+    CircuitEvent::TurnClassified {
+        binding: None,
+        node_id: node_id.to_string(),
+        classification: c,
+        output: output.map(str::to_string),
+    }
+}
+
+#[test]
+fn circuit_downstream_gate_borrows_exact_upstream_evidence_without_relabelling_it() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::ReviewVerdict {
+            target_node_id: Some("work".into()),
+        },
+        &[(StepOutcome::Completed, "next")],
+    );
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 900);
+    let binding =
+        crate::circuit::test_support::record_report_evidence(&mut run, "work", "Approved");
+    assert_eq!(run.step("work").unwrap().status, StepStatus::Completed);
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Running);
+    assert!(run.context.get("node.classify.evidence.1").is_none());
+    assert_eq!(
+        run.classifier_evidence("classify")
+            .unwrap()
+            .identity
+            .as_ref()
+            .unwrap()
+            .step_id,
+        "work"
+    );
+    let event = CircuitEvent::TurnClassified {
+        node_id: "classify".into(),
+        classification: Some(Classification::Completed),
+        output: Some("Approved".into()),
+        binding: Some(binding),
+    };
+    let mut changed_agent = run.clone();
+    changed_agent.step_mut("work").unwrap().agent_node_id = Some(901);
+    let stale = advance(&mut changed_agent, &event);
+    assert!(stale.effects.is_empty());
+    assert_eq!(
+        changed_agent.step("classify").unwrap().status,
+        StepStatus::Unverified
+    );
+    let mut changed_attempt = run.clone();
+    changed_attempt.step_mut("work").unwrap().attempt += 1;
+    assert!(advance(&mut changed_attempt, &event).effects.is_empty());
+    assert_eq!(
+        changed_attempt.step("classify").unwrap().status,
+        StepStatus::Unverified
+    );
+    let transition = advance(&mut run, &event);
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Completed);
+    assert!(transition.input_guard.is_some());
+    let owner: super::super::observation::ObservationIdentity = serde_json::from_str(
+        run.context
+            .get("node.classify.classified_evidence_owner")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(owner.step_id, "work");
+    assert_eq!(owner.attempt, 1);
+}
+
+#[test]
+fn circuit_child_receipts_cannot_refresh_an_older_report_input_fence() {
+    use super::super::observation::{CircuitObservation, ObservedWorkFact, WorkEvidence};
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[(StepOutcome::Completed, "next")],
+    );
+    fire_to_gate(&mut run, "classify");
+    let mut event = crate::circuit::test_support::bind_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Completed)),
+    );
+    let CircuitEvent::TurnClassified {
+        binding: Some(binding),
+        ..
+    } = &mut event
+    else {
+        panic!("binding");
+    };
+    let original = binding.input_guard.clone();
+    let mut expected = binding.owner.clone();
+    expected.report_revision = None;
+    let mut later_guard = original.clone();
+    later_guard.input_stamp = "new-user-input".into();
+    later_guard.observed_at_ms = 2000;
+    for (index, fact) in [
+        ObservedWorkFact::OwnedStarted {
+            work_id: "child".into(),
+        },
+        ObservedWorkFact::OwnedTerminated {
+            work_id: "child".into(),
+        },
+        ObservedWorkFact::OwnershipCovered,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        advance(
+            &mut run,
+            &CircuitEvent::ObservationBatch {
+                receipt_id: 0,
+                expected: expected.clone(),
+                stale: false,
+                input_guard: Some(later_guard.clone()),
+                observations: vec![CircuitObservation {
+                    identity: expected.clone(),
+                    source: "delayed-child".into(),
+                    source_id: Some(index.to_string()),
+                    observed_at_ms: 2000 + index as i64,
+                    authoritative: true,
+                    fact,
+                }],
+            },
+        );
+    }
+    let evidence: WorkEvidence =
+        serde_json::from_str(run.context.get("node.classify.evidence.1").unwrap()).unwrap();
+    let report = evidence.report.unwrap();
+    assert_eq!(
+        report.input_stamp.as_deref(),
+        Some(original.input_stamp.as_str())
+    );
+    assert_eq!(report.observed_at_ms, original.observed_at_ms);
+    binding.input_guard = later_guard;
+    let transition = advance(&mut run, &event);
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Unverified);
+    assert!(transition.effects.is_empty());
+    assert!(run.step("next").is_none());
+}
+
+#[test]
+fn circuit_status_projection_cannot_restore_invalidated_upstream_evidence() {
+    use super::super::observation::{CircuitObservation, ObservedWorkFact};
+    for unavailable in [
+        ObservedWorkFact::Unavailable,
+        ObservedWorkFact::OwnershipUnavailable {
+            reason: "adapter disconnected".into(),
+        },
+    ] {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::ReviewVerdict {
+                target_node_id: Some("work".into()),
+            },
+            &[(StepOutcome::Completed, "next")],
+        );
+        advance(&mut run, &CircuitEvent::Triggered);
+        advance(&mut run, &tick(5));
+        run.attach_agent_node("work", 900);
+        let binding =
+            crate::circuit::test_support::record_report_evidence(&mut run, "work", "Approved");
+        let mut expected = binding.owner.clone();
+        expected.step_id = "classify".into();
+        expected.report_revision = None;
+        for (index, fact) in [unavailable, ObservedWorkFact::Yielded]
+            .into_iter()
+            .enumerate()
+        {
+            advance(
+                &mut run,
+                &CircuitEvent::ObservationBatch {
+                    receipt_id: 0,
+                    expected: expected.clone(),
+                    stale: false,
+                    input_guard: Some(binding.input_guard.clone()),
+                    observations: vec![CircuitObservation {
+                        identity: expected.clone(),
+                        source: "status".into(),
+                        source_id: Some(index.to_string()),
+                        observed_at_ms: 2000 + index as i64,
+                        authoritative: false,
+                        fact,
+                    }],
+                },
+            );
+        }
+        assert!(run.classifier_evidence("classify").is_none());
+        // A recheck must retain the invalidation barrier.
+        run.step_mut("classify").unwrap().status = StepStatus::Running;
+        let transition = advance(
+            &mut run,
+            &CircuitEvent::TurnClassified {
+                node_id: "classify".into(),
+                classification: Some(Classification::Completed),
+                output: Some("Approved".into()),
+                binding: Some(binding),
+            },
+        );
+        assert_eq!(run.step("classify").unwrap().status, StepStatus::Unverified);
+        assert!(transition.effects.is_empty());
+        assert!(run.step("next").is_none());
+    }
+}
+
+#[test]
+fn circuit_classifier_cannot_route_without_bound_native_report_and_lifecycle() {
+    for corruption in [
+        "absent",
+        "malformed",
+        "report",
+        "session",
+        "attempt",
+        "input",
+    ] {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[(StepOutcome::Completed, "next")],
+        );
+        fire_to_gate(&mut run, "classify");
+        let mut event = crate::circuit::test_support::bind_report_evidence(
+            &mut run,
+            &classified("classify", Some(Classification::Completed)),
+        );
+        match corruption {
+            "absent" => run.context.set("node.classify.evidence.1", ""),
+            "malformed" => run.context.set("node.classify.evidence.1", "{broken"),
+            _ => {
+                if let CircuitEvent::TurnClassified {
+                    binding, output, ..
+                } = &mut event
+                {
+                    match corruption {
+                        "report" => *output = Some("An unrelated approval".into()),
+                        "session" => {
+                            binding.as_mut().unwrap().owner.session_id =
+                                Some("old-session".into())
+                        }
+                        "attempt" => binding.as_mut().unwrap().owner.attempt += 1,
+                        "input" => {
+                            binding.as_mut().unwrap().input_guard.input_stamp =
+                                "new-input".into()
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        let transition = advance(&mut run, &event);
+        assert_eq!(
+            run.step("classify").unwrap().status,
+            StepStatus::Unverified,
+            "{corruption}"
+        );
+        assert!(run.step("next").is_none(), "{corruption}");
+        assert!(transition.effects.is_empty(), "{corruption}");
+        assert_eq!(
+            run.context.get("node.classify.classification"),
+            Some("completed"),
+            "interpretation remains separate"
+        );
+    }
+}
+
+#[test]
+fn circuit_classifier_keeps_input_fence_and_exact_report_revision_on_completion() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[(StepOutcome::Completed, "next")],
+    );
+    fire_to_gate(&mut run, "classify");
+    let event = crate::circuit::test_support::bind_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Completed)),
+    );
+    let CircuitEvent::TurnClassified {
+        binding: Some(binding),
+        ..
+    } = &event
+    else {
+        panic!("bound fixture");
+    };
+    let transition = advance(&mut run, &event);
+    assert_eq!(transition.input_guard.as_ref(), Some(&binding.input_guard));
+    assert_eq!(
+        run.context.get("node.classify.classified_report_revision"),
+        Some(binding.report_revision.as_str())
+    );
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Completed);
+}
+
+#[test]
+fn classifier_completed_routes_only_the_on_completed_branch() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[
+            (StepOutcome::Completed, "green-path"),
+            (StepOutcome::Blocked, "help-path"),
+        ],
+    );
+    fire_to_gate(&mut run, "classify");
+    let t = advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Completed)),
+    );
+    assert_eq!(status_of(&run, "classify"), StepStatus::Completed);
+    assert_eq!(
+        run.step("classify").unwrap().outcome,
+        Some(StepOutcome::Completed)
+    );
+    assert_eq!(status_of(&run, "green-path"), StepStatus::Completed);
+    assert!(
+        run.step("help-path").is_none(),
+        "blocked branch must not traverse"
+    );
+    assert!(t
+        .effects
+        .iter()
+        .any(|e| matches!(e, Effect::Notify { message } if message == "green-path")));
+}
+
+#[test]
+fn classifier_blocked_routes_the_help_branch() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[
+            (StepOutcome::Completed, "green-path"),
+            (StepOutcome::Blocked, "help-path"),
+        ],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Blocked)),
+    );
+    assert_eq!(
+        run.step("classify").unwrap().outcome,
+        Some(StepOutcome::Blocked)
+    );
+    assert_eq!(status_of(&run, "help-path"), StepStatus::Completed);
+    assert!(run.step("green-path").is_none());
+}
+
+#[test]
+fn classifier_working_routes_the_working_branch() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[
+            (StepOutcome::Working, "keep-going"),
+            (StepOutcome::Completed, "done-path"),
+        ],
+    );
+    fire_to_gate(&mut run, "classify");
+    advance_with_report_evidence(
+        &mut run,
+        &classified("classify", Some(Classification::Working)),
+    );
+    assert_eq!(
+        run.step("classify").unwrap().outcome,
+        Some(StepOutcome::Working)
+    );
+    assert_eq!(status_of(&run, "keep-going"), StepStatus::Completed);
+    assert!(run.step("done-path").is_none());
+}
+
+#[test]
+fn unavailable_classifier_never_routes_a_working_edge() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[
+            (StepOutcome::Working, "keep-going"),
+            (StepOutcome::Completed, "done-path"),
+        ],
+    );
+    fire_to_gate(&mut run, "classify");
+    let transition = advance_with_report_evidence(&mut run, &classified("classify", None));
+    assert_eq!(run.step("classify").unwrap().status, StepStatus::Running);
+    assert_eq!(run.step("classify").unwrap().outcome, None);
+    assert!(run.step("keep-going").is_none());
+    assert!(transition.step_writes[0]
+        .error
+        .as_ref()
+        .unwrap()
+        .as_ref()
+        .is_some());
+}
+
+/// Run 163: a reviewer that yielded mid-work must not be read as a verdict.
+/// The park records that the report was observed — so the prober stops
+/// re-asking about an unchanged one — and records nothing else: no
+/// classification, no classifier-outage error, no classifier-failure
+/// budget, and no output stamp that would make the progress line this
+/// gate's evidence. The gate's generic yielded-wait reason and its deadline
+/// are written by the separate `WaitObserved`, not by this event.
+#[test]
+fn turn_parked_records_the_observation_and_nothing_else() {
+    let mut run = gate_run(
+        "verdict",
+        CircuitNodeKind::ReviewVerdict {
+            target_node_id: None,
+        },
+        &[
+            (StepOutcome::Working, "feedback"),
+            (StepOutcome::Blocked, "blocked-path"),
+        ],
+    );
+    fire_to_gate(&mut run, "verdict");
+    let progress = "PowerShell NativeCommandError. Let me retry with the standard `.cmd` shim.";
+    let transition = advance(
+        &mut run,
+        &CircuitEvent::TurnParked {
+            report_revision: None,
+            node_id: "verdict".into(),
+            output: progress.into(),
+        },
+    );
+
+    let gate = run.step("verdict").unwrap();
+    assert_eq!(gate.status, StepStatus::Running, "the gate keeps waiting");
+    assert!(gate.outcome.is_none());
+    assert!(
+        gate.error.is_none(),
+        "this event writes no error; got {:?}",
+        gate.error
+    );
+    assert!(
+        run.step("feedback").is_none(),
+        "a progress line must not request changes"
+    );
+    assert!(run.step("blocked-path").is_none());
+    assert!(
+        transition.step_writes.is_empty(),
+        "this event writes no step row"
+    );
+    assert_eq!(run.state, RunState::Running);
+
+    // Nothing that would look like a verdict, an outage, or a report.
+    assert_eq!(run.context.get("node.verdict.classification"), None);
+    assert_eq!(run.context.get("node.verdict.classifier_failures.1"), None);
+    assert_eq!(run.context.get("node.verdict.review_verdict"), None);
+    assert_eq!(run.context.get("node.work.output"), None);
+
+    // The observation itself is recorded, so this exact report is not
+    // observed again — the readiness question is asked when it changes.
+    assert_eq!(run.context.get("node.verdict.evaluated_attempt"), Some("1"));
+    assert_eq!(
+        run.context.get("node.verdict.evaluated_output"),
+        Some(progress)
+    );
+}
+
+#[test]
+fn classifier_outcome_without_a_route_stays_parked() {
+    for classification in [
+        Some(Classification::Completed),
+        Some(Classification::Blocked),
+        Some(Classification::Working),
+        None,
+    ] {
+        let mut run = gate_run(
+            "classify",
+            CircuitNodeKind::LlmTurnClassifier {
+                target_node_id: None,
+            },
+            &[(StepOutcome::Failed, "done-path")],
+        );
+        fire_to_gate(&mut run, "classify");
+        let transition =
+            advance_with_report_evidence(&mut run, &classified("classify", classification));
+
+        assert_eq!(status_of(&run, "classify"), StepStatus::Running);
+        assert!(run.step("classify").unwrap().outcome.is_none());
+        assert!(run.step("done-path").is_none());
+        assert!(transition
+            .step_writes
+            .iter()
+            .any(|write| write.error.is_some()));
+        assert_eq!(run.state, RunState::Running);
+    }
+}
+
+#[test]
+fn turn_classified_for_unknown_or_non_running_steps_is_a_no_op() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[(StepOutcome::Completed, "done-path")],
+    );
+    let before = run.clone();
+    advance(
+        &mut run,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "nowhere".to_string(),
+            classification: Some(Classification::Completed),
+            output: None,
+        },
+    );
+    assert_eq!(run, before);
+}
+
+#[test]
+fn verification_gate_routes_green_and_red() {
+    for (green, expected, hit, miss) in [
+        (true, StepOutcome::Green, "pass", "fail"),
+        (false, StepOutcome::Red, "fail", "pass"),
+    ] {
+        let mut run = gate_run(
+            "verify",
+            CircuitNodeKind::DeterministicVerification {
+                command: "cargo test".into(),
+            },
+            &[(StepOutcome::Green, "pass"), (StepOutcome::Red, "fail")],
+        );
+        fire_to_gate(&mut run, "verify");
+        advance(
+            &mut run,
+            &CircuitEvent::VerificationResult {
+                node_id: "verify".to_string(),
+                green,
+            },
+        );
+        assert_eq!(run.step("verify").unwrap().outcome, Some(expected));
+        assert_eq!(
+            run.context.get("verification.outcome"),
+            Some(expected.as_db_str())
+        );
+        assert_eq!(run.context.get("verification.command"), Some("cargo test"));
+        assert_eq!(status_of(&run, hit), StepStatus::Completed);
+        assert!(run.step(miss).is_none());
+    }
+}
+
+#[test]
+fn collaborator_check_autorun_passes_through_untouched() {
+    let mut run = gate_run(
+        "gate",
+        CircuitNodeKind::CollaboratorCheck {
+            require_approval: false,
+        },
+        &[(StepOutcome::Completed, "after")],
+    );
+    fire_to_gate(&mut run, "gate");
+    // AutoRun never parks: it cascaded straight through.
+    assert_eq!(status_of(&run, "gate"), StepStatus::Completed);
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the successor waits for the next tick's capacity pass"
+    );
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn require_approval_parks_blocked_then_approve_cascades() {
+    let mut run = gate_run(
+        "gate",
+        CircuitNodeKind::CollaboratorCheck {
+            require_approval: true,
+        },
+        &[(StepOutcome::Completed, "after")],
+    );
+    fire_to_gate(&mut run, "gate");
+    assert_eq!(status_of(&run, "gate"), StepStatus::Blocked);
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the run parks on the badge, not failed"
+    );
+    assert!(
+        run.steps
+            .iter()
+            .all(|s| s.status != StepStatus::Completed || s.node_id != "after"),
+        "nothing may advance past an unapproved gate"
+    );
+
+    let t = advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "gate".to_string(),
+        },
+    );
+    assert_eq!(status_of(&run, "gate"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+    assert!(t.run_state_changed);
+}
+
+#[test]
+fn approving_a_non_blocked_step_is_a_no_op() {
+    let mut run = gate_run(
+        "gate",
+        CircuitNodeKind::CollaboratorCheck {
+            require_approval: false,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "gate");
+    let before = run.clone();
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "gate".to_string(),
+        },
+    );
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "elsewhere".to_string(),
+        },
+    );
+    assert_eq!(
+        run, before,
+        "approvals only act on Blocked collaborator gates"
+    );
+}
+
+// -- pause / resume (#1207) ---------------------------------------------------
+
+#[test]
+fn pause_halts_advancement_while_the_current_step_finishes() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+
+    let t = advance(&mut run, &CircuitEvent::Paused);
+    assert!(t.run_state_changed);
+    assert_eq!(run.state, RunState::Paused);
+
+    // Ticks do nothing while paused.
+    let again = advance(&mut run, &tick(9));
+    assert!(again.is_empty());
+
+    // The current step may finish — but nothing cascades.
+    run.attach_agent_node("spawn", 900);
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+    assert_eq!(status_of(&run, "spawn"), StepStatus::Completed);
+    assert!(run.step("notify").is_none(), "paused runs must not advance");
+    assert_eq!(run.state, RunState::Paused);
+}
+
+#[test]
+fn resume_continues_exactly_where_the_pause_stopped() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    run.attach_agent_node("spawn", 900);
+    advance(&mut run, &CircuitEvent::Paused);
+    advance_with_completion_evidence(&mut run, &agent_finished(900, true));
+
+    let t = advance(&mut run, &CircuitEvent::Resumed);
+    assert!(t.run_state_changed);
+    assert_eq!(run.state, RunState::Running);
+
+    // The finished spawn's successor picks up on the next tick.
+    advance(&mut run, &tick(1));
+    assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn pause_and_resume_are_idempotent() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &CircuitEvent::Paused);
+    let again = advance(&mut run, &CircuitEvent::Paused);
+    assert!(!again.run_state_changed);
+    advance(&mut run, &CircuitEvent::Resumed);
+    let again = advance(&mut run, &CircuitEvent::Resumed);
+    assert!(!again.run_state_changed);
+}
+
+#[test]
+fn approvals_do_not_fire_while_paused() {
+    let mut run = gate_run(
+        "gate",
+        CircuitNodeKind::CollaboratorCheck {
+            require_approval: true,
+        },
+        &[(StepOutcome::Completed, "after")],
+    );
+    fire_to_gate(&mut run, "gate");
+    advance(&mut run, &CircuitEvent::Paused);
+    let before = run.clone();
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "gate".to_string(),
+        },
+    );
+    assert_eq!(run, before, "a paused run must not consume approvals");
+    advance(&mut run, &CircuitEvent::Resumed);
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "gate".to_string(),
+        },
+    );
+    assert_eq!(status_of(&run, "after"), StepStatus::Completed);
+}
+
+// -- retry limits (#1207) -------------------------------------------------------
+
+/// trigger → work →(Failed)→ retry →(Always)→ work (loop-back).
+fn retry_run(max_retries: i32) -> RunView {
+    RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "work".into(),
+                    kind: spawn_kind("p"),
+                },
+                CircuitNode {
+                    id: "retry".into(),
+                    kind: CircuitNodeKind::RetryLimit { max_retries },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "work".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "work".into(),
+                    to: "retry".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Failed),
+                },
+                CircuitEdge {
+                    from: "retry".into(),
+                    to: "work".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    }
+}
+
+#[test]
+fn retry_limit_resets_the_failed_step_within_its_budget() {
+    let mut run = retry_run(2);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 11);
+
+    // First failure does NOT fail-fast: the retry gate owns it. The
+    // same advance call cascades into the gate, which resets the
+    // failed step for its second execution.
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    assert_eq!(status_of(&run, "retry"), StepStatus::Completed);
+    assert_eq!(
+        run.step("retry").unwrap().outcome,
+        Some(StepOutcome::Completed),
+        "a retry gate's successful route must be stamped in the ledger"
+    );
+    assert_eq!(status_of(&run, "work"), StepStatus::Queued);
+    assert_eq!(run.step("work").unwrap().attempt, 2);
+    assert_eq!(
+        run.step("work").unwrap().outcome,
+        None,
+        "reset clears the stale outcome"
+    );
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "a wired RetryLimit suppresses fail-fast"
+    );
+
+    // Both decisions are persisted: the failure AND the fresh attempt.
+    assert!(
+        t.step_writes
+            .iter()
+            .any(|w| w.node_id == "work" && w.status == StepStatus::Failed),
+        "the failure itself must be persisted"
+    );
+    let reset = t
+        .step_writes
+        .iter()
+        .find(|w| w.node_id == "work" && w.fresh_attempt)
+        .expect("reset must be persisted as a fresh attempt");
+    assert_eq!(reset.attempt, 2);
+
+    // Next tick re-executes the retried step.
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "work"), StepStatus::Running);
+}
+
+#[test]
+fn authored_retry_limit_ignores_review_round_context_override() {
+    let mut run = retry_run(2);
+    run.context.set("retry.max_retries", "1");
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 11);
+
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "work"), StepStatus::Queued);
+    assert_eq!(run.step("work").unwrap().attempt, 2);
+}
+
+#[test]
+fn flaky_step_succeeding_on_retry_completes_the_run() {
+    let mut run = retry_run(2);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 11);
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    advance(&mut run, &tick(5)); // promote the attempt-2 execution
+    assert_eq!(run.step("work").unwrap().attempt, 2);
+    let t = advance_with_completion_evidence(&mut run, &agent_finished(11, true));
+    assert_eq!(status_of(&run, "work"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+    assert!(t.effects.is_empty());
+}
+
+#[test]
+fn exhausted_retry_budget_fails_the_run() {
+    let mut run = retry_run(2);
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("work", 11);
+    // Attempt 1 fails → reset to 2.
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    advance(&mut run, &tick(5));
+    // Attempt 2 fails → budget spent. The gate is re-armed by the
+    // failure, then executes on the next pass and fails the run.
+    advance_with_completion_evidence(&mut run, &agent_finished(11, false));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the gate still owns the failure"
+    );
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
+    assert!(run
+        .step("retry")
+        .unwrap()
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("exhausted"));
+    assert_eq!(run.state, RunState::Failed);
+    assert!(t.run_state_changed);
+}
+
+#[test]
+fn retry_limit_without_a_failed_upstream_fails_explicitly() {
+    // Reached via an Always edge after SUCCESS — a wiring mistake the
+    // stepper surfaces instead of silently resetting anything.
+    let mut run = retry_run(3);
+    run.graph
+        .edges
+        .retain(|e| !(e.from == "work" && e.to == "retry"));
+    run.graph.edges.push(CircuitEdge {
+        from: "t".into(),
+        to: "retry".into(),
+        condition: Default::default(),
+    });
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "retry"), StepStatus::Failed);
+    assert!(run
+        .step("retry")
+        .unwrap()
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("without a failed upstream"));
+    assert_eq!(run.state, RunState::Failed);
+    let _ = t;
+}
+
+// -- Issue #1357: Multi-agent targeted execution, Blackboard & Loop Retention --
+
+#[test]
+fn targeted_multi_agent_injection_targets_specified_node() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "agent_a".into(),
+                    kind: spawn_kind("pa"),
+                },
+                CircuitNode {
+                    id: "agent_b".into(),
+                    kind: spawn_kind("pb"),
+                },
+                CircuitNode {
+                    id: "inject_a".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "msg to A".into(),
+                        target_node_id: Some("agent_a".into()),
+                    },
+                },
+                CircuitNode {
+                    id: "inject_b".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "msg to B".into(),
+                        target_node_id: Some("agent_b".into()),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "agent_a".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "agent_b".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "agent_a".into(),
+                    to: "inject_a".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "agent_b".into(),
+                    to: "inject_b".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("agent_a", 101);
+    run.attach_agent_node("agent_b", 202);
+
+    // Finish agent_a
+    advance_with_completion_evidence(&mut run, &agent_finished(101, true));
+    assert_eq!(status_of(&run, "inject_a"), StepStatus::Running);
+
+    // Fire ready for inject_a
+    let t_a = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject_a".into(),
+        },
+    );
+    assert_eq!(
+        t_a.effects,
+        vec![Effect::InjectPty {
+            node_id: "inject_a".into(),
+            prompt: "msg to A".into(),
+            target_node_id: Some("agent_a".into()),
+        }]
+    );
+    assert_eq!(run.resolve_target_agent("inject_a"), Some(101));
+
+    // Finish agent_b
+    advance_with_completion_evidence(&mut run, &agent_finished(202, true));
+    assert_eq!(status_of(&run, "inject_b"), StepStatus::Running);
+
+    let t_b = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "inject_b".into(),
+        },
+    );
+    assert_eq!(
+        t_b.effects,
+        vec![Effect::InjectPty {
+            node_id: "inject_b".into(),
+            prompt: "msg to B".into(),
+            target_node_id: Some("agent_b".into()),
+        }]
+    );
+    assert_eq!(run.resolve_target_agent("inject_b"), Some(202));
+}
+
+#[test]
+fn lineage_target_agent_resolution_finds_upstream_spawn_branch() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "spawn_branch_1".into(),
+                    kind: spawn_kind("p1"),
+                },
+                CircuitNode {
+                    id: "spawn_branch_2".into(),
+                    kind: spawn_kind("p2"),
+                },
+                CircuitNode {
+                    id: "inject_branch_1".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "lineage 1".into(),
+                        target_node_id: None,
+                    },
+                },
+                CircuitNode {
+                    id: "inject_branch_2".into(),
+                    kind: CircuitNodeKind::InjectPty {
+                        prompt: "lineage 2".into(),
+                        target_node_id: None,
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "spawn_branch_1".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "spawn_branch_2".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "spawn_branch_1".into(),
+                    to: "inject_branch_1".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "spawn_branch_2".into(),
+                    to: "inject_branch_2".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("spawn_branch_1", 1001);
+    run.attach_agent_node("spawn_branch_2", 2002);
+
+    // Target agent for inject_branch_1 traverses upstream and finds spawn_branch_1 (1001)
+    assert_eq!(run.resolve_target_agent("inject_branch_1"), Some(1001));
+    // Target agent for inject_branch_2 traverses upstream and finds spawn_branch_2 (2002)
+    assert_eq!(run.resolve_target_agent("inject_branch_2"), Some(2002));
+}
+
+#[test]
+fn node_output_blackboard_captures_agent_output_and_status_in_context() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode { id: "t".into(), kind: CircuitNodeKind::Manual },
+                CircuitNode { id: "worker".into(), kind: spawn_kind("do task") },
+                CircuitNode {
+                    id: "notify_output".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "Worker finished with status '{{ node.worker.status }}' and output: '{{ node.worker.output }}'".into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge { from: "t".into(), to: "worker".into(), condition: Default::default() },
+                CircuitEdge { from: "worker".into(), to: "notify_output".into(), condition: Default::default() },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("worker", 777);
+
+    // Agent finishes with captured tail text
+    let t = advance_with_completion_evidence(
+        &mut run,
+        &CircuitEvent::AgentFinished {
+            agent_node_id: 777,
+            success: true,
+            output: Some("All 15 tests passed with 0 errors".into()),
+        },
+    );
+
+    assert_eq!(
+        run.context.get("node.worker.output"),
+        Some("All 15 tests passed with 0 errors")
+    );
+    assert_eq!(run.context.get("node.worker.status"), Some("completed"));
+
+    assert_eq!(
+        t.effects,
+        vec![Effect::Notify {
+            message: "Worker finished with status 'completed' and output: 'All 15 tests passed with 0 errors'".into(),
+        }]
+    );
+}
+
+#[test]
+fn multi_iteration_feedback_loop_with_retry_limit_retains_agent_and_steps() {
+    // Blueprint: trigger -> implementer -> reviewer -> verify -> (Red) -> retry_gate -> implementer
+    //                                                         -> (Green) -> success
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "implementer".into(),
+                    kind: spawn_kind("impl"),
+                },
+                CircuitNode {
+                    id: "reviewer".into(),
+                    kind: spawn_kind("review"),
+                },
+                CircuitNode {
+                    id: "verify".into(),
+                    kind: CircuitNodeKind::DeterministicVerification {
+                        command: "cargo check".into(),
+                    },
+                },
+                CircuitNode {
+                    id: "retry_gate".into(),
+                    kind: CircuitNodeKind::RetryLimit { max_retries: 3 },
+                },
+                CircuitNode {
+                    id: "success".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message: "all good".into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "implementer".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "implementer".into(),
+                    to: "reviewer".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "reviewer".into(),
+                    to: "verify".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "verify".into(),
+                    to: "retry_gate".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Red),
+                },
+                CircuitEdge {
+                    from: "verify".into(),
+                    to: "success".into(),
+                    condition: EdgeCondition::OnOutcome(StepOutcome::Green),
+                },
+                CircuitEdge {
+                    from: "retry_gate".into(),
+                    to: "implementer".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+
+    // --- Iteration 1 ---
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t1 = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
+    assert_eq!(
+        t1.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "implementer".into()
+        }]
+    );
+    run.attach_agent_node("implementer", 101);
+
+    // Implementer finishes iteration 1
+    advance_with_completion_evidence(&mut run, &agent_finished(101, true));
+    assert_eq!(status_of(&run, "implementer"), StepStatus::Completed);
+
+    // Reviewer starts iteration 1
+    let t_rev1 = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    assert_eq!(
+        t_rev1.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "reviewer".into()
+        }]
+    );
+    run.attach_agent_node("reviewer", 202);
+
+    // Reviewer finishes iteration 1
+    advance_with_completion_evidence(&mut run, &agent_finished(202, true));
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
+
+    // Verify starts and returns Red (fails)
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "verify"), StepStatus::Running);
+    let _t_v1 = advance(
+        &mut run,
+        &CircuitEvent::VerificationResult {
+            node_id: "verify".into(),
+            green: false,
+        },
+    );
+    assert_eq!(run.step("verify").unwrap().outcome, Some(StepOutcome::Red));
+
+    // Retry limit should trigger and reset implementer for attempt 2
+    assert_eq!(status_of(&run, "retry_gate"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "implementer"), StepStatus::Queued);
+    assert_eq!(run.step("implementer").unwrap().attempt, 2);
+    // Ensure implementer kept its existing agent_node_id (no leaking or creating new agents!)
+    assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(101));
+
+    // --- Iteration 2 ---
+    // Promoting implementer attempt 2
+    let t2 = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "implementer"), StepStatus::Running);
+    // Emits SpawnAgentNode so worker submits prompt to existing agent or respawns in worktree!
+    assert_eq!(
+        t2.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "implementer".into()
+        }]
+    );
+    assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(101));
+
+    // Implementer finishes iteration 2
+    advance_with_completion_evidence(&mut run, &agent_finished(101, true));
+    assert_eq!(status_of(&run, "implementer"), StepStatus::Completed);
+    assert_eq!(run.step("implementer").unwrap().attempt, 2);
+
+    // Reviewer re-promotes for iteration 2
+    let t_rev2 = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    assert_eq!(run.step("reviewer").unwrap().attempt, 2);
+    assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(202));
+    assert_eq!(
+        t_rev2.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "reviewer".into()
+        }]
+    );
+
+    // Reviewer finishes iteration 2
+    advance_with_completion_evidence(&mut run, &agent_finished(202, true));
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Completed);
+
+    // Verify runs again (attempt 2) and returns Green (passes!)
+    advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "verify"), StepStatus::Running);
+    let _t_v2 = advance(
+        &mut run,
+        &CircuitEvent::VerificationResult {
+            node_id: "verify".into(),
+            green: true,
+        },
+    );
+    assert_eq!(
+        run.step("verify").unwrap().outcome,
+        Some(StepOutcome::Green)
+    );
+    assert_eq!(status_of(&run, "success"), StepStatus::Completed);
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn cross_branch_target_resolution_fails_closed() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "branch_a".into(),
+                    kind: spawn_kind("pa"),
+                },
+                CircuitNode {
+                    id: "branch_b".into(),
+                    kind: spawn_kind("pb"),
+                },
+                CircuitNode {
+                    id: "step_in_a".into(),
+                    kind: CircuitNodeKind::SetNodeStatus {
+                        status: SessionStatusKind::Completed,
+                        target_node_id: Some("branch_b".into()), // cross-branch target!
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "branch_a".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "branch_b".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "branch_a".into(),
+                    to: "step_in_a".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(5));
+    run.attach_agent_node("branch_a", 101);
+    run.attach_agent_node("branch_b", 202);
+
+    // Explicit target "branch_b" is not in step_in_a's lineage -> must fail closed (None)!
+    assert_eq!(run.resolve_target_agent("step_in_a"), None);
+
+    // Advancing into step_in_a fails fast because target cannot be resolved!
+    advance_with_completion_evidence(&mut run, &agent_finished(101, true));
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "step_in_a"), StepStatus::Failed);
+    assert!(run
+        .step("step_in_a")
+        .unwrap()
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("no target agent node found"));
+    let _ = t;
+}
+
+#[test]
+fn set_node_status_fails_fast_when_target_agent_is_missing() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "status_step".into(),
+                    kind: CircuitNodeKind::SetNodeStatus {
+                        status: SessionStatusKind::Completed,
+                        target_node_id: None,
+                    },
+                },
+            ],
+            edges: vec![CircuitEdge {
+                from: "t".into(),
+                to: "status_step".into(),
+                condition: Default::default(),
+            }],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "status_step"), StepStatus::Failed);
+    assert!(run
+        .step("status_step")
+        .unwrap()
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("no target agent node found"));
+    let _ = t;
+}
+
+#[test]
+fn close_agent_node_emits_a_targeted_close_effect() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "agent".into(),
+                    kind: spawn_kind(""),
+                },
+                CircuitNode {
+                    id: "close".into(),
+                    kind: CircuitNodeKind::CloseAgentNode {
+                        target_node_id: Some("agent".into()),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "agent".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "agent".into(),
+                    to: "close".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: CircuitContext::new(),
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    let spawned = advance(&mut run, &tick(5));
+    assert_eq!(
+        spawned.effects,
+        vec![Effect::SpawnAgentNode {
+            node_id: "agent".into()
+        }]
+    );
+    run.attach_agent_node("agent", 101);
+    let closed = advance_with_completion_evidence(&mut run, &agent_finished(101, true));
+    assert_eq!(
+        closed.effects,
+        vec![Effect::CloseAgentNode {
+            node_id: "close".into(),
+            target_node_id: Some("agent".into()),
+        }]
+    );
+    assert_eq!(status_of(&run, "close"), StepStatus::Completed);
+}
+
+fn issue_review_run() -> RunView {
+    let mut context = CircuitContext::new();
+    context.with_issue(
+        42,
+        "Improve the widget",
+        "body",
+        "octocat",
+        "https://github.com/example/repo/issues/42",
+        &[],
+    );
+    context.with_collaborator_gate(true);
+    context.set("autopilot.finish_prompt", "finish the task");
+    RunView {
+        run_id: 42,
+        graph: CircuitGraph::issue_driven_autopilot_review("buildmesh:run"),
+        state: RunState::Pending,
+        context,
+        steps: vec![],
+    }
+}
+
+/// Drive the issue blueprint through its implementation and finish
+/// classifiers until the OpenPr effect is waiting on the GitHub seam.
+fn acknowledge_prompt(run: &mut RunView, node_id: &str) -> Transition {
+    let attempt = run.step(node_id).unwrap().attempt;
+    advance(
+        run,
+        &CircuitEvent::PromptDelivered {
+            node_id: node_id.into(),
+            attempt,
+        },
+    )
+}
+
+fn issue_review_to_open_pr(run: &mut RunView) -> Transition {
+    advance(run, &CircuitEvent::Triggered);
+    // The first tick materializes the approval gate; the worker emits
+    // this event automatically for a trusted issue.
+    advance(run, &tick(8));
+    advance(
+        run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "collaborator_gate".into(),
+        },
+    );
+    advance(run, &tick(8));
+    run.attach_agent_node("implementer", 700);
+    advance_with_completion_evidence(run, &agent_finished(700, true));
+    advance_with_report_evidence(
+        run,
+        &classified("implementation_classifier", Some(Classification::Completed)),
+    );
+    advance(
+        run,
+        &CircuitEvent::AgentReady {
+            node_id: "finish".into(),
+        },
+    );
+    acknowledge_prompt(run, "finish");
+    advance(run, &tick(8));
+    advance_with_report_evidence(
+        run,
+        &classified("finish_classifier", Some(Classification::Completed)),
+    )
+}
+
+#[test]
+fn issue_review_open_pr_resolves_implementer_before_and_after_retry() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+    assert_eq!(run.resolve_target_agent("open_pr"), None);
+    assert_eq!(run.resolve_open_pr_agent("open_pr"), Some(700));
+
+    // Replay uses persisted step associations, including a reviewer
+    // from an earlier round. PR ownership must remain the implementer.
+    let mut replay = RunView {
+        graph: CircuitGraph::from_json(&run.graph.to_json().unwrap()).unwrap(),
+        context: CircuitContext::from_json(&run.context.to_json().unwrap()).unwrap(),
+        ..run.clone()
+    };
+    advance(
+        &mut replay,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/repo/pull/314".into()),
+            pr_head_ref: Some("gh42".into()),
+            pr_title: None,
+            error: None,
+        },
+    );
+    advance(&mut replay, &tick(8));
+    replay.attach_agent_node("reviewer", 701);
+    assert_eq!(replay.resolve_target_agent("open_pr"), None);
+    assert_eq!(replay.resolve_open_pr_agent("open_pr"), Some(700));
+
+    advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: false,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: Some("temporary lookup failure".into()),
+        },
+    );
+    advance(&mut run, &tick(8));
+    advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "wrapup_correction".into(),
+        },
+    );
+    acknowledge_prompt(&mut run, "wrapup_correction");
+    advance(&mut run, &tick(8));
+    advance_with_report_evidence(
+        &mut run,
+        &classified("finish_classifier", Some(Classification::Completed)),
+    );
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+    assert_eq!(run.step("open_pr").unwrap().attempt, 2);
+    assert_eq!(run.resolve_open_pr_agent("open_pr"), Some(700));
+}
+
+#[test]
+fn issue_review_open_pr_waits_for_github_without_agent_lifecycle_events() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+    advance_with_completion_evidence(&mut run, &agent_finished(700, true));
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+    assert!(run.step("reviewer").is_none());
+    advance(&mut run, &CircuitEvent::AgentLost { agent_node_id: 700 });
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+    assert_eq!(run.state, RunState::Running);
+}
+
+/// PR opened, then the reviewer's first turn reaches the verdict gate
+/// through the `review_round` join.
+fn issue_review_to_first_verdict(run: &mut RunView, reviewer: i64) {
+    issue_review_to_open_pr(run);
+    open_pr_succeeds(run, 314);
+    advance(run, &tick(8));
+    assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
+    finish_reviewer_turn(run, reviewer);
+}
+
+fn open_pr_succeeds(run: &mut RunView, pr: i64) {
+    advance(
+        run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(pr),
+            pr_url: Some(format!("https://github.com/example/repo/pull/{pr}")),
+            pr_head_ref: Some("gh42".into()),
+            pr_title: Some("Improve the widget".into()),
+            error: None,
+        },
+    );
+}
+
+fn finish_reviewer_turn(run: &mut RunView, reviewer: i64) {
+    run.attach_agent_node("reviewer", reviewer);
+    advance_with_completion_evidence(run, &agent_finished(reviewer, true));
+    advance(run, &tick(8));
+    assert_eq!(status_of(run, "review_classifier"), StepStatus::Running);
+}
+
+/// Changes requested: findings go to the implementer, whose fix turn is
+/// classified, then the retry gate re-prompts the still-open reviewer.
+fn request_changes_and_fix(run: &mut RunView, findings: &str) -> Transition {
+    advance_with_report_evidence(
+        run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Working),
+            Some(findings),
+        ),
+    );
+    let feedback = advance(
+        run,
+        &CircuitEvent::AgentReady {
+            node_id: "follow_feedback".into(),
+        },
+    );
+    assert!(feedback.effects.iter().any(|effect| matches!(effect,
+        Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+            if target == "implementer" && prompt.contains(findings))));
+    let delivered = acknowledge_prompt(run, "follow_feedback");
+    assert!(
+        delivered
+            .effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::CloseAgentNode { .. })),
+        "a fix round must keep the reviewer open: {:?}",
+        delivered.effects
+    );
+    advance(run, &tick(8));
+    advance_with_report_evidence(
+        run,
+        &classified("feedback_classifier", Some(Classification::Completed)),
+    )
+}
+
+#[test]
+fn issue_review_blueprint_runs_reviewer_feedback_and_keeps_the_reviewer_open() {
+    let mut run = issue_review_run();
+    let open = issue_review_to_open_pr(&mut run);
+    assert!(open.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::CallGithub {
+            action: GithubActionKind::OpenPr,
+            ..
+        }
+    )));
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+
+    open_pr_succeeds(&mut run, 314);
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+    finish_reviewer_turn(&mut run, 701);
+    let review_done = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Working),
+            Some("The architecture needs a cleanup pass."),
+        ),
+    );
+    assert!(review_done.effects.is_empty());
+    assert_eq!(
+        run.context.get("node.reviewer.output"),
+        Some("The architecture needs a cleanup pass.")
+    );
+    assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
+
+    let feedback = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "follow_feedback".into(),
+        },
+    );
+    assert!(feedback.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+            if target == "implementer" && prompt.contains("PR #314") && prompt.contains("push")
+    )));
+    let delivered = acknowledge_prompt(&mut run, "follow_feedback");
+    assert!(delivered
+        .effects
+        .iter()
+        .all(|effect| !matches!(effect, Effect::CloseAgentNode { .. })));
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "feedback_classifier"), StepStatus::Running);
+
+    let retry = advance_with_report_evidence(
+        &mut run,
+        &classified("feedback_classifier", Some(Classification::Completed)),
+    );
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "review_retry"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
+    assert_eq!(run.step("re_review").unwrap().attempt, 2);
+    assert_eq!(
+        run.step("finish").unwrap().attempt,
+        1,
+        "a fix round does not repeat the wrap-up"
+    );
+    assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(701));
+    assert_eq!(run.context.get("retry.attempt"), Some("2"));
+    assert_eq!(run.context.get("retry.max_retries"), Some("3"));
+    assert!(retry.effects.is_empty());
+}
+
+#[test]
+fn issue_review_later_round_reprompts_the_same_reviewer() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    request_changes_and_fix(&mut run, "Fix the race.");
+
+    let next = advance(&mut run, &tick(8));
+    assert!(
+        next.effects.iter().all(|effect| !matches!(
+            effect,
+            Effect::SpawnAgentNode { .. } | Effect::CallGithub { .. }
+        )),
+        "a later round neither spawns a reviewer nor repeats the PR check: {:?}",
+        next.effects
+    );
+    assert_eq!(status_of(&run, "re_review"), StepStatus::Running);
+    let reprompt = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "re_review".into(),
+        },
+    );
+    assert!(reprompt.effects.iter().any(|effect| matches!(effect,
+        Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
+            if node_id == "re_review" && target == "reviewer" && prompt.contains("round 2 of 3"))));
+    assert_eq!(run.resolve_target_agent("re_review"), Some(701));
+    acknowledge_prompt(&mut run, "re_review");
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
+    assert_eq!(run.step("review_classifier").unwrap().attempt, 2);
+    assert_eq!(
+        run.step("reviewer").unwrap().attempt,
+        1,
+        "the reviewer is spawned once"
+    );
+}
+
+/// A saved circuit that carried a stale `completed` feedback route failed on
+/// its first changes-requested verdict. Once repaired it must send the
+/// findings to the implementer instead.
+#[test]
+fn repaired_saved_issue_review_sends_changes_requested_to_the_implementer() {
+    let mut run = issue_review_run();
+    run.graph = crate::circuit::test_support::repaired_stuck_issue_review();
+    issue_review_to_first_verdict(&mut run, 701);
+
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Working),
+            Some("Changes requested: fix the race."),
+        ),
+    );
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
+    let feedback = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "follow_feedback".into(),
+        },
+    );
+    assert!(feedback.effects.iter().any(|effect| matches!(effect,
+        Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+            if target == "implementer" && prompt.contains("fix the race"))));
+}
+
+/// Approval, then the merge request delivered to the implementer; leaves the
+/// run waiting on the implementer's merge report (`merge_wait`).
+fn approve_and_deliver_merge(run: &mut RunView) {
+    advance_with_report_evidence(
+        run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Completed),
+            Some("Approved. No remaining findings."),
+        ),
+    );
+    advance(run, &tick(8));
+    advance(
+        run,
+        &CircuitEvent::AgentReady {
+            node_id: "merge".into(),
+        },
+    );
+    acknowledge_prompt(run, "merge");
+    advance(run, &tick(8));
+    assert_eq!(status_of(run, "merge_wait"), StepStatus::Running);
+}
+
+fn closes_implementer(effect: &Effect) -> bool {
+    matches!(effect, Effect::CloseAgentNode { target_node_id: Some(target), .. } if target == "implementer")
+}
+
+#[test]
+fn issue_review_approval_closes_reviewer_asks_implementer_to_merge_and_waits_for_its_report() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    let approved = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Completed),
+            Some("Approved. No remaining findings."),
+        ),
+    );
+    assert!(approved.effects.iter().any(|effect| matches!(effect,
+        Effect::CloseAgentNode { node_id, target_node_id: Some(target) }
+            if node_id == "close_approved" && target == "reviewer")));
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "the run waits to deliver the merge request"
+    );
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "merge"), StepStatus::Running);
+
+    let merge = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "merge".into(),
+        },
+    );
+    assert!(merge.effects.iter().any(|effect| matches!(effect,
+        Effect::InjectPty { node_id, target_node_id: Some(target), prompt }
+            if node_id == "merge" && target == "implementer"
+                && prompt.contains("gh pr merge 314 --squash") && prompt.contains("gh pr ready 314")
+                && prompt.contains("gh pr update-branch 314"))));
+    let delivered = acknowledge_prompt(&mut run, "merge");
+    assert!(
+        delivered
+            .effects
+            .iter()
+            .all(|effect| !closes_implementer(effect)),
+        "asking for the merge never closes the implementer: {:?}",
+        delivered.effects
+    );
+    assert_eq!(
+        run.state,
+        RunState::Running,
+        "delivering the request is not a merge: the run keeps waiting"
+    );
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
+    assert!(run.step("close_implementer").is_none());
+    assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+}
+
+#[test]
+fn issue_review_verified_merge_closes_the_implementer_then_completes() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    approve_and_deliver_merge(&mut run);
+
+    // The implementer reports the merge; only now is GitHub asked.
+    let mut effects = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "merge_wait",
+            Some(Classification::Completed),
+            Some("Squash-merged PR 314."),
+        ),
+    )
+    .effects;
+    effects.extend(advance(&mut run, &tick(8)).effects);
+    assert!(
+        effects.iter().any(|effect| matches!(effect,
+            Effect::CallGithub { node_id, action: GithubActionKind::ConfirmPrMerged, .. }
+                if node_id == "merge_verify")),
+        "the merge is verified on GitHub: {effects:?}"
+    );
+    assert!(
+        effects.iter().all(|effect| !closes_implementer(effect)),
+        "nothing is closed on the strength of the agent's own report: {effects:?}"
+    );
+
+    let mut after = advance(&mut run, &github_result("merge_verify", true, None)).effects;
+    after.extend(advance(&mut run, &tick(8)).effects);
+    after.extend(advance(&mut run, &tick(8)).effects);
+    assert!(
+        after.iter().any(closes_implementer),
+        "a confirmed merge closes the implementer: {after:?}"
+    );
+    assert!(after.iter().any(|effect| matches!(effect,
+        Effect::Notify { message } if message.contains("approved for PR #314") && message.contains("squash-merged"))));
+    assert_eq!(run.state, RunState::Completed);
+    assert!(run.step("merge_unconfirmed").is_none() && run.step("merge_blocked").is_none());
+}
+
+#[test]
+fn issue_review_unconfirmed_merge_leaves_the_implementer_open_and_says_why() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    approve_and_deliver_merge(&mut run);
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "merge_wait",
+            Some(Classification::Completed),
+            Some("Squash-merged PR 314."),
+        ),
+    );
+    advance(&mut run, &tick(8));
+
+    // The agent said it merged; GitHub says otherwise.
+    let mut effects = advance(
+        &mut run,
+        &github_result(
+            "merge_verify",
+            false,
+            Some("PR #314 is still open and has not been merged"),
+        ),
+    )
+    .effects;
+    effects.extend(advance(&mut run, &tick(8)).effects);
+
+    assert!(
+        effects.iter().all(|effect| !closes_implementer(effect)),
+        "{effects:?}"
+    );
+    assert!(run.step("close_implementer").is_none());
+    assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+    assert!(
+        effects.iter().any(|effect| matches!(effect,
+        Effect::Notify { message }
+            if message.contains("not confirmed") && message.contains("still open")
+                && message.contains("left open"))),
+        "{effects:?}"
+    );
+    assert_eq!(
+        run.state,
+        RunState::Completed,
+        "the run is handed back, not failed"
+    );
+}
+
+#[test]
+fn issue_review_blocked_merge_report_leaves_the_implementer_open_without_asking_github() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    approve_and_deliver_merge(&mut run);
+
+    let mut effects = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "merge_wait",
+            Some(Classification::Blocked),
+            Some("A required check failed; I stopped instead of merging."),
+        ),
+    )
+    .effects;
+    effects.extend(advance(&mut run, &tick(8)).effects);
+
+    assert!(run.step("merge_verify").is_none(), "GitHub is never asked");
+    assert!(
+        effects.iter().all(|effect| !closes_implementer(effect)),
+        "{effects:?}"
+    );
+    assert!(effects.iter().any(|effect| matches!(effect,
+        Effect::Notify { message }
+            if message.contains("could not complete the squash-merge") && message.contains("left open"))),
+        "{effects:?}");
+    assert_eq!(run.step("implementer").unwrap().agent_node_id, Some(700));
+    assert_eq!(run.state, RunState::Completed);
+}
+
+#[test]
+fn issue_review_unfinished_merge_turn_keeps_waiting_and_closes_nothing() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    approve_and_deliver_merge(&mut run);
+
+    let working = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "merge_wait",
+            Some(Classification::Working),
+            Some("Still waiting for the checks."),
+        ),
+    );
+    advance(&mut run, &tick(8));
+
+    assert_eq!(status_of(&run, "merge_wait"), StepStatus::Running);
+    assert!(run.step("merge_verify").is_none());
+    assert!(working
+        .effects
+        .iter()
+        .all(|effect| !closes_implementer(effect)));
+    assert_eq!(run.state, RunState::Running);
+}
+
+// -- issue-driven Autopilot review blueprint contract (#1469) -----------
+
+/// An issue run whose `finish` prompt step failed, exactly as the ledger
+/// holds it once the worker has failed the run: finish Failed, run Failed.
+fn issue_run_failed_at_finish() -> RunView {
+    let mut run = issue_review_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(8));
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "collaborator_gate".into(),
+        },
+    );
+    advance(&mut run, &tick(8));
+    run.attach_agent_node("implementer", 700);
+    advance_with_completion_evidence(&mut run, &agent_finished(700, true));
+    advance_with_report_evidence(
+        &mut run,
+        &classified("implementation_classifier", Some(Classification::Completed)),
+    );
+    assert_eq!(status_of(&run, "finish"), StepStatus::Running);
+    let finish = run.step_mut("finish").unwrap();
+    finish.status = StepStatus::Failed;
+    finish.outcome = Some(StepOutcome::Failed);
+    finish.error = Some("Prompt delivery failed".into());
+    run.state = RunState::Failed;
+    run
+}
+
+/// The operator chose "Retry this step": the failed step is queued again as
+/// the next attempt and the run re-enters the queue (what the recovery
+/// command writes).
+#[test]
+fn a_run_reopened_by_retry_runs_the_failed_step_again_and_carries_on() {
+    let mut run = issue_run_failed_at_finish();
+    let finish = run.step_mut("finish").unwrap();
+    finish.status = StepStatus::Queued;
+    finish.attempt = 2;
+    finish.outcome = None;
+    finish.error = None;
+    run.state = RunState::Pending;
+
+    advance(&mut run, &CircuitEvent::Triggered);
+    assert_eq!(run.state, RunState::Running, "admission reopens the run");
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "finish"), StepStatus::Running);
+    assert_eq!(
+        run.step("finish").unwrap().attempt,
+        2,
+        "it is a new attempt"
+    );
+
+    let sent = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "finish".into(),
+        },
+    );
+    assert!(
+        sent.effects.iter().any(|effect| matches!(effect,
+            Effect::InjectPty { node_id, target_node_id: Some(target), .. }
+                if node_id == "finish" && target == "implementer")),
+        "the prompt is delivered to the implementer again: {:?}",
+        sent.effects
+    );
+    acknowledge_prompt(&mut run, "finish");
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "finish"), StepStatus::Completed);
+    assert_eq!(
+        status_of(&run, "finish_classifier"),
+        StepStatus::Running,
+        "the run is on the next stage"
+    );
+    assert_ne!(run.state, RunState::Failed);
+}
+
+/// The operator chose "I've done this - continue": the step is recorded as
+/// completed and the run re-enters the queue.
+#[test]
+fn a_run_reopened_by_continue_moves_straight_to_the_next_stage() {
+    let mut run = issue_run_failed_at_finish();
+    let finish = run.step_mut("finish").unwrap();
+    finish.status = StepStatus::Completed;
+    finish.outcome = Some(StepOutcome::Completed);
+    finish.error = None;
+    run.context.set("node.finish.status", "completed");
+    run.state = RunState::Pending;
+
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(8));
+    advance(&mut run, &tick(8));
+
+    assert_eq!(run.state, RunState::Running);
+    assert_eq!(
+        run.step("finish").unwrap().attempt,
+        1,
+        "the step is not run again"
+    );
+    assert_eq!(
+        status_of(&run, "finish_classifier"),
+        StepStatus::Running,
+        "the work after the step starts without sending the prompt again"
+    );
+}
+
+#[test]
+fn issue_review_explicit_approval_completes_without_requesting_more_changes() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 701);
+    approve_and_deliver_merge(&mut run);
+    advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "merge_wait",
+            Some(Classification::Completed),
+            Some("Squash-merged PR 314."),
+        ),
+    );
+    advance(&mut run, &tick(8));
+    let mut effects = advance(&mut run, &github_result("merge_verify", true, None)).effects;
+    effects.extend(advance(&mut run, &tick(8)).effects);
+    effects.extend(advance(&mut run, &tick(8)).effects);
+    assert_eq!(run.state, RunState::Completed);
+    assert!(run.step("follow_feedback").is_none());
+    assert!(run.step("re_review").is_none());
+    assert!(effects
+        .iter()
+        .any(|e| matches!(e, Effect::Notify { message }
+        if message.contains("approved") && message.contains("314"))));
+}
+
+#[test]
+fn issue_review_blocked_verdict_fails_immediately_and_notifies() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 702);
+    let transition = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Blocked),
+            Some("Cannot review: provider access is unavailable."),
+        ),
+    );
+    let terminal = advance(&mut run, &tick(8));
+    assert_eq!(run.state, RunState::Failed);
+    assert_eq!(status_of(&run, "review_blocked"), StepStatus::Completed);
+    assert!(transition
+        .effects
+        .iter()
+        .chain(&terminal.effects)
+        .any(|effect| matches!(effect,
+        Effect::Notify { message } if message.contains("Review is blocked"))));
+}
+
+#[test]
+fn issue_review_legacy_completed_classifier_cannot_become_approval_after_upgrade() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+    for step in &mut run.steps {
+        step.status = StepStatus::Completed;
+    }
+    let mut old = StepView::new("review_classifier", StepStatus::Completed);
+    old.outcome = Some(StepOutcome::Completed);
+    run.steps.push(old);
+    run.context
+        .set("node.review_classifier.classification", "completed");
+    run.context
+        .set("node.reviewer.output", "Changes requested.");
+    let t = advance(&mut run, &tick(8));
+    assert!(run.step("close_approved").is_none());
+    assert!(run.step("merge").is_none());
+    assert!(run.step("complete").is_none());
+    assert_eq!(run.state, RunState::Failed);
+    assert!(!t.effects.iter().any(
+        |e| matches!(e, Effect::Notify { message } if message.contains("Review approved"))
+    ));
+}
+//
+// The contract pins these paths in `blueprint_contract.rs`; the
+// stepper tests here exercise them through the actual decision
+// core so a refactor that silently changes routing fails here, not
+// at runtime. The contract acceptance criterion is "the reviewer is
+// reached only after a successful implementation/PR path and
+// feedback closes the reviewer branch correctly" — every test below
+// is named to match that contract.
+
+/// The collaborator gate parks in `Blocked` and only the user's
+/// `CollaboratorApproved` event releases it. No implementation agent
+/// spawns before that — the implementation is gated on a trusted
+/// human label.
+#[test]
+fn issue_review_collaborator_gate_blocks_until_human_approval() {
+    let mut run = issue_review_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    // First tick parks the gate — no spawn effect yet.
+    let t = advance(&mut run, &tick(8));
+    assert_eq!(
+        run.step("collaborator_gate").map(|s| s.status),
+        Some(StepStatus::Blocked),
+        "collaborator_gate must park Blocked after first tick"
+    );
+    assert!(run.step("implementer").is_none());
+    assert!(t.effects.is_empty(), "no spawn effect before approval");
+
+    // A spurious tick does not advance the graph while blocked.
+    let parked = advance(&mut run, &tick(8));
+    assert!(parked.is_empty());
+
+    // Approving the gate flips it to Completed; the next tick (the
+    // worker's capacity pass — `cascade_after_completion` deliberately
+    // skips agent spawns) then schedules the implementer.
+    advance(
+        &mut run,
+        &CircuitEvent::CollaboratorApproved {
+            node_id: "collaborator_gate".into(),
+        },
+    );
+    assert_eq!(
+        run.step("collaborator_gate").map(|s| s.status),
+        Some(StepStatus::Completed)
+    );
+    assert!(
+        run.step("implementer").is_none(),
+        "implementer awaits next tick"
+    );
+
+    let approved = advance(&mut run, &tick(8));
+    assert_eq!(
+        run.step("implementer").map(|s| s.status),
+        Some(StepStatus::Running)
+    );
+    assert!(approved
+        .effects
+        .iter()
+        .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "implementer")));
+}
+
+/// On PR success the reviewer spawns. `pr.*` is populated from the
+/// `GithubActionResult` and the reviewer's classifier receives the
+/// captured reviewer output. The contract's "implementation
+/// completion → PR creation → reviewer spawn" chain is this single
+/// observable sequence.
+#[test]
+fn issue_review_implementation_completion_spawns_reviewer_after_pr() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+    assert!(
+        run.step("reviewer").is_none(),
+        "reviewer must not exist yet"
+    );
+
+    // The PR-success event populates `pr.*` and stamps open_pr
+    // Completed — but `cascade_after_completion` deliberately
+    // filters out agent-spawning nodes (the worker's next Tick is
+    // what schedules them). The Tick on the next line is the
+    // one that fires the reviewer spawn.
+    let pr_result = advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(314),
+            pr_url: Some("https://github.com/example/repo/pull/314".into()),
+            pr_head_ref: Some("gh42".into()),
+            pr_title: Some("Improve the widget".into()),
+            error: None,
+        },
+    );
+    assert_eq!(run.context.get("pr.number"), Some("314"));
+    assert!(
+        pr_result
+            .effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SpawnAgentNode { .. })),
+        "GithubActionResult itself must NOT spawn agents — capacity pass is the scheduler"
+    );
+
+    // The Tick on the open_pr Completed fan-out schedules the
+    // reviewer (OpenPr → reviewer OnCompleted edge). It MUST be
+    // the only agent spawned, and MUST NOT fan out a Notify
+    // (the `complete` notify is gated on retry exhaustion, not
+    // the happy path).
+    let spawn_reviewer = advance(&mut run, &tick(8));
+    assert!(
+        spawn_reviewer
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")),
+        "PR success must schedule the reviewer spawn on the next tick"
+    );
+    assert_eq!(
+        spawn_reviewer
+            .effects
+            .iter()
+            .filter(|e| matches!(e, Effect::SpawnAgentNode { .. }))
+            .count(),
+        1,
+        "PR success must NOT spawn any other agent (no implementer re-spawn, no extras)"
+    );
+    assert!(
+        spawn_reviewer
+            .effects
+            .iter()
+            .all(|e| !matches!(e, Effect::Notify { .. })),
+        "PR success must NOT fan out a Notify (complete is gated on retry exhaustion)"
+    );
+    assert_eq!(status_of(&run, "reviewer"), StepStatus::Running);
+}
+
+#[test]
+fn two_issue_review_runs_spawn_reviewers_while_retaining_implementers() {
+    let mut runs = [issue_review_run(), issue_review_run()];
+    for run in &mut runs {
+        issue_review_to_open_pr(run);
+        assert_eq!(
+            run.step("implementer").and_then(|step| step.agent_node_id),
+            Some(700)
+        );
+        advance(
+            run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: true,
+                pr_number: Some(314),
+                pr_url: Some("https://github.com/example/repo/pull/314".into()),
+                pr_head_ref: Some("gh42".into()),
+                pr_title: Some("Improve the widget".into()),
+                error: None,
+            },
+        );
+    }
+
+    // Each run receives the remaining slot from its durable lease. The
+    // worker reserves the complete blueprint before admission, so peer
+    // runs cannot consume capacity needed by this reviewer.
+    for run in &mut runs {
+        let transition = advance(run, &tick(1));
+        assert_eq!(status_of(run, "reviewer"), StepStatus::Running);
+        assert_eq!(
+            transition.effects,
+            vec![Effect::SpawnAgentNode {
+                node_id: "reviewer".into(),
+            }]
+        );
+    }
+}
+
+/// The reviewer's classifier output lands in `node.<id>.output` for
+/// downstream steps (the contract acceptance: "reviewer output").
+#[test]
+fn issue_review_reviewer_output_is_captured_into_node_context() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 9001);
+    let _ = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Working),
+            Some("The implementation misses an explicit cleanup hook."),
+        ),
+    );
+    assert_eq!(
+        run.context.get("node.reviewer.output"),
+        Some("The implementation misses an explicit cleanup hook.")
+    );
+    // The follow_feedback step runs the implementation agent and is
+    // waiting on AgentReady.
+    assert_eq!(status_of(&run, "follow_feedback"), StepStatus::Running);
+}
+
+/// `follow_feedback` injects into the IMPLEMENTATION agent (NOT the
+/// reviewer). A wrong-target inject is the easiest way to silently
+/// break the loop.
+#[test]
+fn issue_review_feedback_injection_targets_the_implementer_not_the_reviewer() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 9001);
+    let _ = advance_with_report_evidence(
+        &mut run,
+        &classified_with_output(
+            "review_classifier",
+            Some(Classification::Working),
+            Some("reviewer report"),
+        ),
+    );
+    let t = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "follow_feedback".into(),
+        },
+    );
+    let inject = t.effects.iter().find_map(|e| match e {
+        Effect::InjectPty {
+            node_id,
+            target_node_id,
+            prompt,
+        } => Some((node_id, target_node_id, prompt)),
+        _ => None,
+    });
+    let (node_id, target_node_id, prompt) =
+        inject.expect("follow_feedback must emit an InjectPty effect");
+    assert_eq!(node_id, "follow_feedback");
+    assert_eq!(
+        target_node_id.as_deref(),
+        Some("implementer"),
+        "feedback MUST target the implementation agent, not the reviewer"
+    );
+    // The effect carries the *resolved* template — the captured
+    // reviewer output must land in the resolved text.
+    assert!(
+        prompt.contains("reviewer report"),
+        "feedback prompt must contain the captured reviewer output: {prompt}"
+    );
+    assert!(
+        prompt.contains("PR #314"),
+        "feedback prompt must cite the PR number: {prompt}"
+    );
+}
+
+/// The reviewer is closed on approval. The implementer is closed in exactly
+/// one place, after GitHub confirmed the merge: closing it any earlier would
+/// discard the work.
+#[test]
+fn issue_review_only_approval_closes_the_reviewer() {
+    let graph = CircuitGraph::issue_driven_autopilot_review("buildmesh:run");
+    let closes: Vec<(&str, Option<&str>)> = graph
+        .nodes
+        .iter()
+        .filter_map(|node| match &node.kind {
+            CircuitNodeKind::CloseAgentNode { target_node_id } => {
+                Some((node.id.as_str(), target_node_id.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        closes,
+        vec![
+            ("close_approved", Some("reviewer")),
+            ("close_implementer", Some("implementer"))
+        ]
+    );
+}
+
+#[test]
+fn issue_review_three_real_rounds_exhaust_without_claiming_approval() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 9001);
+    for round in 1..=3 {
+        let result = request_changes_and_fix(&mut run, "Changes requested: fix the race.");
+        assert_eq!(run.step("reviewer").unwrap().agent_node_id, Some(9001));
+        if round < 3 {
+            assert_eq!(run.state, RunState::Running);
+            assert_eq!(status_of(&run, "re_review"), StepStatus::Queued);
+            let next = advance(&mut run, &tick(8));
+            assert!(
+                !next.effects.iter().any(|e| matches!(
+                    e,
+                    Effect::SpawnAgentNode { .. } | Effect::CallGithub { .. }
+                )),
+                "a new round must re-prompt the open reviewer: {:?}",
+                next.effects
+            );
+            advance(
+                &mut run,
+                &CircuitEvent::AgentReady {
+                    node_id: "re_review".into(),
+                },
+            );
+            acknowledge_prompt(&mut run, "re_review");
+            advance(&mut run, &tick(8));
+            assert_eq!(status_of(&run, "review_classifier"), StepStatus::Running);
+        } else {
+            let last = advance(&mut run, &tick(8));
+            assert_eq!(run.state, RunState::Failed);
+            assert!(run.step("complete").is_none());
+            assert!(
+                run.step("merge").is_none(),
+                "an unapproved PR is never handed off to merge"
+            );
+            assert!(
+                result
+                    .effects
+                    .iter()
+                    .chain(&last.effects)
+                    .any(|e| matches!(e,
+                    Effect::Notify { message } if message.contains("not been approved"))),
+                "terminal effects: {:?} / {:?}; state={:?}; exhausted={:?}; retry={:?}",
+                result.effects,
+                last.effects,
+                run.state,
+                run.step("review_exhausted"),
+                run.step("review_retry")
+            );
+        }
+    }
+}
+
+/// The retry path's `Completed` outcome re-queues `re_review` for the
+/// next round (attempt increments), and `retry.attempt` /
+/// `retry.max_retries` land in the run context for the prompt.
+#[test]
+fn issue_review_retry_completed_requeues_the_re_review_with_incremented_attempt() {
+    let mut run = issue_review_run();
+    issue_review_to_first_verdict(&mut run, 9001);
+    request_changes_and_fix(&mut run, "reviewer report");
+    assert_eq!(
+        run.step("review_retry").map(|s| s.status),
+        Some(StepStatus::Completed)
+    );
+    assert_eq!(
+        run.step("re_review").map(|s| s.status),
+        Some(StepStatus::Queued),
+        "review_retry Completed must re-queue the re-review prompt"
+    );
+    assert_eq!(run.step("re_review").unwrap().attempt, 2);
+    assert_eq!(run.context.get("retry.attempt"), Some("2"));
+    assert_eq!(run.context.get("retry.max_retries"), Some("3"));
+}
+
+/// Wrapup-retry exhaustion mirrors review_retry: after 3 failed
+/// OpenPr attempts, the wrapup_correction loop terminates — but
+/// here the run ends Failed (no review spawned). The contract pins
+/// that `OpenPr failed` does NOT spawn the reviewer, ever.
+#[test]
+fn issue_review_wrapup_retry_exhaustion_terminates_without_reviewer() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+
+    // Three failed OpenPr attempts.
+    for _attempt in 0..3 {
+        let retry = advance(&mut run, &tick(8));
+        assert!(
+            !retry.effects.iter().any(
+                |e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
+            ),
+            "reviewer MUST NOT spawn while OpenPr is failing (contract acceptance)"
+        );
+        let _ = advance(
+            &mut run,
+            &CircuitEvent::GithubActionResult {
+                node_id: "open_pr".into(),
+                success: false,
+                pr_number: None,
+                pr_url: None,
+                pr_head_ref: None,
+                pr_title: None,
+                error: Some("wrap-up failed".into()),
+            },
+        );
+    }
+
+    // After 3 failed attempts the wrapup_retry budget is exhausted.
+    // The wrapup_retry gate itself never advances to a terminal
+    // state in this fixture — the stepper keeps parking it. The
+    // contract assertion here is the negative one: even after
+    // three failed attempts, NO `reviewer` step exists.
+    assert!(
+        run.step("reviewer").is_none(),
+        "reviewer must NEVER exist when OpenPr keeps failing"
+    );
+}
+
+#[test]
+fn issue_review_wrapup_failure_retries_before_spawning_reviewer() {
+    let mut run = issue_review_run();
+    issue_review_to_open_pr(&mut run);
+    advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: false,
+            pr_number: None,
+            pr_url: None,
+            pr_head_ref: None,
+            pr_title: None,
+            error: Some("autopilot wrap-up verification failed: dirty worktree".into()),
+        },
+    );
+    assert_eq!(run.state, RunState::Running);
+    let retry = advance(&mut run, &tick(8));
+    assert!(retry.effects.is_empty(), "correction waits for AgentReady");
+    assert_eq!(status_of(&run, "wrapup_retry"), StepStatus::Completed);
+    assert_eq!(status_of(&run, "wrapup_correction"), StepStatus::Running);
+    assert!(run.step("reviewer").is_none());
+
+    let correction = advance(
+        &mut run,
+        &CircuitEvent::AgentReady {
+            node_id: "wrapup_correction".into(),
+        },
+    );
+    assert!(correction.effects.iter().any(|effect| matches!(
+        effect,
+        Effect::InjectPty { target_node_id: Some(target), prompt, .. }
+            if target == "implementer" && prompt.contains("dirty worktree")
+    )));
+    acknowledge_prompt(&mut run, "wrapup_correction");
+    advance(&mut run, &tick(8));
+    assert_eq!(status_of(&run, "finish_classifier"), StepStatus::Running);
+}
+
+#[test]
+fn open_pr_result_updates_context_and_cascades_to_downstream_notify() {
+    let mut run = RunView {
+        run_id: 1,
+        graph: CircuitGraph {
+            version: 1,
+            blueprint: None,
+            nodes: vec![
+                CircuitNode {
+                    id: "t".into(),
+                    kind: CircuitNodeKind::Manual,
+                },
+                CircuitNode {
+                    id: "open_pr".into(),
+                    kind: CircuitNodeKind::GithubAction {
+                        action: GithubActionKind::OpenPr,
+                        open_pr_policy: Some(OpenPrPolicy::RequireExisting),
+                        label: None,
+                        comment: Some("ready for review".into()),
+                    },
+                },
+                CircuitNode {
+                    id: "notify".into(),
+                    kind: CircuitNodeKind::Notify {
+                        message:
+                            "PR #{{pr.number}} created at {{pr.url}} for branch {{pr.head_ref}}"
+                                .into(),
+                    },
+                },
+            ],
+            edges: vec![
+                CircuitEdge {
+                    from: "t".into(),
+                    to: "open_pr".into(),
+                    condition: Default::default(),
+                },
+                CircuitEdge {
+                    from: "open_pr".into(),
+                    to: "notify".into(),
+                    condition: Default::default(),
+                },
+            ],
+        },
+        state: RunState::Pending,
+        context: {
+            let mut ctx = CircuitContext::new();
+            ctx.set("issue.number", "42");
+            ctx.set("issue.title", "feat: exciting new feature");
+            ctx
+        },
+        steps: vec![],
+    };
+    advance(&mut run, &CircuitEvent::Triggered);
+    let t1 = advance(&mut run, &tick(5));
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Running);
+    assert_eq!(
+        t1.effects,
+        vec![Effect::CallGithub {
+            node_id: "open_pr".into(),
+            action: GithubActionKind::OpenPr,
+            label: None,
+            comment: Some("ready for review".into()),
+        }]
+    );
+
+    // Worker emits GithubActionResult with PR metadata
+    let t2 = advance(
+        &mut run,
+        &CircuitEvent::GithubActionResult {
+            node_id: "open_pr".into(),
+            success: true,
+            pr_number: Some(1361),
+            pr_url: Some("https://github.com/owner/repo/pull/1361".into()),
+            pr_head_ref: Some("buildmesh-auto/issue-42".into()),
+            pr_title: Some("feat: exciting new feature".into()),
+            error: None,
+        },
+    );
+
+    assert_eq!(status_of(&run, "open_pr"), StepStatus::Completed);
+    assert_eq!(run.context.get("pr.number"), Some("1361"));
+    assert_eq!(
+        run.context.get("pr.url"),
+        Some("https://github.com/owner/repo/pull/1361")
+    );
+    assert_eq!(
+        run.context.get("pr.head_ref"),
+        Some("buildmesh-auto/issue-42")
+    );
+
+    // Cascaded Notify resolves immediately against the populated PR context!
+    assert_eq!(status_of(&run, "notify"), StepStatus::Completed);
+    assert_eq!(
+        t2.effects,
+        vec![Effect::Notify {
+            message: "PR #1361 created at https://github.com/owner/repo/pull/1361 for branch buildmesh-auto/issue-42".into(),
+        }]
+    );
+    assert_eq!(run.state, RunState::Completed);
+}
