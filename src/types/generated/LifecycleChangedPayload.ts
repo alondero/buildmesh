@@ -71,4 +71,13 @@ semantic_turn: SemanticTurnPayload | null,
  * Absent unless the hook payload supplied a trustworthy choice list, so
  * a client can never mistake "no schema" for "no choices offered".
  */
-request?: InputRequest, };
+request?: InputRequest, 
+/**
+ * The session identity this transition invalidated, when it also cleared
+ * one (issue #2137). A `--resume` against an id with no persisted
+ * transcript erases `agent_nodes.cli_session_id`, and clients keep their
+ * own copy of that column — without this field a stale store would ask to
+ * resume the very id the backend just discarded. Present means "drop
+ * this id from your copy"; absent means the identity is unchanged.
+ */
+cleared_session_id?: string, };

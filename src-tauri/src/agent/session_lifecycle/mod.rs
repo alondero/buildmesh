@@ -96,8 +96,11 @@ use ts_rs::TS;
 /// Terminal statuses a recovery/error/input write must never resurrect
 /// (issue #654). Includes `Lost`, which is terminal for hook delivery even
 /// though it was added after the original error/archive fence.
-pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] =
-    &[SessionStatus::Error, SessionStatus::Archived, SessionStatus::Lost];
+pub(crate) const FORBIDDEN_TERMINAL: &[SessionStatus] = &[
+    SessionStatus::Error,
+    SessionStatus::Archived,
+    SessionStatus::Lost,
+];
 
 /// Hook callbacks describe a live process and must not revive a stopped node.
 const FORBIDDEN_HOOK_TRANSITION: &[SessionStatus] = &[
@@ -309,7 +312,11 @@ impl InputRequest {
     {
         let mut seen: Vec<String> = Vec::new();
         for choice in choices {
-            let choice = choice.as_ref().split_whitespace().collect::<Vec<_>>().join(" ");
+            let choice = choice
+                .as_ref()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             // Harnesses may repeat an answer across the questions of one
             // request; rendering it twice would offer the same answer twice.
             if !choice.is_empty() && !seen.contains(&choice) {
@@ -408,6 +415,15 @@ pub struct LifecycleChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request: Option<InputRequest>,
+    /// The session identity this transition invalidated, when it also cleared
+    /// one (issue #2137). A `--resume` against an id with no persisted
+    /// transcript erases `agent_nodes.cli_session_id`, and clients keep their
+    /// own copy of that column — without this field a stale store would ask to
+    /// resume the very id the backend just discarded. Present means "drop
+    /// this id from your copy"; absent means the identity is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cleared_session_id: Option<String>,
 }
 
 impl LifecycleChangedPayload {
@@ -423,7 +439,10 @@ impl LifecycleChangedPayload {
             provider: detail.provider.clone(),
             kind,
             status,
-            message: detail.message.clone().or_else(|| Some(fallback_message.to_string())),
+            message: detail
+                .message
+                .clone()
+                .or_else(|| Some(fallback_message.to_string())),
             provider_event: detail.provider_event.clone(),
             provider_session_id: detail.provider_session_id.clone(),
             completion_reason: detail.completion_reason.clone(),
@@ -432,6 +451,7 @@ impl LifecycleChangedPayload {
             signal_health: detail.signal_health,
             semantic_turn: detail.semantic_turn.clone(),
             request: detail.request.clone(),
+            cleared_session_id: None,
         }
     }
 }
@@ -484,11 +504,20 @@ pub trait SessionLifecycleSink {
 
     fn emit_attention_needed(&self, node_id: i64);
     /// Persist the observation before either transport or passive consumers see it.
-    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String>;
+    fn commit_lifecycle(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        forbidden: &[SessionStatus],
+    ) -> Result<bool, String>;
     /// Store the early-exit promotion only while the row is still `spawning`.
     /// On success, `payload` is the envelope that was stored.
-    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String>;
-    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
+    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload)
+        -> Result<bool, String>;
+    fn emit_attention_needed_with_payload(
+        &self,
+        node_id: i64,
+        semantic_turn: Option<SemanticTurnPayload>,
+    ) {
         let _ = semantic_turn;
         self.emit_attention_needed(node_id);
     }
@@ -515,10 +544,17 @@ pub struct AppSessionLifecycleSink<'a> {
 }
 
 impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
-    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+    fn commit_lifecycle(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        forbidden: &[SessionStatus],
+    ) -> Result<bool, String> {
         commit_lifecycle_with_logging(payload, forbidden)
     }
-    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+    fn commit_spawn_promotion(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+    ) -> Result<bool, String> {
         commit_spawn_promotion_with_logging(payload)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
@@ -547,21 +583,32 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
         self.emit_attention_needed_with_payload(node_id, None);
     }
 
-    fn emit_attention_needed_with_payload(&self, node_id: i64, semantic_turn: Option<SemanticTurnPayload>) {
+    fn emit_attention_needed_with_payload(
+        &self,
+        node_id: i64,
+        semantic_turn: Option<SemanticTurnPayload>,
+    ) {
         let encoded = semantic_turn
             .as_ref()
             .and_then(|turn| serde_json::to_string(turn).ok());
         let _ = db::persist_semantic_turn(node_id, encoded.as_deref());
-        let _ = self
-            .app
-            .emit("attention-needed", AttentionNeededPayload { session_id: node_id, semantic_turn });
+        let _ = self.app.emit(
+            "attention-needed",
+            AttentionNeededPayload {
+                session_id: node_id,
+                semantic_turn,
+            },
+        );
     }
 
     fn emit_attention_cleared(&self, node_id: i64) {
         let _ = db::persist_semantic_turn(node_id, None);
-        let _ = self
-            .app
-            .emit("attention-cleared", AttentionClearedPayload { session_id: node_id });
+        let _ = self.app.emit(
+            "attention-cleared",
+            AttentionClearedPayload {
+                session_id: node_id,
+            },
+        );
     }
 
     fn disarm_attention_autoclear(&self, node_id: i64) {
@@ -603,7 +650,9 @@ impl SessionLifecycleSink for AppSessionLifecycleSink<'_> {
 #[cfg(test)]
 pub mod testing;
 
-fn commit_spawn_promotion_with_logging(payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+fn commit_spawn_promotion_with_logging(
+    payload: &mut LifecycleChangedPayload,
+) -> Result<bool, String> {
     match db::agent_node::commit_spawn_promotion_inner(&db::write_conn(), payload) {
         Ok(committed) => Ok(committed),
         Err(error) => {
@@ -629,10 +678,17 @@ fn commit_lifecycle_with_logging(
 pub struct DbOnlySink;
 
 impl SessionLifecycleSink for DbOnlySink {
-    fn commit_lifecycle(&self, payload: &mut LifecycleChangedPayload, forbidden: &[SessionStatus]) -> Result<bool, String> {
+    fn commit_lifecycle(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+        forbidden: &[SessionStatus],
+    ) -> Result<bool, String> {
         commit_lifecycle_with_logging(payload, forbidden)
     }
-    fn commit_spawn_promotion(&self, payload: &mut LifecycleChangedPayload) -> Result<bool, String> {
+    fn commit_spawn_promotion(
+        &self,
+        payload: &mut LifecycleChangedPayload,
+    ) -> Result<bool, String> {
         commit_spawn_promotion_with_logging(payload)
     }
     fn write_status(&self, node_id: i64, new: SessionStatus) -> Result<(), String> {
@@ -658,7 +714,9 @@ impl SessionLifecycleSink for DbOnlySink {
     }
 
     fn emit_attention_needed(&self, _node_id: i64) {}
-    fn emit_attention_cleared(&self, node_id: i64) { let _ = db::persist_semantic_turn(node_id, None); }
+    fn emit_attention_cleared(&self, node_id: i64) {
+        let _ = db::persist_semantic_turn(node_id, None);
+    }
     fn disarm_attention_autoclear(&self, node_id: i64) {
         crate::attention_autoclear::disarm(node_id);
     }
@@ -675,10 +733,7 @@ impl SessionLifecycleSink for DbOnlySink {
 /// for its competing `Error` write (issue #654) — both writers share
 /// [`FORBIDDEN_TERMINAL`] so whichever fires first sticks and the other
 /// becomes a no-op.
-pub fn on_spawn_started(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_spawn_started(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     sink.write_status_unless_in(node_id, SessionStatus::Spawning, FORBIDDEN_TERMINAL)
 }
 
@@ -686,10 +741,7 @@ pub fn on_spawn_started(
 /// early-exit `Error` — promote `Spawning → Running`. Conditional so the
 /// reader's `Error` write wins if it already fired (issue #654).
 /// Returns `true` iff the promotion fired (false = reader won the race).
-pub fn on_spawn_complete(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_spawn_complete(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     // `node-spawn-completed` is emitted when the process is spawned, before this
     // window elapses, and its refetch can commit `spawning`. The promotion has
     // to be the same envelope a later list read returns, or the badge stays on
@@ -730,10 +782,7 @@ pub fn on_spawn_complete(
 /// may not have happened. The detached-spawn wrapper in `commands::agent`
 /// emits `node-spawn-completed` alongside this so the frontend refetches
 /// and observes the reconciled `Running` row.
-pub fn on_already_active(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_already_active(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     let wrote = sink.write_status_unless_in(node_id, SessionStatus::Running, FORBIDDEN_TERMINAL)?;
     if wrote {
         tracing::info!(
@@ -774,7 +823,35 @@ pub fn on_pty_eof_with_detail(
         detail,
         "agent process exited cleanly",
     );
-    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
+    if sink.commit_lifecycle(&mut payload, &[])? {
+        sink.emit_lifecycle_changed(payload);
+    }
+    Ok(())
+}
+
+/// [`on_pty_eof`] for the issue #2137 path: this clean exit also proved the
+/// node's stored session identity resolves to nothing, so the caller has
+/// cleared it. The id rides the transition because clients keep their own copy
+/// of `cli_session_id` and would otherwise keep asking to resume the id the
+/// backend just discarded — turning the cleared row into a
+/// "no CLI session ID is stored" error and, with the frontend's idle-keyed
+/// auto-spawn and status rollback, a tight relaunch loop with no delay.
+pub fn on_pty_eof_clearing_session(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    cleared_session_id: &str,
+) -> Result<(), String> {
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::SessionExited,
+        SessionStatus::Idle,
+        &HookSignalDetail::default(),
+        "agent process exited cleanly",
+    );
+    payload.cleared_session_id = Some(cleared_session_id.to_string());
+    if sink.commit_lifecycle(&mut payload, &[])? {
+        sink.emit_lifecycle_changed(payload);
+    }
     Ok(())
 }
 
@@ -796,6 +873,43 @@ pub fn on_resume_failed(
     Ok(())
 }
 
+/// Repeated resumes of a session that was never persisted — stop
+/// relaunching and surface the node (issue #2137).
+///
+/// A `--resume <id>` whose transcript does not exist cannot succeed, so the
+/// node would otherwise be relaunched indefinitely. This is the terminal
+/// counterpart to [`on_resume_failed`]: it writes `Lost` — which is in
+/// [`FORBIDDEN_TERMINAL`], so the frontend's idle-keyed auto-spawn cannot pick
+/// the node up again — and reports the give-up reason on both transports
+/// (`agent-lifecycle` for the clients that render status, `resume-failed` for
+/// the toast that tells the user what happened).
+///
+/// Only [`SessionStatus::Archived`] is fenced: this transition escalates a
+/// recovery `Error` to a terminal `Lost`, so the usual terminal set would
+/// block the very write it exists to perform. An archived node stays archived.
+pub fn on_resume_exhausted(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    reason: &str,
+) -> Result<(), String> {
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::Lost,
+        SessionStatus::Lost,
+        &HookSignalDetail::default(),
+        reason,
+    );
+    if sink.commit_lifecycle(&mut payload, &[SessionStatus::Archived])? {
+        sink.emit_lifecycle_changed(payload);
+        // Announced only when the write landed. `resume-failed` tells the user
+        // this node was given up on, so firing it for a node whose status did
+        // not change (already archived) would be reporting a transition that
+        // never happened.
+        sink.emit_resume_failed(node_id, reason);
+    }
+    Ok(())
+}
+
 /// The agent yielded control — mark `AwaitingInput` and broadcast
 /// `attention-needed`. Replaces `mark_attention` in
 /// `commands/attention.rs:40-46`. The autoclear arming lives here too —
@@ -810,8 +924,7 @@ pub fn on_attention_with_detail(
     node_id: i64,
     semantic_turn: Option<SemanticTurnPayload>,
 ) -> Result<(), String> {
-    on_attention_with_signal(sink, node_id, semantic_turn, &HookSignalDetail::default())
-        .map(|_| ())
+    on_attention_with_signal(sink, node_id, semantic_turn, &HookSignalDetail::default()).map(|_| ())
 }
 
 /// [`on_attention_with_detail`] with a full provider envelope (issue #1364).
@@ -825,25 +938,43 @@ pub fn on_attention_with_signal(
     semantic_turn: Option<SemanticTurnPayload>,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    let detail = HookSignalDetail { semantic_turn: semantic_turn.clone(), ..detail.clone() };
+    let detail = HookSignalDetail {
+        semantic_turn: semantic_turn.clone(),
+        ..detail.clone()
+    };
     let kind = attention_kind(semantic_turn.as_ref(), &detail);
-    let mut payload = LifecycleChangedPayload::new(node_id, kind, SessionStatus::AwaitingInput, &detail, "agent is waiting for input");
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        kind,
+        SessionStatus::AwaitingInput,
+        &detail,
+        "agent is waiting for input",
+    );
     let forbidden = if detail.provider.is_some() || detail.provider_event.is_some() {
         FORBIDDEN_HOOK_TRANSITION
     } else {
         FORBIDDEN_TERMINAL
     };
-    if !sink.commit_lifecycle(&mut payload, forbidden)? { return Ok(false); }
+    if !sink.commit_lifecycle(&mut payload, forbidden)? {
+        return Ok(false);
+    }
     sink.emit_attention_needed_with_payload(node_id, semantic_turn);
     sink.emit_lifecycle_changed(payload);
     Ok(true)
 }
 
-fn attention_kind(semantic_turn: Option<&SemanticTurnPayload>, detail: &HookSignalDetail) -> LifecycleKind {
-    detail.kind.unwrap_or(match semantic_turn.map(|turn| turn.kind) {
-        Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation) => LifecycleKind::PermissionRequested,
-        _ => LifecycleKind::InputRequired,
-    })
+fn attention_kind(
+    semantic_turn: Option<&SemanticTurnPayload>,
+    detail: &HookSignalDetail,
+) -> LifecycleKind {
+    detail
+        .kind
+        .unwrap_or(match semantic_turn.map(|turn| turn.kind) {
+            Some(SemanticTurnKind::PermissionRequest | SemanticTurnKind::CommandConfirmation) => {
+                LifecycleKind::PermissionRequested
+            }
+            _ => LifecycleKind::InputRequired,
+        })
 }
 
 /// The user typed into the node (or the autoclear safety net, or
@@ -852,10 +983,7 @@ fn attention_kind(semantic_turn: Option<&SemanticTurnPayload>, detail: &HookSign
 /// `commands/attention.rs:63-74` plus the matching emits in
 /// `http/ws.rs:215-218`, `coordinator/drive.rs:197-201`,
 /// `circuit/delivery.rs:355-357`, `attention_autoclear.rs:104-119`.
-pub fn on_attention_cleared(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<(), String> {
+pub fn on_attention_cleared(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<(), String> {
     on_hook_running(sink, node_id)?;
     Ok(())
 }
@@ -871,18 +999,21 @@ pub fn commit_user_resumed(
     sink: &dyn SessionLifecycleSink,
     node_id: i64,
 ) -> Result<Option<LifecycleChangedPayload>, String> {
-    commit_settled_signal(sink, LifecycleChangedPayload::new(
-        node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
-        &HookSignalDetail::default(), "agent resumed work",
-    ))
+    commit_settled_signal(
+        sink,
+        LifecycleChangedPayload::new(
+            node_id,
+            LifecycleKind::WorkResumed,
+            SessionStatus::Running,
+            &HookSignalDetail::default(),
+            "agent resumed work",
+        ),
+    )
 }
 
 /// A harness reports that work resumed. Unlike manual input, a delayed hook
 /// must not revive a stopped node. Returns false when the callback is stale.
-pub fn on_hook_running(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_hook_running(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     on_hook_running_with_detail(sink, node_id, &HookSignalDetail::default())
 }
 
@@ -893,13 +1024,22 @@ pub fn on_hook_running_with_detail(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    applied(sink, LifecycleChangedPayload::new(
-        node_id, LifecycleKind::WorkResumed, SessionStatus::Running,
-        detail, "agent resumed work",
-    ))
+    applied(
+        sink,
+        LifecycleChangedPayload::new(
+            node_id,
+            LifecycleKind::WorkResumed,
+            SessionStatus::Running,
+            detail,
+            "agent resumed work",
+        ),
+    )
 }
 
-fn applied(sink: &dyn SessionLifecycleSink, payload: LifecycleChangedPayload) -> Result<bool, String> {
+fn applied(
+    sink: &dyn SessionLifecycleSink,
+    payload: LifecycleChangedPayload,
+) -> Result<bool, String> {
     Ok(commit_settled_signal(sink, payload)?.is_some())
 }
 
@@ -912,7 +1052,9 @@ fn commit_settled_signal(
     // schema belongs to the awaiting signal that carried it, never to the
     // running/ready signal that follows.
     payload.request = None;
-    if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? { return Ok(None); }
+    if !sink.commit_lifecycle(&mut payload, FORBIDDEN_HOOK_TRANSITION)? {
+        return Ok(None);
+    }
     let published = payload.clone();
     emit_settled_signal(sink, payload);
     Ok(Some(published))
@@ -955,7 +1097,9 @@ pub fn on_idle_with_detail(
         detail,
         "no live agent process",
     );
-    if sink.commit_lifecycle(&mut payload, &[])? { sink.emit_lifecycle_changed(payload); }
+    if sink.commit_lifecycle(&mut payload, &[])? {
+        sink.emit_lifecycle_changed(payload);
+    }
     Ok(())
 }
 
@@ -975,13 +1119,15 @@ pub fn on_error_with_detail(
     detail: &HookSignalDetail,
 ) -> Result<(), String> {
     let mut payload = LifecycleChangedPayload::new(
-            node_id,
-            LifecycleKind::Error,
-            SessionStatus::Error,
-            detail,
-            "agent process error",
-        );
-    if sink.commit_lifecycle(&mut payload, FORBIDDEN_TERMINAL)? { sink.emit_lifecycle_changed(payload); }
+        node_id,
+        LifecycleKind::Error,
+        SessionStatus::Error,
+        detail,
+        "agent process error",
+    );
+    if sink.commit_lifecycle(&mut payload, FORBIDDEN_TERMINAL)? {
+        sink.emit_lifecycle_changed(payload);
+    }
     Ok(())
 }
 
@@ -998,10 +1144,7 @@ pub fn on_error_with_detail(
 /// debug-level log is emitted. The caller still emits a
 /// `node-spawn-failed` Tauri event for UI awareness — surfacing that
 /// this attempt was deferred, without changing the recoverable DB row.
-pub fn on_error_if_pending(
-    sink: &dyn SessionLifecycleSink,
-    node_id: i64,
-) -> Result<bool, String> {
+pub fn on_error_if_pending(sink: &dyn SessionLifecycleSink, node_id: i64) -> Result<bool, String> {
     let current = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     if current.status != SessionStatus::Pending {
         tracing::debug!(
@@ -1027,10 +1170,16 @@ pub fn on_turn_completed(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    applied(sink, LifecycleChangedPayload::new(
-        node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready, detail,
-        "turn finished - agent is ready for another prompt",
-    ))
+    applied(
+        sink,
+        LifecycleChangedPayload::new(
+            node_id,
+            LifecycleKind::TurnCompleted,
+            SessionStatus::Ready,
+            detail,
+            "turn finished - agent is ready for another prompt",
+        ),
+    )
 }
 
 pub(crate) struct CircuitTurnRecovery<'a> {
@@ -1042,24 +1191,39 @@ pub(crate) struct CircuitTurnRecovery<'a> {
 }
 
 pub(crate) fn recover_turn_completed(
-    sink: &dyn SessionLifecycleSink, node_id: i64, detail: &HookSignalDetail,
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    detail: &HookSignalDetail,
     recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
-    let mut payload = LifecycleChangedPayload::new(node_id, LifecycleKind::TurnCompleted, SessionStatus::Ready,
-        detail, "turn finished - agent is ready for another prompt");
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::TurnCompleted,
+        SessionStatus::Ready,
+        detail,
+        "turn finished - agent is ready for another prompt",
+    );
     payload.semantic_turn = None;
     payload.request = None;
     let committed = recover_circuit_turn(node_id, &mut payload, recovery)?;
-    if committed { emit_settled_signal(sink, payload); }
+    if committed {
+        emit_settled_signal(sink, payload);
+    }
     Ok(committed)
 }
 
 pub(crate) fn recover_attention(
-    sink: &dyn SessionLifecycleSink, node_id: i64,
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
     recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
-    let mut payload = LifecycleChangedPayload::new(node_id, LifecycleKind::InputRequired, SessionStatus::AwaitingInput,
-        &HookSignalDetail::default(), "agent is waiting for input");
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::InputRequired,
+        SessionStatus::AwaitingInput,
+        &HookSignalDetail::default(),
+        "agent is waiting for input",
+    );
     let committed = recover_circuit_turn(node_id, &mut payload, recovery)?;
     if committed {
         sink.emit_attention_needed_with_payload(node_id, None);
@@ -1069,23 +1233,42 @@ pub(crate) fn recover_attention(
 }
 
 fn recover_circuit_turn(
-    node_id: i64, payload: &mut LifecycleChangedPayload, recovery: &CircuitTurnRecovery<'_>,
+    node_id: i64,
+    payload: &mut LifecycleChangedPayload,
+    recovery: &CircuitTurnRecovery<'_>,
 ) -> Result<bool, String> {
-    if recovery.fence.agent_node_id != node_id { return Ok(false); }
+    if recovery.fence.agent_node_id != node_id {
+        return Ok(false);
+    }
     let committed = {
         // Acquire SQLite before the per-agent input guard. Waiting for the
         // writer must never freeze registry access or terminal keystrokes.
         let mut conn = db::write_conn();
-        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(node_id, recovery.input, recovery.observed_at_ms, || {
-            if recovery.cancelled.load(std::sync::atomic::Ordering::Acquire) { return Ok(false); }
-            let transaction = conn.transaction().map_err(|error| error.to_string())?;
-            let committed = db::agent_node::recover_circuit_agent_turn_inner(&transaction, recovery.fence, recovery.stamp, payload)
+        crate::agent::process::PROCESS_REGISTRY.commit_recovered_turn(
+            node_id,
+            recovery.input,
+            recovery.observed_at_ms,
+            || {
+                if recovery
+                    .cancelled
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    return Ok(false);
+                }
+                let transaction = conn.transaction().map_err(|error| error.to_string())?;
+                let committed = db::agent_node::recover_circuit_agent_turn_inner(
+                    &transaction,
+                    recovery.fence,
+                    recovery.stamp,
+                    payload,
+                )
                 .map_err(|error| error.to_string())?;
-            if committed {
-                transaction.commit().map_err(|error| error.to_string())?;
-            }
-            Ok(committed)
-        })?
+                if committed {
+                    transaction.commit().map_err(|error| error.to_string())?;
+                }
+                Ok(committed)
+            },
+        )?
     };
     Ok(committed)
 }
@@ -1101,13 +1284,16 @@ pub fn on_background_running(
     node_id: i64,
     detail: &HookSignalDetail,
 ) -> Result<bool, String> {
-    applied(sink, LifecycleChangedPayload::new(
-        node_id,
-        LifecycleKind::BackgroundRunning,
-        SessionStatus::Running,
-        detail,
-        "agent busy on background work",
-    ))
+    applied(
+        sink,
+        LifecycleChangedPayload::new(
+            node_id,
+            LifecycleKind::BackgroundRunning,
+            SessionStatus::Running,
+            detail,
+            "agent busy on background work",
+        ),
+    )
 }
 
 /// Initial node creation — mark `Pending`. Used by
@@ -1154,8 +1340,14 @@ pub fn on_exit_sweep() -> Result<usize, String> {
 mod tests {
     #[test]
     fn attention_clear_cannot_resurrect_a_terminal_node() {
-        for status in [SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
-            SessionStatus::Suspended, SessionStatus::Completed, SessionStatus::Lost] {
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::Error,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+            SessionStatus::Completed,
+            SessionStatus::Lost,
+        ] {
             let sink = RecordingSink::with_status(status);
             on_attention_cleared(&sink, 7).unwrap();
             assert_eq!(sink.status(), Some(status));
@@ -1166,7 +1358,10 @@ mod tests {
     #[test]
     fn lost_node_rejects_all_late_hook_transitions() {
         let sink = RecordingSink::with_status(SessionStatus::Lost);
-        let detail = HookSignalDetail { provider: Some("anthropic".into()), ..Default::default() };
+        let detail = HookSignalDetail {
+            provider: Some("anthropic".into()),
+            ..Default::default()
+        };
         assert!(!on_hook_running_with_detail(&sink, 7, &detail).unwrap());
         assert!(!on_turn_completed(&sink, 7, &detail).unwrap());
         assert!(!on_background_running(&sink, 7, &detail).unwrap());
@@ -1205,7 +1400,10 @@ mod tests {
     fn on_spawn_complete_writes_running_only_if_currently_spawning() {
         let sink = RecordingSink::with_status(SessionStatus::Spawning);
         let promoted = on_spawn_complete(&sink, 7).unwrap();
-        assert!(promoted, "on_spawn_complete must report success on a happy path");
+        assert!(
+            promoted,
+            "on_spawn_complete must report success on a happy path"
+        );
         let w = sink.writes_if();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0], (7, SessionStatus::Running, SessionStatus::Spawning));
@@ -1214,7 +1412,11 @@ mod tests {
         // ("Starting…") and then nothing else publishes the promotion. Clients
         // leave Starting only if this transition emits the resulting status.
         let events = sink.lifecycle_changed();
-        assert_eq!(events.len(), 1, "surviving the early-exit window must publish Running");
+        assert_eq!(
+            events.len(),
+            1,
+            "surviving the early-exit window must publish Running"
+        );
         assert_eq!(events[0].session_id, 7);
         assert_eq!(events[0].status, SessionStatus::Running);
         assert_eq!(events[0].kind, LifecycleKind::ProcessRunning);
@@ -1226,7 +1428,10 @@ mod tests {
     fn on_spawn_complete_does_not_publish_when_the_row_left_spawning() {
         let sink = RecordingSink::with_status(SessionStatus::Error);
         let promoted = on_spawn_complete(&sink, 7).unwrap();
-        assert!(!promoted, "a row that is no longer Spawning must not be promoted");
+        assert!(
+            !promoted,
+            "a row that is no longer Spawning must not be promoted"
+        );
         assert_eq!(sink.status(), Some(SessionStatus::Error));
         assert!(
             sink.lifecycle_changed().is_empty(),
@@ -1267,7 +1472,11 @@ mod tests {
         assert!(sink.attention_needed().is_empty());
         assert!(sink.attention_cleared().is_empty());
         let events = sink.lifecycle_changed();
-        assert_eq!(events.len(), 1, "clean EOF must emit agent-lifecycle (issue #1364)");
+        assert_eq!(
+            events.len(),
+            1,
+            "clean EOF must emit agent-lifecycle (issue #1364)"
+        );
         assert_eq!(events[0].session_id, 7);
         assert_eq!(events[0].kind, LifecycleKind::SessionExited);
         assert_eq!(events[0].status, SessionStatus::Idle);
@@ -1283,14 +1492,23 @@ mod tests {
             "a clean turn completion must land in Ready, never Completed (issue #1364)"
         );
         assert_eq!(sink.attention_cleared(), vec![7]);
-        assert_eq!(sink.effects(), vec![
-            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
-        ]);
+        assert_eq!(
+            sink.effects(),
+            vec![
+                "status-written",
+                "autoclear-disarmed",
+                "attention-cleared",
+                "lifecycle-emitted",
+            ]
+        );
         let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::TurnCompleted);
         assert_eq!(events[0].status, SessionStatus::Ready);
-        assert!(sink.attention_needed().is_empty(), "Ready must not emit attention-needed");
+        assert!(
+            sink.attention_needed().is_empty(),
+            "Ready must not emit attention-needed"
+        );
     }
 
     #[test]
@@ -1298,9 +1516,15 @@ mod tests {
         let sink = RecordingSink::with_status(SessionStatus::Ready);
         on_background_running(&sink, 7, &HookSignalDetail::default()).unwrap();
         assert_eq!(sink.status(), Some(SessionStatus::Running));
-        assert_eq!(sink.effects(), vec![
-            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
-        ]);
+        assert_eq!(
+            sink.effects(),
+            vec![
+                "status-written",
+                "autoclear-disarmed",
+                "attention-cleared",
+                "lifecycle-emitted",
+            ]
+        );
         let events = sink.lifecycle_changed();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, LifecycleKind::BackgroundRunning);
@@ -1310,8 +1534,12 @@ mod tests {
     #[test]
     fn completed_and_background_hooks_cannot_revive_stopped_nodes() {
         for status in [
-            SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
-            SessionStatus::Suspended, SessionStatus::Pending, SessionStatus::Completed,
+            SessionStatus::Idle,
+            SessionStatus::Error,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+            SessionStatus::Pending,
+            SessionStatus::Completed,
         ] {
             let sink = RecordingSink::with_status(status);
             assert!(!on_turn_completed(&sink, 7, &HookSignalDetail::default()).unwrap());
@@ -1335,9 +1563,15 @@ mod tests {
         let sink = RecordingSink::with_status(SessionStatus::AwaitingInput);
         assert!(on_hook_running(&sink, 7).unwrap());
         assert_eq!(sink.status(), Some(SessionStatus::Running));
-        assert_eq!(sink.effects(), vec![
-            "status-written", "autoclear-disarmed", "attention-cleared", "lifecycle-emitted",
-        ]);
+        assert_eq!(
+            sink.effects(),
+            vec![
+                "status-written",
+                "autoclear-disarmed",
+                "attention-cleared",
+                "lifecycle-emitted",
+            ]
+        );
         assert_eq!(sink.lifecycle_changed()[0].kind, LifecycleKind::WorkResumed);
     }
 
@@ -1349,8 +1583,12 @@ mod tests {
             ..HookSignalDetail::default()
         };
         for status in [
-            SessionStatus::Idle, SessionStatus::Error, SessionStatus::Archived,
-            SessionStatus::Suspended, SessionStatus::Pending, SessionStatus::Completed,
+            SessionStatus::Idle,
+            SessionStatus::Error,
+            SessionStatus::Archived,
+            SessionStatus::Suspended,
+            SessionStatus::Pending,
+            SessionStatus::Completed,
         ] {
             let sink = RecordingSink::with_status(status);
             assert!(!on_hook_running(&sink, 7).unwrap());
@@ -1373,7 +1611,10 @@ mod tests {
         on_attention_with_signal(&sink, 7, None, &detail).unwrap();
         assert_eq!(sink.status(), Some(SessionStatus::AwaitingInput));
         assert_eq!(sink.attention_needed(), vec![7]);
-        assert_eq!(sink.lifecycle_changed()[0].kind, LifecycleKind::QuestionRequested);
+        assert_eq!(
+            sink.lifecycle_changed()[0].kind,
+            LifecycleKind::QuestionRequested
+        );
     }
 
     #[test]
@@ -1434,7 +1675,6 @@ mod tests {
         assert_eq!(events[0].status, SessionStatus::Error);
     }
 
-
     #[test]
     fn on_resume_failed_writes_error_with_forbidden_set_and_emits_resume_failed() {
         let sink = RecordingSink::new();
@@ -1453,6 +1693,78 @@ mod tests {
             vec![(7, "session expired".to_string())],
             "early exit must emit resume-failed exactly once with the given reason"
         );
+    }
+
+    /// Issue #2137 — the give-up transition must write the terminal `Lost`
+    /// status (so neither the frontend's idle-keyed auto-spawn nor the stale
+    /// kill at spawn step 2 can relaunch the node), report the reason on both
+    /// transports, and still escalate a recovery `Error` — which is why this
+    /// transition fences only `Archived` rather than the usual terminal set.
+    #[test]
+    fn on_resume_exhausted_escalates_to_terminal_lost_with_a_reason() {
+        let sink = RecordingSink::with_status(SessionStatus::Error);
+        on_resume_exhausted(&sink, 7, "session was never saved").unwrap();
+        assert_eq!(sink.status(), Some(SessionStatus::Lost));
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, SessionStatus::Lost);
+        assert_eq!(events[0].kind, LifecycleKind::Lost);
+        assert_eq!(
+            events[0].message.as_deref(),
+            Some("session was never saved"),
+            "the node's own affordances are where the user learns why it stopped relaunching"
+        );
+        assert_eq!(
+            *sink.resume_failed(),
+            vec![(7, "session was never saved".to_string())],
+            "give-up reports on the toast channel too, from this one place"
+        );
+        assert_eq!(
+            sink.writes_unless()[0].2.as_slice(),
+            &[SessionStatus::Archived],
+            "only Archived is fenced: FORBIDDEN_TERMINAL would block this very write"
+        );
+    }
+
+    #[test]
+    fn on_resume_exhausted_leaves_an_archived_node_archived() {
+        let sink = RecordingSink::with_status(SessionStatus::Archived);
+        on_resume_exhausted(&sink, 7, "session was never saved").unwrap();
+        assert_eq!(sink.status(), Some(SessionStatus::Archived));
+        assert!(
+            sink.lifecycle_changed().is_empty(),
+            "a rejected write must not broadcast a status change that did not happen"
+        );
+        assert!(
+            sink.resume_failed().is_empty(),
+            "the toast would claim this node was given up on when its status never changed"
+        );
+    }
+
+    /// Issue #2137 — the `Idle` transition has to carry the identity it
+    /// cleared, or the client's own copy of `cli_session_id` stays stale and
+    /// keeps asking the backend to resume the id that was just discarded.
+    #[test]
+    fn on_pty_eof_clearing_session_announces_the_dropped_identity() {
+        let sink = RecordingSink::new();
+        on_pty_eof_clearing_session(&sink, 7, "fb718014-0440-4b74-99e2-6ee5e2fafb57").unwrap();
+        assert_eq!(*sink.writes(), vec![(7, SessionStatus::Idle)]);
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].cleared_session_id.as_deref(),
+            Some("fb718014-0440-4b74-99e2-6ee5e2fafb57"),
+            "the client must learn which id to drop from its store copy"
+        );
+    }
+
+    /// The ordinary clean EOF must leave identity claims out of the wire, so
+    /// a client can tell "unchanged" from "cleared".
+    #[test]
+    fn a_plain_pty_eof_does_not_claim_an_identity_was_cleared() {
+        let sink = RecordingSink::new();
+        on_pty_eof(&sink, 7).unwrap();
+        assert_eq!(sink.lifecycle_changed()[0].cleared_session_id, None);
     }
 
     #[test]
@@ -1502,15 +1814,11 @@ mod tests {
         assert!(sink.resume_failed().is_empty());
     }
 
-
     #[test]
     fn on_created_writes_pending() {
         let sink = RecordingSink::new();
         on_created(&sink, 7).unwrap();
-        assert_eq!(
-            *sink.writes(),
-            vec![(7, SessionStatus::Pending)]
-        );
+        assert_eq!(*sink.writes(), vec![(7, SessionStatus::Pending)]);
     }
 
     // -----------------------------------------------------------------------

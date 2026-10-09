@@ -21,7 +21,7 @@ pub const EARLY_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_sec
 /// after the read loop ends. Extracted as a pure decision so the
 /// deliberate-kill / early-exit / plain-terminal matrix is unit-testable
 /// without a live PTY.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostExitAction {
     /// Natural exit — flip the node to Idle.
     MarkIdle,
@@ -57,6 +57,117 @@ pub(crate) fn post_exit_action(
         PostExitAction::MarkErrorResumeFailed
     } else {
         PostExitAction::MarkIdle
+    }
+}
+
+/// What the reader epilogue must do about a process that just ended.
+/// Pure: the DB write, the log line and the emit stay at the call site so
+/// the decision itself is unit-testable without an `AppHandle` (issue #2137).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EpilogueOutcome {
+    /// `kill_session` owns the next status; the reader writes nothing.
+    LeaveStatusAlone,
+    /// The bound on unusable resumes is reached — surface the node with a
+    /// reason instead of letting the frontend relaunch it again.
+    SurfaceExhaustedResume,
+    /// The stored session id cannot have resolved: clear it, then apply the
+    /// exit's usual status verdict.
+    DropUnusableSessionIdentity,
+    /// Clean exit → Idle.
+    MarkIdle,
+    /// Immediate death → Error + `resume-failed`.
+    MarkErrorResumeFailed,
+}
+
+/// Fold the exit heuristic and the resume guard (issue #2137) into one
+/// decision. `verdict` is `None` when the exit was not an unusable resume —
+/// `Some` already carries that fact, so the caller cannot pass a flag and a
+/// verdict that disagree.
+pub(crate) fn classify_post_exit(
+    action: PostExitAction,
+    verdict: Option<super::resume_guard::UnusableResumeVerdict>,
+) -> EpilogueOutcome {
+    // A deliberate kill is never a resume failure, so it must win before the
+    // guard: the kill initiator owns the next status (#654).
+    if action == PostExitAction::LeaveStatusAlone {
+        return EpilogueOutcome::LeaveStatusAlone;
+    }
+    match verdict {
+        Some(super::resume_guard::UnusableResumeVerdict::Exhausted { .. }) => {
+            EpilogueOutcome::SurfaceExhaustedResume
+        }
+        Some(super::resume_guard::UnusableResumeVerdict::DropIdentity) => {
+            EpilogueOutcome::DropUnusableSessionIdentity
+        }
+        None => match action {
+            PostExitAction::MarkIdle => EpilogueOutcome::MarkIdle,
+            _ => EpilogueOutcome::MarkErrorResumeFailed,
+        },
+    }
+}
+
+/// Whether this exit should be charged against a node's resume budget.
+///
+/// A deliberate kill is not evidence of an unusable session (#654): the kill
+/// initiator owns the outcome, so closing a node must not spend the budget
+/// that would otherwise give the node up. `note_unusable_resume` is the only
+/// place a strike is counted, so this gate must run at most once per exit —
+/// hence the single call in the epilogue, with the pure decision in
+/// [`classify_post_exit`].
+pub(super) fn should_count_resume_failure(
+    action: PostExitAction,
+    resume_attempt: bool,
+    elapsed_since_process_creation: std::time::Duration,
+) -> bool {
+    action != PostExitAction::LeaveStatusAlone
+        && super::resume_guard::is_unusable_resume(resume_attempt, elapsed_since_process_creation)
+}
+
+/// Apply the status verdict for an exit through SessionLifecycle (issue #132),
+/// the single writer for `agent_nodes.status`. Shared by the plain and the
+/// identity-dropping paths so clearing an unusable session id (issue #2137)
+/// cannot quietly change what the user is told.
+///
+/// `cleared_session_id` is the id the caller just erased, announced on the
+/// `Idle` transition so clients drop their own copy of it.
+fn apply_status_verdict(
+    sink: &session_lifecycle::AppSessionLifecycleSink<'_>,
+    session_id: i64,
+    action: PostExitAction,
+    elapsed: std::time::Duration,
+    cleared_session_id: Option<&str>,
+) {
+    match action {
+        // `LeaveStatusAlone` is filtered out by `classify_post_exit` before we
+        // get here; treating it as `Idle` keeps this total.
+        PostExitAction::LeaveStatusAlone | PostExitAction::MarkIdle => {
+            let _ = match cleared_session_id {
+                Some(id) => session_lifecycle::on_pty_eof_clearing_session(sink, session_id, id),
+                None => session_lifecycle::on_pty_eof(sink, session_id),
+            };
+        }
+        PostExitAction::MarkErrorResumeFailed => {
+            tracing::warn!(
+                "Node {} reader exited after {:?} — likely resume failure",
+                session_id,
+                elapsed
+            );
+            // The `unless_in(Error, Archived)` guard (#654) lives inside
+            // `on_resume_failed`, and `resume-failed` is emitted from exactly
+            // one place (the lifecycle sink).
+            //
+            // This path writes no `agent-lifecycle` event, so a client that was
+            // told the id is gone does not learn it here. It does not loop
+            // either: `Error` is not the `idle` the frontend's auto-spawn keys
+            // on. A later explicit Retry Resume that still holds the stale id
+            // falls back to a fresh launch in `spawn_with_intent` instead of
+            // erroring.
+            let _ = session_lifecycle::on_resume_failed(
+                sink,
+                session_id,
+                "Agent exited immediately after spawn — session may have expired",
+            );
+        }
     }
 }
 
@@ -130,6 +241,14 @@ pub enum SessionIdMode {
     Resume(String),
     None,
 }
+
+/// User-facing reason for the issue #2137 give-up. It has to name the cause
+/// (the transcript is missing) and the way out (start fresh), because the
+/// node's own affordances are the only place the user learns why it stopped
+/// relaunching.
+const EXHAUSTED_REASON: &str =
+    "This agent could not be resumed: its conversation was never saved, so there is nothing to \
+     resume. Start a fresh conversation to continue.";
 
 /// Whether the PTY reader thread should attempt to capture a session ID
 /// from live PTY output (issue #651).
@@ -218,6 +337,11 @@ pub(crate) fn maybe_buffer_for_naming(is_plain_terminal: bool, session_id: i64, 
 ///   `spawn_agent_inner`. Used by the `first_pty_output` checkpoint log
 ///   so it lines up with every other `spawn_timing:` line (all
 ///   measured against the same "user clicked Spawn" instant).
+/// * `resume_attempt` — this incarnation was launched with `--resume
+///   <stored id>`. The epilogue's resume guard (issue #2137) only
+///   invalidates a session identity that was actually asked for: a fresh
+///   spawn's pre-assigned UUID is not evidence that the conversation it
+///   names is missing.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_reader(
     app: tauri::AppHandle,
@@ -231,6 +355,7 @@ pub(super) fn start_reader(
     mesh_id: i64,
     deliberate_kill: Arc<AtomicBool>,
     generation: u64,
+    resume_attempt: bool,
 ) -> std::thread::JoinHandle<()> {
     let app_clone = app;
     let reader_alive_clone = reader_alive;
@@ -342,12 +467,36 @@ pub(super) fn start_reader(
         // early-exit heuristic answers "did the process die almost
         // immediately after it was created?" — a slow 14s pipeline
         // followed by a 1s-later death must still read as an early exit.
-        match post_exit_action(
+        let elapsed = spawned_at.elapsed();
+        let action = post_exit_action(
             is_plain_terminal,
             deliberate_kill.load(Ordering::SeqCst),
-            spawned_at.elapsed(),
-        ) {
-            PostExitAction::LeaveStatusAlone => {
+            elapsed,
+        );
+        // Issue #2137 — a `--resume <id>` that dies this soon after process
+        // creation cannot have been resumed: the stored id names a
+        // conversation that was never persisted, so the row would otherwise
+        // flip to a spawnable status → auto-spawn → `--resume` the same dead
+        // id, every few seconds, forever.
+        //
+        // `note_unusable_resume` is the only place a strike is counted, so it
+        // must run at most once per exit — hence the single call here, with
+        // the pure decisions in [`should_count_resume_failure`] and
+        // [`classify_post_exit`].
+        let verdict = should_count_resume_failure(action, resume_attempt, elapsed)
+            .then(|| super::resume_guard::note_unusable_resume(session_id));
+        if verdict.is_none() {
+            // This exit was not judged unusable, so earlier strikes no longer
+            // describe the node — and a deliberate kill means the user is
+            // replacing the process outright. The budget resets *here* rather
+            // than on the `Spawning → Running` promotion: that fires at
+            // EARLY_EXIT_WINDOW (3s), well inside UNUSABLE_RESUME_WINDOW, so a
+            // resume that dies at 5s would have its strike wiped before the
+            // reader could count it and the loop would never reach the bound.
+            super::resume_guard::reset(session_id);
+        }
+        match classify_post_exit(action, verdict) {
+            EpilogueOutcome::LeaveStatusAlone => {
                 // kill_session initiated this exit; the kill initiator
                 // owns the node's next status (see PostExitAction docs).
                 tracing::debug!(
@@ -355,28 +504,55 @@ pub(super) fn start_reader(
                     session_id
                 );
             }
-            PostExitAction::MarkIdle => {
-                // Routes through SessionLifecycle (issue #132) — single writer
-                // for `agent_nodes.status`.
+            EpilogueOutcome::SurfaceExhaustedResume => {
+                // Repeated resumes of a session that does not exist. Stop
+                // relaunching: `Lost` is in FORBIDDEN_TERMINAL, so neither
+                // the frontend's idle-keyed auto-spawn nor the stale kill at
+                // spawn step 2 can pick this node up again.
+                tracing::error!(
+                    "Node {} could not start: {} consecutive --resume attempts of a session with \
+                     no persisted transcript (issue #2137) — surfacing instead of relaunching",
+                    session_id,
+                    super::resume_guard::MAX_CONSECUTIVE_UNUSABLE_RESUMES
+                );
                 let sink = session_lifecycle::AppSessionLifecycleSink { app: &app_clone };
-                let _ = session_lifecycle::on_pty_eof(&sink, session_id);
+                let _ = session_lifecycle::on_resume_exhausted(&sink, session_id, EXHAUSTED_REASON);
             }
-            PostExitAction::MarkErrorResumeFailed => {
+            EpilogueOutcome::DropUnusableSessionIdentity => {
+                // The stored id resolves to nothing. Drop it so the next spawn
+                // resolves to `fresh` instead of re-issuing the same doomed
+                // `--resume` — this is what actually ends the loop. The status
+                // verdict below is deliberately unchanged: #1306's
+                // `resume-failed` toast and `Error` recovery state must not
+                // depend on whether the guard also had something to clear.
+                //
+                // Read the id before clearing it: the clients keep their own
+                // copy of this column, so the transition has to tell them
+                // which id to drop.
+                let cleared = crate::db::get_agent_node_by_id(session_id)
+                    .ok()
+                    .and_then(|node| node.cli_session_id);
                 tracing::warn!(
-                    "Node {} reader exited after {:?} — likely resume failure",
+                    "Node {} exited {:.1?}s after a --resume launch of session {} — it was never \
+                     persisted; clearing the session identity so the next spawn starts fresh \
+                     (issue #2137)",
                     session_id,
-                    spawned_at.elapsed()
+                    elapsed,
+                    cleared.as_deref().unwrap_or("<unknown>"),
                 );
-                // Routes through SessionLifecycle (issue #132) — the
-                // `unless_in(Error, Archived)` guard (#654) lives inside
-                // `on_resume_failed`, and `resume-failed` is emitted from
-                // exactly one place (the lifecycle sink).
+                if let Err(error) = crate::db::clear_cli_session_id(session_id) {
+                    tracing::warn!(
+                        "Node {}: clearing unusable session id failed: {}",
+                        session_id,
+                        error
+                    );
+                }
                 let sink = session_lifecycle::AppSessionLifecycleSink { app: &app_clone };
-                let _ = session_lifecycle::on_resume_failed(
-                    &sink,
-                    session_id,
-                    "Agent exited immediately after spawn — session may have expired",
-                );
+                apply_status_verdict(&sink, session_id, action, elapsed, cleared.as_deref());
+            }
+            EpilogueOutcome::MarkIdle | EpilogueOutcome::MarkErrorResumeFailed => {
+                let sink = session_lifecycle::AppSessionLifecycleSink { app: &app_clone };
+                apply_status_verdict(&sink, session_id, action, elapsed, None);
             }
         }
 
