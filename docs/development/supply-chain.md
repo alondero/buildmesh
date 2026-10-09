@@ -27,6 +27,12 @@ whole `verify.yml` graph) rather than the merge. Promoting it to a required
 merge check is a deliberate future step, not an omission — see
 [Not yet a required check](#not-yet-a-required-check).
 
+Its step order is part of the contract: the two dependency-free checks (action
+pins, npm) run immediately after checkout and finish in seconds, so the two most
+common failures are reported in seconds rather than after `cargo-audit` is
+built. The Rust check then restores the cached `cargo-audit` binary, paying the
+~2m45s source build only on a cache miss.
+
 ## Repository settings
 
 These are repository settings rather than files, so they do not travel with a
@@ -83,7 +89,12 @@ and `.github/actions/*/action.yml`:
   pin readable and is what Dependabot updates;
 - `--verify` (used by `npm run check:actions` and CI) resolves each pinned SHA
   against the GitHub API, so a typo or truncated SHA fails here rather than at
-  run time.
+  run time. A subdirectory action (`actions/cache/restore`, and the reusable
+  workflow form `owner/repo/.github/workflows/x.yml`) is queried by its
+  **repository** slug `owner/repo`, not by its full action path — asking for
+  `repos/actions/cache/restore/commits/<sha>` is a 404 for a repository that
+  does not exist. Messages and the allowlist key keep the full action path, so
+  an exception for `acme/action/post` never covers `acme/action/restore`.
 
 To pin a new action, resolve its tag (following `object.url` once for an
 annotated tag):
@@ -176,6 +187,16 @@ treats them differently on purpose:
 
 A yanked crate has no RustSec advisory document, so those entries are matched by
 `crate@version` instead of advisory ID.
+
+**Matching is exact, and that is load-bearing.** A finding that carries an
+advisory ID is matched by that ID or by nothing; it never falls back to
+`crate@version`. A crate-level fallback would turn any one exception into a
+permanent get-out-of-jail-free card for that crate@version, so a *new* advisory
+arriving for a crate that already had *some* exception would pass unreviewed on
+the strength of a rationale written about a different problem. The
+`crate@version` fallback exists only for id-less (yanked) findings, and then
+only to an entry of the same `kind`. Every exception therefore declares the
+`kind` it excuses, which the gate requires.
 
 ### Recording an exception
 

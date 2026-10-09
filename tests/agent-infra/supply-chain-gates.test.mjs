@@ -103,6 +103,45 @@ test('action pins: a third-party reusable workflow is pinned too', () => {
   assert.equal(checkActionFile('  uses: someorg/shared/.github/workflows/build.yml@v2\n').length, 1);
 });
 
+test('action pins: a subdirectory action resolves against its repository, not its path', () => {
+  // Regression: `actions/cache/restore@<sha>` used to be verified against the
+  // non-existent repository `actions/cache/restore`, which is a guaranteed 404.
+  // The repository slug is `owner/repo`; the rest is the action's path.
+  const requested = [];
+  const fetchJson = async (endpoint) => {
+    requested.push(endpoint);
+    return { sha: SHA };
+  };
+  const reference = {
+    owner: 'actions/cache/restore',
+    repository: 'actions/cache',
+    sha: SHA,
+    key: `actions/cache/restore@${SHA}`,
+  };
+  return verifyShas([reference], { fetchJson }).then((problems) => {
+    assert.deepEqual(problems, []);
+    assert.deepEqual(requested, [`repos/actions/cache/commits/${SHA}`]);
+  });
+});
+
+test('action pins: a subdirectory action is still pinned and still allowlistable by its full path', () => {
+  // The allowlist key and every message keep the full action path, so an
+  // exception for `acme/no-tags/restore` cannot accidentally cover
+  // `acme/no-tags/post`.
+  const markdown = '      - uses: acme/no-tags/restore@main\n';
+  assert.equal(checkActionFile(markdown).length, 1);
+  assert.deepEqual(
+    checkActionFile(markdown, { allow: new Set(['acme/no-tags/restore@main']) }),
+    [],
+    'the full action path is the allowlist key',
+  );
+  assert.equal(
+    checkActionFile(markdown, { allow: new Set(['acme/no-tags@main']) }).length,
+    1,
+    'the repository alone must not exempt an action inside it',
+  );
+});
+
 test('action pins: an allowlisted reference is skipped, others still checked', () => {
   const markdown = '      - uses: acme/no-tags-action@main\n';
   assert.equal(checkActionFile(markdown).length, 1);
@@ -415,6 +454,7 @@ test('rust advisories: a yanked crate with no advisory id matches by crate@versi
     {
       crate: 'libssh2-sys',
       version: '0.3.2',
+      kind: 'yanked',
       owner: 'maintainers',
       rationale: 'yanked upstream, no known advisory',
       reviewBy: FUTURE,
@@ -426,6 +466,88 @@ test('rust advisories: a yanked crate with no advisory id matches by crate@versi
   const { failures, stale } = evaluateFindings(findings, entries);
   assert.deepEqual(failures, []);
   assert.deepEqual(stale, [], 'a matched yanked entry is not stale');
+});
+
+test('rust advisories: an exception must declare the kind it excuses', () => {
+  // The same-kind rule is only enforceable if every entry says what it is
+  // excusing. Without `kind`, an entry could not be matched by an id-less
+  // finding at all, which is exactly the silent-failure mode this guards.
+  const problems = validateExceptions([
+    { id: 'RUSTSEC-2025-0141', crate: 'bincode', version: '1.3.3', owner: 'm', rationale: 'x', reviewBy: FUTURE },
+  ]);
+  assert.ok(problems.some((problem) => /missing a kind/.test(problem)));
+});
+
+test('rust advisories: a NEW advisory cannot ride in on an existing crate@version exception', () => {
+  // Regression: lookup fell back to crate@version whenever the advisory id was
+  // not in the map. A crate that already had *some* exception therefore became a
+  // permanent get-out-of-jail-free card — any later advisory for the same
+  // crate@version matched it and passed unreviewed. A yanked exception for
+  // `libssh2-sys@0.3.2` silently covered a brand-new `unsound` advisory.
+  const entries = [
+    {
+      crate: 'libssh2-sys',
+      version: '0.3.2',
+      kind: 'yanked',
+      owner: 'maintainers',
+      rationale: 'yanked upstream, no known advisory',
+      reviewBy: FUTURE,
+    },
+  ];
+  const findings = [
+    {
+      id: 'RUSTSEC-2026-9999',
+      crate: 'libssh2-sys',
+      version: '0.3.2',
+      kind: 'unsound',
+      title: 'A brand-new problem',
+    },
+  ];
+  const { failures } = evaluateFindings(findings, entries);
+  assert.equal(failures.length, 1, 'an unreviewed advisory with an id must not be excused');
+  assert.equal(failures[0].reason, 'unreviewed');
+});
+
+test('rust advisories: an id-less finding only matches an entry of the same kind', () => {
+  // The fallback exists for yanked crates, which have no advisory document. It
+  // must not become a general crate-level wildcard.
+  const entries = [
+    {
+      crate: 'some-crate',
+      version: '1.0.0',
+      kind: 'unmaintained',
+      owner: 'maintainers',
+      rationale: 'transitive',
+      reviewBy: FUTURE,
+    },
+  ];
+  const yankedFinding = [{ id: null, crate: 'some-crate', version: '1.0.0', kind: 'yanked', title: '' }];
+  assert.equal(evaluateFindings(yankedFinding, entries).failures.length, 1);
+  const sameKind = [{ id: null, crate: 'some-crate', version: '1.0.0', kind: 'unmaintained', title: '' }];
+  assert.equal(evaluateFindings(sameKind, entries).failures.length, 0);
+});
+
+test('rust advisories: the shipped exception file cannot be used to excuse a new advisory', () => {
+  // Guards the real data, not just a synthetic case: for every id-bearing
+  // exception, an unrelated advisory id on the same crate must still fail. If
+  // the lookup ever falls back to crate@version again, this turns red.
+  const { entries } = loadExceptions(path.join(repoRoot, '.github', 'rustsec-exceptions.json'));
+  const idBearing = entries.filter((entry) => entry.id);
+  assert.ok(idBearing.length > 0, 'expected id-bearing exceptions');
+  for (const entry of idBearing) {
+    const impostor = [
+      {
+        id: 'RUSTSEC-2026-0000',
+        crate: entry.crate,
+        version: entry.version,
+        kind: entry.kind,
+        title: 'unrelated new advisory',
+      },
+    ];
+    const { failures } = evaluateFindings(impostor, entries);
+    assert.equal(failures.length, 1, `${entry.id} excused an unrelated advisory on ${entry.crate}`);
+    assert.equal(failures[0].reason, 'unreviewed');
+  }
 });
 
 test('rust advisories: an exception for an advisory that no longer exists is stale', () => {

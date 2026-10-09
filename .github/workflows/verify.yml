@@ -127,8 +127,12 @@ jobs:
   # runs when Rust moved is a gate that misses exactly the diff it exists to
   # catch — an unpinned action, or a lockfile bump that pulls in a vulnerable
   # package, changes no Rust source file. It also starts at t=0 (only a checkout
-  # precedes it), so it costs seconds on the critical path rather than joining
-  # the queue behind a compile.
+  # precedes it).
+  #
+  # Step order is part of the contract, not an accident: the two dependency-free
+  # checks run first and finish in seconds, so an unpinned action or a vulnerable
+  # npm package is reported in seconds. Only then does the job pay for building
+  # `cargo-audit`, which is cached after the first run.
   #
   # The three checks are separate steps rather than one "audit" step, because
   # they fail for different reasons and are fixed by different people:
@@ -157,19 +161,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # `cargo audit` is NOT preinstalled on ubuntu-latest, and the job needs it
-      # to say anything about the Rust tree. Install it only when it is missing,
-      # so a runner image that starts shipping it does not pay the compile. This
-      # fails loudly rather than skipping the check: a supply-chain gate that
-      # silently degrades to "no Rust check" is worse than no gate, because it
-      # reads as green.
-      - name: Ensure cargo-audit is available
-        run: |
-          if ! cargo audit --version; then
-            cargo install cargo-audit --locked
-          fi
-          cargo audit --version
-
+      # The two dependency-free checks come first, before anything that compiles.
+      # They need no install and finish in seconds, so an unpinned action or a
+      # vulnerable npm package is reported in seconds rather than after the
+      # cargo-audit build below — which is what the job header claims this job
+      # costs, and until this ordering was fixed it did not.
       - name: Check every third-party action is SHA-pinned
         # `gh api` refuses to run in a workflow without a token, so --verify
         # fails on every reference until one is supplied. This is the job's own
@@ -181,6 +177,28 @@ jobs:
 
       - name: Check npm dependencies against the advisory policy
         run: node scripts/check-npm-audit.mjs
+
+      # `cargo audit` is NOT preinstalled on ubuntu-latest, and building it from
+      # source costs ~2m45s. The binary is cached on this file's own hash: the
+      # first run on a given key pays the compile, later runs restore it in a
+      # second or two, and editing this workflow is what deliberately invalidates
+      # the entry.
+      - name: Cache cargo-audit
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ hashFiles('.github/workflows/verify.yml') }}
+
+      # Install only when the cache did not provide it, so a runner image that
+      # starts shipping cargo-audit costs nothing, and fail loudly rather than
+      # skipping the check: a supply-chain gate that silently degrades to "no Rust
+      # check" is worse than no gate, because it reads as green.
+      - name: Ensure cargo-audit is available
+        run: |
+          if ! cargo audit --version; then
+            cargo install cargo-audit --locked
+          fi
+          cargo audit --version
 
       - name: Check Rust dependencies against the RustSec policy
         run: node scripts/check-rust-advisories.mjs

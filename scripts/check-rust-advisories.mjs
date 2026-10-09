@@ -85,7 +85,7 @@ export function validateExceptions(entries, { now = new Date() } = {}) {
   const seen = new Set();
   for (const entry of entries) {
     const label = entry.id ?? `${entry.crate}@${entry.version}`;
-    for (const field of ['crate', 'owner', 'rationale', 'reviewBy']) {
+    for (const field of ['crate', 'kind', 'owner', 'rationale', 'reviewBy']) {
       if (typeof entry[field] !== 'string' || entry[field].trim() === '') {
         // 'an owner' / 'a rationale', not 'a owner'.
         const article = /^[aeiou]/i.test(field) ? 'an' : 'a';
@@ -137,8 +137,17 @@ export function evaluateFindings(findings, entries, { now = new Date() } = {}) {
       });
       continue;
     }
-    const entry = (finding.id ? byId.get(finding.id) : null) ?? byCrate.get(`${finding.crate}@${finding.version}`);
-    if (!entry) {
+    // A finding that HAS an advisory id must be matched by that id, or not at
+    // all. Falling back to crate@version would let any new advisory for a crate
+    // that already has *some* exception ride in on that exception's review — the
+    // rationale covers the advisory it was written for, not whatever arrives
+    // next for the same crate. Only an id-less finding (a yanked crate, which has
+    // no RustSec advisory document) falls back, and then only to an entry of the
+    // same kind.
+    const entry = finding.id !== null && finding.id !== undefined
+      ? byId.get(finding.id)
+      : byCrate.get(`${finding.crate}@${finding.version}`);
+    if (!entry || (entry.id === null || entry.id === undefined) && entry.kind !== finding.kind) {
       failures.push({
         ...finding,
         reason: 'unreviewed',

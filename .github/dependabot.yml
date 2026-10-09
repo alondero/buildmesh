@@ -13,9 +13,9 @@
 # are separate from version updates precisely because they must not wait for a
 # weekly batch.
 #
-# The Cargo ecosystem is listed at `/` because the manifest lives in
-# `src-tauri/` rather than at the repository root, which is where Dependabot
-# looks by default. The workflows ecosystem keeps its own grouping: an action
+# The Cargo ecosystem is listed at `/src-tauri` because that is where the
+# manifest lives; Dependabot looks at the repository root by default and would
+# find no `Cargo.toml` there. The workflows ecosystem keeps its own grouping: an action
 # bump rewrites SHA pins, and a grouped action PR is reviewable as one change.
 version: 2
 

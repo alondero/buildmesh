@@ -112,15 +112,21 @@ export function parseUses(markdown) {
 
 function classify(reference) {
   if (reference.startsWith('./') || reference.startsWith('../') || reference.startsWith('.')) {
-    return { kind: 'local', owner: null, version: null };
+    return { kind: 'local', owner: null, repository: null, version: null };
   }
-  if (reference.startsWith('docker://')) return { kind: 'docker', owner: null, version: null };
+  if (reference.startsWith('docker://')) return { kind: 'docker', owner: null, repository: null, version: null };
   const at = reference.lastIndexOf('@');
-  if (at === -1) return { kind: 'third-party', owner: reference, version: null };
+  if (at === -1) return { kind: 'third-party', owner: reference, repository: null, version: null };
+  // `owner/repo/path@ref` is still third-party and still needs a SHA, but the GitHub
+  // API is keyed on the *repository* slug (`owner/repo`), not on the action path.
+  // Keeping them apart is what stops a subdirectory action such as
+  // `gradle/actions/setup-gradle` or `actions/cache/restore` from being resolved
+  // against the non-existent repository `gradle/actions/setup-gradle`.
   const owner = reference.slice(0, at);
   const version = reference.slice(at + 1);
-  // `owner/repo/path@ref` is still third-party and still needs a SHA.
-  return { kind: 'third-party', owner, version };
+  const segments = owner.split('/');
+  const repository = segments.length >= 2 ? `${segments[0]}/${segments[1]}` : null;
+  return { kind: 'third-party', owner, repository, version };
 }
 
 /**
@@ -188,17 +194,24 @@ function readAllowList(root) {
 export async function verifyShas(references, { fetchJson } = {}) {
   const problems = [];
   const authFailures = [];
-  const byOwner = new Map();
-  for (const { owner, sha } of references) {
-    if (!byOwner.has(owner)) byOwner.set(owner, new Set());
-    byOwner.get(owner).add(sha);
+  const byRepository = new Map();
+  for (const { owner, repository, sha } of references) {
+    // Query by repository slug, not by the action path. For a subdirectory action
+    // (`actions/cache/restore`, `gradle/actions/setup-gradle`) the two differ, and
+    // asking the API for `repos/actions/cache/restore/commits/<sha>` is a 404 for
+    // a repository that never existed. `owner` stays in the message so the reader
+    // still sees which action is at fault.
+    const slug = repository ?? owner;
+    const key = `${slug} ${owner}`;
+    if (!byRepository.has(key)) byRepository.set(key, { slug, owner, shas: new Set() });
+    byRepository.get(key).shas.add(sha);
   }
-  for (const [owner, shas] of byOwner) {
+  for (const { slug, owner, shas } of byRepository.values()) {
     for (const sha of shas) {
       try {
-        const commit = await fetchJson(`repos/${owner}/commits/${sha}`);
+        const commit = await fetchJson(`repos/${slug}/commits/${sha}`);
         if (!commit || commit.sha !== sha) {
-          problems.push(`${owner}@${sha}: the API did not resolve this SHA to a commit.`);
+          problems.push(`${owner}@${sha}: the API did not resolve this SHA to a commit in ${slug}.`);
         }
       } catch (error) {
         const message = error.message ?? String(error);
@@ -215,24 +228,30 @@ export async function verifyShas(references, { fetchJson } = {}) {
       `GitHub API authentication failed for ${authFailures.length} reference(s) — this is a wiring problem, not an unpinned action.\n`
       + `  First: ${authFailures[0]}\n`
       + "  Set GH_TOKEN for this step (in a workflow, `env: GH_TOKEN: ${{ github.token }}`); "
-      + 'locally, run `gh auth login`. First error: ' + authFailures.slice(1, 3).join(' | '),
+      + `locally, run \`gh auth login\`. Others: ${authFailures.slice(1, 3).join(' | ')}`,
     );
   }
   return problems;
 }
 
-/** Every third-party reference in the tree, deduplicated, for `--verify`. */
+/**
+ * Every third-party reference in the tree, deduplicated, for `--verify`.
+ *
+ * Each entry carries both the full action path (`owner`, used for the allowlist
+ * key and for reporting) and the repository slug (`repository`, used for the API
+ * call), because they differ for a subdirectory action.
+ */
 export function collectReferences(root = repoRoot) {
   const allow = readAllowList(root);
   const references = [];
   for (const file of collectActionFiles(root)) {
     const markdown = fs.readFileSync(file, 'utf8');
     for (const { ref } of parseUses(markdown)) {
-      const { kind, owner, version } = classify(ref);
+      const { kind, owner, repository, version } = classify(ref);
       if (kind !== 'third-party' || version === null || !FULL_SHA.test(version)) continue;
       const key = `${owner}@${version}`;
       if (allow.has(key)) continue;
-      references.push({ owner, sha: version, key });
+      references.push({ owner, repository, sha: version, key });
     }
   }
   const seen = new Map();
