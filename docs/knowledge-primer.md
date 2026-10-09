@@ -45,6 +45,7 @@ place to add or change that area's durable architecture.
 
 Supporting detail that is a current contract rather than architecture: the
 [development guide](development/README.md), [releasing](development/releasing.md),
+[supply-chain controls](development/supply-chain.md),
 [circuit effect recovery](development/circuit-effect-recovery.md),
 [circuits from Agent Nodes](development/agent-node-circuits.md),
 [node status observation](development/node-status-observation.md),

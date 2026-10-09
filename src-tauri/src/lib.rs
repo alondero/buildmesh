@@ -277,6 +277,7 @@ pub fn run() {
             commands::preferences::set_harness_order,
             commands::preferences::set_proxied_provider_order,
             commands::preferences::get_provider_accounts,
+            commands::preferences::get_provider_accounts_with_preferences_keys,
             commands::preferences::get_keyed_first_class_catalog,
             commands::preferences::upsert_provider_account,
             commands::preferences::remove_provider_account,

@@ -222,7 +222,7 @@ pub fn export_harness_capabilities_table() -> std::io::Result<()> {
     let dir = generated_export_dir();
     let ids = catalog_ids();
     let json = catalog_json();
-    let ts = render_ts(&json.trim_end().to_string(), &ids);
+    let ts = render_ts(json.trim_end(), &ids);
     write_if_changed(&dir.join("HarnessCapabilitiesTable.json"), &json)?;
     write_if_changed(&dir.join("HarnessCapabilitiesTable.ts"), &ts)?;
     Ok(())

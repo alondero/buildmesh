@@ -251,6 +251,8 @@ The Buildmesh-managed OAuth secrets live in Windows Credential Manager under `CR
 
 - **Provider API keys** (`src-tauri/src/preferences/secrets.rs`, issue #830) are ordinary `api_key` / `minimax_api_key` fields in memory and never fields on disk. `storage::write_to_disk` calls `secrets::externalize` (store each key, blank the ones the store accepted, delete the entry of a cleared key or removed account); `storage::read_state` calls `secrets::hydrate_json` through `recovery::classify_with` **before** the read-time migrations, because ADR-0025's migration creates a pairing only for an account that has a key. Rules a change must keep: a key leaves the file only after the store accepted it (no store means it stays in the file, never lost); a key present in the file wins over the stored one (hand edit, restored backup); a file from an older build is scrubbed in place on first load (`secrets::scrub_file`: only the secret fields change, no shape migration and no fabricated backup, preserving the read-never-persists rule), and so is its `.bak`; a recovery reset deletes nothing; a full-fidelity bundle (`state_recovery::build_bundle`) inlines the keys back through `secrets::with_keys_inlined`. Non-Windows builds have no store, so keys stay in the file. Tests use a per-thread in-memory vault (`secrets::test_support`), so they never touch the real Credential Manager; the OS wrapper has its own round-trip test that skips where Credential Manager is unreachable.
 
+- **In-app notice when the fallback is active** (issue #2154). `preferences::secrets::account_ids_with_keys_on_disk` reads the **raw files** — `preferences.json` and its `.bak` — and returns the account ids whose `api_key` is still a non-empty string there; `resolver::provider_accounts_with_keys_in_preferences` re-exports it and `commands::preferences::get_provider_accounts_with_preferences_keys` puts it on the wire. `AccountsPane` passes each id to `AccountCard` as `keyInPreferences`, which renders a per-account notice outside the "Edit credentials" disclosure. Two rules a change must keep: it reads the files rather than the hydrated `AppPreferences`, because after `hydrate` a key from the file is indistinguishable from one from the store — that is the whole question; and it is deliberately **not** a field on `ProviderAccount`, which is both the persisted shape and the wire type, so a storage-location flag there would be written into the very file being reported on. The deprecated flat `minimax_api_key` is reported against the `minimax` account only when that account has no key of its own, matching the fold `resolver::accounts::provider_accounts` applies.
+
 - **Operator commands** for diagnosing drift:
   - `cmdkey /list | findstr antigravity` — confirm the legacy `gemini:antigravity` keyring target is present (metadata only; does not dump the blob).
   - `Get-Content $env:USERPROFILE\.gemini\antigravity-cli\antigravity-oauth-token` (or `$env:GEMINI_HOME\antigravity-cli\antigravity-oauth-token`) — inspect the live CLI oauth file; redact before pasting. Compare `token.expiry` against the keyring blob when the Usage Probe drops Antigravity.
@@ -292,6 +294,26 @@ The Claude-backed family does not declare its own value at all:
 `adapters/anthropic.rs` delegates to `claude_direct_recipe(platform)` in
 `src-tauri/src/agent/provider/mod.rs`, which pins `Direct`, so a new
 Claude-backed adapter inherits the right shell instead of restating it.
+
+The binary the shell invokes is the absolute path discovery resolved, not a
+bare stem. A GUI-launched app (Finder/Dock on macOS, Start Menu on Windows)
+inherits a restricted process `PATH` that omits user-managed directories
+(`~/.local/bin`, Homebrew, Node manager shims, npm prefix bins), so spawning
+`claude` by name fails even when the picker offered it. Detection
+(`src-tauri/src/agent/detection.rs`) therefore searches those directories in
+addition to `PATH` and records the resolved path on
+`HarnessProfile.executable`. The launch router
+(`agent::launch_routing::prepare` and `prepare_snapshot`) threads that path
+onto the routing (both `Native` and `Environment`), and re-resolves the
+adapter's recipe stem through the same enriched search at spawn time when the
+profile carries none (config-dir-only installs, custom profiles).
+`agent::spawn::command::build_spawn_command_prepared` consumes the routing's
+resolved path without further lookup, keeping command composition pure and
+unit-testable. On Windows only `PATHEXT` extensions resolve a bare stem, so an
+unrunnable extensionless npm shim is never recorded. WSL guests and
+Windows-interop spawns are exempt from host-side resolution: the guest login
+shell (WSL) or the Windows side (interop) resolves the stem in its own
+runtime, since a host-resolved Linux path is not valid input to PowerShell.
 
 ## Saved Spawn Configurations
 

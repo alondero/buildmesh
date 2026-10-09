@@ -203,7 +203,7 @@ pub(super) fn apply_routing_env<'a>(
     routing: &'a crate::agent::launch_routing::PreparedLaunchRouting,
 ) -> Vec<&'a str> {
     let backend_env: &[(String, String)] = match routing {
-        crate::agent::launch_routing::PreparedLaunchRouting::Environment(values) => {
+        crate::agent::launch_routing::PreparedLaunchRouting::Environment { values, .. } => {
             values.as_slice()
         }
         _ => &[],

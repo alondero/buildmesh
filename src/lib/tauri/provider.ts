@@ -215,6 +215,21 @@ export const getKeyedFirstClassCatalog = () =>
     'get_keyed_first_class_catalog',
   );
 
+/**
+ * Ids of provider accounts whose API key is persisted in `preferences.json`
+ * rather than in the OS credential store, because the credential store could
+ * not be used (issue #2154). Empty is the healthy state — every key is in the
+ * credential store, and Settings shows no notice.
+ *
+ * Rejection means "unknown", not "fine": Settings renders nothing rather than
+ * claiming a key is safe when the probe could not answer. See
+ * `useSettingsResources`'s accounts loader.
+ */
+export const getProviderAccountsWithPreferencesKeys = () =>
+  _invoke<string[]>(
+    'get_provider_accounts_with_preferences_keys',
+  );
+
 /** Upsert a provider account. Busts the provider-list cache. */
 export const upsertProviderAccount = async (
   account: ProviderAccount,

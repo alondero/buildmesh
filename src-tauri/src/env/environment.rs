@@ -1155,7 +1155,7 @@ pub(crate) fn commandcode_dir_for_env(env_type: EnvType, spawn_path: &str) -> Op
 /// that to a `\\wsl$\…` UNC path via [`cline_db_path_for_host`] (the
 /// `host_path` module is the only place a UNC string is built — see
 /// CLAUDE.md rule 21 / the `HostPath` sub-module).
-
+///
 /// Honour the Cline `--data-dir` / `CLINE_DATA_DIR` override for the
 /// resolved environment. `get` lets tests inject a fake env without
 /// mutating process state. The `env_type` parameter is reserved for

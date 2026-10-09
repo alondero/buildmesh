@@ -1,0 +1,90 @@
+# Grouped dependency updates (issue #1541).
+#
+# Three ecosystems, one weekly Monday slot, and deliberately *grouped* rather
+# than per-dependency: ungrouped npm produces dozens of single-bump pull
+# requests a week, and on a repository where every pull request pays a
+# frontend quality gate plus (for a Rust or workflow change) the Rust graph,
+# that review cost is real. Grouping keeps the signal (one PR per ecosystem
+# per week) while the gates keep the safety.
+#
+# `security-updates` is not configured here on purpose: Dependabot security
+# updates are a *repository setting*, enabled independently of this file
+# (`dependabot_security_updates` in the repository's security settings). They
+# are separate from version updates precisely because they must not wait for a
+# weekly batch.
+#
+# The Cargo ecosystem is listed at `/src-tauri` because that is where the
+# manifest lives; Dependabot looks at the repository root by default and would
+# find no `Cargo.toml` there. The workflows ecosystem keeps its own grouping: an action
+# bump rewrites SHA pins, and a grouped action PR is reviewable as one change.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      # Off the hour: the top of the hour is the busiest slot on GitHub's
+      # scheduler, and this run is a background convenience, not a release gate.
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    groups:
+      # Runtime dependencies and the toolchain (Vite/Vitest/ESLint/Tailwind) are
+      # the two sets that move together and break together. Splitting them
+      # produced PRs that could not typecheck or build on their own.
+      production-dependencies:
+        dependency-type: production
+      development-toolchain:
+        dependency-type: development
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    groups:
+      # Patch and minor updates are the ones CI can absorb unattended. `cargo
+      # update` moves the whole graph, so each group is still reviewed, but a
+      # single PR instead of one per transitive bump.
+      rust-patches:
+        update-types:
+          - patch
+      rust-minors:
+        update-types:
+          - minor
+      # Major bumps are the ones that change an API. They arrive alone so the
+      # diff is the bump rather than a bump hidden in a batch.
+      rust-majors:
+        update-types:
+          - major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    groups:
+      # Every action in this repository is pinned to a full commit SHA (issue
+      # #1541); Dependabot rewrites the SHA and updates the `# vX.Y.Z` comment
+      # beside it, which is exactly the update workflow this repository wants.
+      # Grouping keeps one PR to review rather than thirteen.
+      github-actions:
+        patterns:
+          - "*"
