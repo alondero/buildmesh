@@ -127,11 +127,17 @@ pub fn build_spawn_command_prepared(
         ..
     } = routing
     {
-        recipe.base_args.extend(["--profile".into(), profile_name.clone()]);
+        recipe
+            .base_args
+            .extend(["--profile".into(), profile_name.clone()]);
         if descriptor.reasoning_effort == Some(true) {
             // Unknown model names otherwise suppress Codex's reasoning field entirely.
-            recipe.base_args.extend(["-c".into(), "model_supports_reasoning_summaries=true".into(),
-                "-c".into(), "model_reasoning_summary=\"none\"".into()]);
+            recipe.base_args.extend([
+                "-c".into(),
+                "model_supports_reasoning_summaries=true".into(),
+                "-c".into(),
+                "model_reasoning_summary=\"none\"".into(),
+            ]);
         }
     }
 
@@ -325,13 +331,7 @@ pub(crate) fn resolve_spawn_config(
     let capabilities = crate::agent::capabilities::capabilities_for(provider.adapter());
     crate::agent::capabilities::resolve_agent_config(
         &capabilities,
-        cascade_inputs_for(
-            explicit_model,
-            explicit_effort,
-            None,
-            None,
-            app_default,
-        ),
+        cascade_inputs_for(explicit_model, explicit_effort, None, None, app_default),
         explicit_extra_args,
     )
 }

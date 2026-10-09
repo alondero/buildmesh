@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{AppPreferences, HarnessProfile, ProviderPairing};
-use crate::agent::capabilities::{capabilities_for, resolve_agent_config, AgentConfigInputs, FieldInputs};
+use crate::agent::capabilities::{
+    capabilities_for, resolve_agent_config, AgentConfigInputs, FieldInputs,
+};
 use crate::agent::provider::SpawnOptionId;
 use crate::models::Provider;
 
@@ -34,8 +36,11 @@ pub struct GeneratedLaunch {
 fn effective_profiles(prefs: &AppPreferences) -> Vec<HarnessProfile> {
     let mut profiles = super::default_harness_profiles();
     for profile in &prefs.harness_profiles {
-        if let Some(existing) = profiles.iter_mut().find(|h| h.id == profile.id) { *existing = profile.clone(); }
-        else { profiles.push(profile.clone()); }
+        if let Some(existing) = profiles.iter_mut().find(|h| h.id == profile.id) {
+            *existing = profile.clone();
+        } else {
+            profiles.push(profile.clone());
+        }
     }
     profiles
 }
@@ -46,16 +51,32 @@ pub fn reconcile(prefs: &mut AppPreferences) {
         let surface = super::surface_for_executor(Provider::from_db_str(&profile.harness));
         for account in prefs.provider_accounts.iter().filter(|a| a.enabled) {
             let source = format!("{}:{}", profile.id, account.id);
-            if prefs.spawn_configurations.iter().any(|c| c.generated.as_ref().is_some_and(|g| g.source == source))
-                || prefs.deleted_launch_configurations.contains(&format!("launch/{source}"))
-                || prefs.detached_provider_routes.iter().any(|d| d == &source) {
+            if prefs
+                .spawn_configurations
+                .iter()
+                .any(|c| c.generated.as_ref().is_some_and(|g| g.source == source))
+                || prefs
+                    .deleted_launch_configurations
+                    .contains(&format!("launch/{source}"))
+                || prefs.detached_provider_routes.iter().any(|d| d == &source)
+            {
                 continue;
             }
-            if let Some(endpoint) = super::first_class_surfaces(&account.id).into_iter().find(|e| Some(e.surface) == surface) {
-                if !prefs.provider_pairings.iter().any(|p| p.harness_id == profile.id && p.provider_id == account.id) {
+            if let Some(endpoint) = super::first_class_surfaces(&account.id)
+                .into_iter()
+                .find(|e| Some(e.surface) == surface)
+            {
+                if !prefs
+                    .provider_pairings
+                    .iter()
+                    .any(|p| p.harness_id == profile.id && p.provider_id == account.id)
+                {
                     prefs.provider_pairings.push(ProviderPairing {
-                        harness_id: profile.id.clone(), provider_id: account.id.clone(), surface: endpoint.surface,
-                        base_url: Some(endpoint.base_url), model_tiers: endpoint.model_tiers,
+                        harness_id: profile.id.clone(),
+                        provider_id: account.id.clone(),
+                        surface: endpoint.surface,
+                        base_url: Some(endpoint.base_url),
+                        model_tiers: endpoint.model_tiers,
                     });
                 }
             }
@@ -79,10 +100,13 @@ pub fn reconcile(prefs: &mut AppPreferences) {
             if let Some(source) = c.generated.as_ref().map(|g| g.source.clone()) {
                 let id = SpawnOptionId::from(source.as_str());
                 let paired = id.provider_id.as_deref().is_none_or(|provider| {
-                    prefs.provider_pairings.iter()
+                    prefs
+                        .provider_pairings
+                        .iter()
                         .any(|p| p.harness_id == id.harness_id && p.provider_id == provider)
                 });
-                if id.is_proxied() && !paired
+                if id.is_proxied()
+                    && !paired
                     && !prefs.detached_provider_routes.iter().any(|d| d == &source)
                 {
                     detached.push(source);
@@ -95,14 +119,20 @@ pub fn reconcile(prefs: &mut AppPreferences) {
         }
     });
     prefs.detached_provider_routes.extend(detached);
-    for value in &mut prefs.spawn_configurations { let _ = normalize_identity(value); }
+    for value in &mut prefs.spawn_configurations {
+        let _ = normalize_identity(value);
+    }
     // Selections that pointed at a purged recipe fall back to its bare Spawn
     // Option (same harness/route, native defaults) so existing nodes and
     // app-wide defaults keep resolving. Other selections are left alone:
     // bare Spawn Option ids resolve directly, and surviving configuration
     // ids keep working.
     if !purged.is_empty() {
-        for selection in [&mut prefs.default_provider, &mut prefs.reviewer_provider, &mut prefs.naming_provider] {
+        for selection in [
+            &mut prefs.default_provider,
+            &mut prefs.reviewer_provider,
+            &mut prefs.naming_provider,
+        ] {
             if let Some(value) = selection.as_mut() {
                 if let Some((_, option)) = purged.iter().find(|(id, _)| id == value) {
                     *value = option.clone();
@@ -112,14 +142,28 @@ pub fn reconcile(prefs: &mut AppPreferences) {
     }
 }
 
-pub fn normalize_identity(value: &mut super::spawn_configurations::SpawnConfiguration) -> Result<(), String> {
+pub fn normalize_identity(
+    value: &mut super::spawn_configurations::SpawnConfiguration,
+) -> Result<(), String> {
     let legacy = SpawnOptionId::from(value.spawn_option_id.as_str());
-    let harness = value.harness_id.clone().unwrap_or_else(|| legacy.harness_id.clone());
-    let route = value.provider_route_id.clone().or_else(|| legacy.is_proxied().then(|| value.spawn_option_id.clone()));
-    if route.as_ref().is_some_and(|r| !SpawnOptionId::from(r.as_str()).is_proxied()) {
+    let harness = value
+        .harness_id
+        .clone()
+        .unwrap_or_else(|| legacy.harness_id.clone());
+    let route = value
+        .provider_route_id
+        .clone()
+        .or_else(|| legacy.is_proxied().then(|| value.spawn_option_id.clone()));
+    if route
+        .as_ref()
+        .is_some_and(|r| !SpawnOptionId::from(r.as_str()).is_proxied())
+    {
         return Err("Provider Route must identify both a harness and a provider".into());
     }
-    if route.as_ref().is_some_and(|r| SpawnOptionId::from(r.as_str()).harness_id != harness) {
+    if route
+        .as_ref()
+        .is_some_and(|r| SpawnOptionId::from(r.as_str()).harness_id != harness)
+    {
         return Err("Provider Route belongs to a different harness".into());
     }
     value.spawn_option_id = route.clone().unwrap_or_else(|| harness.clone());
@@ -160,17 +204,27 @@ pub fn resolve(
     resolve_plan(prefs, selection, overrides, true)
 }
 
-pub fn resolve_for_edit(prefs: &AppPreferences, selection: &str) -> Result<ResolvedLaunchPlan, String> {
+pub fn resolve_for_edit(
+    prefs: &AppPreferences,
+    selection: &str,
+) -> Result<ResolvedLaunchPlan, String> {
     resolve_plan(prefs, selection, &Default::default(), false)
 }
 
 /// Freeze effective settings without probing installed processes or reading preferences.
 /// Availability and credentials are checked again when the frozen plan launches.
-pub fn capture(prefs: &AppPreferences, selection: &str, overrides: &LaunchOverrides) -> Result<ResolvedLaunchPlan, String> {
+pub fn capture(
+    prefs: &AppPreferences,
+    selection: &str,
+    overrides: &LaunchOverrides,
+) -> Result<ResolvedLaunchPlan, String> {
     resolve_plan(prefs, selection, overrides, false)
 }
 
-pub fn capture_legacy(prefs: &AppPreferences, selection: &str) -> Result<ResolvedLaunchPlan, String> {
+pub fn capture_legacy(
+    prefs: &AppPreferences,
+    selection: &str,
+) -> Result<ResolvedLaunchPlan, String> {
     resolve_plan(prefs, selection, &Default::default(), false)
 }
 
@@ -180,48 +234,114 @@ fn resolve_plan(
     overrides: &LaunchOverrides,
     require_available: bool,
 ) -> Result<ResolvedLaunchPlan, String> {
-    let configuration = prefs.spawn_configurations.iter().find(|c| c.id == selection);
+    let configuration = prefs
+        .spawn_configurations
+        .iter()
+        .find(|c| c.id == selection);
     if configuration.is_none() && selection.starts_with("launch/") {
         return Err("Launch Configuration no longer exists; select another configuration".into());
     }
     let option = configuration.map_or(selection, |c| c.spawn_option_id.as_str());
     let id = SpawnOptionId::from(option);
-    let harness = prefs.harness_profiles.iter().find(|h| h.id == id.harness_id())
-        .cloned().or_else(|| {
-            crate::agent::provider::BUILTIN_HARNESS_IDS.contains(&id.harness_id()).then(|| HarnessProfile {
-                id: id.harness_id.clone(), name: id.harness_id.clone(),
-                harness: if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() },
-                runtime: None, wsl_distro: None, executable: None,
-            })
-        }).ok_or_else(|| "Harness is missing; reinstall it or select another configuration".to_string())?;
-    if require_available && (crate::agent::detection::currently_installed_profiles(vec![harness.clone()]).is_empty()
-        || crate::agent::provider_menu::provider_info_for(&harness, crate::agent::provider::Platform::current()).is_none())
+    let harness = prefs
+        .harness_profiles
+        .iter()
+        .find(|h| h.id == id.harness_id())
+        .cloned()
+        .or_else(|| {
+            crate::agent::provider::BUILTIN_HARNESS_IDS
+                .contains(&id.harness_id())
+                .then(|| HarnessProfile {
+                    id: id.harness_id.clone(),
+                    name: id.harness_id.clone(),
+                    harness: if id.harness_id == "claude" {
+                        "anthropic".into()
+                    } else {
+                        id.harness_id.clone()
+                    },
+                    runtime: None,
+                    wsl_distro: None,
+                    executable: None,
+                })
+        })
+        .ok_or_else(|| {
+            "Harness is missing; reinstall it or select another configuration".to_string()
+        })?;
+    if require_available
+        && (crate::agent::detection::currently_installed_profiles(vec![harness.clone()]).is_empty()
+            || crate::agent::provider_menu::provider_info_for(
+                &harness,
+                crate::agent::provider::Platform::current(),
+            )
+            .is_none())
     {
         return Err("Harness is unavailable; install it for the selected runtime".into());
     }
     let caps = capabilities_for(Provider::from_db_str(&harness.harness).adapter());
     // Harness defaults describe its native provider. A proxy has its own model default.
     let native_defaults = !id.is_proxied();
-    let app = prefs.harness_defaults.get(&harness.id).filter(|_| native_defaults);
+    let app = prefs
+        .harness_defaults
+        .get(&harness.id)
+        .filter(|_| native_defaults);
     let configured_model = configuration.and_then(|c| c.model.as_deref());
     let configured_effort = configuration.and_then(|c| c.effort.as_deref());
-    let nonblank = |value: Option<&str>| value.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let nonblank = |value: Option<&str>| {
+        value
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     let model = nonblank(overrides.model.as_deref()).or_else(|| nonblank(configured_model));
     let effort = nonblank(overrides.effort.as_deref()).or_else(|| nonblank(configured_effort));
-    let extra = nonblank(overrides.extra_args.as_deref()).or_else(|| configuration.and_then(|c| nonblank(c.extra_args.as_deref())));
-    let mut config = resolve_agent_config(&caps, AgentConfigInputs {
-        model: FieldInputs { explicit: model.as_deref(), mesh: None, application: app.and_then(|c| c.model.as_deref()) },
-        effort: FieldInputs { explicit: effort.as_deref(), mesh: None, application: app.and_then(|c| c.effort.as_deref()) },
-    }, extra.as_deref());
+    let extra = nonblank(overrides.extra_args.as_deref())
+        .or_else(|| configuration.and_then(|c| nonblank(c.extra_args.as_deref())));
+    let mut config = resolve_agent_config(
+        &caps,
+        AgentConfigInputs {
+            model: FieldInputs {
+                explicit: model.as_deref(),
+                mesh: None,
+                application: app.and_then(|c| c.model.as_deref()),
+            },
+            effort: FieldInputs {
+                explicit: effort.as_deref(),
+                mesh: None,
+                application: app.and_then(|c| c.effort.as_deref()),
+            },
+        },
+        extra.as_deref(),
+    );
     let route = if let Some(provider_id) = id.provider_id() {
-        let account = prefs.provider_accounts.iter().find(|a| a.id == provider_id)
-            .ok_or_else(|| format!("Provider account '{provider_id}' is missing; restore its credential"))?;
-        if require_available && !account.enabled { return Err(format!("Provider '{}' is disabled; enable it in Providers", account.name)); }
-        if require_available && account.api_key.as_deref().is_none_or(|key| key.trim().is_empty()) {
-            return Err(format!("Provider '{}' has no credential; add its key in Providers", account.name));
+        let account = prefs
+            .provider_accounts
+            .iter()
+            .find(|a| a.id == provider_id)
+            .ok_or_else(|| {
+                format!("Provider account '{provider_id}' is missing; restore its credential")
+            })?;
+        if require_available && !account.enabled {
+            return Err(format!(
+                "Provider '{}' is disabled; enable it in Providers",
+                account.name
+            ));
+        }
+        if require_available
+            && account
+                .api_key
+                .as_deref()
+                .is_none_or(|key| key.trim().is_empty())
+        {
+            return Err(format!(
+                "Provider '{}' has no credential; add its key in Providers",
+                account.name
+            ));
         }
         let executor = Provider::from_db_str(&harness.harness);
-        let mut route = prefs.provider_pairings.iter().find(|p| p.harness_id == harness.id && p.provider_id == provider_id)
+        let mut route = prefs
+            .provider_pairings
+            .iter()
+            .find(|p| p.harness_id == harness.id && p.provider_id == provider_id)
             .cloned();
         // Cline's native auth flow can consume an existing Claude- or
         // Codex-attached pairing for the same account. Preserve that legacy
@@ -229,49 +349,98 @@ fn resolve_plan(
         // the common resolver fails before launch_routing can emit Cline's
         // consumer-specific environment.
         if route.is_none() && executor == Provider::Cline {
-            route = prefs.provider_accounts.iter().find(|a| a.id == provider_id)
-                .and_then(|account| super::compatibility::resolve_pairing("cline", account, &prefs.provider_pairings));
+            route = prefs
+                .provider_accounts
+                .iter()
+                .find(|a| a.id == provider_id)
+                .and_then(|account| {
+                    super::compatibility::resolve_pairing(
+                        "cline",
+                        account,
+                        &prefs.provider_pairings,
+                    )
+                });
         }
-        let mut route = route.ok_or_else(|| "Provider Route is missing; restore it in Launch Configurations".to_string())?;
+        let mut route = route.ok_or_else(|| {
+            "Provider Route is missing; restore it in Launch Configurations".to_string()
+        })?;
         let supports_surface = executor == Provider::Cline
             || super::surface_for_executor(executor) == Some(route.surface);
         if !supports_surface {
             return Err("Provider Route uses an API surface this harness does not support".into());
         }
-        if let Some(model) = config.model.as_ref() { route.model_tiers.default = Some(model.clone()); }
-        else { config.model = route.model_tiers.default.clone(); }
+        if let Some(model) = config.model.as_ref() {
+            route.model_tiers.default = Some(model.clone());
+        } else {
+            config.model = route.model_tiers.default.clone();
+        }
         let catalogue = super::launch_catalog::provider_catalogue();
         let entry = catalogue.iter().find(|p| p.id == provider_id);
-        let model = entry.and_then(|p| p.models.iter().find(|m| m.surface == route.surface && Some(&m.id) == config.model.as_ref()));
+        let model = entry.and_then(|p| {
+            p.models
+                .iter()
+                .find(|m| m.surface == route.surface && Some(&m.id) == config.model.as_ref())
+        });
         // A custom model is allowed, but absent metadata is not evidence of effort support.
-        let allowed = if model.is_none() && entry.is_some_and(|p| !p.manual_model) { Vec::new() }
-            else { super::launch_catalog::allowed_efforts(&caps, model) };
-        if effort.as_ref().or(config.effort.as_ref()).is_some_and(|e| !allowed.contains(e)) {
-            if effort.is_some() { return Err("Effort is not supported by this provider/model and harness".into()); }
+        let allowed = if model.is_none() && entry.is_some_and(|p| !p.manual_model) {
+            Vec::new()
+        } else {
+            super::launch_catalog::allowed_efforts(&caps, model)
+        };
+        if effort
+            .as_ref()
+            .or(config.effort.as_ref())
+            .is_some_and(|e| !allowed.contains(e))
+        {
+            if effort.is_some() {
+                return Err("Effort is not supported by this provider/model and harness".into());
+            }
             config.effort = None;
         }
         let decision = super::pairing_compatibility(&route);
-        if !decision.compatible { return Err(decision.reason.unwrap_or_else(|| "Provider Route is incompatible".into())); }
+        if !decision.compatible {
+            return Err(decision
+                .reason
+                .unwrap_or_else(|| "Provider Route is incompatible".into()));
+        }
         super::compatibility::preflight_pairing_env(Some(&route), provider_id)?;
         Some(route)
-    } else { None };
-    let verification = route.as_ref().and_then(|route| prefs.pairing_verifications.iter().find(|v|
-        v.harness_id == route.harness_id && v.provider_id == route.provider_id
-            && Some(v.endpoint.as_str()) == route.base_url.as_deref()
-            && Some(v.model_id.as_str()) == route.model_tiers.default.as_deref()
-            && v.status == super::PairingVerificationStatus::Verified).cloned());
+    } else {
+        None
+    };
+    let verification = route.as_ref().and_then(|route| {
+        prefs
+            .pairing_verifications
+            .iter()
+            .find(|v| {
+                v.harness_id == route.harness_id
+                    && v.provider_id == route.provider_id
+                    && Some(v.endpoint.as_str()) == route.base_url.as_deref()
+                    && Some(v.model_id.as_str()) == route.model_tiers.default.as_deref()
+                    && v.status == super::PairingVerificationStatus::Verified
+            })
+            .cloned()
+    });
     if require_available
         && Provider::from_db_str(&harness.harness) != Provider::Cline
-        && route.as_ref().is_some_and(|r| r.surface == super::ApiSurface::OpenAI)
+        && route
+            .as_ref()
+            .is_some_and(|r| r.surface == super::ApiSurface::OpenAI)
         && verification.is_none()
     {
         return Err("Provider Route is unverified or stale for this model; verify it in Launch Configurations".into());
     }
     Ok(ResolvedLaunchPlan {
-        configuration_id: configuration.map_or_else(|| format!("launch/{selection}"), |c| c.id.clone()),
+        configuration_id: configuration
+            .map_or_else(|| format!("launch/{selection}"), |c| c.id.clone()),
         configuration_name: configuration.map_or_else(|| harness.name.clone(), |c| c.name.clone()),
-        spawn_option_id: option.into(), harness, route, verification,
-        model: config.model, effort: config.effort, extra_args: config.extra_args,
+        spawn_option_id: option.into(),
+        harness,
+        route,
+        verification,
+        model: config.model,
+        effort: config.effort,
+        extra_args: config.extra_args,
     })
 }
 
@@ -290,12 +459,29 @@ fn resolve_plan(
 /// reference heals to the bare option, which resolves again once the route
 /// is re-attached (and reports the missing route, not a missing recipe,
 /// while detached).
-pub(crate) fn retired_configuration_aliases(prefs: &AppPreferences) -> std::collections::HashMap<String, String> {
-    let live: std::collections::HashSet<&str> = prefs.spawn_configurations.iter().map(|c| c.id.as_str()).collect();
-    let deleted: std::collections::HashSet<&str> = prefs.deleted_launch_configurations.iter().map(String::as_str).collect();
+pub(crate) fn retired_configuration_aliases(
+    prefs: &AppPreferences,
+) -> std::collections::HashMap<String, String> {
+    let live: std::collections::HashSet<&str> = prefs
+        .spawn_configurations
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect();
+    let deleted: std::collections::HashSet<&str> = prefs
+        .deleted_launch_configurations
+        .iter()
+        .map(String::as_str)
+        .collect();
     let mut aliases = std::collections::HashMap::new();
-    for source in effective_profiles(prefs).into_iter().map(|p| p.id)
-        .chain(prefs.provider_pairings.iter().map(|p| format!("{}:{}", p.harness_id, p.provider_id)))
+    for source in effective_profiles(prefs)
+        .into_iter()
+        .map(|p| p.id)
+        .chain(
+            prefs
+                .provider_pairings
+                .iter()
+                .map(|p| format!("{}:{}", p.harness_id, p.provider_id)),
+        )
         .chain(prefs.detached_provider_routes.iter().cloned())
     {
         let retired = format!("launch/{source}");
@@ -316,13 +502,19 @@ pub fn selection_option(selection: &str) -> Result<String, String> {
             // however, has no safe legacy interpretation and must stay a hard
             // error so deleted configurations never silently fall through.
             if selection.starts_with("launch/") {
-                return Err("Launch Configuration no longer exists; select another configuration".into());
+                return Err(
+                    "Launch Configuration no longer exists; select another configuration".into(),
+                );
             }
             return Ok(selection.into());
         }
         Err(error) => return Err(error),
     };
-    if let Some(value) = prefs.spawn_configurations.iter().find(|c| c.id == selection) {
+    if let Some(value) = prefs
+        .spawn_configurations
+        .iter()
+        .find(|c| c.id == selection)
+    {
         return Ok(value.spawn_option_id.clone());
     }
     if selection.starts_with("launch/") {
@@ -333,16 +525,24 @@ pub fn selection_option(selection: &str) -> Result<String, String> {
 
 pub fn snapshot(plan: ResolvedLaunchPlan) -> super::spawn_configurations::SpawnConfiguration {
     let mut value = super::spawn_configurations::SpawnConfiguration {
-        id: plan.configuration_id.clone(), name: plan.configuration_name.clone(), spawn_option_id: plan.spawn_option_id.clone(),
-        model: plan.model.clone(), effort: plan.effort.clone(), extra_args: plan.extra_args.clone(),
-        resolved: Some(plan), generated: None,
+        id: plan.configuration_id.clone(),
+        name: plan.configuration_name.clone(),
+        spawn_option_id: plan.spawn_option_id.clone(),
+        model: plan.model.clone(),
+        effort: plan.effort.clone(),
+        extra_args: plan.extra_args.clone(),
+        resolved: Some(plan),
+        generated: None,
         ..Default::default()
     };
     let _ = normalize_identity(&mut value);
     value
 }
 
-pub fn resolve_snapshot(plan: &ResolvedLaunchPlan, overrides: &LaunchOverrides) -> Result<ResolvedLaunchPlan, String> {
+pub fn resolve_snapshot(
+    plan: &ResolvedLaunchPlan,
+    overrides: &LaunchOverrides,
+) -> Result<ResolvedLaunchPlan, String> {
     let prefs = AppPreferences {
         harness_profiles: vec![plan.harness.clone()],
         provider_accounts: super::provider_accounts(),
@@ -361,9 +561,15 @@ mod tests {
     #[test]
     fn unavailable_runtime_is_rejected_at_the_resolver_not_only_in_the_menu() {
         let mut prefs = generated_preferences();
-        prefs.harness_profiles[0].runtime = Some(if cfg!(windows) { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl });
+        prefs.harness_profiles[0].runtime = Some(if cfg!(windows) {
+            crate::models::EnvType::WindowsInterop
+        } else {
+            crate::models::EnvType::Wsl
+        });
         reconcile(&mut prefs);
-        assert!(resolve(&prefs, "claude", &Default::default()).unwrap_err().contains("unavailable"));
+        assert!(resolve(&prefs, "claude", &Default::default())
+            .unwrap_err()
+            .contains("unavailable"));
         assert!(resolve_for_edit(&prefs, "claude").is_ok());
     }
 
@@ -384,15 +590,28 @@ mod tests {
         reconcile(&mut prefs);
         assert_eq!(prefs, once);
         // A user-saved recipe survives reconciliation untouched.
-        prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
-            "id": "launch/my-review", "name": "My review", "spawn_option_id": "claude",
-            "model": null, "effort": null, "extra_args": null
-        })).unwrap());
+        prefs.spawn_configurations.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "launch/my-review", "name": "My review", "spawn_option_id": "claude",
+                "model": null, "effort": null, "extra_args": null
+            }))
+            .unwrap(),
+        );
         reconcile(&mut prefs);
-        assert_eq!(prefs.spawn_configurations.iter().find(|c| c.id == "launch/my-review").unwrap().name, "My review");
+        assert_eq!(
+            prefs
+                .spawn_configurations
+                .iter()
+                .find(|c| c.id == "launch/my-review")
+                .unwrap()
+                .name,
+            "My review"
+        );
         // A deleted route id is not re-materialized.
         prefs.provider_pairings.clear();
-        prefs.deleted_launch_configurations.push("launch/claude:minimax".into());
+        prefs
+            .deleted_launch_configurations
+            .push("launch/claude:minimax".into());
         reconcile(&mut prefs);
         assert!(prefs.provider_pairings.is_empty());
     }
@@ -416,14 +635,36 @@ mod tests {
         prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
             "id":"custom-choice","name":"Personal","spawn_option_id":"claude","model":"sonnet","effort":"high","extra_args":null
         })).unwrap());
-        prefs.harness_profiles.push(HarnessProfile { id: "codex".into(), name: "Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "codex".into(),
+            name: "Codex".into(),
+            harness: "codex".into(),
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
+        });
         reconcile(&mut prefs);
         assert_eq!(prefs.default_provider.as_deref(), Some("custom-choice"));
-        assert!(prefs.spawn_configurations.iter().any(|c| c.id == "custom-choice"));
-        assert!(!prefs.spawn_configurations.iter().any(|c| c.id == "launch/codex:minimax"),
+        assert!(prefs
+            .spawn_configurations
+            .iter()
+            .any(|c| c.id == "custom-choice"));
+        assert!(
+            !prefs
+                .spawn_configurations
+                .iter()
+                .any(|c| c.id == "launch/codex:minimax"),
             "a new harness must not gain a pre-made configuration: {:?}",
-            prefs.spawn_configurations.iter().map(|c| &c.id).collect::<Vec<_>>());
-        assert_eq!(prefs.provider_accounts[0].api_key.as_deref(), Some("private-key"));
+            prefs
+                .spawn_configurations
+                .iter()
+                .map(|c| &c.id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            prefs.provider_accounts[0].api_key.as_deref(),
+            Some("private-key")
+        );
     }
 
     fn user_minimax_configuration() -> serde_json::Value {
@@ -437,10 +678,16 @@ mod tests {
     fn proxy_defaults_do_not_inherit_native_harness_models() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.harness_defaults.insert("claude".into(), crate::preferences::HarnessConfigValue {
-            model: Some("sonnet".into()), effort: Some("high".into()),
-        });
-        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        prefs.harness_defaults.insert(
+            "claude".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("sonnet".into()),
+                effort: Some("high".into()),
+            },
+        );
+        prefs
+            .spawn_configurations
+            .push(serde_json::from_value(user_minimax_configuration()).unwrap());
         let plan = resolve_plan(&prefs, "launch/my-minimax", &Default::default(), false).unwrap();
         assert_eq!(plan.model.as_deref(), Some("MiniMax-M3[1m]"));
         assert_eq!(plan.effort, None);
@@ -449,49 +696,93 @@ mod tests {
     #[test]
     fn minimax_codex_configuration_accepts_documented_thinking_choices() {
         let mut prefs = generated_preferences();
-        prefs.harness_profiles.push(HarnessProfile { id: "codex".into(), name: "Codex".into(), harness: "codex".into(), runtime: None, wsl_distro: None, executable: None });
+        prefs.harness_profiles.push(HarnessProfile {
+            id: "codex".into(),
+            name: "Codex".into(),
+            harness: "codex".into(),
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
+        });
         reconcile(&mut prefs);
         for effort in ["none", "high"] {
-            let plan = resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
-                model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
-            }, false).unwrap();
+            let plan = resolve_plan(
+                &prefs,
+                "codex:minimax",
+                &LaunchOverrides {
+                    model: Some("MiniMax-M3".into()),
+                    effort: Some(effort.into()),
+                    extra_args: None,
+                },
+                false,
+            )
+            .unwrap();
             assert_eq!(plan.effort.as_deref(), Some(effort));
         }
-        assert!(resolve_plan(&prefs, "codex:minimax", &LaunchOverrides {
-            model: Some("MiniMax-M3".into()), effort: Some("xhigh".into()), extra_args: None,
-        }, false).unwrap_err().contains("Effort"));
+        assert!(resolve_plan(
+            &prefs,
+            "codex:minimax",
+            &LaunchOverrides {
+                model: Some("MiniMax-M3".into()),
+                effort: Some("xhigh".into()),
+                extra_args: None,
+            },
+            false
+        )
+        .unwrap_err()
+        .contains("Effort"));
     }
 
     #[test]
     fn resolver_reports_missing_dependencies_without_native_fallback() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
-        let resolve_current = |prefs: &AppPreferences| resolve(prefs, "launch/my-minimax", &Default::default());
+        prefs
+            .spawn_configurations
+            .push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        let resolve_current =
+            |prefs: &AppPreferences| resolve(prefs, "launch/my-minimax", &Default::default());
         assert!(resolve_current(&prefs).is_ok());
         prefs.provider_accounts[0].api_key = None;
         assert!(resolve_current(&prefs).unwrap_err().contains("credential"));
         prefs.provider_accounts[0].api_key = Some("rotated".into());
         prefs.provider_pairings.clear();
-        assert!(resolve_current(&prefs).unwrap_err().contains("Route is missing"));
+        assert!(resolve_current(&prefs)
+            .unwrap_err()
+            .contains("Route is missing"));
         prefs.spawn_configurations.clear();
-        assert!(resolve_current(&prefs).unwrap_err().contains("no longer exists"));
+        assert!(resolve_current(&prefs)
+            .unwrap_err()
+            .contains("no longer exists"));
     }
 
     #[test]
     fn explicit_overrides_win_and_terminal_masks_unsupported_fields() {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.harness_defaults.insert("claude".into(), crate::preferences::HarnessConfigValue { model: Some("app".into()), effort: Some("low".into()) });
+        prefs.harness_defaults.insert(
+            "claude".into(),
+            crate::preferences::HarnessConfigValue {
+                model: Some("app".into()),
+                effort: Some("low".into()),
+            },
+        );
         let plan = resolve(&prefs, "claude", &Default::default()).unwrap();
         assert_eq!(plan.model.as_deref(), Some("app"));
         assert_eq!(plan.effort.as_deref(), Some("low"));
-        let overrides = LaunchOverrides { model: Some("explicit".into()), effort: Some("high".into()), extra_args: Some("--verbose".into()) };
+        let overrides = LaunchOverrides {
+            model: Some("explicit".into()),
+            effort: Some("high".into()),
+            extra_args: Some("--verbose".into()),
+        };
         let plan = resolve(&prefs, "claude", &overrides).unwrap();
         assert_eq!(plan.model.as_deref(), Some("explicit"));
         assert_eq!(plan.extra_args.as_deref(), Some("--verbose"));
         let plan = resolve(&prefs, "terminal", &overrides).unwrap();
-        assert_eq!((plan.model, plan.effort, plan.extra_args), (None, None, None));
+        assert_eq!(
+            (plan.model, plan.effort, plan.extra_args),
+            (None, None, None)
+        );
     }
 
     #[test]
@@ -500,19 +791,25 @@ mod tests {
         super::super::init_for_tests(dir.path().into());
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
-        prefs.spawn_configurations.push(serde_json::from_value(user_minimax_configuration()).unwrap());
+        prefs
+            .spawn_configurations
+            .push(serde_json::from_value(user_minimax_configuration()).unwrap());
         let plan = resolve(&prefs, "launch/my-minimax", &Default::default()).unwrap();
         prefs.harness_profiles.clear();
         prefs.provider_pairings.clear();
         prefs.spawn_configurations.clear();
-        prefs.deleted_launch_configurations.push(plan.configuration_id.clone());
+        prefs
+            .deleted_launch_configurations
+            .push(plan.configuration_id.clone());
         prefs.provider_accounts[0].api_key = Some("rotated".into());
         super::super::save(prefs.clone()).unwrap();
         let resumed = resolve_snapshot(&plan, &Default::default()).unwrap();
         assert_eq!(resumed, plan);
         prefs.provider_accounts.clear();
         super::super::save(prefs).unwrap();
-        assert!(resolve_snapshot(&plan, &Default::default()).unwrap_err().contains("account"));
+        assert!(resolve_snapshot(&plan, &Default::default())
+            .unwrap_err()
+            .contains("account"));
         super::super::reset_for_tests();
     }
 
@@ -524,12 +821,24 @@ mod tests {
             "spawn_configurations": [{"id":"launch/private", "name":"Private", "spawn_option_id":"claude:custom", "model":"chosen-model", "effort":"high", "extra_args":null}]
         })).unwrap();
         let plan = resolve(&prefs, "launch/private", &LaunchOverrides::default()).unwrap();
-        assert_eq!(plan.route.as_ref().unwrap().base_url.as_deref(), Some("https://example.test/anthropic"));
-        assert_eq!(plan.route.as_ref().unwrap().model_tiers.default.as_deref(), Some("chosen-model"));
-        assert!(!serde_json::to_string(&plan).unwrap().contains("secret-test-key"));
+        assert_eq!(
+            plan.route.as_ref().unwrap().base_url.as_deref(),
+            Some("https://example.test/anthropic")
+        );
+        assert_eq!(
+            plan.route.as_ref().unwrap().model_tiers.default.as_deref(),
+            Some("chosen-model")
+        );
+        assert!(!serde_json::to_string(&plan)
+            .unwrap()
+            .contains("secret-test-key"));
         let mut disabled = prefs.clone();
         disabled.provider_accounts[0].enabled = false;
-        assert!(resolve(&disabled, "launch/private", &LaunchOverrides::default()).unwrap_err().contains("disabled"));
+        assert!(
+            resolve(&disabled, "launch/private", &LaunchOverrides::default())
+                .unwrap_err()
+                .contains("disabled")
+        );
     }
 
     #[test]
@@ -538,38 +847,77 @@ mod tests {
         // must not materialize one generated recipe per harness.
         let mut prefs = AppPreferences::default();
         reconcile(&mut prefs);
-        assert!(prefs.spawn_configurations.is_empty(),
-            "fresh prefs must not pre-create configurations, got {:?}", prefs.spawn_configurations);
+        assert!(
+            prefs.spawn_configurations.is_empty(),
+            "fresh prefs must not pre-create configurations, got {:?}",
+            prefs.spawn_configurations
+        );
         let mut known = generated_preferences();
         reconcile(&mut known);
-        assert!(known.spawn_configurations.is_empty(),
+        assert!(
+            known.spawn_configurations.is_empty(),
             "a known provider must materialize its route, not a configuration: {:?}",
-            known.spawn_configurations);
+            known.spawn_configurations
+        );
         assert_eq!(known.provider_pairings.len(), 1);
     }
 
     #[test]
     fn reconcile_purges_catalogue_generated_configurations_but_keeps_user_ones() {
         let mut prefs = generated_preferences();
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/claude".into(), name: "Claude Code".into(), spawn_option_id: "claude".into(),
-            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: false, route: None }),
-            ..Default::default()
-        });
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/my-review".into(), name: "My review".into(), spawn_option_id: "claude".into(),
-            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: true, route: None }),
-            ..Default::default()
-        });
-        prefs.spawn_configurations.push(serde_json::from_value(serde_json::json!({
-            "id": "launch/personal", "name": "Personal", "spawn_option_id": "claude",
-            "model": null, "effort": null, "extra_args": null
-        })).unwrap());
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude".into(),
+                name: "Claude Code".into(),
+                spawn_option_id: "claude".into(),
+                generated: Some(GeneratedLaunch {
+                    source: "claude".into(),
+                    catalogue_revision: 1,
+                    user_owned: false,
+                    route: None,
+                }),
+                ..Default::default()
+            },
+        );
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/my-review".into(),
+                name: "My review".into(),
+                spawn_option_id: "claude".into(),
+                generated: Some(GeneratedLaunch {
+                    source: "claude".into(),
+                    catalogue_revision: 1,
+                    user_owned: true,
+                    route: None,
+                }),
+                ..Default::default()
+            },
+        );
+        prefs.spawn_configurations.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "launch/personal", "name": "Personal", "spawn_option_id": "claude",
+                "model": null, "effort": null, "extra_args": null
+            }))
+            .unwrap(),
+        );
         reconcile(&mut prefs);
-        let ids: Vec<_> = prefs.spawn_configurations.iter().map(|c| c.id.as_str()).collect();
-        assert!(!ids.contains(&"launch/claude"), "catalogue-generated recipes must be purged: {ids:?}");
-        assert!(ids.contains(&"launch/my-review"), "user-owned recipes must survive: {ids:?}");
-        assert!(ids.contains(&"launch/personal"), "user-created recipes must survive: {ids:?}");
+        let ids: Vec<_> = prefs
+            .spawn_configurations
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert!(
+            !ids.contains(&"launch/claude"),
+            "catalogue-generated recipes must be purged: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"launch/my-review"),
+            "user-owned recipes must survive: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"launch/personal"),
+            "user-created recipes must survive: {ids:?}"
+        );
     }
 
     #[test]
@@ -584,14 +932,23 @@ mod tests {
         let pairing = prefs.provider_pairings.clone();
         super::super::remove_provider_pairing(&mut prefs, "claude", "minimax");
         reconcile(&mut prefs);
-        assert!(prefs.provider_pairings.is_empty(),
-            "detach must stick, got {:?}", prefs.provider_pairings);
-        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
+        assert!(
+            prefs.provider_pairings.is_empty(),
+            "detach must stick, got {:?}",
+            prefs.provider_pairings
+        );
+        assert!(prefs
+            .detached_provider_routes
+            .contains(&"claude:minimax".to_string()));
         for route in pairing {
             super::super::upsert_provider_pairing(&mut prefs, route);
         }
         reconcile(&mut prefs);
-        assert_eq!(prefs.provider_pairings.len(), 1, "explicit re-attach must win over the detach record");
+        assert_eq!(
+            prefs.provider_pairings.len(),
+            1,
+            "explicit re-attach must win over the detach record"
+        );
     }
 
     #[test]
@@ -603,19 +960,42 @@ mod tests {
         let mut prefs = generated_preferences();
         reconcile(&mut prefs);
         prefs.provider_pairings.clear();
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/claude:minimax".into(), name: "MiniMax".into(), spawn_option_id: "claude:minimax".into(),
-            generated: Some(GeneratedLaunch { source: "claude:minimax".into(), catalogue_revision: 1, user_owned: false, route: None }),
-            ..Default::default()
-        });
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude:minimax".into(),
+                name: "MiniMax".into(),
+                spawn_option_id: "claude:minimax".into(),
+                generated: Some(GeneratedLaunch {
+                    source: "claude:minimax".into(),
+                    catalogue_revision: 1,
+                    user_owned: false,
+                    route: None,
+                }),
+                ..Default::default()
+            },
+        );
         reconcile(&mut prefs);
-        assert!(prefs.provider_pairings.is_empty(),
-            "pre-upgrade detach must survive the purge, got {:?}", prefs.provider_pairings);
-        assert!(prefs.detached_provider_routes.contains(&"claude:minimax".to_string()));
-        assert!(!prefs.deleted_launch_configurations.contains(&"launch/claude:minimax".to_string()),
-            "a detach record must not masquerade as a recipe deletion");
-        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
-            Some("claude:minimax"), "detached routes must still heal to their bare option");
+        assert!(
+            prefs.provider_pairings.is_empty(),
+            "pre-upgrade detach must survive the purge, got {:?}",
+            prefs.provider_pairings
+        );
+        assert!(prefs
+            .detached_provider_routes
+            .contains(&"claude:minimax".to_string()));
+        assert!(
+            !prefs
+                .deleted_launch_configurations
+                .contains(&"launch/claude:minimax".to_string()),
+            "a detach record must not masquerade as a recipe deletion"
+        );
+        assert_eq!(
+            retired_configuration_aliases(&prefs)
+                .get("launch/claude:minimax")
+                .map(String::as_str),
+            Some("claude:minimax"),
+            "detached routes must still heal to their bare option"
+        );
     }
 
     #[test]
@@ -626,19 +1006,39 @@ mod tests {
         // catalogue ids for the harness, its route, and Terminal all heal
         // to their bare Spawn Option.
         let aliases = retired_configuration_aliases(&prefs);
-        assert_eq!(aliases.get("launch/claude").map(String::as_str), Some("claude"));
-        assert_eq!(aliases.get("launch/claude:minimax").map(String::as_str), Some("claude:minimax"));
-        assert_eq!(aliases.get("launch/terminal").map(String::as_str), Some("terminal"));
+        assert_eq!(
+            aliases.get("launch/claude").map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            aliases.get("launch/claude:minimax").map(String::as_str),
+            Some("claude:minimax")
+        );
+        assert_eq!(
+            aliases.get("launch/terminal").map(String::as_str),
+            Some("terminal")
+        );
         // A user-owned edit keeps its id live: no alias reroutes it.
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/claude".into(), name: "My Claude".into(), spawn_option_id: "claude".into(),
-            generated: Some(GeneratedLaunch { source: "claude".into(), catalogue_revision: 1, user_owned: true, route: None }),
-            ..Default::default()
-        });
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude".into(),
+                name: "My Claude".into(),
+                spawn_option_id: "claude".into(),
+                generated: Some(GeneratedLaunch {
+                    source: "claude".into(),
+                    catalogue_revision: 1,
+                    user_owned: true,
+                    route: None,
+                }),
+                ..Default::default()
+            },
+        );
         assert!(!retired_configuration_aliases(&prefs).contains_key("launch/claude"));
         // An explicitly deleted recipe is never resurrected as an alias.
         prefs.spawn_configurations.clear();
-        prefs.deleted_launch_configurations.push("launch/claude:minimax".into());
+        prefs
+            .deleted_launch_configurations
+            .push("launch/claude:minimax".into());
         assert!(!retired_configuration_aliases(&prefs).contains_key("launch/claude:minimax"));
         // A detached (not deleted) route still heals, even with no pairing
         // stored: references migrate to the bare option and resolve again
@@ -646,8 +1046,12 @@ mod tests {
         prefs.deleted_launch_configurations.clear();
         prefs.provider_pairings.clear();
         prefs.detached_provider_routes.push("claude:minimax".into());
-        assert_eq!(retired_configuration_aliases(&prefs).get("launch/claude:minimax").map(String::as_str),
-            Some("claude:minimax"));
+        assert_eq!(
+            retired_configuration_aliases(&prefs)
+                .get("launch/claude:minimax")
+                .map(String::as_str),
+            Some("claude:minimax")
+        );
     }
 
     #[test]
