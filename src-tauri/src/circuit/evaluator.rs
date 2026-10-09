@@ -718,6 +718,19 @@ fn run_classifier_command(
     )
 }
 
+pub(crate) const CLASSIFIER_TIMEOUT_MESSAGE: &str = "classifier exceeded its time budget";
+
+/// Did this stored classifier error come from [`CLASSIFIER_TIMEOUT_MESSAGE`]?
+/// Callers store errors as `<provider>: <message>`, so the message is matched
+/// as the whole error or its final `: `-separated segment. A hung start-up
+/// (run 399) times out; a failure with a diagnostic does not.
+pub(crate) fn is_classifier_timeout(error: &str) -> bool {
+    error == CLASSIFIER_TIMEOUT_MESSAGE
+        || error
+            .strip_suffix(CLASSIFIER_TIMEOUT_MESSAGE)
+            .is_some_and(|prefix| prefix.ends_with(": "))
+}
+
 /// Pure error composition for [`run_classifier_command`]'s tail (issue
 /// #2049): the message a failing classifier produces from its exit status
 /// plus the captured stdout/stderr and truncation flags. No child, no
@@ -748,7 +761,7 @@ fn classifier_command_error(
         .into());
     }
     if timed_out {
-        return Err("classifier exceeded its time budget".into());
+        return Err(CLASSIFIER_TIMEOUT_MESSAGE.into());
     }
     if over_limit {
         return Err("classifier stdout exceeded 64 KiB".into());
@@ -834,6 +847,34 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("OAuth session expired"), "{error}");
         assert!(error.contains("Refresh rejected"), "{error}");
+    }
+
+    #[test]
+    fn a_timed_out_classifier_is_told_apart_from_one_that_failed() {
+        // Run 399: every `mcode exec` hung in start-up for 29 minutes. The
+        // gate stores the error as `<provider>: <message>`, and only a
+        // timeout may earn the longer retry back-off.
+        let timed_out = classifier_command_error(None, true, false, b"", b"", false).unwrap_err();
+        assert!(is_classifier_timeout(&format!("mcode: {timed_out}")));
+        assert!(is_classifier_timeout(&timed_out));
+
+        let exited = classifier_command_error(
+            Some("classifier exited with exit code: 4".to_string()),
+            false,
+            false,
+            b"",
+            b"Model is not available for this route\n",
+            false,
+        )
+        .unwrap_err();
+        assert!(!is_classifier_timeout(&format!("mcode: {exited}")));
+        assert!(!is_classifier_timeout(
+            "mcode: classifier stdout exceeded 64 KiB"
+        ));
+        assert!(!is_classifier_timeout(
+            "mcode: Classifier returned no recognised verdict: classifier exceeded its time budget soon"
+        ));
+        assert!(!is_classifier_timeout(""));
     }
 
     #[test]

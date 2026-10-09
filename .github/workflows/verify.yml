@@ -845,6 +845,24 @@ jobs:
       - name: Verify the Rust shards cover every unit test
         run: node scripts/check-rust-shard-coverage.mjs
 
+      # Issue #2156. The `http::fuzz` tests are already claimed by the
+      # `commands-http` shard, so this adds no coverage — it is the explicit,
+      # bounded invocation of the fuzz target, run with the campaign knobs
+      # visible in the log. `--nocapture` puts the case count and seed it ran
+      # with on the record; a campaign is a local command
+      # (BUILDMESH_FUZZ_CASES), not CI time.
+      - name: Smoke the HTTP request fuzz target
+        env:
+          BUILDMESH_FUZZ_CASES: "2000"
+        run: |
+          node "$GITHUB_WORKSPACE/scripts/ci/run-guarded.mjs" \
+            --minutes 5 \
+            --kill-grace-seconds 30 \
+            --log cargo-http-fuzz.log \
+            --label "The HTTP request fuzz smoke" \
+            -- cargo test --locked --lib http::fuzz -- --nocapture
+        working-directory: src-tauri
+
       # The matrix above runs every Rust unit test, and the coverage gate
       # verifies none were missed. Here, run the ts-rs export tests, doctests,
       # and every integration-test target; rerunning all unit tests serially
@@ -884,6 +902,20 @@ jobs:
         with:
           name: rust-nonshard-tests-log
           path: src-tauri/cargo-nonshard-tests.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      # The fuzz smoke's own log, uploaded separately because the upload above
+      # is pinned to one filename by tests/unit/ci-rust-timeout-guard.test.ts:
+      # a glob there would satisfy the intent and fail that test. A smoke
+      # failure skips the export/integration step, so without this the one log
+      # that explains it is also the one never written.
+      - name: Upload the HTTP fuzz smoke log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-http-fuzz-log
+          path: src-tauri/cargo-http-fuzz.log
           retention-days: 7
           if-no-files-found: warn
 
