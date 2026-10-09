@@ -5,8 +5,8 @@
 //! `supports_*`, `resets_backend_env`, etc.) plus an adapter-id switch in
 //! `agent::capabilities::effort_control_for`. The capability descriptor
 //! could disagree with the recipe the spawn path actually launched — the
-//! `mcode` `supports_model_override() == true` while the interactive TUI
-//! recipe rejects `--model` is the named example.
+//! older `mcode` releases advertised model overrides while their interactive
+//! recipe rejected `--model`. Current mcode supports the session override.
 //!
 //! This module introduces one adapter-owned struct — [`PreparedHarnessLaunch`]
 //! — that bundles the recipe, the capability contract, and the environment

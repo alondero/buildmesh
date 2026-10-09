@@ -41,7 +41,7 @@ fn make_input<'a>(
 /// 1. The recipe's model-flag presence (the flag name from
 ///    `adapter.model_args(m).first()`) matches
 ///    `caps.supports_model_override`. Kimi uses `-m`, anthropic /
-///    codex / grok / agy / cursor use `--model`, mcode uses nothing.
+///    codex / grok / agy / cursor / mcode use `--model`.
 /// 2. The recipe's effort-flag presence (matched by
 ///    `caps.effort_control` shape: `Closed => "--effort"`,
 ///    `InlineConfig => key prefix`, `None => neither`) matches
@@ -62,8 +62,7 @@ fn capability_recipe_coherence() {
         // short forms (Kimi `-m`) or vendor-specific names; the
         // adapter owns its flag vocabulary.
         let model_value = match adapter.id() {
-            // mcode's `model` slot is no longer advertised; pick a
-            // plausible value to attempt smuggling it past the mask.
+            // mcode model references include their provider prefix.
             "mcode" => "minimax/MiniMax-Text-01",
             "codex" => "gpt-4o",
             "kimi" => "kimi-k2",
@@ -243,11 +242,9 @@ fn codex_resume_recipe_uses_subcommand_shape() {
     assert!(!args.contains(&"--resume"));
 }
 
-/// Issue #1179 follow-up pin: `mcode` no longer advertises
-/// `supports_model_override`. Even with a value in the resolver
-/// config, the recipe must not contain `--model`.
+/// mcode 0.6.5 accepts model overrides in its interactive session recipe.
 #[test]
-fn mcode_recipe_never_carries_model_arg_under_coherence_matrix() {
+fn mcode_recipe_carries_model_arg_under_coherence_matrix() {
     let adapter =
         &crate::agent::provider::adapters::MCODE as &dyn crate::agent::provider::AgentProvider;
     let config = ResolvedAgentConfig {
@@ -263,15 +260,13 @@ fn mcode_recipe_never_carries_model_arg_under_coherence_matrix() {
     );
     let prepared = crate::agent::launch::default_prepare(adapter, input);
     let args = &prepared.recipe.base_args;
-    assert!(
-        !args.contains(&"--model".to_string()),
-        "mcode recipe must never carry --model; got {:?}",
-        args
-    );
-    assert!(
-        args.last().map(|a| a.as_str()) == Some("check the auth handler"),
-        "mcode prefill should be the trailing positional, got {:?}",
-        args
+    assert_eq!(
+        args,
+        &[
+            "--model",
+            "minimax/MiniMax-Text-01",
+            "check the auth handler"
+        ]
     );
 }
 

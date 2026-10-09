@@ -355,9 +355,8 @@ mod tests {
         assert!(Provider::Kimi.adapter().supports_model_override());
         assert!(Provider::Kimi.adapter().requires_attention_hook());
         assert!(Provider::Mcode.adapter().supports_resume());
-        // Issue #1179: mcode's interactive TUI rejects `--model`, so the
-        // override is no longer advertised.
-        assert!(!Provider::Mcode.adapter().supports_model_override());
+        // mcode 0.6.5 accepts a session-only model override in the TUI.
+        assert!(Provider::Mcode.adapter().supports_model_override());
         // Issue #1797: the Agent-Plugin attention hook is provisioned and
         // `Stop` delivery was validated against a live 0.4.12 TUI.
         assert!(Provider::Mcode.adapter().requires_attention_hook());

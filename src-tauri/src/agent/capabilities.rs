@@ -815,10 +815,8 @@ mod tests {
         );
 
         let mcode = mcode_caps();
-        // Issue #1179: mcode's interactive TUI rejects `--model`, so
-        // the override is no longer advertised. The capability and
-        // recipe now agree (see `adapters::mcode::tests`).
-        assert!(!mcode.supports_model_override);
+        // mcode 0.6.5 accepts a session-only model override in the TUI.
+        assert!(mcode.supports_model_override);
         assert!(!mcode.supports_effort_override);
         // Issue #1358: mcode's interactive TUI still accepts arbitrary
         // CLI flags as positional args; permissive on extras.

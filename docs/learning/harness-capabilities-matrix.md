@@ -100,7 +100,7 @@ Legend: ✅ advertised, ❌ not advertised. Column shorthand:
 | OpenCode | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Attention arrives through the project plugin |
 | Kimi Code | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ | ✅ | ❌ | ❌ | Hook needs 0.27.0+; no transcript reader |
 | Grok Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Hook validated against 1.0.5 |
-| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ❌ | TUI rejects `--model`; attention hook validated on 0.4.12 (`Stop` only) |
+| MiniMax Code | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ❌ | Session-only `--model` verified in 0.6.5 interactive help; attention hook validated on 0.4.12 (`Stop` only) |
 | DeepSeek Harness | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | Capabilities deliberately gated (no validated profile) |
 | Command Code | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | Passive watcher replaces a native hook |
 | Freebuff | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ❌ | No model or effort override |

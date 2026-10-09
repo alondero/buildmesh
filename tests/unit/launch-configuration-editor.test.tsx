@@ -10,6 +10,32 @@ const targets: LaunchTarget[] = [{ id: 'claude:minimax', harness_id: 'claude', h
 const route: ProviderPairing = { harness_id: 'claude', provider_id: 'minimax', surface: 'anthropic', base_url: 'https://api.minimax.io/anthropic', model_tiers: { default: 'MiniMax-M3', opus: null, fable: null, sonnet: null, haiku: null, small_fast: null } };
 
 describe('Launch Configuration editor', () => {
+  it('saves and reopens a MiniMax Code session model reference', async () => {
+    const target: LaunchTarget = {
+      id: 'mcode', harness_id: 'mcode', harness_name: 'MiniMax Code', provider_name: 'Native authentication',
+      models: [], efforts: [], route_attached: false, manual_model: true, supports_model: true, supports_extra_args: true,
+    };
+    const value: SpawnConfiguration = {
+      id: 'launch/mcode-review', name: 'MiniMax review', spawn_option_id: 'mcode', model: null, effort: null, extra_args: null,
+    };
+    const save = vi.fn().mockResolvedValue(undefined);
+    const editor = render(<LaunchConfigurationEditor value={value} targets={[target]} onSave={save} onCancel={vi.fn()} />);
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('');
+    expect(screen.queryByLabelText('Effort')).toBeNull();
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: 'minimax/MiniMax-M3#variant' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(
+      { ...value, model: 'minimax/MiniMax-M3#variant' }, undefined, expect.any(Function),
+    ));
+
+    editor.unmount();
+    render(<LaunchConfigurationEditor value={save.mock.calls[0][0]} targets={[target]} onSave={save} onCancel={vi.fn()} />);
+    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('minimax/MiniMax-M3#variant');
+    fireEvent.change(screen.getByLabelText('Model'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith(value, undefined, expect.any(Function)));
+  });
+
   it('shows effort guidance for WSL profiles and scopes max guidance to the max selection', () => {
     const claude: LaunchTarget = {
       id: 'claude-wsl-ubuntu', harness_id: 'claude-wsl-ubuntu', harness_name: 'Claude Code (WSL: Ubuntu)', provider_name: 'Native authentication',

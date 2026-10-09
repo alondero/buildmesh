@@ -18,16 +18,13 @@
 //! silently discarded. `self_assigns_session_id()` is `true` and
 //! `session_assign_args()` is a no-op.
 //!
-//! **No model override** (issue #1179). `mcode` exposes `--model
-//! <provider>/<model>` on the `exec` subcommand only; the interactive TUI
-//! the harness always launches rejects it. Previously this adapter
-//! advertised `supports_model_override() == true` while emitting a
-//! `--model` flag the active recipe did not accept — the resolver
-//! passed the value through, the spawn path appended it, and the TUI
-//! surfaced an upstream rejection. The coherent choice (recorded in
-//! the issue thread) is to keep the interactive TUI as the supported
-//! mode and drop the override. A future `mcode exec`-based launch
-//! mode (with its own lifecycle work) would re-advertise the flag.
+//! **Model override** uses `--model <provider/model>` for the launched
+//! session, including `--session <id>` resumes. Verified against installed
+//! mcode 0.6.5 on 2026-10-09: the interactive CLI now accepts this option,
+//! superseding the older limitation recorded in issue #1179. References may
+//! include `#variant`; the adapter forwards them unchanged. An omitted model
+//! leaves mcode's own default intact, and the override does not change its
+//! global model configuration.
 //!
 //! **Prefill** is the trailing positional `[prompt]` — there is no `--prefill`
 //! flag. We override `prefill_args()` to return the text as a single positional
@@ -895,21 +892,16 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
-    /// `false` — the interactive TUI recipe (`mcode [--session <id>]
-    /// [<prompt>]`) does not accept `--model`. The flag exists on
-    /// `mcode exec`, but Buildmesh does not launch that subcommand. See
-    /// the module doc for the issue #1179 product decision.
+    /// The interactive CLI accepts a session-only `--model` override (0.6.5).
     fn supports_model_override(&self) -> bool {
-        false
+        true
     }
 
     fn supports_extra_args(&self) -> bool {
         // Issue #1358: mcode's interactive TUI still accepts arbitrary
         // CLI flags as positional args (it's a runtime, not a
-        // vocab-restricted CLI like Codex). The masking defaults are
-        // conservative on `supports_model_override` and
-        // `supports_effort_override` (mcode's TUI rejects them) but
-        // permissive on extras.
+        // vocab-restricted CLI like Codex). Effort controls remain
+        // unsupported; model selection uses the dedicated override.
         true
     }
 
@@ -1068,28 +1060,70 @@ mod tests {
         assert!(MCODE.supports_prefill());
     }
 
-    /// Issue #1179: mcode does not advertise a model override. Even if a
-    /// resolved value somehow reached the launch helper, the prepared
-    /// recipe must never carry a `--model` flag — the interactive TUI
-    /// rejects it. The capability descriptor and the recipe are
-    /// required to agree.
     #[test]
-    fn supports_resume_but_no_model_override_after_issue_1179() {
+    fn supports_resume_and_session_model_override() {
         assert!(MCODE.supports_resume());
-        assert!(!MCODE.supports_model_override());
+        assert!(MCODE.supports_model_override());
+    }
+
+    #[test]
+    fn configuration_round_trips_and_resolves_model_before_defaults() {
+        use crate::preferences::{
+            launch_catalog, launch_configurations, spawn_configurations, AppPreferences,
+            HarnessConfigValue,
+        };
+
+        let mut prefs = AppPreferences::default();
+        let saved = spawn_configurations::validate(spawn_configurations::SpawnConfiguration {
+            id: "launch/mcode-review".into(),
+            name: "MiniMax review".into(),
+            spawn_option_id: "mcode".into(),
+            model: Some(" minimax/MiniMax-M3#variant ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        prefs.spawn_configurations.push(saved);
+        let mut prefs: AppPreferences =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
+        assert_eq!(plan.effort, None);
+        assert!(plan.route.is_none());
+
+        let targets = launch_catalog::targets_for(&prefs, vec![plan.harness.clone()]);
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].supports_model);
+        assert!(targets[0].manual_model);
+        assert!(targets[0].efforts.is_empty());
+
+        prefs.harness_defaults.insert(
+            "mcode".into(),
+            HarnessConfigValue {
+                model: Some("minimax/application-default".into()),
+                effort: None,
+            },
+        );
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
+        prefs.spawn_configurations[0].model = None;
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/application-default"));
+        prefs.harness_defaults.clear();
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model, None);
     }
 
     /// Pin the capability descriptor end-to-end: the harness-id,
-    /// `supports_model_override = false`, and the absence of effort
+    /// model override support, and the absence of effort
     /// controls. Drift here means the Spawn Menu or autopilot
     /// compatibility gate will misroute mcode.
     #[test]
-    fn capabilities_descriptor_drops_model_and_effort() {
+    fn capabilities_descriptor_supports_model_without_effort() {
         let caps = MCODE.capabilities();
         assert_eq!(caps.harness_id, "mcode");
         assert!(caps.supports_resume);
         assert!(caps.supports_prefill);
-        assert!(!caps.supports_model_override);
+        assert!(caps.supports_model_override);
         assert!(!caps.supports_effort_override);
         // Issue #1797 — the hook is provisioned and Stop delivery was
         // validated against a live 0.4.12 TUI.
@@ -1143,64 +1177,97 @@ mod tests {
         }
     }
 
-    /// The recipe for the default launch mode — even with a (hypothetical)
-    /// resolved model in the input — must contain no `--model` flag.
     #[test]
-    fn mcode_interactive_recipe_never_carries_model_arg() {
-        // Defence in depth: even if a caller bypassed the resolver mask
-        // and stuffed a model into ResolvedAgentConfig, the prepared
-        // recipe must not include --model, because the harness
-        // advertised `supports_model_override = false`.
+    fn mcode_interactive_recipe_carries_model_before_positional_prompt() {
         let config = ResolvedAgentConfig {
-            model: Some("minimax/MiniMax-Text-01".to_string()),
+            model: Some("minimax/MiniMax-M3#variant".to_string()),
             effort: None,
             extra_args: None,
         };
-        let input = HarnessLaunchInput {
-            platform: Platform::Macos,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::None,
-            config: &config,
-            prefill: None,
-            sandbox: false,
-        };
-        let prepared = default_prepare(&MCODE, input);
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "mcode interactive recipe must never carry --model (issue #1179); got {:?}",
-            prepared.recipe.base_args
-        );
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform,
+                    runtime: EnvType::Windows,
+                    session: SessionIdModeRef::None,
+                    config: &config,
+                    prefill: Some("Review this workspace"),
+                    sandbox: false,
+                },
+            );
+            assert_eq!(
+                prepared.recipe.base_args,
+                vec![
+                    "--model",
+                    "minimax/MiniMax-M3#variant",
+                    "Review this workspace",
+                ]
+            );
+            assert_eq!(prepared.recipe.windows_shell, shell_for(platform));
+        }
     }
 
-    /// Cross-check the resume-mode recipe: it uses the `--session`
-    /// positional and the TUI never receives `--model` even when a model
-    /// is in the resolved config.
     #[test]
-    fn mcode_resume_recipe_carries_session_not_model() {
+    fn mcode_resume_recipe_carries_session_and_model_before_prompt() {
         let config = ResolvedAgentConfig {
-            model: Some("minimax/MiniMax-Text-01".to_string()),
+            model: Some("minimax/MiniMax-M3".to_string()),
             effort: None,
             extra_args: None,
         };
-        let input = HarnessLaunchInput {
-            platform: Platform::Windows,
-            runtime: EnvType::Windows,
-            session: SessionIdModeRef::Resume("abc-123"),
-            config: &config,
-            prefill: None,
-            sandbox: false,
+        for platform in [Platform::Windows, Platform::Macos, Platform::Linux] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform,
+                    runtime: EnvType::Windows,
+                    session: SessionIdModeRef::Resume("mvs_abc123"),
+                    config: &config,
+                    prefill: Some("Continue the review"),
+                    sandbox: false,
+                },
+            );
+            assert_eq!(
+                prepared.recipe.base_args,
+                vec![
+                    "--session",
+                    "mvs_abc123",
+                    "--model",
+                    "minimax/MiniMax-M3",
+                    "Continue the review",
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn mcode_recipe_without_model_preserves_native_default() {
+        let config = ResolvedAgentConfig {
+            model: None,
+            effort: None,
+            extra_args: None,
         };
-        let prepared = default_prepare(&MCODE, input);
-        assert!(
-            prepared.recipe.base_args.contains(&"--session".to_string()),
-            "mcode resume must include --session, got {:?}",
-            prepared.recipe.base_args
-        );
-        assert!(prepared.recipe.base_args.contains(&"abc-123".to_string()));
-        assert!(
-            !prepared.recipe.base_args.iter().any(|a| a == "--model"),
-            "mcode resume must not carry --model"
-        );
+        for session in [
+            SessionIdModeRef::None,
+            SessionIdModeRef::Resume("mvs_abc123"),
+        ] {
+            let prepared = default_prepare(
+                &MCODE,
+                HarnessLaunchInput {
+                    platform: Platform::Windows,
+                    runtime: EnvType::Windows,
+                    session,
+                    config: &config,
+                    prefill: None,
+                    sandbox: false,
+                },
+            );
+            let expected = match session {
+                SessionIdModeRef::None => vec![],
+                _ => vec!["--session", "mvs_abc123"],
+            };
+            assert_eq!(prepared.recipe.base_args, expected);
+        }
     }
 
     #[test]

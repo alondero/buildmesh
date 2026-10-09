@@ -293,6 +293,18 @@ Check these in order:
 Never work around a certificate warning by disabling browser security on a
 shared network. Remote access exposes terminal content and input.
 
+## MiniMax Code rejects a configured model
+
+Buildmesh passes the Launch Configuration's **Model** as the session-only
+`--model` option, including when resuming. Support was verified with installed
+`mcode 0.6.5`. Run `mcode --version` and `mcode --help` in the selected runtime;
+if its interactive help has no `--model`, update that installation with
+`mcode update`. Windows and WSL installations can have different versions.
+Use mcode's `/model` picker to find a model available to your account and enter
+its full `provider/model` reference, optionally with `#variant`. Clearing the
+configuration's Model field restores the Mesh/application/native default
+cascade. See the [MiniMax CLI docs](https://agent.minimax.io/docs/cli/features#model-references).
+
 ## My standalone `mcode` sessions now run in Full Access
 
 Expected. When you launch a MiniMax Code node, Buildmesh sets
