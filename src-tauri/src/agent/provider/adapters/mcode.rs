@@ -19,10 +19,11 @@
 //! `session_assign_args()` is a no-op.
 //!
 //! **Model override** uses `--model <provider/model>` for the launched
-//! session, including `--session <id>` resumes. Verified against installed
-//! mcode 0.6.5 on 2026-10-09: the interactive CLI now accepts this option,
-//! superseding the older limitation recorded in issue #1179. References may
-//! include `#variant`; the adapter forwards them unchanged. An omitted model
+//! session, including `--session <id>` resumes. References may include
+//! `#variant`; the adapter validates their syntax before save and spawn,
+//! restricting each part to ASCII letters, digits, `.`, `_` and `-` so the
+//! Windows Cmd wrapper cannot interpret model text. Accepted references are
+//! forwarded unchanged. An omitted model
 //! leaves mcode's own default intact, and the override does not change its
 //! global model configuration.
 //!
@@ -58,9 +59,8 @@
 //! `Ok(())` with no side effects.
 //!
 //! **Full Access** is pinned on every spawn. mcode's TUI accepts no permission
-//! flag — `mcode --help` offers `--model`, `--lane`, `--session`,
-//! `--continue` and `--tui-mode` and nothing else; `--permission` exists on
-//! `mcode exec` only, which we never spawn — and mcode reads no environment
+//! flag in the installed help; `--permission` exists on `mcode exec` only,
+//! which we never spawn for interactive nodes — and mcode reads no environment
 //! variable for the mode. The sole lever is the `permissionMode` key in
 //! `<dataDir>/config.yaml`, so [`pin_permission_mode`] sets it to
 //! `bypassPermissions` (Full Access) alongside the attention plugin. This
@@ -898,6 +898,28 @@ impl AgentProvider for McodeAdapter {
         true
     }
 
+    fn validate_model_override(&self, model: &str) -> Result<(), String> {
+        // A conservative identifier alphabet keeps references literal when
+        // the Windows .cmd shim is launched through cmd.exe.
+        let identifier = |value: &str| {
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        };
+        let valid = model.split_once('/').is_some_and(|(provider, selection)| {
+            let (name, variant) = selection
+                .split_once('#')
+                .map_or((selection, None), |(name, variant)| (name, Some(variant)));
+            identifier(provider) && identifier(name) && variant.is_none_or(identifier)
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err("MiniMax Code model reference must use provider/model or provider/model#variant; each part allows only ASCII letters, digits, '.', '_' and '-'".into())
+        }
+    }
+
     fn supports_extra_args(&self) -> bool {
         // Issue #1358: mcode's interactive TUI still accepts arbitrary
         // CLI flags as positional args (it's a runtime, not a
@@ -1065,53 +1087,6 @@ mod tests {
     fn supports_resume_and_session_model_override() {
         assert!(MCODE.supports_resume());
         assert!(MCODE.supports_model_override());
-    }
-
-    #[test]
-    fn configuration_round_trips_and_resolves_model_before_defaults() {
-        use crate::preferences::{
-            launch_catalog, launch_configurations, spawn_configurations, AppPreferences,
-            HarnessConfigValue,
-        };
-
-        let mut prefs = AppPreferences::default();
-        let saved = spawn_configurations::validate(spawn_configurations::SpawnConfiguration {
-            id: "launch/mcode-review".into(),
-            name: "MiniMax review".into(),
-            spawn_option_id: "mcode".into(),
-            model: Some(" minimax/MiniMax-M3#variant ".into()),
-            ..Default::default()
-        })
-        .unwrap();
-        prefs.spawn_configurations.push(saved);
-        let mut prefs: AppPreferences =
-            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
-        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
-        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
-        assert_eq!(plan.effort, None);
-        assert!(plan.route.is_none());
-
-        let targets = launch_catalog::targets_for(&prefs, vec![plan.harness.clone()]);
-        assert_eq!(targets.len(), 1);
-        assert!(targets[0].supports_model);
-        assert!(targets[0].manual_model);
-        assert!(targets[0].efforts.is_empty());
-
-        prefs.harness_defaults.insert(
-            "mcode".into(),
-            HarnessConfigValue {
-                model: Some("minimax/application-default".into()),
-                effort: None,
-            },
-        );
-        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
-        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
-        prefs.spawn_configurations[0].model = None;
-        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
-        assert_eq!(plan.model.as_deref(), Some("minimax/application-default"));
-        prefs.harness_defaults.clear();
-        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
-        assert_eq!(plan.model, None);
     }
 
     /// Pin the capability descriptor end-to-end: the harness-id,

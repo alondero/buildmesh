@@ -514,6 +514,13 @@ pub trait AgentProvider: Send + Sync {
     /// Whether `--model <name>` / `--effort <level>` args from mesh config apply.
     fn supports_model_override(&self) -> bool;
 
+    /// Validate model-reference syntax at save and spawn boundaries.
+    /// Adapters with a constrained CLI grammar override this; availability
+    /// to the user's account remains the harness's responsibility.
+    fn validate_model_override(&self, _model: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Whether the harness accepts verbatim CLI flag args from
     /// configuration (issue #1358). The orchestrator's
     /// `default_prepare` only forwards `ResolvedAgentConfig.extra_args`

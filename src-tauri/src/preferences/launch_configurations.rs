@@ -559,6 +559,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcode_configuration_round_trips_and_resolves_model_before_defaults() {
+        use crate::preferences::{
+            launch_catalog, launch_configurations, spawn_configurations, AppPreferences,
+            HarnessConfigValue,
+        };
+
+        let mut prefs = AppPreferences::default();
+        let saved = spawn_configurations::validate(spawn_configurations::SpawnConfiguration {
+            id: "launch/mcode-review".into(),
+            name: "MiniMax review".into(),
+            spawn_option_id: "mcode".into(),
+            model: Some(" minimax/MiniMax-M3#variant ".into()),
+            ..Default::default()
+        })
+        .unwrap();
+        prefs.spawn_configurations.push(saved);
+        let mut prefs: AppPreferences =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
+        assert_eq!(plan.effort, None);
+        assert!(plan.route.is_none());
+
+        let targets = launch_catalog::targets_for(&prefs, vec![plan.harness.clone()]);
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].supports_model);
+        assert!(targets[0].manual_model);
+        assert!(targets[0].efforts.is_empty());
+
+        prefs.harness_defaults.insert(
+            "mcode".into(),
+            HarnessConfigValue {
+                model: Some("minimax/application-default".into()),
+                effort: None,
+            },
+        );
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/MiniMax-M3#variant"));
+        prefs.spawn_configurations[0].model = None;
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model.as_deref(), Some("minimax/application-default"));
+        prefs.harness_defaults.clear();
+        let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
+        assert_eq!(plan.model, None);
+    }
+
+    #[test]
     fn unavailable_runtime_is_rejected_at_the_resolver_not_only_in_the_menu() {
         let mut prefs = generated_preferences();
         prefs.harness_profiles[0].runtime = Some(if cfg!(windows) {

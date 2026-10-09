@@ -132,6 +132,7 @@ pub(crate) fn resolve_plan(
     };
     let mut args = Vec::new();
     if let Some(model) = &plan.model {
+        adapter.validate_model_override(model)?;
         args.extend(adapter.model_args(model));
     }
     if let Some(effort) = &plan.effort {
@@ -314,6 +315,21 @@ mod tests {
             &LaunchOverrides::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn mcode_background_revalidates_models_in_frozen_plans() {
+        let prefs = AppPreferences::default();
+        let mut saved = plan("mcode");
+        saved.model = Some("minimax/MiniMax-M3#variant".into());
+        let launch = resolve_plan(saved.clone(), &prefs).unwrap();
+        assert_eq!(launch.args, ["--model", "minimax/MiniMax-M3#variant"]);
+
+        saved.model = Some("minimax/M3&echo x".into());
+        let error = resolve_plan(saved, &prefs)
+            .err()
+            .expect("unsafe frozen models must not reach background commands");
+        assert!(error.contains("model reference"), "{error}");
     }
 
     /// A stale-`PATH` Claude lookup (empty `PATH`, home and AppData under a temp

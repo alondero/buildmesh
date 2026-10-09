@@ -628,13 +628,18 @@ examples and each harness's live model-list command or picker.
 For **MiniMax Code**, enter the model reference from mcode's `/model` picker
 as `provider/model` (or `provider/model#variant`) in the configuration's
 **Model** field. The selected model applies to fresh and resumed sessions
-without changing mcode's global model default. Leave the field blank to inherit
-the application default from **Settings → Launch Configurations**, in the
-**Agent Harness defaults** section, then mcode's own default.
-Set MiniMax Code's **Model** under **Settings → Launch Configurations**, in the
-**Agent Harness defaults** section, to apply it to launches whose configuration
-has no model. Previously stored MiniMax Code model defaults now take effect too.
-This was verified with `mcode 0.6.5`; older installations may need an update.
+without changing mcode's global model default. Buildmesh accepts ASCII letters,
+digits, `.`, `_` and `-` in each reference part; other characters are rejected
+when saving or launching so Windows command parsing cannot alter the reference.
+Leave the field blank to inherit MiniMax Code's **Model** from
+**Settings → Launch Configurations**, in the **Agent Harness defaults** section,
+then mcode's own default. Previously stored MiniMax Code model defaults now take
+effect too; replace or clear invalid defaults in that section.
+The interactive flag was verified on native Windows with `mcode.cmd 0.6.5`;
+macOS, Linux and WSL are unverified. Buildmesh does not gate this flag by CLI
+version: older installations without interactive `--model` will reject a launch
+with a model. Update the executable Buildmesh launches or clear both model fields;
+see [MiniMax Code model troubleshooting](troubleshooting.md#minimax-code-rejects-a-configured-model).
 MiniMax Code has no configurable effort control. See the [MiniMax CLI model reference docs](https://agent.minimax.io/docs/cli/features#model-references).
 
 Adding or enabling a known provider creates compatible routes; configurations

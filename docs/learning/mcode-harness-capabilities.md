@@ -61,15 +61,23 @@ interactive TUI over PTY, no harness-owned worktree flag.
 
 ## Session model selection
 
-The installed 0.6.5 interactive help advertises `--model` alongside `--session`
-and `--continue`, so model selection does not require changing to `mcode exec`.
-Buildmesh forwards a configuration's model reference unchanged on fresh and
-resumed launches, before the trailing positional prompt. Saved configurations
+The native Windows `mcode.cmd 0.6.5` interactive help advertises `--model`
+alongside `--session` and `--continue`, so model selection does not require
+changing to `mcode exec`.
+Buildmesh validates the `provider/model[#variant]` syntax and accepts only ASCII
+letters, digits, `.`, `_` and `-` in each part to prevent Windows Cmd parsing or
+expansion. Validation is adapter-owned and runs on configuration/default saves
+and before spawn, including Circuit overrides. Accepted references are forwarded
+unchanged on fresh and resumed launches, before the trailing positional prompt. Saved configurations
 override native defaults; an absent model retains the existing default cascade.
 This option applies to the session without changing mcode's global model default.
-Older installations that lack the interactive option need an update; no runtime
-version probe is added. This help-level check does not validate inference for
-every account/model combination or extend the separate attention evidence.
+macOS, Linux and WSL remain unverified. No runtime model-flag version gate is
+added: the accepted compatibility risk is that older installations lacking the
+interactive option reject launches with a model inside the terminal. Update the
+exact executable Buildmesh launches or clear the configuration and harness-default
+models; see [troubleshooting](../troubleshooting.md#minimax-code-rejects-a-configured-model).
+This help-level check does not validate inference for every account/model
+combination or extend the separate attention evidence.
 
 ## Transcript — wired (this change)
 
@@ -206,9 +214,8 @@ provisioned.
 
 ### Pinning Full Access
 
-The TUI accepts no permission flag — `mcode --help` offers `--model`, `--lane`,
-`--session`, `--continue` and `--tui-mode` and nothing else. `--permission`
-exists on `mcode exec` only, which Buildmesh never spawns, and mcode reads no
+The installed TUI help exposes no permission flag. `--permission` exists on
+`mcode exec` only, which Buildmesh never spawns for interactive nodes, and mcode reads no
 environment variable for the mode (enumerated across the installed 0.5.5
 bundle). The sole lever is the top-level `permissionMode` key in
 `<dataDir>/config.yaml`, validated against

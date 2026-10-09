@@ -8,6 +8,107 @@ use crate::agent::provider::Platform;
 use crate::models::{EnvType, Provider};
 use crate::preferences::HarnessConfigValue;
 
+#[test]
+fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
+    use super::command::build_spawn_command;
+    use super::reader::SessionIdMode;
+
+    for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        for session in [
+            SessionIdMode::None,
+            SessionIdMode::Resume("mvs_test".into()),
+        ] {
+            let mut config = ResolvedAgentConfig {
+                model: Some("minimax/MiniMax-M3#variant".into()),
+                ..Default::default()
+            };
+            let command = build_spawn_command(
+                &resolved,
+                Provider::Mcode,
+                &[],
+                &session,
+                1,
+                &config,
+                Some("prompt"),
+                false,
+            )
+            .unwrap();
+            let argv: Vec<_> = command
+                .get_argv()
+                .iter()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            if runtime == EnvType::WindowsInterop {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(argv.last().unwrap().as_bytes())
+                    .unwrap();
+                let utf16: Vec<_> = bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                let script = String::from_utf16(&utf16).unwrap();
+                assert!(
+                    script.contains("'--model' 'minimax/MiniMax-M3#variant'"),
+                    "{script}"
+                );
+            } else {
+                assert!(
+                    argv.windows(2)
+                        .any(|pair| pair == ["--model", "minimax/MiniMax-M3#variant"]),
+                    "{runtime:?}: {argv:?}"
+                );
+            }
+
+            // Final values can come directly from Circuit overrides or old
+            // snapshots without passing through configuration-save validation.
+            for invalid in [
+                "minimax/M3&echo x",
+                "minimax/M3&echo",
+                "minimax/M3|echo",
+                "minimax/M3<input",
+                "minimax/M3>output",
+                "minimax/M3^x",
+                "minimax/%PATH%",
+                "minimax/!MODEL!",
+                "minimax/M3\"",
+                "minimax/M3 x",
+                "minimax/M3\necho",
+                "MiniMax-M3",
+                "/M3",
+                "minimax/",
+                "minimax/M3#",
+                "minimax/M3#variant#extra",
+                "minimax/M3/extra",
+                "minimax/M3#variant&echo",
+            ] {
+                config.model = Some(invalid.into());
+                let error = build_spawn_command(
+                    &resolved,
+                    Provider::Mcode,
+                    &[],
+                    &session,
+                    1,
+                    &config,
+                    None,
+                    false,
+                )
+                .expect_err("invalid model must fail before building a command");
+                assert!(
+                    error.contains("model reference"),
+                    "{runtime:?} {invalid:?}: {error}"
+                );
+            }
+        }
+    }
+}
+
 // -----------------------------------------------------------------
 // Issue #1179: capability / recipe coherence table.
 //
@@ -101,9 +202,7 @@ fn capability_recipe_coherence() {
 
         // 1. Model-flag coherence. Ask the adapter what its model-flag
         //    shape is; the recipe must contain it iff caps advertises
-        //    the control. mcode (which used to advertise) now does
-        //    not, so the recipe must not carry `--model` even when
-        //    a value is in the resolved config.
+        //    the control.
         let model_flag = adapter
             .model_args(model_value)
             .first()

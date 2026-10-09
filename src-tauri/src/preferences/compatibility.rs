@@ -19,6 +19,7 @@ use super::model::{
 };
 use super::resolver::{
     claude_harness_id, harness_capabilities_for, provider_accounts, provider_pairings,
+    resolve_harness_provider,
 };
 use crate::agent::capabilities::EffortControlKind;
 
@@ -60,10 +61,9 @@ fn trim_to_none(s: Option<&str>) -> Option<String> {
 ///   value not in it is refused at the write boundary (issue #1148 AC #5
 ///   "Accept only values allowed by that harness's effort-control kind").
 ///
-/// Model values pass through after trimming — there is no harness-side model
-/// vocabulary; the harness either accepts the override or the resolver's
-/// `supports_model_override` flag drops it on the spawn path. A blank model
-/// collapses to `None` here so the storage-shape invariant
+/// Model values are trimmed and checked against the adapter's reference
+/// syntax; model availability remains the harness's responsibility. A blank
+/// model collapses to `None` here so the storage-shape invariant
 /// (`is_empty → no entry`) keeps working.
 pub fn validate_harness_default(
     profile_id: &str,
@@ -72,6 +72,11 @@ pub fn validate_harness_default(
     let caps = harness_capabilities_for(profile_id)
         .ok_or_else(|| format!("unknown harness id '{profile_id}'"))?;
     let normalized = normalize_harness_default(raw);
+    if let Some(model) = normalized.model.as_deref() {
+        resolve_harness_provider(profile_id)
+            .adapter()
+            .validate_model_override(model)?;
+    }
     match &caps.effort_control {
         EffortControlKind::None => {
             if normalized.effort.is_some() {
@@ -718,8 +723,10 @@ mod tests {
     // ----- Issue #1773 review — Cline consumer-aware env emission -----
 
     fn anthropic_pairing(base_url: Option<&str>) -> ProviderPairing {
-        let mut tiers = ModelTiers::default();
-        tiers.default = Some("anthropic/claude-3-5-sonnet-latest".into());
+        let tiers = ModelTiers {
+            default: Some("anthropic/claude-3-5-sonnet-latest".into()),
+            ..Default::default()
+        };
         ProviderPairing {
             harness_id: "claude".into(),
             provider_id: "minimax".into(),
@@ -730,8 +737,10 @@ mod tests {
     }
 
     fn openai_pairing(base_url: Option<&str>) -> ProviderPairing {
-        let mut tiers = ModelTiers::default();
-        tiers.default = Some("gpt-4o-mini".into());
+        let tiers = ModelTiers {
+            default: Some("gpt-4o-mini".into()),
+            ..Default::default()
+        };
         ProviderPairing {
             harness_id: "codex".into(),
             provider_id: "minimax".into(),

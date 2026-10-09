@@ -341,6 +341,37 @@ mod tests {
     }
 
     #[test]
+    fn mcode_configuration_rejects_shell_characters_and_accepts_variants() {
+        let mut value = configuration("mcode");
+        value.model = Some(" minimax/MiniMax-M3#variant ".into());
+        assert_eq!(
+            validate(value.clone()).unwrap().model.as_deref(),
+            Some("minimax/MiniMax-M3#variant")
+        );
+
+        value.model = Some("minimax/M3&echo x".into());
+        assert!(validate(value).unwrap_err().contains("model reference"));
+
+        let mut prefs = AppPreferences::default();
+        let valid = super::super::HarnessConfigValue {
+            model: Some(" minimax/MiniMax-M3#variant ".into()),
+            effort: None,
+        };
+        super::super::upsert_harness_default(&mut prefs, "mcode", valid).unwrap();
+        let saved = prefs.clone();
+        let invalid = super::super::HarnessConfigValue {
+            model: Some("minimax/%PATH%".into()),
+            effort: None,
+        };
+        assert!(
+            super::super::upsert_harness_default(&mut prefs, "mcode", invalid)
+                .unwrap_err()
+                .contains("model reference")
+        );
+        assert_eq!(prefs, saved);
+    }
+
+    #[test]
     fn configuration_and_pairing_save_atomically_and_preserve_other_routes() {
         let tmp = tempfile::tempdir().unwrap();
         super::super::init_for_tests(tmp.path().into());
