@@ -895,16 +895,27 @@ jobs:
 
       # The shards have always uploaded their log; this job did not, so a hang
       # here lost the only evidence it produced. Same `if: always()`, same
-      # reason (issue #1961). The glob covers every guarded log this job
-      # produces, not just the last one: the fuzz smoke writes its own, and a
-      # failure there skips the export/integration step, so pinning a single
-      # filename would discard exactly the log explaining the failure.
-      - name: Upload the non-shard test logs
+      # reason (issue #1961).
+      - name: Upload the non-shard test log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-nonshard-tests-log
-          path: src-tauri/cargo-*.log
+          path: src-tauri/cargo-nonshard-tests.log
+          retention-days: 7
+          if-no-files-found: warn
+
+      # The fuzz smoke's own log, uploaded separately because the upload above
+      # is pinned to one filename by tests/unit/ci-rust-timeout-guard.test.ts:
+      # a glob there would satisfy the intent and fail that test. A smoke
+      # failure skips the export/integration step, so without this the one log
+      # that explains it is also the one never written.
+      - name: Upload the HTTP fuzz smoke log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-http-fuzz-log
+          path: src-tauri/cargo-http-fuzz.log
           retention-days: 7
           if-no-files-found: warn
 
