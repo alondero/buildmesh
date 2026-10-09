@@ -61,8 +61,8 @@ requires recording them again.
 
 ## Review and repair
 
-The maintainer decision for #2122 combines batched findings (B) with fast
-repair checks (D). During an independent review's repair loop, use fast checks
+This workflow adopts batched findings (option B) and fast repair checks
+(option D) from #2122. During an independent review's repair loop, use fast checks
 plus focused behavioral regressions; run scope-complete verification when the
 candidate is stable and before successful handoff. Final completion continues
 to require current verification, acceptance evidence and independent APPROVE

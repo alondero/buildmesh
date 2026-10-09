@@ -422,7 +422,6 @@ test('batched review repairs can proceed before full verification but cannot fin
   update({ phase: 'implement', nextAction: 'Run focused owner regressions and request follow-up review' });
   const approved = update({ phase: 'review', review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Both findings resolved; approved the complete current change' } });
   assert.equal(approved.reviewTree, fingerprint(fixture.cwd, task.base));
-  fixture.put('.harness/fast.json', JSON.stringify({ tree: approved.reviewTree, results: [{ id: 'fast-agent-rules', outcome: 'PASS' }] }));
   assert.equal(existsSync(join(fixture.cwd, '.harness/receipt.json')), false);
   const finished = fixture.cli('finish');
   assert.equal(finished.status, 2);
