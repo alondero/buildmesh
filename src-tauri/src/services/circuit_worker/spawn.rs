@@ -1,5 +1,6 @@
 //! Circuit spawn overrides and two-stage agent launch (issue #1660).
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use tauri::{AppHandle, Emitter};
@@ -9,6 +10,10 @@ use crate::circuit::model::CircuitNodeKind;
 use crate::circuit::stepper::RunView;
 use crate::db;
 use crate::models::{EnvType, SessionStatus};
+use crate::session_naming::{
+    agent_reviewer_node_name, disambiguate_node_name, issue_node_name, issue_reviewer_node_name,
+    pr_node_name, pr_reviewer_node_name,
+};
 
 use super::{begin_circuit_spawn, run_accepts_effects, CircuitSpawnPermit};
 
@@ -207,6 +212,71 @@ pub(super) fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
                     if target_node_id.as_deref() == Some(node_id)
             )
         })
+}
+
+/// The initial name for a Circuit step's new agent node. An authored step
+/// name wins, except on the built-in review preset. `None` lets
+/// `create_pending` pick a random name, which the LLM later renames from the
+/// node's first turns. A name built from the issue or PR
+/// shows what the node is for from the moment it appears, and a non-default
+/// name skips the LLM rename. The name is also the worktree directory and
+/// branch, so `taken` disambiguates against sibling nodes in the same mesh,
+/// such as a Probe-spawned `gh{N}` node. A respawn of a dead step agent is
+/// disambiguated against its predecessor too: two rows must never share one
+/// worktree directory.
+pub(super) fn circuit_step_node_name(
+    view: &RunView,
+    node_id: &str,
+    authored: Option<&str>,
+    taken: &HashSet<String>,
+) -> Option<String> {
+    // The built-in review preset's graph row is shared and its reviewer name
+    // is a role label ("Code reviewer"), not author intent for this run — the
+    // same reason `resolve_review_spawn_inputs` ignores its stored provider.
+    let preset_reviewer = view.context.get("source.review_preset") == Some("1")
+        && is_review_spawn_step(view, node_id);
+    let authored = authored.filter(|_| !preset_reviewer);
+    let base = if let Some(name) = authored.and_then(non_empty_trim) {
+        name.to_string()
+    } else if is_review_spawn_step(view, node_id) {
+        let issue_title = view.context.get("issue.title").unwrap_or("");
+        if let Some(pr) = context_number(view, "pr.number") {
+            let pr_title = view.context.get("pr.title").unwrap_or(issue_title);
+            pr_reviewer_node_name(pr, pr_title)
+        } else if let Some(issue) = context_number(view, "issue.number") {
+            issue_reviewer_node_name(issue, issue_title)
+        } else {
+            let source_name = view.context.get("source.name").and_then(non_empty_trim)?;
+            agent_reviewer_node_name(source_name)
+        }
+    } else if let Some(issue) = context_number(view, "issue.number") {
+        issue_node_name(issue, view.context.get("issue.title").unwrap_or(""))
+    } else if let Some(pr) = context_number(view, "pr.number") {
+        pr_node_name(pr, view.context.get("pr.title").unwrap_or(""))
+    } else {
+        return None;
+    };
+    Some(disambiguate_node_name(&base, taken))
+}
+
+fn context_number(view: &RunView, key: &str) -> Option<i64> {
+    view.context.get(key).and_then(|value| value.parse().ok())
+}
+
+/// Names already used by the mesh's agent nodes. Archived nodes keep their
+/// names reserved (see `disambiguate_node_name`).
+fn step_node_name(
+    mesh_id: i64,
+    view: &RunView,
+    node_id: &str,
+    authored: Option<&str>,
+) -> Result<Option<String>, String> {
+    let taken: HashSet<String> = db::list_agent_nodes_by_mesh(mesh_id)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter_map(|node| node.worktree_name)
+        .collect();
+    Ok(circuit_step_node_name(view, node_id, authored, &taken))
 }
 
 /// Resolve the activity parent agent for a circuit step from its upstream
@@ -740,6 +810,7 @@ pub(super) fn spawn_step_agent(
                 node_id,
                 old_node.path
             );
+            let node_name = step_node_name(mesh_id, view, node_id, name.as_deref())?;
             let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
                 return Ok(());
             };
@@ -750,7 +821,7 @@ pub(super) fn spawn_step_agent(
                     &old_node.branch,
                     Some(provider.as_str()),
                     source_issue,
-                    name.as_deref(),
+                    node_name.as_deref(),
                     use_worktree_override,
                     inherited_configuration.as_ref().or_else(|| {
                         old_node
@@ -811,6 +882,7 @@ pub(super) fn spawn_step_agent(
     let branch = crate::commands::git::get_default_branch_blocking(mesh.path.clone())
         .unwrap_or_else(|_| "main".to_string());
 
+    let node_name = step_node_name(mesh_id, view, node_id, name.as_deref())?;
     let Some(spawn_permit) = begin_circuit_spawn(run_id)? else {
         return Ok(());
     };
@@ -821,7 +893,7 @@ pub(super) fn spawn_step_agent(
         // Issue #1358: per-node provider override flows here.
         Some(provider.as_str()),
         source_issue,
-        name.as_deref(),
+        node_name.as_deref(),
         use_worktree_override,
         inherited_configuration.as_ref(),
     )

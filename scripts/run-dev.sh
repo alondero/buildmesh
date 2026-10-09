@@ -84,6 +84,38 @@ echo "Buildmesh Dev pre-launch line count (panic_early.log): $BEFORE_PANIC_EARLY
 # hook (lib.rs setup()) so the dev profile's panic.log gets real frames
 # instead of the "disabled backtrace" placeholder. Issue #152.
 export RUST_BACKTRACE=1
+# Issue #2136: /use and /verify launch the dev profile from inside an agent's
+# Claude Code session, and that session exports its own markers into every
+# process it spawns. Handed on to an agent Buildmesh spawns,
+# CLAUDE_CODE_CHILD_SESSION makes Claude Code print "Transcript saving is off",
+# write no .jsonl, and park every transcript reader downstream. The app scrubs
+# these per spawn (agent::spawn_environment), so this is defence in depth for
+# the paths the scrub cannot reach; clearing here makes the dev profile behave
+# like a user's own launch. Same launch-only scope as RUST_BACKTRACE above.
+# Keep in sync with run-dev.ps1.
+CLAUDE_SESSION_MARKERS=(
+  CLAUDECODE
+  CLAUDE_CODE_CHILD_SESSION
+  CLAUDE_CODE_SESSION_ID
+  CLAUDE_CODE_SESSION_ATTENDED
+  CLAUDE_CODE_BRIDGE_SESSION_ID
+  CLAUDE_CODE_ENTRYPOINT
+  CLAUDE_CODE_EXECPATH
+  CLAUDE_CODE_MESSAGING_TOKEN
+  CLAUDE_CODE_MESSAGING_SOCKET
+  CLAUDE_PID
+  CLAUDE_EFFORT
+)
+CLEARED=""
+for marker in "${CLAUDE_SESSION_MARKERS[@]}"; do
+  if [ -n "${!marker:-}" ]; then
+    unset "$marker"
+    CLEARED="$CLEARED $marker"
+  fi
+done
+if [ -n "$CLEARED" ]; then
+  echo "Cleared Claude Code session markers for this launch:$CLEARED"
+fi
 "$BINARY" &
 PID=$!
 echo "Launched PID: $PID"

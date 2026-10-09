@@ -3,11 +3,16 @@
 // These live in their own module because `scripts/ui-shot.mjs` is a
 // top-level CLI script: importing it to read a constant would launch Chromium.
 // The script and its server helper import from here, and
-// `tests/integration/ui-shot.test.ts` reads the same values, so the wrapper
-// deadline it budgets can never silently drift below what the child really
+// `tests/integration/ui-shot.test.ts` reads the same values, so the deadline
+// the wrapper budgets can never silently drift below what the child really
 // spends (issue #2049 class: a wrapper tighter than its child reports a bare
 // transport error that reads like "start the dev server" when `--serve` already
 // started one).
+//
+// The wrapper's deadline is derived from these budgets below
+// (`UI_SHOT_WATCHDOG_DEADLINE_MS`), not hand-summed: see the note there for
+// why the 12-term sum this replaced was itself the maintenance hazard
+// (issue #2168).
 
 /** Dev-server startup, charged before the browser navigates. */
 export const DEV_SERVER_STARTUP_MS = 60000;
@@ -115,28 +120,55 @@ export const BROWSER_CLOSE_TIMEOUT_MS = 15000;
 export const STEP_SCRIPT_TIMEOUT_MS = 240000;
 
 /**
- * The most a single `ui-shot --serve` run can spend, phase by phase:
- * dev-server startup, browser launch, navigation, mount, step script, selector
- * wait, screenshot, browser close. A supervising wrapper must exceed this.
+ * The slowest single phase a `--mock` run can be in.
  *
- * Every phase the child can spend is priced here, including the ones that would
- * otherwise fall back to a Playwright default, because an unpriced phase is
- * exactly how this sum came to sit below the real worst case (#2063).
- *
- * `tests/integration/ui-shot.test.ts` audits `scripts/ui-shot.mjs` against this
- * sum, so a phase that stops passing its budget is caught rather than quietly
- * reverting to Playwright's own default.
+ * Every phase above is a budget, and each is enforced at its own call site, so
+ * the child fails with a *named* phase long before any wrapper needs to act.
+ * What a wrapper still wants is one deadline above every phase, so a child that
+ * somehow exceeds all of them is caught rather than running forever.
  */
-export const UI_SHOT_STEP_BUDGETS_MS =
-  DEV_SERVER_STARTUP_MS +
-  BROWSER_LAUNCH_TIMEOUT_MS * 2 +
-  BROWSER_SETUP_TIMEOUT_MS * 2 +
-  FIXTURES_LOAD_TIMEOUT_MS +
-  NAVIGATION_TIMEOUT_MS +
-  MOUNT_TIMEOUT_MS +
-  STEP_SCRIPT_TIMEOUT_MS +
-  STEP_MODULE_LOAD_TIMEOUT_MS +
-  ELEMENT_VISIBLE_TIMEOUT_MS +
-  SCREENSHOT_TIMEOUT_MS +
-  BROWSER_CLOSE_TIMEOUT_MS +
-  DEV_SERVER_STOP_MS;
+export const UI_SHOT_SLOWEST_PHASE_MS = Math.max(
+  DEV_SERVER_STARTUP_MS,
+  BROWSER_LAUNCH_TIMEOUT_MS,
+  BROWSER_SETUP_TIMEOUT_MS,
+  FIXTURES_LOAD_TIMEOUT_MS,
+  NAVIGATION_TIMEOUT_MS,
+  MOUNT_TIMEOUT_MS,
+  STEP_SCRIPT_TIMEOUT_MS,
+  STEP_MODULE_LOAD_TIMEOUT_MS,
+  ELEMENT_VISIBLE_TIMEOUT_MS,
+  SCREENSHOT_TIMEOUT_MS,
+  BROWSER_CLOSE_TIMEOUT_MS,
+  DEV_SERVER_STOP_MS,
+);
+
+/**
+ * How many times the slowest phase a supervising wrapper must outlast.
+ *
+ * This replaces a 12-term hand-priced sum of every phase (#2168). The sum was a
+ * second copy of the phase list, and the copy was the invariant: nothing
+ * detected a phase present in neither copy, and #2140's eight review rounds were
+ * spent keeping them in step. A multiple of the slowest phase is derived from
+ * the budgets themselves, so raising any of them widens this with it and no
+ * list has to be maintained in two places.
+ *
+ * Known limit: a *newly added* phase whose budget exceeds every one listed
+ * above has to be added to `UI_SHOT_SLOWEST_PHASE_MS` too. That is one list of
+ * constants, not the old list of names-with-call-counts plus its test mirror,
+ * and getting it wrong errs safe — the deadline stays generous while the new
+ * phase's own timeout still fires first and reports by name.
+ *
+ * Four is chosen because a run that is slow in several phases at once is the
+ * case this covers, and 4x the slowest (240s -> 960s) still clears the old
+ * 612s sum. It is a backstop, not a budget: the child's own per-phase timeouts
+ * fire first and report the phase by name, and the wrapper's job on a kill is
+ * only to name that phase too (`scripts/phase-watchdog.mjs`).
+ */
+export const UI_SHOT_WATCHDOG_MULTIPLE = 4;
+
+/**
+ * The deadline a supervising wrapper gives a `--mock` run: one number, derived
+ * from the per-phase budgets rather than summed by hand.
+ */
+export const UI_SHOT_WATCHDOG_DEADLINE_MS =
+  UI_SHOT_SLOWEST_PHASE_MS * UI_SHOT_WATCHDOG_MULTIPLE;

@@ -35,6 +35,9 @@ Linux and platform smoke builds.
 
 For the Circuit side-effect inventory and restart/replay policy, see the
 [Circuit effect recovery contract](circuit-effect-recovery.md).
+For the Rust backend's seams — which module owns git access, why the stepper is
+pure, where the large files still are — see the
+[Rust module map](module-map.md).
 For a Codex model-switch report checkpoint, see the
 [run 293 investigation](../archive/2026-10/circuit-run-293-codex-context.md).
 For Settings keyboard behavior, compact sidebar targets and the theme inventory,
@@ -154,6 +157,7 @@ owner document per subsystem, reachable from the
 | [remote-access.md](remote-access.md) | Coordinator API, LAN/VPN exposure |
 | [state-recovery.md](state-recovery.md) | Snapshot, export, integrity check, restore |
 | [rust-conventions.md](rust-conventions.md) | DB, threading, caches, pattern guards, wire types |
+| [module-map.md](module-map.md) | Rust backend seams and which module owns which capability |
 | [supply-chain.md](supply-chain.md) | Dependency and workflow supply-chain controls: action pinning, advisory policy |
 | [mobile.md](mobile.md) | Mobile client |
 

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use rand::seq::IndexedRandom;
 use super::words::{ADJECTIVES, NOUNS};
+use rand::seq::IndexedRandom;
 
 // ---------------------------------------------------------------------------
 // Random name generation (word lists + combinatorics)
@@ -72,6 +72,20 @@ pub fn pr_node_name(pr_number: i64, title: &str) -> String {
 /// with the previous reviewer.
 pub fn pr_reviewer_node_name(pr_number: i64, title: &str) -> String {
     prefixed_node_name("pr", pr_number, &format!("review {title}"))
+}
+
+/// Build the initial node name for the **reviewer** of a GitHub issue's
+/// implementation node, e.g. issue #123 "fix it" → `gh123-review-fix-it`.
+/// Same role and collision rules as [`pr_reviewer_node_name`].
+pub fn issue_reviewer_node_name(issue_number: i64, title: &str) -> String {
+    prefixed_node_name("gh", issue_number, &format!("review {title}"))
+}
+
+/// Build the initial node name for a reviewer of a borrowed source agent that
+/// has no PR or issue of its own, e.g. `gh5-add-chip` → `review-gh5-add-chip`.
+/// The result is capped at 50 chars by [`slugify_issue_title`].
+pub fn agent_reviewer_node_name(source_name: &str) -> String {
+    slugify_issue_title(&format!("review {source_name}"))
 }
 
 /// Cap on `base-2`, `base-3`, … attempts before falling back to a random
