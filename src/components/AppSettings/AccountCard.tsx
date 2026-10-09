@@ -13,6 +13,7 @@ import { formatError } from '../../lib/errorUtils';
 import { ProviderIcon } from '../Providers/ProviderIcon';
 import { isSelfAuthId, isFirstClassId } from '../../lib/providerClassification';
 import { normalizeApiKey } from './settingsUtils';
+import { isWindows } from '../../lib/platform';
 import type { ProviderAccount } from '../../lib/tauri';
 
 /** Per-field editable overlays. Each field is independently tracked:
@@ -38,6 +39,7 @@ export function AccountCard({
   onRemove,
   onDirtyChange,
   disabled = false,
+  keyInPreferences = false,
 }: {
   account: ProviderAccount;
   onSave: (account: ProviderAccount) => Promise<boolean>;
@@ -58,6 +60,12 @@ export function AccountCard({
    *  type a credential only to have the save rejected. Same contract as
    *  `HarnessDefaultsSection` / `ProbeSpawnPromptsSection`. */
   disabled?: boolean;
+  /** Issue #2154 — this account's key is persisted in `preferences.json`
+   *  because the OS credential store could not be used. Renders a notice
+   *  saying so, on the account that is affected. Defaults false so the
+   *  common case (every key safely in the credential store) shows nothing
+   *  and no caller has to prove the negative. */
+  keyInPreferences?: boolean;
 }) {
   // Issue #1535 (round 4, PR #1636 review round 3): per-field overrides
   // replace the round-3 nullable snapshot. isDirty is derived purely from
@@ -275,6 +283,31 @@ export function AccountCard({
           ))}
         </div>
       </div>
+
+      {/* Issue #2154 — where this account's key actually lives. Sits outside
+          the "Edit credentials" disclosure on purpose: the person who needs
+          this is the one who has NOT opened the credential editor, and the
+          whole point of the issue is that the fallback used to be invisible.
+          Polite rather than assertive — it is a standing condition about
+          storage, not a failure that just happened. */}
+      {keyInPreferences && (
+        <div
+          role="status"
+          aria-live="polite"
+          data-testid={`account-key-in-preferences-${account.id}`}
+          className="mt-3 flex items-start gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm text-text-secondary"
+        >
+          <span className="text-status-warning" aria-hidden="true">⚠</span>
+          <span>
+            <span className="font-medium text-text-primary">
+              This {account.name} API key is stored in the preferences.json file.
+            </span>{' '}
+            {isWindows
+              ? 'Buildmesh keeps provider keys in the Windows Credential Manager, but it could not reach it, so this key stayed on disk in your app data folder in plain text. Sign in to Windows and save the key again to move it into the credential store.'
+              : 'Buildmesh keeps provider keys in the OS credential store, which this platform does not provide, so this key stays in your app data folder in plain text.'}
+          </span>
+        </div>
+      )}
 
       {(showApiKey || showBilling) && (
         <button

@@ -16,12 +16,25 @@
  * Meter rendering moved to `tests/unit/usage-panel.test.tsx`.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AccountCard } from '../../src/components/AppSettings/AccountCard';
 import type { ProviderAccount } from '../../src/lib/tauri';
 import { isClaudeCompatibleId } from '../../src/lib/providerClassification';
+
+// `lib/platform` reads `navigator.platform` at import time, which jsdom leaves
+// empty. A mutable module stub pins the platform per test; the copy under test
+// differs by platform, and only Windows has a credential store to blame.
+let mockIsWindows = false;
+vi.mock('../../src/lib/platform', () => ({
+  get isWindows() {
+    return mockIsWindows;
+  },
+  get isMac() {
+    return false;
+  },
+}));
 
 vi.mock('../../src/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('../../src/lib/tauri')>('../../src/lib/tauri');
@@ -637,6 +650,131 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         (screen.getByLabelText(/kimi \(renamed\) api key/i) as HTMLInputElement).value,
       ).toBe('sk-half-typed');
       expect(screen.getByText('Kimi (renamed)')).toBeTruthy();
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // Issue #2154 — the credential-store fallback notice. Both acceptance
+  // states, driven through the real component:
+  //   - the account whose key stayed in preferences.json says so
+  //   - an account whose key is only in the credential store says nothing
+  // -----------------------------------------------------------------
+  describe('key-stored-in-preferences notice (#2154)', () => {
+    beforeEach(() => {
+      mockIsWindows = true;
+    });
+
+    function keyedAccount(over: Partial<ProviderAccount> = {}): ProviderAccount {
+      return account({
+        id: 'minimax',
+        name: 'MiniMax',
+        billing_mode: 'pay_as_you_go',
+        claude_compatible: true,
+        api_key: 'sk-live-0001',
+        ...over,
+      });
+    }
+
+    it('warns on the account whose key is persisted in preferences.json', () => {
+      mockIsWindows = true;
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
+      );
+
+      const notice = screen.getByTestId('account-key-in-preferences-minimax');
+      // It must say which account, that the key is on disk in plain text,
+      // why, and what to do — the issue's "and what to do about it".
+      expect(notice.textContent).toMatch(
+        /MiniMax API key is stored in the preferences\.json file/,
+      );
+      expect(notice.textContent).toMatch(/could not reach it/i);
+      expect(notice.textContent).toMatch(/save the key again/i);
+    });
+
+    it('does not blame an unreachable store where none exists', () => {
+      // macOS/Linux have no credential store by design, so keys stay in the
+      // file legitimately; saying "it could not reach it" would be false.
+      mockIsWindows = false;
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
+      );
+
+      const notice = screen.getByTestId('account-key-in-preferences-minimax');
+      expect(notice.textContent).toMatch(
+        /MiniMax API key is stored in the preferences\.json file/,
+      );
+      expect(notice.textContent).toMatch(/this platform does not provide/i);
+      expect(notice.textContent).not.toMatch(/could not reach it/i);
+      expect(notice.textContent).not.toMatch(/sign in to windows/i);
+    });
+
+    it('shows nothing when the key is only in the credential store', () => {
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences={false}
+        />,
+      );
+
+      expect(screen.queryByTestId('account-key-in-preferences-minimax')).toBeNull();
+      expect(screen.queryByText(/preferences\.json/i)).toBeNull();
+    });
+
+    it('shows nothing by default, so a caller cannot warn by accident', () => {
+      render(<AccountCard account={keyedAccount()} onSave={vi.fn().mockResolvedValue(true)} />);
+
+      expect(screen.queryByTestId('account-key-in-preferences-minimax')).toBeNull();
+    });
+
+    it('is visible without expanding the credential editor', async () => {
+      // The person who needs this notice is the one who has NOT opened the
+      // credential editor; behind the disclosure it would be invisible,
+      // which is the bug the issue reports.
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
+      );
+
+      expect(screen.queryByLabelText(/minimax api key/i)).toBeNull();
+      expect(screen.getByTestId('account-key-in-preferences-minimax')).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      // Still shown alongside the editor, not replaced by it.
+      expect(screen.getByTestId('account-key-in-preferences-minimax')).toBeTruthy();
+    });
+
+    it('clears when the probe reports the key is stored again', () => {
+      // The store can come back; the notice must not latch on.
+      const { rerender } = render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
+      );
+      expect(screen.getByTestId('account-key-in-preferences-minimax')).toBeTruthy();
+
+      rerender(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences={false}
+        />,
+      );
+      expect(screen.queryByTestId('account-key-in-preferences-minimax')).toBeNull();
     });
   });
 });

@@ -79,6 +79,10 @@ export interface SettingsResourceCallbacks {
   onAccountsLoaded?: (data: {
     accountList: api.ProviderAccount[];
     catalog: api.ProviderAccount[];
+    /** Issue #2154 — account ids whose API key is persisted in
+     *  `preferences.json` instead of the credential store. `null` when the
+     *  probe failed: "unknown", which is not the same as "safe". */
+    keysInPreferences: string[] | null;
   }) => void;
   onPairingsLoaded?: (data: {
     effective: api.ProviderPairing[];
@@ -106,7 +110,12 @@ export interface UseSettingsResources extends SettingsResourceCallbacks {
   loadPreferences: () => Promise<api.AppPreferences | null>;
   loadRouting: () => Promise<api.ProviderInfo[] | null>;
   loadProviders: () => Promise<api.ProviderInfo[] | null>;
-  loadAccounts: () => Promise<{ accountList: api.ProviderAccount[]; catalog: api.ProviderAccount[] } | null>;
+  loadAccounts: () => Promise<{
+    accountList: api.ProviderAccount[];
+    catalog: api.ProviderAccount[];
+    /** Issue #2154 — `null` when the probe failed (unknown, not "safe"). */
+    keysInPreferences: string[] | null;
+  } | null>;
   loadPairings: () => Promise<{
     effective: api.ProviderPairing[];
     verifications: api.PairingVerification[];
@@ -283,7 +292,22 @@ export function useSettingsResources(
               '[AppSettings] Failed to load keyed-first-class catalog; add-picker will be empty.',
             );
           }
-          return { accountList, catalog };
+          // Issue #2154 — which keys the credential store refused, so the
+          // affected card can say its key is in `preferences.json`. Fails
+          // soft with `null`, never `[]`: an unanswered probe is "unknown",
+          // and defaulting it to "no keys on disk" would assert the one
+          // thing this notice exists to stop the app from assuming.
+          const keysInPreferences = await api
+            .getProviderAccountsWithPreferencesKeys()
+            .then((ids) => (Array.isArray(ids) ? ids : null))
+            .catch((cause: unknown) => {
+              console.warn(
+                '[AppSettings] Failed to read which provider keys are in preferences.json; the credential-store notice will be hidden.',
+                cause,
+              );
+              return null;
+            });
+          return { accountList, catalog, keysInPreferences };
         },
         (data) => {
           callbacksRef.current.onAccountsLoaded?.(data);
