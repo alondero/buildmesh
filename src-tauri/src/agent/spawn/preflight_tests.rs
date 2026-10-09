@@ -111,11 +111,7 @@ fn the_probed_stem_is_the_adapter_recipe_binary() {
             *probed.borrow_mut() = stem.to_string();
             None
         });
-        assert_eq!(
-            *probed.borrow(),
-            stem,
-            "wrong stem probed for {provider:?}"
-        );
+        assert_eq!(*probed.borrow(), stem, "wrong stem probed for {provider:?}");
     }
 }
 

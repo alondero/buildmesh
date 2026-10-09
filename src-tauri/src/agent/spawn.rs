@@ -15,9 +15,9 @@ mod command;
 mod intent;
 mod process;
 pub(crate) use intent::{
-    format_issue_prefill_with_url, ExplicitSpawnOverrides, IssueContext, PullRequestContext,
-    ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest, TerminalSize, WorktreePolicy,
-    DEFAULT_ISSUE_SPAWN_TEMPLATE, DEFAULT_PR_SPAWN_TEMPLATE, render_issue_spawn_prompt_with_url,
+    format_issue_prefill_with_url, render_issue_spawn_prompt_with_url, ExplicitSpawnOverrides,
+    IssueContext, PullRequestContext, ResumeCause, SpawnIntent, SpawnOutcome, SpawnRequest,
+    TerminalSize, WorktreePolicy, DEFAULT_ISSUE_SPAWN_TEMPLATE, DEFAULT_PR_SPAWN_TEMPLATE,
 };
 mod launch;
 mod orchestrator;
