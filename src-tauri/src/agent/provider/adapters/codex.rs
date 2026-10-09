@@ -3299,8 +3299,13 @@ mod tests {
     /// `cmd.exe` (probed from a real session: `$PSVersionTable` expands,
     /// `%CMDCMDLINE%` does not). A callback that only parses under cmd.exe is
     /// a PowerShell syntax error there and shows as "hook exited with code 1".
+    ///
+    /// `BUILDMESH_PORT` and `BUILDMESH_SESSION_ID` are set on the child to a
+    /// known dead port, so a callback that expands them has a fixed, failing
+    /// URL. Without this the result depends on whatever Buildmesh spawned the
+    /// test shell, and a live hub on that port can accept the POST.
     #[cfg(windows)]
-    fn run_like_codex(command: &str) -> std::process::Output {
+    fn run_like_codex(command: &str, dead_port: u16) -> std::process::Output {
         use std::io::Write;
         use std::process::Stdio;
 
@@ -3312,6 +3317,8 @@ mod tests {
             "-Command",
             command,
         ])
+        .env("BUILDMESH_PORT", dead_port.to_string())
+        .env("BUILDMESH_SESSION_ID", "42")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -3325,16 +3332,21 @@ mod tests {
         child.wait_with_output().expect("wait for hook")
     }
 
-    /// A loopback port nothing listens on, and one answering every request
-    /// `404` (a callback for a node Buildmesh no longer has).
+    /// A loopback port that was free a moment ago and is now closed.
     #[cfg(windows)]
-    fn dead_and_not_found_urls() -> (String, String) {
+    fn dead_port() -> u16 {
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        dead.local_addr().unwrap().port()
+    }
+
+    /// A dead loopback port, and a URL answered with `404` on another port (a
+    /// callback for a node Buildmesh no longer has).
+    #[cfg(windows)]
+    fn dead_and_not_found_urls() -> (u16, String) {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
-        let dead = TcpListener::bind("127.0.0.1:0").unwrap();
-        let dead_port = dead.local_addr().unwrap().port();
-        drop(dead);
+        let dead_port = dead_port();
 
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
@@ -3355,7 +3367,7 @@ mod tests {
             }
         });
         (
-            format!("http://127.0.0.1:{dead_port}/api/attention/42"),
+            dead_port,
             format!("http://127.0.0.1:{port}/api/attention/42"),
         )
     }
@@ -3363,7 +3375,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_attention_hook_emits_json_after_callback_failure_in_codex_runner() {
-        let (dead, not_found) = dead_and_not_found_urls();
+        let (dead_port, not_found) = dead_and_not_found_urls();
+        let dead = format!("http://127.0.0.1:{dead_port}/api/attention/42");
         for url in [dead, not_found] {
             // Rebuild both commands for the failure URL through the same
             // constructors `attention_hook_handler` uses for the live port.
@@ -3374,7 +3387,7 @@ mod tests {
                 ),
                 ("commandWindows", attention_hook_windows_command(&url)),
             ] {
-                let output = run_like_codex(&command);
+                let output = run_like_codex(&command, dead_port);
                 assert!(
                     output.status.success(),
                     "{field} against {url} exited {:?}: {}",
@@ -3396,7 +3409,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn legacy_windows_callbacks_fail_in_codex_runner() {
-        let (_dead, not_found) = dead_and_not_found_urls();
+        let (dead_port, not_found) = dead_and_not_found_urls();
         let flags = "-fsS --connect-timeout 2 --max-time 10 -o NUL -X POST --data-binary @-";
         let cases = [
             (
@@ -3417,7 +3430,7 @@ mod tests {
             ),
         ];
         for (name, command, expected_code) in cases {
-            let output = run_like_codex(&command);
+            let output = run_like_codex(&command, dead_port);
             assert!(
                 !output.status.success(),
                 "{name} unexpectedly passed in the Codex runner"
