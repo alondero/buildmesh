@@ -73,11 +73,6 @@ use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
 
-/// Wall-clock milliseconds the worker stamps into the context just before it
-/// applies a classifier-failure event. The stepper has no clock of its own; it
-/// copies this into the gate's persisted failure time.
-pub(crate) const CLASSIFIER_CLOCK_KEY: &str = "clock.now_ms";
-
 /// Wait between classifier attempts for any failure that carries a diagnostic
 /// (bad login, missing binary, unrecognised verdict): the person can act on it,
 /// so it surfaces quickly.
@@ -879,12 +874,17 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         error: String,
+        /// When the seam saw the failure. Persisted per gate attempt so the
+        /// retry cooldown survives a restart; the stepper has no clock.
+        observed_at_ms: i64,
     },
     /// Readiness inference failed without establishing a report or turn verdict.
     ClassifierUnavailable {
         node_id: String,
         attempt: i32,
         error: String,
+        /// When the seam saw the failure (see `ClassifierErrorObserved`).
+        observed_at_ms: i64,
     },
     /// The seam observed the piloted agent's latest report for this gate and
     /// deliberately did not classify it: the agent is still working, so the
@@ -1926,6 +1926,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             node_id,
             attempt,
             error,
+            observed_at_ms,
         } => {
             if run.state == RunState::Running
                 && run.step(node_id).is_some_and(|step| {
@@ -1933,6 +1934,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
                 })
             {
+                record_classifier_failure_time(run, node_id, *attempt, *observed_at_ms);
                 record_classifier_failure(run, &mut t, node_id, *attempt, Some(error.as_str()));
             }
         }
@@ -1940,6 +1942,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             node_id,
             attempt,
             error,
+            observed_at_ms,
         } => {
             if run.state == RunState::Running
                 && run.step(node_id).is_some_and(|step| {
@@ -1949,6 +1952,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             {
                 run.context
                     .set(&format!("node.{node_id}.classifier_error.{attempt}"), error);
+                record_classifier_failure_time(run, node_id, *attempt, *observed_at_ms);
                 t.context_changed = true;
             }
         }
@@ -2485,6 +2489,23 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
     t
 }
 
+/// Persist when the seam saw a classifier failure for this gate attempt. The
+/// in-memory evaluation clock does not survive a restart, and without this a
+/// restart inside a long timeout cooldown would retry at once and spend a
+/// failure from the budget. The time arrives in the event: the stepper has no
+/// clock.
+fn record_classifier_failure_time(
+    run: &mut RunView,
+    node_id: &str,
+    attempt: i32,
+    observed_at_ms: i64,
+) {
+    run.context.set(
+        &format!("node.{node_id}.classifier_failed_at_ms.{attempt}"),
+        observed_at_ms.to_string(),
+    );
+}
+
 fn record_classifier_failure(
     run: &mut RunView,
     t: &mut Transition,
@@ -2507,14 +2528,6 @@ fn record_classifier_failure(
     }
     let failures = previous + 1;
     run.context.set(&key, failures.to_string());
-    // The retry clock is otherwise in memory only; persisting when this failure
-    // happened lets a restart keep honouring a long timeout cooldown.
-    if let Some(now_ms) = run.context.get(CLASSIFIER_CLOCK_KEY).map(str::to_owned) {
-        run.context.set(
-            &format!("node.{node_id}.classifier_failed_at_ms.{attempt}"),
-            now_ms,
-        );
-    }
     t.context_changed = true;
     let last_error = run
         .context

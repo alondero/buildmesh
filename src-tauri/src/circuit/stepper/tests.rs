@@ -3134,6 +3134,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 2,
             error: "stale error".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(run.context.get("node.classify.classifier_error.2"), None);
@@ -3143,6 +3144,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 1,
             error: "claude: Failed to authenticate: OAuth session expired".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(
@@ -3171,6 +3173,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 2,
             error: "codex: new attempt failed".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(
@@ -3211,6 +3214,7 @@ fn circuit_classifier_quiet_failure_spends_budget_without_inventing_report_evide
         node_id: "classify".into(),
         attempt: 1,
         error: "codex: authentication failed".into(),
+        observed_at_ms: 0,
     };
     for _ in 0..5 {
         let transition = advance(&mut run, &event);
@@ -3299,6 +3303,7 @@ fn the_checkpoint_states_the_real_wait_before_the_next_classifier_attempt() {
         node_id: "classify".into(),
         attempt: 1,
         error,
+        observed_at_ms: 0,
     };
 
     advance(&mut run, &outage(classifier_timeout_error()));
@@ -3330,10 +3335,11 @@ fn the_checkpoint_states_the_real_wait_before_the_next_classifier_attempt() {
 }
 
 /// Review of PR 2178: the retry clock lived only in memory, so a restart
-/// during a 10-minute cooldown retried at once. The failure time is persisted
-/// per gate attempt, from the clock the worker stamps before applying the event.
+/// during a 10-minute cooldown retried at once. The seam stamps each failure
+/// event with when it saw it (the stepper has no clock) and the stepper keeps
+/// that per gate attempt.
 #[test]
-fn a_classifier_failure_records_when_it_happened() {
+fn a_classifier_failure_records_when_the_seam_saw_it() {
     let mut run = gate_run(
         "classify",
         CircuitNodeKind::LlmTurnClassifier {
@@ -3347,25 +3353,45 @@ fn a_classifier_failure_records_when_it_happened() {
             .get("node.classify.classifier_failed_at_ms.1")
             .map(str::to_owned)
     };
-    let outage = CircuitEvent::ClassifierUnavailable {
-        node_id: "classify".into(),
-        attempt: 1,
-        error: classifier_timeout_error(),
-    };
+    assert_eq!(failed_at(&run), None);
 
-    advance(&mut run, &outage);
-    assert_eq!(failed_at(&run), None, "no clock, nothing to invent");
-
-    run.context.set(CLASSIFIER_CLOCK_KEY, "1000000");
-    advance(&mut run, &outage);
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierUnavailable {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: classifier_timeout_error(),
+            observed_at_ms: 1_000_000,
+        },
+    );
     assert_eq!(failed_at(&run).as_deref(), Some("1000000"));
 
-    run.context.set(CLASSIFIER_CLOCK_KEY, "1180000");
-    advance_with_report_evidence(&mut run, &classified("classify", None));
+    // The report path publishes the error first, then the no-verdict turn.
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: classifier_timeout_error(),
+            observed_at_ms: 1_180_000,
+        },
+    );
+    assert_eq!(failed_at(&run).as_deref(), Some("1180000"));
+
+    // A stale event for an earlier attempt must not stamp this one.
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 2,
+            error: classifier_timeout_error(),
+            observed_at_ms: 9_999_999,
+        },
+    );
+    assert_eq!(failed_at(&run).as_deref(), Some("1180000"));
     assert_eq!(
-        failed_at(&run).as_deref(),
-        Some("1180000"),
-        "an unavailable verdict on the report path is a failure too"
+        run.context.get("node.classify.classifier_failed_at_ms.2"),
+        None
     );
 }
 

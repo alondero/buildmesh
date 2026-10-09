@@ -2030,30 +2030,6 @@ fn a_restart_does_not_forget_a_timeout_cooldown() {
 }
 
 #[test]
-fn applying_a_classifier_failure_stamps_the_wall_clock_into_the_run() {
-    let mut view = report_gate_view();
-    let before = chrono::Utc::now().timestamp_millis();
-    advance_and_persist_observed_event(
-        &mut view,
-        &CircuitEvent::ClassifierUnavailable {
-            node_id: "finish_classifier".into(),
-            attempt: 1,
-            error: mcode_timeout(),
-        },
-        |_, _| Ok(false),
-    )
-    .unwrap();
-    let after = chrono::Utc::now().timestamp_millis();
-    let failed_at: i64 = view
-        .context
-        .get("node.finish_classifier.classifier_failed_at_ms.1")
-        .expect("the failure time is persisted with the failure")
-        .parse()
-        .unwrap();
-    assert!((before..=after).contains(&failed_at), "{failed_at}");
-}
-
-#[test]
 fn circuit_classifier_exhaustion_survives_restart_and_new_reports() {
     let mut view = report_gate_view();
     for _ in 0..5 {

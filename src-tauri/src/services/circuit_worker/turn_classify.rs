@@ -1195,6 +1195,7 @@ pub(super) fn observe_gates_with(
                             node_id: step.node_id.clone(),
                             attempt: step.attempt,
                             error,
+                            observed_at_ms: source.now_ms(),
                         });
                     }
                     events.push(CircuitEvent::TurnClassified {

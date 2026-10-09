@@ -1347,21 +1347,6 @@ fn advance_and_persist_observed_event(
     mut persist: impl FnMut(&mut RunView, &Transition) -> Result<bool, TransitionPersistFailure>,
 ) -> Result<(Transition, bool), TransitionPersistFailure> {
     let before_observation = view.clone();
-    if matches!(
-        event,
-        CircuitEvent::ClassifierUnavailable { .. }
-            | CircuitEvent::TurnClassified {
-                classification: None,
-                ..
-            }
-    ) {
-        // The stepper has no clock; give it the time of a classifier failure
-        // so the retry cooldown survives a restart.
-        view.context.set(
-            crate::circuit::stepper::CLASSIFIER_CLOCK_KEY,
-            chrono::Utc::now().timestamp_millis().to_string(),
-        );
-    }
     let transition = advance(view, event);
     match persist(view, &transition) {
         Ok(turn_boundary_changed) => Ok((transition, turn_boundary_changed)),
@@ -2459,6 +2444,7 @@ fn apply_quiet_classifier_failures(app: &AppHandle, failures: Vec<QuietClassifie
                 node_id: failure.step,
                 attempt: failure.attempt,
                 error: failure.error,
+                observed_at_ms: chrono::Utc::now().timestamp_millis(),
             };
             match advance_and_persist_observed_event(&mut view, &event, |view, transition| {
                 persist_transition_checked(run.id, view, transition)
