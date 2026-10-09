@@ -49,6 +49,10 @@ import type { MeshRow } from '../types/generated/MeshRow';
 import type { MeshGitStatic } from '../types/generated/MeshGitStatic';
 import type { MeshHealth } from '../types/generated/MeshHealth';
 import type { NetworkStatus } from '../types/generated/NetworkStatus';
+import type { PendingWorktreeRemoval } from '../types/generated/PendingWorktreeRemoval';
+import type { BlockingProcess } from '../types/generated/BlockingProcess';
+import type { WorktreeCleanupRetryResult } from '../types/generated/WorktreeCleanupRetryResult';
+import type { WorktreeCleanupDismissalResult } from '../types/generated/WorktreeCleanupDismissalResult';
 import type { PickedFolder } from '../types/generated/PickedFolder';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
@@ -561,6 +565,39 @@ export const deleteWorktrees = (worktreePaths: string[]) =>
 // frontend can surface git's own output (or an empty string on a no-op).
 export const pruneRemoteTracking = (worktreePath: string) =>
   _invoke<string>('prune_remote_tracking', { worktreePath });
+
+// ── Blocked worktree cleanup (issue #2139) ──────────────────────────────────
+//
+// Closing a node defers its worktree removal to a durable queue. When a removal
+// cannot complete, the row keeps the failed operation, the OS error, the attempt
+// count and the backoff deadline — these calls are what the blocked-cleanup
+// dialog reads and acts on.
+
+/** Every blocked worktree cleanup, with its persisted evidence. */
+export const listPendingWorktreeRemovals = () =>
+  _invoke<PendingWorktreeRemoval[]>('list_pending_worktree_removals');
+
+/** Retry one cleanup now, ignoring its backoff. The status says what actually
+ *  happened to the folder; only `removed` means it was deleted. */
+export const retryWorktreeCleanup = (worktreePath: string) =>
+  _invoke<WorktreeCleanupRetryResult>('retry_worktree_cleanup', { worktreePath });
+
+/** "Keep worktree" — cancel the cleanup intent for one path. The reply says
+ *  what was done to the disk and whether the intent was cancelled (false when
+ *  the staged copy could not be moved back, so the entry stays queued). */
+export const dismissWorktreeCleanup = (worktreePath: string) =>
+  _invoke<WorktreeCleanupDismissalResult>('dismiss_worktree_cleanup', { worktreePath });
+
+/** Which processes are pinning a worktree directory. Read-only; nothing is
+ *  terminated. */
+export const diagnoseWorktreeCleanupBlockers = (worktreePath: string) =>
+  _invoke<BlockingProcess[]>('diagnose_worktree_cleanup_blockers', { worktreePath });
+
+/** Explicitly terminate one process the diagnosis named. Only ever called from
+ *  a user action on a row the diagnosis returned; the backend re-diagnoses and
+ *  refuses a pid that is not a current blocker of `worktreePath`. */
+export const releaseWorktreeCleanupBlocker = (worktreePath: string, pid: number) =>
+  _invoke<void>('release_worktree_cleanup_blocker', { worktreePath, pid });
 
 // Attention
 export const registerAttentionNode = (nodeId: number) =>

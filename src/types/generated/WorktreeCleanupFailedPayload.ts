@@ -2,14 +2,37 @@
 
 /**
  * Payload of the `worktree-cleanup-failed` Tauri event. Emitted by
- * [`crate::services::agent_node::process_pending_removals`] when the
- * background-drained worktree delete (issue #613 deferred removal) fails —
- * the row stays in `pending_worktree_removals` and the user is told via a
- * toast that it'll be retried on next launch.
+ * [`crate::services::agent_node::process_pending_removals`] when a
+ * background-drained worktree delete (issue #613 deferred removal) fails and
+ * the blocker is new information — the row stays in `pending_worktree_removals`
+ * and the UI opens a dialog offering Copy path / Copy diagnostics / Retry /
+ * Keep worktree (issue #2139).
+ *
+ * Carries everything the user needs to act: the node's identity, the full
+ * worktree path, which removal step failed and why (the OS error), how many
+ * attempts have been made, when the last one ran, and when the next automatic
+ * retry may run. The pre-#2139 payload carried only the error string, which is
+ * why the toast could hide both the path and the reason.
  *
  * Generated to `src/types/generated/WorktreeCleanupFailedPayload.ts`; the
- * TS half is imported by `src/App.tsx`. Three fields because the toast
- * surfaces the node name (the user-facing identity) and the worktree path
- * (the on-disk artifact) and the error reason (so support can copy/paste).
+ * TS half is imported by `src/App.tsx`.
  */
-export type WorktreeCleanupFailedPayload = { node_name: string, worktree_path: string, error: string, };
+export type WorktreeCleanupFailedPayload = { node_name: string, worktree_path: string, error: string, 
+/**
+ * Stable identifier of the removal step that failed (`git::worktree`
+ * operation vocabulary), e.g. `rename-worktree-to-staging`.
+ */
+operation: string, 
+/**
+ * Failed attempts so far, including this one.
+ */
+attempt_count: number, 
+/**
+ * Epoch milliseconds of the attempt that just failed.
+ */
+last_attempt_at: number, 
+/**
+ * Epoch milliseconds before which the drain will not retry (the backoff).
+ * A user-initiated retry ignores it.
+ */
+retry_not_before: number, };

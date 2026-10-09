@@ -2054,6 +2054,12 @@ pub(crate) fn reap_zombie_agents_inner(conn: &mut Connection, ids: &[i64]) -> Sq
 // here (atomically with the row delete) so a background task — or the next app
 // launch — can finish the removal. `worktree_path` is UNIQUE so re-enqueuing the
 // same path is a no-op rather than a duplicate.
+//
+// Issue #2139 adds the failure bookkeeping (see `PendingWorktreeRemoval`): a
+// removal that can't complete keeps the row with the failed operation, the OS
+// error, the attempt count and the backoff deadline, so the drain backs off
+// instead of retrying a block it can't clear, and the UI can show a blocked
+// cleanup with real evidence and actions rather than an unlabelled warning.
 
 pub(crate) fn enqueue_worktree_removal_inner(
     conn: &Connection,
@@ -2070,12 +2076,22 @@ pub(crate) fn enqueue_worktree_removal_inner(
 pub(crate) fn list_pending_worktree_removals_inner(
     conn: &Connection,
 ) -> SqlResult<Vec<PendingWorktreeRemoval>> {
-    let mut stmt =
-        conn.prepare("SELECT worktree_path, node_name FROM pending_worktree_removals ORDER BY id")?;
+    let mut stmt = conn.prepare(
+        "SELECT worktree_path, node_name, attempt_count, last_attempt_at, last_operation, \
+         last_error, retry_not_before, notified_error, notified_at FROM \
+         pending_worktree_removals ORDER BY id",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(PendingWorktreeRemoval {
             worktree_path: row.get(0)?,
             node_name: row.get(1)?,
+            attempt_count: row.get(2)?,
+            last_attempt_at: row.get(3)?,
+            last_operation: row.get(4)?,
+            last_error: row.get(5)?,
+            retry_not_before: row.get(6)?,
+            notified_error: row.get(7)?,
+            notified_at: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -2088,6 +2104,51 @@ pub(crate) fn delete_pending_worktree_removal_inner(
     conn.execute(
         "DELETE FROM pending_worktree_removals WHERE worktree_path = ?1",
         params![path],
+    )?;
+    Ok(())
+}
+
+/// Persist a failed removal attempt: which step failed, the OS error, when it
+/// was attempted, and when the next automatic attempt may run. The attempt
+/// count increments (never resets — a path that fails repeatedly must show a
+/// growing count), so the row keeps the growing history of an unchanged
+/// blocker. The `notified_error` signature is left untouched: notification is
+/// a separate decision, made by the caller that knows the current time.
+pub(crate) fn record_pending_removal_failure_inner(
+    conn: &Connection,
+    path: &str,
+    operation: &str,
+    error: &str,
+    last_attempt_at: i64,
+    retry_not_before: i64,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE pending_worktree_removals \
+         SET attempt_count = attempt_count + 1, \
+             last_attempt_at = ?2, \
+             last_operation = ?3, \
+             last_error = ?4, \
+             retry_not_before = ?5 \
+         WHERE worktree_path = ?1",
+        params![path, last_attempt_at, operation, error, retry_not_before],
+    )?;
+    Ok(())
+}
+
+/// Record the blocker signature the user was told about, and when. The next
+/// failure with the same signature is suppressed until
+/// [`crate::models::RE_NOTIFY_BLOCKER_MS`] has elapsed, so an unchanged blocker
+/// warns once instead of on every drain (issue #2139).
+pub(crate) fn mark_pending_removal_notified_inner(
+    conn: &Connection,
+    path: &str,
+    signature: &str,
+    notified_at: i64,
+) -> SqlResult<()> {
+    conn.execute(
+        "UPDATE pending_worktree_removals SET notified_error = ?2, notified_at = ?3 \
+         WHERE worktree_path = ?1",
+        params![path, signature, notified_at],
     )?;
     Ok(())
 }
@@ -2128,6 +2189,45 @@ pub fn delete_agent_node_enqueueing_removal(
 pub fn list_pending_worktree_removals() -> SqlResult<Vec<PendingWorktreeRemoval>> {
     let db = read_conn();
     list_pending_worktree_removals_inner(&db)
+}
+
+/// Read a single queued removal (the blocked-cleanup workflow needs the row
+/// for one path — e.g. after a user-initiated retry).
+pub fn get_pending_worktree_removal(path: &str) -> SqlResult<Option<PendingWorktreeRemoval>> {
+    let db = read_conn();
+    Ok(list_pending_worktree_removals_inner(&db)?
+        .into_iter()
+        .find(|removal| removal.worktree_path == path))
+}
+
+/// Persist the failure bookkeeping for a blocked cleanup (issue #2139).
+pub fn record_pending_removal_failure(
+    path: &str,
+    operation: &str,
+    error: &str,
+    last_attempt_at: i64,
+    retry_not_before: i64,
+) -> SqlResult<()> {
+    let db = write_conn();
+    record_pending_removal_failure_inner(
+        &db,
+        path,
+        operation,
+        error,
+        last_attempt_at,
+        retry_not_before,
+    )
+}
+
+/// Record which blocker signature the user has been notified about, so the
+/// drain can suppress repeats (issue #2139).
+pub fn mark_pending_removal_notified(
+    path: &str,
+    signature: &str,
+    notified_at: i64,
+) -> SqlResult<()> {
+    let db = write_conn();
+    mark_pending_removal_notified_inner(&db, path, signature, notified_at)
 }
 
 pub fn delete_pending_worktree_removal(path: &str) -> SqlResult<()> {

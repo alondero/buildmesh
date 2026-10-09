@@ -126,7 +126,9 @@ impl Provider {
     /// the silent fallback shows up in the buildmesh.log file — empty strings
     /// are treated as an intentional default and not logged.
     pub fn from_db_str(s: &str) -> Provider {
-        if s.trim().is_empty() { return Provider::Anthropic; }
+        if s.trim().is_empty() {
+            return Provider::Anthropic;
+        }
         Self::try_from_db_str(s).unwrap_or_else(|| {
             tracing::warn!(
                 "Provider::from_db_str: unrecognized provider {:?}, falling back to Anthropic",
@@ -336,7 +338,7 @@ pub struct AgentNode {
     #[ts(as = "i32")]
     pub mesh_id: i64,
     pub name: String,
-    pub path: String,         // absolute path to node directory
+    pub path: String, // absolute path to node directory
     /// Branch the worktree was cut from — **overloaded** based on spawn source.
     ///
     /// For issue-spawned, hand-spawned, and handover-spawned nodes, this holds
@@ -353,7 +355,7 @@ pub struct AgentNode {
     /// `worktree_base_ref` derivation around `if node.source_pr.is_some()`);
     /// new readers should not reimplement the overload decision.
     pub branch: String,
-    pub env: EnvType,         // windows or wsl
+    pub env: EnvType, // windows or wsl
     /// Stored harness/profile id (e.g. "anthropic", "minimax", "terminal", or a
     /// user-defined profile id). Kept as an opaque `String` rather than the
     /// legacy [`Provider`] enum so user-defined harness profiles survive the
@@ -368,8 +370,8 @@ pub struct AgentNode {
     pub launch_configuration: Option<crate::preferences::spawn_configurations::SpawnConfiguration>,
     pub status: SessionStatus,
     pub cli_session_id: Option<String>, // Opaque ID from the agent CLI
-    pub worktree_name: Option<String>,   // git worktree name (same as name for claude-backed providers)
-    pub use_worktree: bool,  // true = commands run in worktree, false = repo root
+    pub worktree_name: Option<String>, // git worktree name (same as name for claude-backed providers)
+    pub use_worktree: bool,            // true = commands run in worktree, false = repo root
     /// Whether the user has pinned this node for the Pinned Grid view
     /// (wayfinder #982). Persisted so a pinned node survives app restarts
     /// and stays in the user's focus set across sessions. Independent of
@@ -380,7 +382,7 @@ pub struct AgentNode {
     /// reads back as unpinned).
     pub is_pinned: bool,
     #[ts(as = "Option<i32>")]
-    pub source_issue: Option<i64>,       // GitHub issue number that triggered this node
+    pub source_issue: Option<i64>, // GitHub issue number that triggered this node
     /// GitHub PR number that triggered this node (issue #420). `None` for
     /// issue-spawned and hand-spawned nodes. When set, `spawn_agent_inner`
     /// fetches `origin/<head_ref>` and uses it as the worktree's `base_ref`
@@ -428,7 +430,7 @@ pub struct AgentNode {
     #[ts(optional)]
     pub lifecycle: Option<crate::agent::session_lifecycle::LifecycleChangedPayload>,
     #[ts(as = "i32")]
-    pub position: i64,        // grid order within the mesh (drag-to-reorder); lower = earlier
+    pub position: i64, // grid order within the mesh (drag-to-reorder); lower = earlier
     pub created_at: DateTime<Utc>,
     /// Exact resolved Worktree Node directory for this node (issue #1519).
     /// `Some(raw_path)` for Worktree Nodes created after the configurable
@@ -446,10 +448,113 @@ pub struct AgentNode {
 /// needs removing. Recording the intent durably lets the slow, retry-prone
 /// removal run in the background (or resume on next launch) without the node
 /// lingering in the UI while it grinds. Drained by `process_pending_removals`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Issue #2139: a removal that fails is no longer just "still queued". The
+/// failure is persisted on the row — which step failed, the OS error, how many
+/// attempts have been made and when the next automatic retry may run — so the
+/// UI can show a blocked cleanup with the evidence and actions instead of an
+/// unlabelled warning toast, and the drain can back off instead of hammering a
+/// block it cannot clear.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PendingWorktreeRemoval.ts")]
 pub struct PendingWorktreeRemoval {
     pub worktree_path: String,
     pub node_name: String,
+    /// Failed removal attempts so far (0 before the first failure).
+    #[ts(as = "i32")]
+    pub attempt_count: i64,
+    /// Epoch milliseconds of the most recent attempt; 0 when none has run.
+    #[ts(as = "i32")]
+    pub last_attempt_at: i64,
+    /// Which removal step failed last, from the `git::worktree` operation
+    /// vocabulary (`rename-worktree-to-staging`, …). `None` before the first
+    /// failure — this is what makes the failure actionable, because a rename
+    /// blocked by an open handle is a different problem from a staged delete
+    /// blocked by one.
+    ///
+    /// The epoch/attempt counters carry `#[ts(as = "i32")]` so they emit
+    /// `number`: a JS `Date`-style millisecond value, not the `bigint` ts-rs
+    /// defaults to for an `i64`.
+    pub last_operation: Option<String>,
+    /// OS error text of the last failure.
+    pub last_error: Option<String>,
+    /// Epoch milliseconds before which the drain must not retry (the backoff).
+    /// A user-initiated retry ignores this.
+    #[ts(as = "i32")]
+    pub retry_not_before: i64,
+    /// Signature of the last blocker we told the user about
+    /// (`operation: error`) and when. An unchanged blocker is not notified
+    /// again until [`RE_NOTIFY_BLOCKER_MS`] has elapsed — a reminder for a
+    /// user who dismissed the dialog, not a toast per drain (issue #2139).
+    pub notified_error: Option<String>,
+    /// Epoch milliseconds of that notification; 0 when nothing was notified.
+    #[ts(as = "i32")]
+    pub notified_at: i64,
+}
+
+/// How long an unchanged blocked cleanup may stay quiet before the user is
+/// reminded. Long enough that a busy session never sees the same worktree twice,
+/// short enough that a dismissal is not a permanent silence.
+pub const RE_NOTIFY_BLOCKER_MS: i64 = 60 * 60 * 1000;
+
+impl PendingWorktreeRemoval {
+    /// The zero state: queued, never attempted, nothing known to be wrong.
+    /// Used when a close enqueues a fresh tombstone and by tests that build
+    /// records without the DB.
+    pub fn new(worktree_path: &str, node_name: &str) -> Self {
+        Self {
+            worktree_path: worktree_path.to_string(),
+            node_name: node_name.to_string(),
+            attempt_count: 0,
+            last_attempt_at: 0,
+            last_operation: None,
+            last_error: None,
+            retry_not_before: 0,
+            notified_error: None,
+            notified_at: 0,
+        }
+    }
+
+    /// A copy with the failed step, OS error, attempt bookkeeping and backoff
+    /// applied — the shape the drain persists after a failed attempt.
+    pub fn with_failure(
+        mut self,
+        operation: &str,
+        error: &str,
+        last_attempt_at: i64,
+        retry_not_before: i64,
+    ) -> Self {
+        self.attempt_count += 1;
+        self.last_attempt_at = last_attempt_at;
+        self.last_operation = Some(operation.to_string());
+        self.last_error = Some(error.to_string());
+        self.retry_not_before = retry_not_before;
+        self
+    }
+
+    /// Whether the automatic drain may attempt this removal now, or must wait
+    /// for the backoff to expire. A never-attempted row is always due.
+    pub fn retry_due(&self, now_ms: i64) -> bool {
+        self.retry_not_before <= now_ms
+    }
+
+    /// Whether the user has already been told about this exact blocker, still
+    /// recently enough that saying it again is noise. The signature is
+    /// `operation: error`, so a blocker that changes shape (the process that
+    /// held the handle changed, the error code changed) is new information at
+    /// any time, and an unchanged blocker becomes a reminder once
+    /// [`RE_NOTIFY_BLOCKER_MS`] has passed since it was last reported.
+    pub fn already_notified(&self, operation: &str, error: &str, now_ms: i64) -> bool {
+        self.notified_error.as_deref() == Some(blocker_signature(operation, error).as_str())
+            && now_ms.saturating_sub(self.notified_at) < RE_NOTIFY_BLOCKER_MS
+    }
+}
+
+/// The identity of a blocked cleanup: which step failed and how. Used both
+/// for notification suppression and for the diagnostics block the user can
+/// copy.
+pub fn blocker_signature(operation: &str, error: &str) -> String {
+    format!("{operation}: {error}")
 }
 
 /// A chat message in the agent session
@@ -457,7 +562,7 @@ pub struct PendingWorktreeRemoval {
 pub struct ChatMessage {
     pub id: i64,
     pub session_id: i64,
-    pub role: String,         // "user" or "assistant"
+    pub role: String, // "user" or "assistant"
     pub content: String,
     pub tool_calls: Option<String>, // JSON array of tool calls if any
     pub created_at: DateTime<Utc>,
@@ -468,6 +573,6 @@ pub struct ChatMessage {
 pub struct SessionScript {
     pub id: i64,
     pub session_id: i64,
-    pub script_type: String,  // "setup" | "run" | "archive"
+    pub script_type: String, // "setup" | "run" | "archive"
     pub content: String,
 }
