@@ -315,6 +315,50 @@ Windows-interop spawns are exempt from host-side resolution: the guest login
 shell (WSL) or the Windows side (interop) resolves the stem in its own
 runtime, since a host-resolved Linux path is not valid input to PowerShell.
 
+### Spawned agents never inherit the launching Claude Code session
+
+A Claude Code session exports a set of markers into the environment of every
+process it spawns, so each can tell it belongs to *that* session. When
+Buildmesh itself was launched from such a session's shell — an agent running
+`scripts\run-dev.ps1` for `/use`, `/verify` or `/verify-ui` — the app inherits
+the whole set and would otherwise hand it straight back to the agents it spawns.
+`CLAUDE_CODE_CHILD_SESSION` is the damaging one: the spawned Claude Code reads
+it, prints `Transcript saving is off - inherited CLAUDE_CODE_CHILD_SESSION
+marker`, writes no transcript, and every transcript consumer downstream (a
+Circuit's first gate, session recovery) then parks on a file that will never
+exist. The rest leak the launching session's identity and, for the messaging
+token and socket, its credentials into another agent process.
+
+`agent::spawn_environment` therefore scrubs them on **both** spawn paths, and
+`CLAUDE_SESSION_MARKER_ENV_VARS` is that single list:
+
+- `wrap` — every interactive PTY agent — clears them alongside
+  `pty::strip_git_env_vars`.
+- `background_command` — the pipe-based launches (session naming, circuit
+  classifiers) — clears them too. Those build a `std::process::Command` rather
+  than a `CommandBuilder`, so they are a second instance of the same leak, not
+  a variant of the first.
+
+Two things make this a list rather than a `CLAUDE*` prefix rule, and both are
+load-bearing. First, Buildmesh sets `CLAUDE_*` variables **on purpose** —
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` for the MiniMax naming side-channel
+(`provider_conf::minimax_backend_env`), `CLAUDE_CONFIG_DIR` for the Windows
+sandbox — and a prefix rule would silently undo all three. Second, the scrub
+runs *before* the harness environment policy, so a deliberately-set value is
+layered back on afterwards by `agent::spawn::command`; deliberate wins by
+ordering, not by having to be excluded from the list.
+
+`scripts/run-dev.ps1` and `scripts/run-dev.sh` clear the same names for the dev
+launch only, so agent-driven runtime checks behave like a user's own launch.
+That is defence in depth for the paths the in-app scrub cannot reach, not a
+substitute for it: the scrub is what fixes a *shipped* app a user launched from
+a Claude Code terminal, which no script can help with.
+
+Read `CLAUDE_SESSION_MARKER_ENV_VARS` before adding a variable: a new marker
+Claude Code exports belongs there, and its own test asserts none of the
+deliberately-set names above ever drift in.
+
 ## Saved Spawn Configurations
 
 `preferences::spawn_configurations` owns named, capability-validated launch overrides scoped to one Spawn Option. Configurations live in application preferences; the backend menu includes each option's saved choices for mobile, while desktop management reads the same collection through IPC. The shared editor creates and edits configurations from Settings and spawn menus. Launch targets include unattached credentialed providers; saving a new route and recipe uses one preference transaction. Draft verification resolves the selected model without persisting the draft; verification records distinguish endpoint/model/runtime so checking one recipe does not replace another model's proof. Provider model metadata is independent of tier remaps, and allowed efforts intersect provider/model/surface metadata with harness capabilities. New-node creation commits the selected snapshot in `agent_nodes.spawn_configuration` in the same transaction as the node. Explicit per-call overrides win; omitted native fields retain the mesh/application/native cascade, while proxy models default to their route and do not inherit native harness model/effort defaults. A resolved proxy model reaches Codex as a single `--model`: `agent::spawn::command::build_spawn_command_prepared` folds the routing descriptor's model into the resolved config before `default_prepare` composes the recipe, so the adapter remains the single owner of the model flag and the orchestrator layer adds only `--profile` and the reasoning `-c` keys. The fold is load-bearing in both directions: the generated `<profile>.config.toml` carries only `model_provider`, so an empty cascade model would leave Codex on an OpenAI model against a foreign endpoint, and a second occurrence is rejected by the CLI as a repeated argument. Resume reads the snapshot, not the editable preference. A provider change cannot reuse another Spawn Option's snapshot.
