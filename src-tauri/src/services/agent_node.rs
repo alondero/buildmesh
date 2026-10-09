@@ -2,7 +2,6 @@
 
 use crate::agent::provider::SpawnOptionId;
 use crate::db;
-use serde::Serialize;
 
 /// Upgrade legacy history outside DB locks; the existing JSON column keeps the operation additive.
 pub fn migrate_launch_history() -> Result<(), String> {
@@ -976,11 +975,8 @@ fn now_epoch_ms() -> i64 {
 /// Every queued worktree cleanup with its current bookkeeping, in queue order.
 /// The blocked-cleanup surface (and its actions) reads from here so what the
 /// user sees is exactly what the drain knows.
-pub fn list_blocked_worktree_cleanups() -> Vec<PendingWorktreeRemoval> {
-    db::list_pending_worktree_removals().unwrap_or_else(|e| {
-        tracing::error!("could not read pending worktree removals: {}", e);
-        Vec::new()
-    })
+pub fn list_blocked_worktree_cleanups() -> db::SqlResult<Vec<PendingWorktreeRemoval>> {
+    db::list_pending_worktree_removals()
 }
 
 /// Retry one blocked cleanup now, ignoring its backoff.
@@ -1099,10 +1095,9 @@ pub enum CleanupRetryOutcome {
 }
 
 /// What "Keep worktree" found on disk, so the UI can tell the truth about what
-/// it did (issue #2139). Serialized for logs and future wire use; the command
-/// reply is its message, which is the part the user actually sees.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "kebab-case")]
+/// it did (issue #2139). The user-visible wording lives in [`Self::message`];
+/// this type is not sent over the wire.
+#[derive(Debug, Clone)]
 pub enum WorktreeCleanupDismissal {
     /// The worktree was exactly where the queue row said, and is still there.
     /// Only the cleanup intent was cancelled.
@@ -1116,6 +1111,11 @@ pub enum WorktreeCleanupDismissal {
     /// The original path is absent and there is no staging copy to restore, so
     /// there is nothing left on disk to keep.
     NothingOnDisk,
+    /// The staged copy could not be moved back — something still holds it — so
+    /// the worktree is *not* where the queue row says it is. The cleanup intent
+    /// is preserved: the row stays queued and the drain keeps trying, exactly
+    /// as it would for any other blocked removal (issue #2139 review round 2).
+    RestoreFailed,
 }
 
 impl WorktreeCleanupDismissal {
@@ -1132,8 +1132,27 @@ impl WorktreeCleanupDismissal {
             Self::NothingOnDisk => {
                 format!("Nothing left to keep at {path} — the cleanup had already removed it")
             }
+            Self::RestoreFailed => format!(
+                "Couldn't move the worktree back to {path} — something still holds {path}.removing. \
+                 The worktree is still there and the cleanup stays queued, so close what is \
+                 holding it and try Keep worktree again."
+            ),
         }
     }
+}
+
+/// The result of "Keep worktree": what happened on disk, and what happened to
+/// the cleanup intent.
+pub struct WorktreeCleanupDismissed {
+    pub kind: WorktreeCleanupDismissal,
+    /// Whether the cleanup intent was cancelled (the queue row is gone). False
+    /// when the restore could not finish: the intent is deliberately preserved
+    /// so the drain keeps trying, rather than abandoning a worktree that is
+    /// not even where the queue row says it is.
+    pub cancelled: bool,
+    /// Set when the row *should* have been dequeued but could not be (only
+    /// possible for the non-`RestoreFailed` outcomes).
+    pub dequeue_error: Option<String>,
 }
 
 /// "Keep worktree" — the user has decided to leave the directory where it is.
@@ -1146,12 +1165,33 @@ impl WorktreeCleanupDismissal {
 /// chose while the queue row claimed the worktree was still at `path`. A staged
 /// delete that had already removed part of the tree is reported as such rather
 /// than promised as an intact restore.
-pub fn dismiss_pending_worktree_removal(
-    path: &str,
-) -> (WorktreeCleanupDismissal, db::SqlResult<()>) {
-    let outcome = restore_staged_worktree(path);
-    let result = db::delete_pending_worktree_removal(path);
-    (outcome, result)
+///
+/// If that move-back fails — something still holds the staged copy — nothing is
+/// cancelled: the disk no longer matches what the queue row says, so cancelling
+/// the intent would abandon both the folder and the git bookkeeping. The row
+/// stays queued, the drain keeps trying, and the user is told exactly that.
+pub fn dismiss_pending_worktree_removal(path: &str) -> WorktreeCleanupDismissed {
+    let kind = restore_staged_worktree(path);
+    if matches!(kind, WorktreeCleanupDismissal::RestoreFailed) {
+        return WorktreeCleanupDismissed {
+            kind,
+            cancelled: false,
+            dequeue_error: None,
+        };
+    }
+    let dequeue_error = db::delete_pending_worktree_removal(path).err().map(|e| {
+        tracing::error!(
+            "keep worktree: cancelled the intent for {} but failed to dequeue it: {}",
+            path,
+            e
+        );
+        e.to_string()
+    });
+    WorktreeCleanupDismissed {
+        kind,
+        cancelled: dequeue_error.is_none(),
+        dequeue_error,
+    }
 }
 
 /// Undo the staging rename a removal may have left behind at `path`, reporting
@@ -1179,16 +1219,17 @@ fn restore_staged_worktree(path: &str) -> WorktreeCleanupDismissal {
             }
         }
         Err(e) => {
-            // The rename back failed (something now holds the staging copy), so
-            // the queue row is still dropped but the user is told the folder is
-            // not where they expect it.
+            // The rename back failed, so something still holds the staged copy.
+            // Nothing is restored, and the caller must keep the cleanup intent
+            // rather than cancel it: the worktree is not where the queue row
+            // says it is (issue #2139 review round 2).
             tracing::warn!(
                 "keep worktree: could not move {} back to {}: {}",
                 staging,
                 path,
                 e
             );
-            WorktreeCleanupDismissal::RestoredIncomplete
+            WorktreeCleanupDismissal::RestoreFailed
         }
     }
 }
@@ -1793,7 +1834,7 @@ mod tests {
         );
 
         // The evidence survived both attempts and reads back from the queue.
-        let [row] = &list_blocked_worktree_cleanups()[..] else {
+        let [row] = &list_blocked_worktree_cleanups().unwrap()[..] else {
             panic!("the queue holds exactly one blocked cleanup");
         };
         assert_eq!(row.worktree_path, path);
@@ -1828,7 +1869,7 @@ mod tests {
             blocked.is_empty(),
             "an entry inside its backoff window must not be attempted or reported"
         );
-        let [row] = &list_blocked_worktree_cleanups()[..] else {
+        let [row] = &list_blocked_worktree_cleanups().unwrap()[..] else {
             panic!("the queue still holds the backing-off cleanup")
         };
         assert_eq!(row.attempt_count, 1, "no second attempt was made");
@@ -1864,7 +1905,7 @@ mod tests {
 
         assert!(!good.exists(), "the worktree directory must be gone");
         assert!(
-            list_blocked_worktree_cleanups().is_empty(),
+            list_blocked_worktree_cleanups().unwrap().is_empty(),
             "a successful retry dequeues the tombstone"
         );
     }
@@ -1889,7 +1930,7 @@ mod tests {
             other => panic!("expected StillBlocked, got {:?}", outcome_tag(&other)),
         }
 
-        let [row] = &list_blocked_worktree_cleanups()[..] else {
+        let [row] = &list_blocked_worktree_cleanups().unwrap()[..] else {
             panic!("the blocked cleanup stays queued after a failed retry")
         };
         assert_eq!(row.attempt_count, 1);
@@ -1903,16 +1944,22 @@ mod tests {
         let td = TempDir::new();
         let (_blocker, path) = enqueue_blocked_cleanup(&td, "wt-dismissed");
 
-        let (outcome, result) = dismiss_pending_worktree_removal(&path);
-        result.unwrap();
-        assert!(matches!(outcome, WorktreeCleanupDismissal::Unchanged));
+        let dismissed = dismiss_pending_worktree_removal(&path);
+        assert!(
+            dismissed.cancelled,
+            "the clean cases cancel the cleanup intent"
+        );
+        assert!(matches!(
+            dismissed.kind,
+            WorktreeCleanupDismissal::Unchanged
+        ));
 
         assert!(matches!(
             retry_pending_worktree_removal(&path),
             CleanupRetryOutcome::Gone
         ));
         assert!(
-            list_blocked_worktree_cleanups().is_empty(),
+            list_blocked_worktree_cleanups().unwrap().is_empty(),
             "dismissing cancels the cleanup intent"
         );
     }
@@ -1941,7 +1988,7 @@ mod tests {
         assert!(first[0].notify, "the first blocker is new information");
 
         // Same blocker again, seeded from the row that pass persisted.
-        let row = list_blocked_worktree_cleanups().remove(0);
+        let row = list_blocked_worktree_cleanups().unwrap().remove(0);
         assert!(
             row.already_notified(
                 crate::git::worktree::OP_OPEN_WORKTREE_REPO,
@@ -1967,7 +2014,7 @@ mod tests {
         );
 
         // Same step, a *different* OS error: the blocker changed shape.
-        let row = list_blocked_worktree_cleanups().remove(0);
+        let row = list_blocked_worktree_cleanups().unwrap().remove(0);
         let changed = record_blocked_cleanups(
             vec![(
                 row,
@@ -2033,7 +2080,7 @@ mod tests {
             "a claimed worktree belongs to a live agent and must survive a manual retry"
         );
         assert!(
-            list_blocked_worktree_cleanups().is_empty(),
+            list_blocked_worktree_cleanups().unwrap().is_empty(),
             "the superseded tombstone is dequeued, as in the drain (issue #653)"
         );
     }
@@ -2049,15 +2096,21 @@ mod tests {
         let path = good.to_string_lossy().to_string();
         db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-keep").unwrap();
 
-        let (outcome, result) = dismiss_pending_worktree_removal(&path);
-        result.unwrap();
+        let dismissed = dismiss_pending_worktree_removal(&path);
+        assert!(
+            dismissed.cancelled,
+            "the clean cases cancel the cleanup intent"
+        );
 
-        assert!(matches!(outcome, WorktreeCleanupDismissal::Unchanged));
+        assert!(matches!(
+            dismissed.kind,
+            WorktreeCleanupDismissal::Unchanged
+        ));
         assert!(good.exists(), "the worktree is still where it was");
         assert!(good.join("file.txt").exists(), "its contents are untouched");
-        assert!(list_blocked_worktree_cleanups().is_empty());
+        assert!(list_blocked_worktree_cleanups().unwrap().is_empty());
         assert!(
-            outcome.message(&path).contains(&path),
+            dismissed.kind.message(&path).contains(&path),
             "the message names the path the user asked about"
         );
     }
@@ -2081,11 +2134,17 @@ mod tests {
         assert!(!std::path::Path::new(&path).exists());
         db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-staged").unwrap();
 
-        let (outcome, result) = dismiss_pending_worktree_removal(&path);
-        result.unwrap();
+        let dismissed = dismiss_pending_worktree_removal(&path);
+        assert!(
+            dismissed.cancelled,
+            "the clean cases cancel the cleanup intent"
+        );
 
         assert!(
-            matches!(outcome, WorktreeCleanupDismissal::RestoredFromStaging),
+            matches!(
+                dismissed.kind,
+                WorktreeCleanupDismissal::RestoredFromStaging
+            ),
             "the staging copy is moved back, not left stranded"
         );
         assert!(std::path::Path::new(&path).exists(), "the worktree is back");
@@ -2095,11 +2154,11 @@ mod tests {
             "the restored worktree is intact"
         );
         assert!(
-            outcome.message(&path).contains("moved"),
+            dismissed.kind.message(&path).contains("moved"),
             "the message admits the folder had moved, got: {}",
-            outcome.message(&path)
+            dismissed.kind.message(&path)
         );
-        assert!(list_blocked_worktree_cleanups().is_empty());
+        assert!(list_blocked_worktree_cleanups().unwrap().is_empty());
     }
 
     /// A worktree whose staged delete had already begun is reported as
@@ -2120,17 +2179,20 @@ mod tests {
         fs::remove_file(std::path::Path::new(&staging).join("file.txt")).unwrap();
         db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-partial").unwrap();
 
-        let (outcome, result) = dismiss_pending_worktree_removal(&path);
-        result.unwrap();
+        let dismissed = dismiss_pending_worktree_removal(&path);
+        assert!(
+            dismissed.cancelled,
+            "the clean cases cancel the cleanup intent"
+        );
 
         assert!(
-            matches!(outcome, WorktreeCleanupDismissal::RestoredIncomplete),
+            matches!(dismissed.kind, WorktreeCleanupDismissal::RestoredIncomplete),
             "a gutted worktree must not be reported as restored"
         );
         assert!(
-            outcome.message(&path).contains("deleted part of it"),
+            dismissed.kind.message(&path).contains("deleted part of it"),
             "got: {}",
-            outcome.message(&path)
+            dismissed.kind.message(&path)
         );
     }
 
@@ -2146,12 +2208,82 @@ mod tests {
         fs::remove_dir_all(&gone).unwrap();
         db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-vanished").unwrap();
 
-        let (outcome, result) = dismiss_pending_worktree_removal(&path);
-        result.unwrap();
+        let dismissed = dismiss_pending_worktree_removal(&path);
+        assert!(
+            dismissed.cancelled,
+            "the clean cases cancel the cleanup intent"
+        );
 
-        assert!(matches!(outcome, WorktreeCleanupDismissal::NothingOnDisk));
-        assert!(outcome.message(&path).contains("Nothing left to keep"));
-        assert!(list_blocked_worktree_cleanups().is_empty());
+        assert!(matches!(
+            dismissed.kind,
+            WorktreeCleanupDismissal::NothingOnDisk
+        ));
+        assert!(dismissed
+            .kind
+            .message(&path)
+            .contains("Nothing left to keep"));
+        assert!(list_blocked_worktree_cleanups().unwrap().is_empty());
+    }
+
+    /// A worktree staged by a removal and still held by a live process cannot
+    /// be moved back. "Keep worktree" must not then cancel the cleanup: the
+    /// folder is at `<path>.removing`, so the queue row — which says the
+    /// worktree is at `path` — is the only thing still tracking it. Cancelling
+    /// would strand the work under a name the user never chose and stop the
+    /// drain from retrying (issue #2139 review round 2).
+    #[test]
+    #[cfg(windows)]
+    fn dismiss_keeps_the_intent_when_the_staged_worktree_cannot_be_moved_back() {
+        use crate::env::test_helpers::ScopedChild;
+        let _db = crate::db::test_support::isolated();
+        let root = TempDir::new();
+        let root_repo = init_repo(root.path());
+        let moved = add_worktree(&root_repo, &root, "wt-held-staging");
+        let path = moved.to_string_lossy().to_string();
+        let staging = format!("{path}.removing");
+
+        // An interrupted removal: the rename into staging landed. Something is
+        // still holding the staged copy, so the rename back fails too.
+        fs::rename(&moved, &staging).unwrap();
+        let mut command = crate::process_util::command_no_window("cmd");
+        command
+            .args(["/c", "ping -n 30 127.0.0.1"])
+            .current_dir(&staging)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let _holder = ScopedChild::spawn(command);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        db::enqueue_worktree_removal_inner(&db::write_conn(), &path, "wt-held-staging").unwrap();
+
+        let dismissed = dismiss_pending_worktree_removal(&path);
+
+        assert!(
+            matches!(dismissed.kind, WorktreeCleanupDismissal::RestoreFailed),
+            "nothing was restored, so that is what must be reported"
+        );
+        assert!(
+            !dismissed.cancelled,
+            "the cleanup intent must survive a failed restore"
+        );
+        assert!(
+            dismissed
+                .kind
+                .message(&path)
+                .contains("cleanup stays queued"),
+            "got: {}",
+            dismissed.kind.message(&path)
+        );
+        // The queue keeps tracking the worktree, so the drain can retry once
+        // the holder is gone, and the folder is left exactly where it was.
+        assert_eq!(
+            list_blocked_worktree_cleanups().unwrap().len(),
+            1,
+            "the tombstone is still queued"
+        );
+        assert!(
+            std::path::Path::new(&staging).exists() && !std::path::Path::new(&path).exists(),
+            "the staged copy is left alone for the next removal to reclaim"
+        );
     }
 
     /// A retry on a path the queue no longer holds is a definite "nothing to

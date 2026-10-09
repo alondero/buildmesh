@@ -1143,19 +1143,30 @@ fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeRemovalFailu
 /// function exists to prevent. The one legitimate `Ok` without a prune is
 /// "there is no repository above this path" — a path that was never a worktree
 /// of any repo we can find (a #1080-style derived path, a mesh root that was
-/// deleted) — so that case is the only one that reports nothing.
+/// deleted). Anything else — an I/O error, a repository that cannot be read —
+/// is an error and keeps the tombstone (issue #2139 review round 2).
 fn prune_orphaned_worktree_entry(host_path: &str) -> Result<(), WorktreeRemovalFailure> {
+    prune_orphaned_worktree_entry_with(host_path, |parent| Repository::discover(parent))
+}
+
+/// [`prune_orphaned_worktree_entry`] with repository discovery injected, so the
+/// "no repository above this path" and "cannot read the repository" branches
+/// can be told apart by a test (issue #2139 review round 2).
+fn prune_orphaned_worktree_entry_with(
+    host_path: &str,
+    discover: impl Fn(&std::path::Path) -> Result<Repository, git2::Error>,
+) -> Result<(), WorktreeRemovalFailure> {
     let target = std::path::Path::new(host_path);
     let Some(parent) = target.parent() else {
         return Ok(());
     };
     // The working directory is gone, so open the repository from above: it is
-    // the one that holds the (still present) admin metadata. No repository
-    // above the path means there is no metadata to reconcile — that is a
-    // definite "nothing to prune", not a failed read.
-    let repo = match Repository::discover(parent) {
+    // the one that holds the (still present) admin metadata. Only "not found"
+    // means there is no repository above this path, and therefore no metadata
+    // to reconcile; every other error is a failed read.
+    let repo = match discover(parent) {
         Ok(repo) => repo,
-        Err(e) => {
+        Err(e) if e.code() == git2::ErrorCode::NotFound => {
             tracing::debug!(
                 "prune_orphaned_worktree_entry: no repository above {} ({}); nothing to \
                  reconcile",
@@ -1163,6 +1174,12 @@ fn prune_orphaned_worktree_entry(host_path: &str) -> Result<(), WorktreeRemovalF
                 e
             );
             return Ok(());
+        }
+        Err(e) => {
+            return Err(WorktreeRemovalFailure::new(
+                OP_PRUNE_ADMIN_ENTRY,
+                format!("could not open the repository above {host_path}: {e}"),
+            ));
         }
     };
     // Everything below here *is* a repository we found, so a failure means we
@@ -1265,13 +1282,19 @@ fn inode_same(a: &std::path::Path, target: &std::path::Path) -> bool {
 
 /// Path equality that tolerates the Windows verbatim/UNC and separator
 /// differences a `gitdir` file can carry (git writes forward slashes, the
-/// queue can hold either spelling).
+/// queue can hold either spelling). Case folding is Windows-only: on Unix two
+/// paths that differ in case are different files.
 fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
     let normalize = |p: &std::path::Path| {
-        p.to_string_lossy()
+        let unified = p
+            .to_string_lossy()
             .trim_end_matches(['/', '\\'])
-            .replace('\\', "/")
-            .to_lowercase()
+            .replace('\\', "/");
+        if cfg!(target_os = "windows") {
+            unified.to_lowercase()
+        } else {
+            unified
+        }
     };
     normalize(a) == normalize(b)
 }
@@ -2445,6 +2468,50 @@ mod tests {
         let missing = td.path().join("never-existed");
         remove_one_worktree(&missing.to_string_lossy())
             .expect("a missing worktree dir counts as already removed");
+    }
+
+    /// A path with no repository above it has no admin metadata to reconcile,
+    /// so there is genuinely nothing to prune and the removal succeeds (a
+    /// #1080-style derived path, or a mesh root that was deleted).
+    #[test]
+    fn prune_orphaned_worktree_entry_reports_nothing_when_no_repository_is_above_the_path() {
+        let td = TestDir::new("prune_no_repo");
+        let missing = td.path().join("never-existed");
+        // The temp directory is not a git repository, so discovery says
+        // "not found" — the only legitimate success without a prune.
+        prune_orphaned_worktree_entry(&missing.to_string_lossy())
+            .expect("no repository above the path means nothing to reconcile");
+    }
+
+    /// Any other discovery failure — an I/O error, a repository that cannot be
+    /// read — means the git half was *not* finished, so the caller must keep the
+    /// tombstone instead of retiring it (issue #2139 review round 2).
+    #[test]
+    fn prune_orphaned_worktree_entry_fails_closed_when_discovery_errors() {
+        let td = TestDir::new("prune_discover_error");
+        let missing = td.path().join("never-existed");
+        // An OS error is not "not found": the repository may well be there and
+        // unreadable, so the admin entry could still exist. `git2::Error` is
+        // not `Clone`, so the closure builds a fresh one per call.
+        let failure = prune_orphaned_worktree_entry_with(missing.to_str().unwrap(), |_| {
+            Err(git2::Error::new(
+                git2::ErrorCode::GenericError,
+                git2::ErrorClass::Os,
+                "could not read the repository",
+            ))
+        })
+        .expect_err("a failed repository read must keep the tombstone");
+        assert_eq!(
+            failure.operation, OP_PRUNE_ADMIN_ENTRY,
+            "the failure names the step that could not finish"
+        );
+        assert!(
+            failure
+                .detail
+                .contains("could not open the repository above"),
+            "the failure says which repository could not be read, got: {}",
+            failure.detail
+        );
     }
 
     // ── issue #2139 — blocked cleanup stays recoverable ─────────────────────

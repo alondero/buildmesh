@@ -188,10 +188,17 @@ pub fn drain_pending_removals(app: tauri::AppHandle) {
 /// Every worktree cleanup that is still blocked, with its persisted evidence.
 /// The blocked-cleanup dialog lists these and acts on them, so what the user
 /// sees is exactly what the drain knows (issue #2139).
+///
+/// A failure to read the queue is an error rather than an empty list: the
+/// dialog must stay up and say so, not close and imply nothing is blocked
+/// (issue #2139 review round 2).
 #[command]
 pub async fn list_pending_worktree_removals() -> Result<Vec<PendingWorktreeRemoval>, String> {
     crate::commands::run_blocking("list_pending_worktree_removals", || {
-        Ok(services::agent_node::list_blocked_worktree_cleanups())
+        services::agent_node::list_blocked_worktree_cleanups().map_err(|e| {
+            tracing::error!("could not read pending worktree removals: {}", e);
+            e.to_string()
+        })
     })
     .await
 }
@@ -299,17 +306,39 @@ pub async fn release_worktree_cleanup_blocker(
     .await
 }
 
+/// The reply to `dismiss_worktree_cleanup`: what the user should be told, and
+/// whether the cleanup intent was actually cancelled. `cancelled` is false when
+/// the staged copy could not be moved back — the queue row is still there, the
+/// drain keeps trying, and the entry must stay in the dialog (issue #2139
+/// review round 2).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "WorktreeCleanupDismissalResult.ts")]
+pub struct WorktreeCleanupDismissalResult {
+    pub message: String,
+    pub cancelled: bool,
+}
+
 /// "Keep worktree" — cancel the cleanup intent for one path, and report what
 /// was actually done to the disk (issue #2139 review round 1): cancelling the
 /// intent is safe, but a removal may already have moved the worktree aside, so
-/// the reply carries the message the user should be told.
+/// the reply carries the message the user should be told and whether the queue
+/// entry is gone.
 #[command]
-pub async fn dismiss_worktree_cleanup(worktree_path: String) -> Result<String, String> {
+pub async fn dismiss_worktree_cleanup(
+    worktree_path: String,
+) -> Result<WorktreeCleanupDismissalResult, String> {
     crate::commands::run_blocking("dismiss_worktree_cleanup", move || {
-        let (outcome, result) =
-            services::agent_node::dismiss_pending_worktree_removal(&worktree_path);
-        result.map_err(|e| e.to_string())?;
-        Ok(outcome.message(&worktree_path))
+        let dismissed = services::agent_node::dismiss_pending_worktree_removal(&worktree_path);
+        let mut message = dismissed.kind.message(&worktree_path);
+        if let Some(error) = dismissed.dequeue_error {
+            // The row is still queued, which is what actually happened, so say
+            // so rather than implying the cleanup was forgotten.
+            message.push_str(&format!(" The cleanup stays queued: {error}."));
+        }
+        Ok(WorktreeCleanupDismissalResult {
+            message,
+            cancelled: dismissed.cancelled,
+        })
     })
     .await
 }

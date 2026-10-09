@@ -201,11 +201,12 @@ export function BlockedCleanupDialog() {
     {pendingKill && (
       <ConfirmDialog
         title={`End ${pendingKill.process.name ?? 'process'} (pid ${pendingKill.process.pid})?`}
-        message={
-          'Buildmesh will force this process to end, along with every process it started. ' +
-          `It was found holding ${pendingKill.path}. Anything unsaved in it will be lost, and ` +
-          'the process may already have exited — in which case nothing is ended.'
-        }
+          message={
+            'Buildmesh will force this process to end, along with every process it started. ' +
+            `It was found holding ${pendingKill.path}. Anything unsaved in it will be lost, and ` +
+            'the process may already have exited — in which case nothing is ended. Buildmesh ' +
+            'then retries the cleanup.'
+          }
         confirmLabel="End process"
         onConfirm={() => void confirmRelease()}
         onCancel={cancelRelease}

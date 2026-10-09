@@ -67,6 +67,10 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
       set({ entries, loading: false });
       if (entries.length === 0) set({ isOpen: false });
     } catch (error) {
+      // A queue that cannot be read is not an empty queue. Keeping the dialog
+      // up and saying so is the difference between "nothing is blocked" and
+      // "we don't know" — the second must not hide the recovery surface for a
+      // worktree that really is stuck (issue #2139 review round 2).
       set({ loading: false });
       addToast('Worktree', `Couldn't read the blocked worktree cleanups: ${String(error)}`, 'error');
     }
@@ -153,16 +157,20 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
 
   dismiss: async (path) => {
     try {
-      // The backend reports what it actually did to the disk, because a removal
-      // may already have moved the worktree aside.
-      const message = await api.dismissWorktreeCleanup(path);
-      const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
-      set((state) => ({
-        entries: remaining,
-        blockers: withoutKey(state.blockers, path),
-        isOpen: remaining.length > 0,
-      }));
-      addToast('Worktree', message, 'info');
+      // The reply says what was actually done to the disk, and whether the
+      // cleanup intent was cancelled. Only a cancelled intent removes the entry:
+      // a failed restore leaves the row queued, so the drain keeps trying and
+      // the entry stays visible (issue #2139 review round 2).
+      const result = await api.dismissWorktreeCleanup(path);
+      if (result.cancelled) {
+        const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
+        set((state) => ({
+          entries: remaining,
+          blockers: withoutKey(state.blockers, path),
+          isOpen: remaining.length > 0,
+        }));
+      }
+      addToast('Worktree', result.message, 'info');
     } catch (error) {
       set((state) => ({
         actionStatus: {

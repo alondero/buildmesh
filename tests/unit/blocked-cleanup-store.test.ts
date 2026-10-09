@@ -79,12 +79,18 @@ describe('blocked cleanup store (#2139)', () => {
     expect(useBlockedCleanupStore.getState().isOpen).toBe(false);
   });
 
-  it('reports a failed read instead of silently showing an empty list', async () => {
+  it('keeps the dialog open and reports the failure when the queue cannot be read', async () => {
+    // `list_pending_worktree_removals` rejects when the queue read fails, so a
+    // stuck worktree cannot be hidden behind an empty list (issue #2139 review
+    // round 2). The command must reject for this test to be able to fail.
     mocked.listPendingWorktreeRemovals.mockRejectedValue(new Error('db locked'));
+    useBlockedCleanupStore.setState({ isOpen: true, entries: [] });
 
     await useBlockedCleanupStore.getState().open();
 
-    expect(useBlockedCleanupStore.getState().loading).toBe(false);
+    const state = useBlockedCleanupStore.getState();
+    expect(state.loading).toBe(false);
+    expect(state.isOpen, 'the only recovery surface must not close on a read failure').toBe(true);
     const toasts = useToastStore.getState().toasts;
     expect(toasts.some((t) => t.provider === 'Worktree' && t.message.includes('db locked'))).toBe(true);
   });
@@ -161,7 +167,10 @@ describe('blocked cleanup store (#2139)', () => {
   });
 
   it('keeps the worktree in place on "keep worktree" and repeats the backend message', async () => {
-    mocked.dismissWorktreeCleanup.mockResolvedValue(`Worktree kept in place: ${BLOCKED.worktree_path}`);
+    mocked.dismissWorktreeCleanup.mockResolvedValue({
+      message: `Worktree kept in place: ${BLOCKED.worktree_path}`,
+      cancelled: true,
+    });
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
     await useBlockedCleanupStore.getState().dismiss(BLOCKED.worktree_path);
@@ -174,6 +183,25 @@ describe('blocked cleanup store (#2139)', () => {
     // disk (a removal may already have moved the folder aside).
     expect(
       useToastStore.getState().toasts.some((toast) => toast.message === `Worktree kept in place: ${BLOCKED.worktree_path}`),
+    ).toBe(true);
+  });
+
+  it('keeps the entry when the restore failed, so the drain keeps trying', async () => {
+    // The staged copy could not be moved back: the row stays queued, so the
+    // entry must stay in the dialog (issue #2139 review round 2).
+    mocked.dismissWorktreeCleanup.mockResolvedValue({
+      message: `Couldn't move the worktree back to ${BLOCKED.worktree_path} — something still holds`,
+      cancelled: false,
+    });
+    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
+
+    await useBlockedCleanupStore.getState().dismiss(BLOCKED.worktree_path);
+
+    const state = useBlockedCleanupStore.getState();
+    expect(state.entries).toEqual([BLOCKED], 'the cleanup intent survived, so the entry stays');
+    expect(state.isOpen).toBe(true);
+    expect(
+      useToastStore.getState().toasts.some((toast) => /Couldn't move the worktree back/.test(toast.message)),
     ).toBe(true);
   });
 

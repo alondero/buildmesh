@@ -52,6 +52,7 @@ import type { NetworkStatus } from '../types/generated/NetworkStatus';
 import type { PendingWorktreeRemoval } from '../types/generated/PendingWorktreeRemoval';
 import type { BlockingProcess } from '../types/generated/BlockingProcess';
 import type { WorktreeCleanupRetryResult } from '../types/generated/WorktreeCleanupRetryResult';
+import type { WorktreeCleanupDismissalResult } from '../types/generated/WorktreeCleanupDismissalResult';
 import type { PickedFolder } from '../types/generated/PickedFolder';
 import type { OpenPr } from '../types/generated/OpenPr';
 import type { PrMergeability } from '../types/generated/PrMergeability';
@@ -581,10 +582,11 @@ export const listPendingWorktreeRemovals = () =>
 export const retryWorktreeCleanup = (worktreePath: string) =>
   _invoke<WorktreeCleanupRetryResult>('retry_worktree_cleanup', { worktreePath });
 
-/** "Keep worktree" — cancel the cleanup intent for one path. The reply is the
- *  message describing what was done to the disk. */
+/** "Keep worktree" — cancel the cleanup intent for one path. The reply says
+ *  what was done to the disk and whether the intent was cancelled (false when
+ *  the staged copy could not be moved back, so the entry stays queued). */
 export const dismissWorktreeCleanup = (worktreePath: string) =>
-  _invoke<string>('dismiss_worktree_cleanup', { worktreePath });
+  _invoke<WorktreeCleanupDismissalResult>('dismiss_worktree_cleanup', { worktreePath });
 
 /** Which processes are pinning a worktree directory. Read-only; nothing is
  *  terminated. */

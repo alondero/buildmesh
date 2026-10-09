@@ -73,7 +73,9 @@ describe('BlockedCleanupDialog (#2139)', () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
     vi.mocked(api.retryWorktreeCleanup).mockReset().mockResolvedValue({ status: 'still-blocked', record: ROW });
-    vi.mocked(api.dismissWorktreeCleanup).mockReset().mockResolvedValue(undefined);
+    vi.mocked(api.dismissWorktreeCleanup)
+      .mockReset()
+      .mockResolvedValue({ message: 'Worktree kept in place.', cancelled: true });
     vi.mocked(api.diagnoseWorktreeCleanupBlockers).mockReset().mockResolvedValue([]);
   });
 
@@ -176,6 +178,7 @@ describe('BlockedCleanupDialog (#2139)', () => {
     expect(confirm.textContent).toContain('powershell.exe');
     expect(confirm.textContent).toContain('5212');
     expect(confirm.textContent).toMatch(/every process it started/);
+    expect(confirm.textContent).toMatch(/then retries the cleanup/);
 
     fireEvent.click(within(confirm as HTMLElement).getByRole('button', { name: /end process/i }));
     await vi.waitFor(() =>
