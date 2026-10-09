@@ -4,6 +4,7 @@ import { emit } from '@tauri-apps/api/event';
 import { CircuitEvidenceHistory } from '../../src/components/Circuits/CircuitEvidenceHistory';
 import { circuitRunHistory, recordCircuitOutcome } from '../../src/lib/tauri/circuitEvidence';
 import type { CircuitHistoryEntry } from '../../src/types/generated/CircuitHistoryEntry';
+import type { ObservationCoverage } from '../../src/types/generated/ObservationCoverage';
 import type { CircuitEvidenceView } from '../../src/types/generated/CircuitEvidenceView';
 
 vi.mock('../../src/lib/tauri/circuitEvidence', () => ({
@@ -16,6 +17,8 @@ beforeEach(() => {
   vi.mocked(recordCircuitOutcome).mockReset();
 });
 
+const nativeCoverage: ObservationCoverage = { push: 'hooks', pull: 'native_turn_completion', turn_identity: 'native_token',
+  owned_work: 'unavailable', final_report: 'pull_message', passive_watcher: null };
 const entry: CircuitHistoryEntry = { id: 7, node_id: 'comment', attempt: 1,
   kind: 'checkpoint_reason', detail: 'github', source: 'circuit_worker', disposition: 'waiting',
   observed_at: '2026-09-24T12:00:00Z' };
@@ -262,7 +265,7 @@ it('shows unsupported ownership and the evidence deadline without promising live
     capabilities: { harness: 'codex', foreground: 'Identity-bound rollout task_complete pull',
       owned_work: 'Unavailable: rollouts do not expose a complete child/background registry',
       final_report: 'Scrubbed task_complete response', reconciliation: 'Bounded native rollout pull',
-      yielded_budget_ms: 60000, active_budget_ms: 7200000 },
+      yielded_budget_ms: 60000, active_budget_ms: 7200000, coverage: nativeCoverage },
   }] });
   const {container} = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
@@ -280,7 +283,7 @@ it('explains when lifecycle evidence is unavailable', async () => {
     waits_active: true, human_waits: [], observation_blocker: { kind: 'lifecycle_evidence_unavailable' },
     capabilities: { harness: 'claude_code', foreground: 'Lifecycle callback', owned_work: 'Unavailable',
       final_report: 'Transcript', reconciliation: 'Bounded report read', yielded_budget_ms: 60000,
-      active_budget_ms: 7200000 },
+      active_budget_ms: 7200000, coverage: nativeCoverage },
   }] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
@@ -295,7 +298,7 @@ it('gives session observation conflicts evidence-focused guidance', async () => 
     waits_active: true, human_waits: [], observation_blocker: { kind: 'evidence_conflict' },
     capabilities: { harness: 'claude_code', foreground: 'Lifecycle callback', owned_work: 'Unavailable',
       final_report: 'Transcript', reconciliation: 'Bounded report read', yielded_budget_ms: 60000,
-      active_budget_ms: 7200000 },
+      active_budget_ms: 7200000, coverage: nativeCoverage },
   }] });
   const { container } = render(<CircuitEvidenceHistory runId={3} updatedAt="one" />);
   fireEvent.click(container.querySelector('summary')!);
@@ -309,7 +312,7 @@ it.each([true, false])('keeps wait provenance distinct when active=%s', async (a
   vi.mocked(circuitRunHistory).mockResolvedValue({ entries: [], checkpoints: [], coverage: [{
     node_id: 'reviewer', attempt: 2, platform: 'windows host / windows launch', deadline_ms: null, waits_active: active,
     capabilities: { harness: 'codex', foreground: 'Native pull', owned_work: 'Unavailable',
-      final_report: 'Native report', reconciliation: 'Bounded pull', yielded_budget_ms: 60000, active_budget_ms: 7200000 },
+      final_report: 'Native report', reconciliation: 'Bounded pull', yielded_budget_ms: 60000, active_budget_ms: 7200000, coverage: nativeCoverage },
     human_waits: ['permission', 'question'].map((kind) => ({ wait_kind: kind as 'permission' | 'question',
       request_id: kind === 'permission' ? 'tool-1' : null, source: 'native', source_id: 'source-1',
       observed_at_ms: 1790251200000, authoritative: false, resolved_at_ms: null,

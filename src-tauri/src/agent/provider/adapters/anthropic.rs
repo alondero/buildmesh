@@ -1,8 +1,13 @@
+use super::hook_contract;
 use crate::agent::capabilities::{
     EffortControlKind, PermissionModeOption, CLAUDE_EFFORT_ALLOWED, PERMISSION_MODE_UNATTENDED,
 };
 use crate::agent::provider::{
     claude_direct_recipe, AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta,
+};
+use crate::circuit::strategy::{
+    FinalReportSource, HookPush, ObservationStrategy, OwnedWorkCoverage, PullSource, PushSource,
+    ReconciliationPolicy, StrategyNotes, TurnIdentity,
 };
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
@@ -85,6 +90,40 @@ impl AgentProvider for AnthropicAdapter {
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: Some("workspace trust".into()),
             min_version: None,
+        }
+    }
+
+    /// Issue #1898: Claude Code's documented hook contract supplies both
+    /// halves needed to tie a turn to a Buildmesh submission —
+    /// `UserPromptSubmit` carries the verbatim `prompt` the harness says it
+    /// received plus a `prompt_id` turn token (v2.1.196+), and `Stop` carries
+    /// that same token. Buildmesh binds the token to a submission it recorded,
+    /// and only while that submission is still the newest one for the agent,
+    /// so a delayed, duplicate, prior-turn or cross-run hook cannot
+    /// acknowledge a different submission. No live environment has exercised
+    /// this yet, so delivery is stated as unverified rather than claimed.
+    fn circuit_observation(&self) -> ObservationStrategy {
+        ObservationStrategy {
+            push: PushSource::Hooks(HookPush {
+                parse: |value| hook_contract::parse("anthropic", true, value),
+                source: "claude_native_hook",
+                request_source: "anthropic_request_hook",
+                ownership_gap: None,
+            }),
+            pull: PullSource::None,
+            turn_identity: TurnIdentity::SubmissionEcho,
+            owned_work: OwnedWorkCoverage::HookRegistry,
+            final_report: FinalReportSource::HookMessage,
+            reconciliation: ReconciliationPolicy {
+                yielded_budget_ms: 90_000,
+            },
+            passive_watcher: None,
+            notes: StrategyNotes {
+                foreground: "UserPromptSubmit prompt echo bound to a recorded submission, then prompt_id inherited by Stop; receipts without a provable binding stay reduced confidence; live delivery unverified",
+                owned_work: "Child hooks and explicit task/cron registries; missing coverage remains unverified",
+                final_report: "Scrubbed Stop response when supplied; otherwise unavailable",
+                reconciliation: "Durable hook receipt replay bound through the recorded submission; no authoritative ownership pull is available",
+            },
         }
     }
 

@@ -470,10 +470,21 @@ pub trait AgentProvider: Send + Sync {
         crate::agent::capabilities::AttentionCapability::None
     }
 
+    /// What this harness contributes to a Circuit's observation of one agent
+    /// (issue #2128): its push hook parser, native pull, identity and
+    /// owned-work coverage, report source and reconciliation budget. The
+    /// Circuit worker selects behaviour from this declaration and renders its
+    /// diagnostics from it. The default is unwired: execution support never
+    /// implies lifecycle or ownership authority.
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        crate::circuit::strategy::ObservationStrategy::UNWIRED
+    }
+
     /// Whether this harness supplies turn lifecycle signals through a passive
-    /// transcript watcher rather than a native attention hook.
+    /// transcript watcher rather than a native attention hook. Derived from
+    /// the observation strategy so the two cannot disagree.
     fn supports_passive_turn_watcher(&self) -> bool {
-        false
+        self.circuit_observation().passive_watcher.is_some()
     }
 
     /// Ensure the workspace is trusted for this harness before its process is

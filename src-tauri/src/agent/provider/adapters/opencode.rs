@@ -186,6 +186,28 @@ impl AgentProvider for OpenCodeAdapter {
         "opencode"
     }
 
+    /// Issue #1899: OpenCode 1.18.3 (Windows `.cmd` via `cmd.exe /c`,
+    /// Linux/macOS direct spawn) was inspected, not assumed. Its project
+    /// plugin forwards `session.idle` / `question.asked` / `permission.asked`
+    /// (plus capture-only `session.created`) and its `opencode.db` SQLite
+    /// store yields a readable transcript/report — but no event carries a
+    /// turn/input fence and no pull source exposes a turn completion or a
+    /// complete child/background registry. It therefore declares no Circuit
+    /// push or pull source, and Circuit execution stays visibly Unverified
+    /// until a controlled live run exists.
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        use crate::circuit::strategy::{ObservationStrategy, StrategyNotes};
+        ObservationStrategy {
+            notes: StrategyNotes {
+                foreground: "OpenCode 1.18.3 (Windows .cmd via cmd.exe /c; Linux/macOS direct) has no validated Circuit lifecycle adapter; the session.idle plugin hook carries no turn/input fence and cannot establish foreground termination",
+                owned_work: "OpenCode exposes no complete child/background registry to Buildmesh; unknown child/background work never establishes completion",
+                final_report: "Transcript (opencode.db SQLite) or PTY text may inform interpretation; complete native report unavailable",
+                ..ObservationStrategy::UNWIRED.notes
+            },
+            ..ObservationStrategy::UNWIRED
+        }
+    }
+
     fn ui(&self) -> UiMeta {
         UiMeta {
             label: "OpenCode".into(),

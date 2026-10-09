@@ -8,6 +8,7 @@ use super::*;
 use crate::agent::spawn::ExplicitSpawnOverrides;
 use crate::circuit::evaluator;
 use crate::circuit::model::{CircuitNode, StepOutcome, CIRCUIT_GRAPH_VERSION};
+use crate::circuit::strategy::PassiveWatcher;
 use crate::circuit::test_support::advance_with_report_evidence;
 use rusqlite::{Connection, OptionalExtension};
 
@@ -788,11 +789,11 @@ fn observer_node(provider: &str, session: Option<&str>) -> crate::models::AgentN
 fn observer_restart_dispatches_muse_and_commandcode_only() {
     assert_eq!(
         observer_restart(&observer_node("muse", Some("sid"))),
-        Some(ObserverRestart::Muse)
+        Some(PassiveWatcher::Muse)
     );
     assert_eq!(
         observer_restart(&observer_node("commandcode", Some("sid"))),
-        Some(ObserverRestart::CommandCode)
+        Some(PassiveWatcher::CommandCode)
     );
     // A harness with an attention hook needs no passive watcher.
     assert_eq!(

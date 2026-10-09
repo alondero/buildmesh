@@ -152,8 +152,14 @@ impl AgentProvider for CommandCodeAdapter {
         false
     }
 
-    fn supports_passive_turn_watcher(&self) -> bool {
-        true
+    /// Command Code (issue #1407) delivers its turn signal through a
+    /// transcript watcher rather than an attention hook, so a restarted
+    /// Circuit must reattach that watcher. It has no Circuit-native receipt.
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        crate::circuit::strategy::ObservationStrategy {
+            passive_watcher: Some(crate::circuit::strategy::PassiveWatcher::CommandCode),
+            ..crate::circuit::strategy::ObservationStrategy::UNWIRED
+        }
     }
 
     fn on_spawn_activated(&self, node_id: i64) {

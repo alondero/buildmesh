@@ -698,8 +698,11 @@ impl AgentProvider for MuseAdapter {
 
     // Issue #1709: no native hook exists, so Muse's turn signal comes from the
     // backend-owned session-log watcher instead.
-    fn supports_passive_turn_watcher(&self) -> bool {
-        true
+    fn circuit_observation(&self) -> crate::circuit::strategy::ObservationStrategy {
+        crate::circuit::strategy::ObservationStrategy {
+            passive_watcher: Some(crate::circuit::strategy::PassiveWatcher::Muse),
+            ..crate::circuit::strategy::ObservationStrategy::UNWIRED
+        }
     }
     fn on_spawn_activated(&self, node_id: i64) {
         crate::services::muse_watcher::activate(node_id);
