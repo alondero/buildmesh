@@ -562,14 +562,24 @@ pub(super) fn has_unconsumed_classifier_evidence(view: &RunView, node_id: &str) 
                     .context
                     .get(&format!("node.{node_id}.evaluated_evidence_owner"))
                     == encoded.as_deref();
+                // The stored value is the serialised blocker, so today it is the
+                // `#[serde(tag = "kind")]` tag — `report_admission` only yields
+                // unit variants into this slot. If a data-carrying variant ever
+                // reached it, the key would move with the payload; compare the
+                // kind instead if that happens.
                 let blocker = view
                     .report_blocker(node_id)
                     .and_then(|blocker| serde_json::to_string(&blocker).ok())
                     .unwrap_or_default();
+                // An absent key must NOT count as a match. A gate stamped by a
+                // build that did not record the blocker would otherwise keep a
+                // cleared blocker pinned forever. Re-judging such a gate once is
+                // the healing path: this code then stamps the key, so it is not
+                // re-judged on every tick.
                 let blocker_matches = view
                     .context
                     .get(&format!("node.{node_id}.evaluated_evidence_blocker"))
-                    .map_or(true, |recorded| recorded == blocker);
+                    .is_some_and(|recorded| recorded == blocker);
                 view.context
                     .get(&format!("node.{node_id}.classified_evidence_owner"))
                     != encoded.as_deref()

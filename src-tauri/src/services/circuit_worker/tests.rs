@@ -2915,6 +2915,65 @@ fn parked_unverified_gate_is_not_reclassified_on_an_unchanged_report() {
     }
 }
 
+/// Issue #2138 follow-up: a gate stamped by the first fix
+/// (`b7c8b029`) has no `evaluated_evidence_blocker` key at all. Treating an
+/// absent key as a match keeps its cleared blocker pinned forever; treating an
+/// absent key as *not* a match re-judges the gate exactly once, and the new code
+/// then stamps the key. A dev-profile hub carries gates in that state, so the
+/// healing path has to be the default.
+#[test]
+fn a_gate_without_a_recorded_blocker_is_rejudged_once_after_its_blocker_clears() {
+    use crate::circuit::observation::WorkEvidence;
+    let mut view = view_with_outstanding_lineage_work();
+    let report = "Published the PR but the push could not complete.";
+    advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified
+    );
+    // Exactly the older build's state: the refusal stamped the owner but never
+    // the blocker key. The context is a flat dotted-key map, so drop that one
+    // key and rebuild.
+    let mut vars: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(&view.context.to_json().unwrap()).unwrap();
+    assert!(
+        vars.remove("node.finish_classifier.evaluated_evidence_blocker")
+            .is_some(),
+        "the current build records the key; this test removes it"
+    );
+    view.context =
+        crate::circuit::context::CircuitContext::from_json(&serde_json::to_string(&vars).unwrap())
+            .unwrap();
+    assert_eq!(
+        view.context
+            .get("node.finish_classifier.evaluated_evidence_blocker"),
+        None,
+        "this gate carries no recorded blocker"
+    );
+    view.context.set(
+        "node.implementer.evidence.1",
+        serde_json::to_string(&WorkEvidence::default()).unwrap(),
+    );
+    assert!(
+        should_classify_report(
+            &view,
+            "finish_classifier",
+            SessionStatus::AwaitingInput,
+            report,
+            None
+        ),
+        "a missing key must re-judge once, not freeze a cleared blocker"
+    );
+}
+
 /// The suppression is scoped to the *unchanged* report: fresh evidence — a new
 /// revision, or the same text from a new native turn — still re-classifies.
 /// This passes on the pre-fix code too; it guards the fix from over-suppressing
@@ -3066,9 +3125,12 @@ fn repeated_ticks_on_a_parked_gate_append_no_ledger_rows() {
     );
     assert_eq!(first.classifications.len(), 1);
     commit(&mut db, &view, &first);
-    // Five more observation ticks of the same unchanged report. Each tick runs
-    // the real gate and, when admitted, is advanced and committed — so the
-    // assertions below genuinely measure the rows a repeated tick would append.
+    // Five more observation ticks of the same unchanged report. This is a
+    // fail-fast predicate guard: if any tick is admitted, that tick is advanced
+    // and committed and the test fails immediately, so the counts below only
+    // ever observe the first commit. They still pin the durable shape — one
+    // classification, one transition, one checkpoint reason — but the
+    // discriminating assertion is the gate itself. Fails on the pre-fix code.
     for tick in 0..5 {
         if should_classify_report(
             &view,
