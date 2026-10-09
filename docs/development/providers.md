@@ -309,7 +309,9 @@ Spawn Menu render (`permission_modes`, `default_permission_mode` on
 `HarnessCapabilities`) comes from the same adapter methods, so the UI and
 the argv cannot disagree; `capability_recipe_coherence` pins the agreement
 per adapter. Harnesses with no flag expose no modes, and mcode's Full Access
-is a singleton mode (a `config.yaml` pin, not argv). The orchestrator's
+is a singleton mode (a `config.yaml` pin, not argv). Static descriptors such
+as the attention launch mode describe the unattended launch: a harness
+switched to prompt mode in Settings can raise approval prompts. The orchestrator's
 sandbox toggle and the attention-hook trust bypass are separate controls and
 stay in their own layers.
 

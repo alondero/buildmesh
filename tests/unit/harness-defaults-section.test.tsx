@@ -109,15 +109,31 @@ const MCODE_ROW = providerFixture(
     { id: 'unattended', label: 'Full Access (permissionMode: bypassPermissions)', description: 'Pinned in config.yaml.' },
   ] }),
 );
+const AGY_MODES = [
+  { id: 'unattended', label: '--dangerously-skip-permissions', description: 'Prompts off (today’s behavior).' },
+  { id: 'prompt', label: 'Prompts on (no flag)', description: 'Antigravity asks for approval.' },
+];
 const AGY_ROW = providerFixture(
   'agy',
   'agy',
-  capsFixture('agy', { supports_model: true, effortKind: 'none' }),
+  capsFixture('agy', { supports_model: true, effortKind: 'none', permissionModes: AGY_MODES }),
 );
+const OPENCODE_MODES = [
+  { id: 'unattended', label: '--auto', description: 'Auto-approve (today’s behavior).' },
+  { id: 'prompt', label: 'Prompts on (no flag)', description: 'OpenCode asks for approval.' },
+];
 const OPENCODE_ROW = providerFixture(
   'opencode',
   'opencode',
-  capsFixture('opencode', { supports_model: false, effortKind: 'none' }),
+  capsFixture('opencode', { supports_model: false, effortKind: 'none', permissionModes: OPENCODE_MODES }),
+);
+// Kimi Code genuinely has no permission flag and supports model override —
+// the truthful fixture for the no-such-flag line (review round 1: AGY and
+// OpenCode both ship two modes, so they can never render that line).
+const KIMI_ROW = providerFixture(
+  'kimi',
+  'kimi',
+  capsFixture('kimi', { supports_model: true, effortKind: 'none' }),
 );
 const TERMINAL_ROW = providerFixture(
   'terminal',
@@ -203,7 +219,7 @@ describe('Settings — Agent Harness defaults', () => {
     expect(calls['set_harness_default']).toBeUndefined();
   });
 
-  it('renders capability-gated controls — Claude has both, Agy has model only, OpenCode has neither', async () => {
+  it('renders capability-gated controls — Claude has both, Agy has model + permission, OpenCode has permission only', async () => {
     mockBackend({ providers: [CLAUDE_ROW, AGY_ROW, OPENCODE_ROW, CODEX_ROW, TERMINAL_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
 
@@ -211,14 +227,18 @@ describe('Settings — Agent Harness defaults', () => {
     await screen.findByTestId('harness-default-model-input-claude');
     await screen.findByTestId('harness-default-effort-select-claude');
 
-    // Agy: model input, no effort select.
+    // Agy: model input, no effort select, permission select (two real modes).
     await screen.findByTestId('harness-default-model-input-agy');
     expect(screen.queryByTestId('harness-default-effort-select-agy')).toBeNull();
+    await screen.findByTestId('harness-permission-select-agy');
 
-    // OpenCode: no input, no select, only the "no configurable defaults" state.
-    await screen.findByTestId('harness-default-empty-opencode');
+    // OpenCode: no model/effort controls and no "no configurable
+    // defaults" state — it has a real permission flag, so it renders the
+    // permission select instead.
+    expect(screen.queryByTestId('harness-default-empty-opencode')).toBeNull();
     expect(screen.queryByTestId('harness-default-model-input-opencode')).toBeNull();
     expect(screen.queryByTestId('harness-default-effort-select-opencode')).toBeNull();
+    await screen.findByTestId('harness-permission-select-opencode');
   });
 
   it('effort choices and guidance match each harness\'s declared vocabulary', async () => {
@@ -383,17 +403,21 @@ describe('Settings — Agent Harness defaults', () => {
     const fixed = await screen.findByTestId('harness-permission-fixed-mcode');
     expect(fixed.textContent).toBe('Full Access (permissionMode: bypassPermissions)');
     expect(screen.queryByTestId('harness-permission-select-mcode')).toBeNull();
+    // No second "Effective:" line — the fixed label already names the mode.
+    expect(screen.queryByTestId('harness-permission-effective-mcode')).toBeNull();
   });
 
   it('harness with model control but no flag renders the no-such-flag line', async () => {
-    mockBackend({ providers: [AGY_ROW] });
+    // Kimi Code genuinely ships no permission flag (unlike Agy/OpenCode,
+    // which both offer unattended + prompt).
+    mockBackend({ providers: [KIMI_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
 
-    // Agy keeps its model input (unchanged behavior) …
-    await screen.findByTestId('harness-default-model-input-agy');
+    // Kimi keeps its model input (unchanged behavior) …
+    await screen.findByTestId('harness-default-model-input-kimi');
     // … and gains the written "no such flag" line instead of a control.
-    const line = await screen.findByTestId('harness-permission-noflag-agy');
+    const line = await screen.findByTestId('harness-permission-noflag-kimi');
     expect(line.textContent).toMatch(/has no permission flag/i);
-    expect(screen.queryByTestId('harness-permission-select-agy')).toBeNull();
+    expect(screen.queryByTestId('harness-permission-select-kimi')).toBeNull();
   });
 });

@@ -309,13 +309,17 @@ fn resolve_plan(
                 mesh: None,
                 application: app.and_then(|c| c.effort.as_deref()),
             },
-            // Issue #2151: launch recipes carry no permission slot of
-            // their own — the per-harness Settings default applies, same
-            // as a direct spawn.
+            // Issue #2151, review round 1: launch recipes carry no
+            // permission slot of their own, and the plan carries none
+            // either — the per-harness Settings default resolves live at
+            // spawn time (never frozen into a recipe or plan), same as a
+            // direct spawn. Feeding a permission layer into
+            // `resolve_agent_config` here would compute a value the plan
+            // cannot project, so it is deliberately absent.
             permission_mode: FieldInputs {
                 explicit: None,
                 mesh: None,
-                application: app.and_then(|c| c.permission_mode.as_deref()),
+                application: None,
             },
         },
         extra.as_deref(),

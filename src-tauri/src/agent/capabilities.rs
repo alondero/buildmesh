@@ -141,6 +141,8 @@ pub fn platform_name(platform: Platform) -> &'static str {
 pub enum AttentionLaunchMode {
     /// Launch args skip permission prompts (`--dangerously-skip-permissions`
     /// and friends) — the harness never blocks on a tool approval.
+    /// Describes the unattended launch (issue #2151): a harness set to
+    /// prompt mode can still raise approval prompts.
     #[default]
     SkipPermissions,
     /// The harness runs with permission prompts enabled and raises a
@@ -485,6 +487,29 @@ fn resolve_permission_mode(
     modes: &[PermissionModeOption],
 ) -> Option<String> {
     resolve_field(field).filter(|v| modes.iter().any(|m| m.id == *v))
+}
+
+/// Effective launch permission mode (issue #2151, review round 1). The
+/// stored per-harness Settings value when it names one of the harness's
+/// own modes (trimmed, blanks dropped), else the harness's unattended
+/// default. `None` when the harness has no modes. Single source of truth
+/// for the spawn path (`agent::launch`) and the menu stamp
+/// (`agent::provider_menu`); the Settings UI mirrors the same rule.
+pub(crate) fn effective_permission_mode(
+    modes: &[PermissionModeOption],
+    default_mode: Option<&str>,
+    stored: Option<&str>,
+) -> Option<PermissionModeOption> {
+    if modes.is_empty() {
+        return None;
+    }
+    let id = stored
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| modes.iter().any(|m| m.id == *s))
+        .map(str::to_string)
+        .or_else(|| default_mode.map(str::to_string))?;
+    modes.iter().find(|m| m.id == id).cloned()
 }
 
 /// Trim and drop empties. Pure helper so every layer flows through the same

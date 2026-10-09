@@ -372,14 +372,16 @@ function HarnessDefaultCard({
               </span>
             )
           )}
-          <span
-            className="text-text-muted"
-            title={effectiveMode.description}
-            data-testid={`harness-permission-effective-${provider.harness_id}`}
-          >
-            Effective: {effectiveMode.label}
-            {effectiveIsDefault ? ' (harness default)' : ''}
-          </span>
+          {showPermissionSelect && (
+            <span
+              className="text-text-muted"
+              title={effectiveMode.description}
+              data-testid={`harness-permission-effective-${provider.harness_id}`}
+            >
+              Effective: {effectiveMode.label}
+              {effectiveIsDefault ? ' (harness default)' : ''}
+            </span>
+          )}
         </div>
       )}
       {allowed && effortHelpId && (

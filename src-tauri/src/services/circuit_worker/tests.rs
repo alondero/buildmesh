@@ -6796,7 +6796,7 @@ fn observe_waits_marks_a_muse_agent_without_identity_as_unobserved() {
 fn naming_view(graph: CircuitGraph, context: &[(&str, &str)]) -> RunView {
     let mut view_context = CircuitContext::new();
     for (key, value) in context {
-        view_context.set(*key, *value);
+        view_context.set(key, *value);
     }
     RunView {
         run_id: 1,

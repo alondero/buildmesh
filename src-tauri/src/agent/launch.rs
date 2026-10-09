@@ -251,21 +251,18 @@ pub fn default_prepare(
     // `[flags..., resume, <uuid>]` order.)
     //
     // Defence in depth, mirroring the model/effort branches below: the
-    // resolved id is re-checked against the adapter's own mode list, so a
-    // caller that bypasses the resolver cannot smuggle an unknown mode
-    // into argv (`permission_args` is prompt-equivalent for unknown ids
-    // anyway).
+    // shared fallback re-checks the resolved id against the adapter's
+    // own mode list, so a caller that bypasses the resolver cannot
+    // smuggle an unknown mode into argv (`permission_args` is
+    // prompt-equivalent for unknown ids anyway).
     {
         let modes = adapter.permission_modes();
-        let effective = input
-            .config
-            .permission_mode
-            .as_deref()
-            .filter(|m| modes.iter().any(|o| o.id == *m))
-            .map(str::to_string)
-            .or_else(|| adapter.default_permission_mode());
-        if let Some(mode) = effective {
-            let args = adapter.permission_args(&mode);
+        if let Some(option) = crate::agent::capabilities::effective_permission_mode(
+            &modes,
+            adapter.default_permission_mode().as_deref(),
+            input.config.permission_mode.as_deref(),
+        ) {
+            let args = adapter.permission_args(&option.id);
             if !args.is_empty() {
                 let insert_at = usize::from(subcommand_resume);
                 recipe.base_args.splice(insert_at..insert_at, args);
@@ -573,11 +570,10 @@ mod tests {
         let base = adapter.spawn_recipe(Platform::Windows, EnvType::Windows);
         // Issue #2151: the unattended permission default contributes its
         // flags at the front (where the base recipe used to carry them);
-        // the session-assign pair follows. The flag *content* is pinned
-        // by the adapter tests — here the point is the session pair
-        // still lands, in order, behind the permission layer.
-        let mut expected =
-            adapter.permission_args(&adapter.default_permission_mode().unwrap_or_default());
+        // the session-assign pair follows. The flag content is literal
+        // here (Anthropic's own unattended flag) so a wrong default is
+        // caught at this seam too, not only in the adapter tests.
+        let mut expected = vec!["--dangerously-skip-permissions".to_string()];
         expected.extend(base.base_args.clone());
         expected.extend(["--session-id".to_string(), "abc-uuid".to_string()]);
         assert_eq!(prepared.recipe.base_args, expected);

@@ -2,6 +2,7 @@ use super::command::{cascade_inputs_for, resolve_spawn_config};
 use super::{ExplicitSpawnOverrides, SpawnIntent, SpawnRequest, TerminalSize};
 use crate::agent::capabilities::{
     resolve_agent_config, FieldInputs, HarnessCapabilities, ResolvedAgentConfig,
+    PERMISSION_MODE_UNATTENDED,
 };
 use crate::agent::launch::{HarnessLaunchInput, SessionIdModeRef};
 use crate::agent::provider::Platform;
@@ -331,6 +332,18 @@ fn capability_recipe_coherence() {
             "default_permission_mode / descriptor mismatch for {}",
             adapter.id(),
         );
+        // Literal product rule (issue #2151, review round 1): any harness
+        // with permission modes defaults to unattended — today's
+        // behavior — so a flipped default trips this pin even though the
+        // descriptor-identity assertion above would follow it.
+        if !caps.permission_modes.is_empty() {
+            assert_eq!(
+                caps.default_permission_mode.as_deref(),
+                Some(PERMISSION_MODE_UNATTENDED),
+                "default must be unattended for {}",
+                adapter.id(),
+            );
+        }
         let default_args = caps
             .default_permission_mode
             .as_deref()

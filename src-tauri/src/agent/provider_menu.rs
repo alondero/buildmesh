@@ -11,7 +11,9 @@
 //! (`compose_provider_menu`, `order_providers`, `order_proxied_children`,
 //! `provider_info_for`, `provider_info_for_pairing`) are the unit-test seam.
 
-use crate::agent::provider::{AgentProvider, EffectivePermissionMode, Platform, ProviderInfo};
+#[cfg(test)]
+use crate::agent::provider::AgentProvider;
+use crate::agent::provider::{EffectivePermissionMode, Platform, ProviderInfo};
 use tauri::command;
 
 /// Compose the `ProviderInfo` (Spawn Option) row for a single harness profile on the
@@ -322,52 +324,74 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     available_providers_with_preferences(crate::preferences::load().ok())
 }
 
-/// Resolve the effective launch permission mode for one harness (issue
+/// Resolve the effective launch permission mode for one menu row (issue
 /// #2151): the stored per-harness default when it names one of the
-/// adapter's own modes, else the adapter's unattended default. `None`
+/// harness's own modes, else the harness's unattended default. `None`
 /// for harnesses with no modes.
 ///
-/// Pure over the already-loaded prefs snapshot (no `preferences::load()`)
-/// so unit tests pin it without touching global state. The harness half
-/// of a composite Spawn Option id (`"<harness>:<provider>"`) resolves to
-/// the same entry — native and proxied rows of one harness share it.
+/// Reads the mode list off the row's own `capabilities` (populated at
+/// composition time) instead of re-resolving the adapter — which would
+/// reload and deep-clone the whole preferences tree per row on a path
+/// this file instruments for wall-clock (issue #1937). Pure over the
+/// already-loaded prefs snapshot (no `preferences::load()`) so unit
+/// tests pin it without touching global state. Native and proxied rows
+/// of one harness share the harness-defaults entry.
 fn effective_permission_for(
-    harness_id: &str,
+    row: &ProviderInfo,
     prefs: &crate::preferences::AppPreferences,
 ) -> Option<EffectivePermissionMode> {
-    let adapter = crate::preferences::resolve_harness_provider(harness_id).adapter();
     let stored = prefs
         .harness_defaults
-        .get(harness_id)
+        .get(&row.harness_id)
         .and_then(|v| v.permission_mode.as_deref());
-    effective_permission_for_adapter(adapter, stored)
+    effective_permission_for_modes(
+        &row.capabilities.permission_modes,
+        row.capabilities.default_permission_mode.as_deref(),
+        stored,
+    )
 }
 
-/// Pure adapter-level core of [`effective_permission_for`]: no prefs, no
-/// disk — the unit-test seam. A stored value that names no known mode
-/// (stale after an adapter change) falls back to the adapter default.
-fn effective_permission_for_adapter(
-    adapter: &dyn AgentProvider,
+/// Pure modes-level core of [`effective_permission_for`]: no prefs, no
+/// disk, no adapter resolution — the unit-test seam. A stored value that
+/// names no known mode (stale after an adapter change) falls back to the
+/// default. Same fallback rule as the spawn path; both delegate to
+/// `agent::capabilities::effective_permission_mode`.
+fn effective_permission_for_modes(
+    modes: &[crate::agent::capabilities::PermissionModeOption],
+    default_mode: Option<&str>,
     stored: Option<&str>,
 ) -> Option<EffectivePermissionMode> {
-    let modes = adapter.permission_modes();
-    if modes.is_empty() {
-        return None;
-    }
+    // Validated here (as well as inside the shared fallback) so a stale
+    // value counts as "no stored choice" for `is_default`, matching the
+    // pre-review behavior the adapter tests pin.
     let stored = stored
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter(|s| modes.iter().any(|m| m.id == *s));
-    let mode_id = stored
-        .map(str::to_string)
-        .or_else(|| adapter.default_permission_mode())?;
-    let option = modes.iter().find(|m| m.id == mode_id)?;
+    let option =
+        crate::agent::capabilities::effective_permission_mode(modes, default_mode, stored)?;
     Some(EffectivePermissionMode {
-        mode_id: option.id.clone(),
-        label: option.label.clone(),
-        description: option.description.clone(),
+        mode_id: option.id,
+        label: option.label,
+        description: option.description,
         is_default: stored.is_none(),
     })
+}
+
+/// Pure adapter-level core of [`effective_permission_for`]: no prefs, no
+/// disk — the unit-test seam. Test-only since the menu stamp reads the
+/// row's own capabilities (finding 4); kept because the adapter tests pin
+/// the contract without building menu rows.
+#[cfg(test)]
+fn effective_permission_for_adapter(
+    adapter: &dyn AgentProvider,
+    stored: Option<&str>,
+) -> Option<EffectivePermissionMode> {
+    effective_permission_for_modes(
+        &adapter.permission_modes(),
+        adapter.default_permission_mode().as_deref(),
+        stored,
+    )
 }
 
 /// Stamp the resolved launch permission mode onto every menu row (issue
@@ -380,7 +404,7 @@ fn stamp_effective_permission(
 ) -> Vec<ProviderInfo> {
     menu.into_iter()
         .map(|mut row| {
-            row.effective_permission = effective_permission_for(&row.harness_id, prefs);
+            row.effective_permission = effective_permission_for(&row, prefs);
             row
         })
         .collect()
@@ -835,6 +859,81 @@ mod tests {
         // Modeless harness: always None, even with a stored value.
         assert!(effective_permission_for_adapter(&TERMINAL, None).is_none());
         assert!(effective_permission_for_adapter(&TERMINAL, Some("prompt")).is_none());
+    }
+
+    /// Issue #2151 review round 1: the Spawn Menu wiring itself. Stamping
+    /// a prefs snapshot onto rows must carry the stored choice, the
+    /// harness default when nothing is stored, and `None` for a
+    /// modeless harness — including on a saved-configuration row, which
+    /// shares its harness's defaults entry.
+    #[test]
+    fn stamp_effective_permission_uses_row_capabilities_and_prefs_snapshot() {
+        use crate::agent::capabilities::{PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED};
+        use crate::agent::provider::adapters::{ANTHROPIC, TERMINAL};
+        use crate::preferences::{AppPreferences, HarnessConfigValue};
+
+        fn row(harness: &str) -> ProviderInfo {
+            let adapter: &dyn AgentProvider = match harness {
+                "claude" => &ANTHROPIC,
+                _ => &TERMINAL,
+            };
+            ProviderInfo {
+                id: harness.to_string(),
+                label: harness.to_string(),
+                color: String::new(),
+                icon: String::new(),
+                resumable: false,
+                harness_id: harness.to_string(),
+                provider_id: None,
+                is_proxied: false,
+                group_key: harness.to_string(),
+                capabilities: adapter.capabilities(),
+                runtime: None,
+                configurations: Vec::new(),
+                configuration: None,
+                unavailable_reason: None,
+                effective_permission: None,
+            }
+        }
+
+        let mut prefs = AppPreferences::default();
+        prefs.harness_defaults.insert(
+            "claude".to_string(),
+            HarnessConfigValue {
+                model: None,
+                effort: None,
+                permission_mode: Some(PERMISSION_MODE_PROMPT.to_string()),
+            },
+        );
+
+        // Saved-configuration rows share the harness entry: a row with a
+        // configuration attached still stamps from `harness_defaults`.
+        let mut config_row = row("claude");
+        config_row.configuration = Some(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                ..Default::default()
+            },
+        );
+
+        let stamped = stamp_effective_permission(vec![config_row, row("terminal")], &prefs);
+        let claude = stamped.iter().find(|r| r.harness_id == "claude").unwrap();
+        let mode = claude
+            .effective_permission
+            .as_ref()
+            .expect("claude row stamped");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_PROMPT);
+        assert!(!mode.is_default);
+        let terminal = stamped.iter().find(|r| r.harness_id == "terminal").unwrap();
+        assert!(terminal.effective_permission.is_none());
+
+        // Nothing stored: the harness unattended default, marked default.
+        let stamped = stamp_effective_permission(vec![row("claude")], &AppPreferences::default());
+        let mode = stamped[0]
+            .effective_permission
+            .as_ref()
+            .expect("default stamped");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_UNATTENDED);
+        assert!(mode.is_default);
     }
 
     #[test]
