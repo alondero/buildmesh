@@ -18,11 +18,77 @@
 //! promise, [`wrap`] is fallible: the macOS Seatbelt profile is written during
 //! command assembly, so a write failure returns `Err` rather than degrading to
 //! an unsandboxed spawn.
+//!
+//! The module also owns spawn-environment hygiene that is not a harness's to
+//! decide: [`CLAUDE_SESSION_MARKER_ENV_VARS`] and the scrub that drops them
+//! from both the PTY spawn ([`wrap`]) and the pipe-based background spawn
+//! ([`background_command`]), so an agent Buildmesh launched from inside a
+//! Claude Code session does not inherit that session's markers (#2136).
 
 use crate::agent::provider::{SpawnRecipe, WindowsShell};
 use crate::models::EnvType;
 use crate::pty;
 use portable_pty::CommandBuilder;
+
+/// Environment a launching Claude Code session hands to every process it
+/// spawns, so each can tell it belongs to *that* session.
+///
+/// Buildmesh inherits the whole set whenever the app itself was started from a
+/// Claude Code session's shell — an agent running `scripts\run-dev.ps1` for
+/// `/use`, `/verify` or `/verify-ui` — and then hands it straight back to the
+/// agents it spawns. `CLAUDE_CODE_CHILD_SESSION` is the damaging one: Claude
+/// Code reads it and starts with "Transcript saving is off — inherited
+/// CLAUDE_CODE_CHILD_SESSION marker", writes no
+/// `~/.claude/projects/<dir>/<session>.jsonl`, and every transcript consumer
+/// downstream (a Circuit's first gate, session recovery) parks on a transcript
+/// that will never exist. The rest leak the launching session's identity and,
+/// for the messaging token and socket, its credentials into another agent
+/// process. Issue #2136.
+///
+/// This is an explicit list, never a `CLAUDE*` prefix rule. Buildmesh sets
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+/// `CLAUDE_CODE_AUTO_COMPACT_WINDOW` on purpose for the MiniMax naming
+/// side-channel (`provider_conf::minimax_backend_env`), and `CLAUDE_CONFIG_DIR`
+/// for the Windows sandbox; a prefix rule would silently undo them. A
+/// deliberately-set value also survives by ordering rather than by exclusion:
+/// the harness environment policy and per-profile backend env are layered on
+/// top in `agent::spawn::command` *after* this scrub has run.
+pub const CLAUDE_SESSION_MARKER_ENV_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+];
+
+/// Drop the launching session's markers from a PTY agent spawn.
+///
+/// `portable_pty::CommandBuilder` seeds itself from the live process
+/// environment, so `env_remove` clears an *inherited* value, not just one this
+/// process set — that is the whole mechanism, and the reason a caller cannot
+/// fix this by not setting the variables.
+fn strip_claude_session_markers(cmd: &mut CommandBuilder) {
+    for key in CLAUDE_SESSION_MARKER_ENV_VARS {
+        cmd.env_remove(key);
+    }
+}
+
+/// The same scrub for the pipe-based background launches (`agent::background`:
+/// session naming, circuit classifiers). Those build a `std::process::Command`
+/// rather than a `CommandBuilder`, so they cannot share the loop above, and
+/// they are a second instance of the same leak — a backgrounded
+/// `claude --print` inherits the same markers the interactive agent must not.
+fn strip_claude_session_markers_from_command(cmd: &mut std::process::Command) {
+    for key in CLAUDE_SESSION_MARKER_ENV_VARS {
+        cmd.env_remove(key);
+    }
+}
 
 /// Encode a command string for PowerShell's -EncodedCommand parameter.
 /// -EncodedCommand decodes the Base64 payload into a PowerShell *script* and
@@ -59,23 +125,42 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
 }
 
 /// Pipe-based background tasks still need the adapter's Windows shell for npm shims.
-pub(crate) fn background_command(recipe: &SpawnRecipe, executable: Option<&std::path::Path>) -> std::process::Command {
-    let executable = executable.map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| recipe.binary.into());
+pub(crate) fn background_command(
+    recipe: &SpawnRecipe,
+    executable: Option<&std::path::Path>,
+) -> std::process::Command {
+    let executable = executable
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| recipe.binary.into());
     let args: Vec<String> = recipe.argv().map(str::to_owned).collect();
-    if cfg!(windows) && recipe.windows_shell == WindowsShell::PowerShell {
-        let script = format!("{}; exit $LASTEXITCODE", format_powershell_command(&executable, &args));
+    let mut cmd = if cfg!(windows) && recipe.windows_shell == WindowsShell::PowerShell {
+        let script = format!(
+            "{}; exit $LASTEXITCODE",
+            format_powershell_command(&executable, &args)
+        );
         let mut cmd = crate::process_util::command_no_window("powershell.exe");
-        cmd.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encode_for_powershell(&script)]);
+        cmd.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-EncodedCommand",
+            &encode_for_powershell(&script),
+        ]);
         cmd
     } else {
         let mut cmd = if cfg!(windows) && recipe.windows_shell == WindowsShell::Cmd {
             let mut cmd = crate::process_util::command_no_window("cmd.exe");
             cmd.args(["/d", "/c", &executable]);
             cmd
-        } else { crate::process_util::command_no_window(executable) };
+        } else {
+            crate::process_util::command_no_window(executable)
+        };
         cmd.args(args);
         cmd
-    }
+    };
+    // The recipe's own deliberate env is applied by the caller afterwards, so
+    // scrubbing here clears only what the launching session contributed.
+    strip_claude_session_markers_from_command(&mut cmd);
+    cmd
 }
 
 pub fn wrap(
@@ -87,19 +172,39 @@ pub fn wrap(
     session_id: i64,
     sandbox: bool,
 ) -> Result<CommandBuilder, String> {
-    recipe.base_args.extend(std::mem::take(&mut recipe.trailing_args));
+    recipe
+        .base_args
+        .extend(std::mem::take(&mut recipe.trailing_args));
     let executable = executable_override.unwrap_or(recipe.binary);
     let mut cmd = if env_type == EnvType::WindowsInterop {
         let script = if recipe.windows_shell == WindowsShell::Cmd {
-            let mut args = vec!["/d".into(), "/c".into(), "pushd".into(), spawn_path.into(), "&&".into(), executable.into()];
+            let mut args = vec![
+                "/d".into(),
+                "/c".into(),
+                "pushd".into(),
+                spawn_path.into(),
+                "&&".into(),
+                executable.into(),
+            ];
             args.extend(recipe.base_args.clone());
             format_powershell_command("cmd.exe", &args)
         } else {
-            format!("Set-Location -LiteralPath {}; {}", ps_single_quote(spawn_path), format_powershell_command(executable, &recipe.base_args))
+            format!(
+                "Set-Location -LiteralPath {}; {}",
+                ps_single_quote(spawn_path),
+                format_powershell_command(executable, &recipe.base_args)
+            )
         };
         let mut command = CommandBuilder::new("powershell.exe");
-        command.args(["-NoLogo", "-NoProfile", "-EncodedCommand", &encode_for_powershell(&format!("{script}; exit $LASTEXITCODE"))]);
-        if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") { command.env("BUILDMESH_WSL_HOST", distro); }
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-EncodedCommand",
+            &encode_for_powershell(&format!("{script}; exit $LASTEXITCODE")),
+        ]);
+        if let Ok(distro) = std::env::var("WSL_DISTRO_NAME") {
+            command.env("BUILDMESH_WSL_HOST", distro);
+        }
         Ok(command)
     } else if env_type == EnvType::Wsl && !cfg!(windows) {
         let mut c = CommandBuilder::new(executable);
@@ -114,8 +219,16 @@ pub fn wrap(
         }
         // Use the same login environment as discovery. Positional parameters
         // preserve arbitrary prompts without evaluating them as shell code.
-        c.args(["--cd", spawn_path, "--exec", "sh", "-lc",
-            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"", "buildmesh", executable]);
+        c.args([
+            "--cd",
+            spawn_path,
+            "--exec",
+            "sh",
+            "-lc",
+            "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"",
+            "buildmesh",
+            executable,
+        ]);
         c.args(recipe.base_args);
         Ok(c)
     } else if cfg!(target_os = "macos") {
@@ -157,7 +270,10 @@ pub fn wrap(
                 crate::agent::sandbox::setup_failure_message(session_id, recipe.binary, &e)
             })
         } else {
-            tracing::info!("spawn_environment: building macOS command for {}", executable);
+            tracing::info!(
+                "spawn_environment: building macOS command for {}",
+                executable
+            );
             let mut c = CommandBuilder::new(executable);
             c.args(recipe.base_args);
             Ok(c)
@@ -204,7 +320,10 @@ pub fn wrap(
                 c
             }
             WindowsShell::Direct => {
-                tracing::info!("spawn_environment: building direct Windows spawn for {}", executable);
+                tracing::info!(
+                    "spawn_environment: building direct Windows spawn for {}",
+                    executable
+                );
                 let mut c = CommandBuilder::new(executable);
                 c.args(recipe.base_args);
                 c
@@ -218,10 +337,15 @@ pub fn wrap(
         cmd.cwd(spawn_path);
     }
     if crate::env::is_wsl_host() && env_type != EnvType::WindowsInterop {
-        if let Some(path) = crate::agent::detection::native_wsl_path() { cmd.env("PATH", path); }
+        if let Some(path) = crate::agent::detection::native_wsl_path() {
+            cmd.env("PATH", path);
+        }
     }
     cmd.env("BUILDMESH_SESSION_ID", session_id.to_string());
-    cmd.env("BUILDMESH_PORT", crate::http_server::current_http_port().to_string());
+    cmd.env(
+        "BUILDMESH_PORT",
+        crate::http_server::current_http_port().to_string(),
+    );
     // Issue #1366 round-2 fix: the runtime hook token is minted
     // lazily by the Grok adapter's `provision_attention_hooks`
     // BEFORE `wrap()` runs (the orchestrator orders: provision →
@@ -237,6 +361,13 @@ pub fn wrap(
         cmd.env("BUILDMESH_HOOK_TOKEN", token);
     }
     pty::strip_git_env_vars(&mut cmd);
+    // Issue #2136: a Buildmesh launched from inside a Claude Code session
+    // hands that session's markers to every agent it spawns, and an inherited
+    // `CLAUDE_CODE_CHILD_SESSION` turns the agent's transcript off — which
+    // silently parks every downstream transcript reader. Runs before the
+    // harness environment policy, so a value Buildmesh sets on purpose is
+    // layered back on afterwards.
+    strip_claude_session_markers(&mut cmd);
     pty::apply_interactive_tty_env(&mut cmd);
 
     Ok(cmd)
@@ -254,7 +385,11 @@ pub(crate) fn apply_wsl_env(
     if !matches!(env_type, EnvType::Wsl | EnvType::WindowsInterop) {
         return;
     }
-    let direction = if env_type == EnvType::WindowsInterop { "/w" } else { "/u" };
+    let direction = if env_type == EnvType::WindowsInterop {
+        "/w"
+    } else {
+        "/u"
+    };
     let mut wslenv = std::env::var("WSLENV").unwrap_or_default();
     // `wrap` installs these callback values on the outer `wsl.exe` command.
     // They must also be listed in WSLENV or the guest hook process cannot see
@@ -274,17 +409,30 @@ pub(crate) fn apply_wsl_env(
             set_wslenv_direction(&mut wslenv, key, direction);
         }
     }
-    if env_type == EnvType::WindowsInterop { set_wslenv_direction(&mut wslenv, "BUILDMESH_WSL_HOST", direction); }
+    if env_type == EnvType::WindowsInterop {
+        set_wslenv_direction(&mut wslenv, "BUILDMESH_WSL_HOST", direction);
+    }
     if !wslenv.is_empty() {
         cmd.env("WSLENV", wslenv);
     }
 }
 
 fn set_wslenv_direction(wslenv: &mut String, key: &str, direction: &str) {
-    let flags = wslenv.split(':').find(|part| part.split('/').next() == Some(key))
-        .and_then(|entry| entry.split_once('/')).map(|(_, flags)| flags.replace(['u', 'w'], "")).unwrap_or_default();
-    let mut entries: Vec<_> = wslenv.split(':').filter(|entry| !entry.is_empty() && entry.split('/').next() != Some(key)).map(str::to_string).collect();
-    entries.push(format!("{key}/{flags}{}", direction.trim_start_matches('/')));
+    let flags = wslenv
+        .split(':')
+        .find(|part| part.split('/').next() == Some(key))
+        .and_then(|entry| entry.split_once('/'))
+        .map(|(_, flags)| flags.replace(['u', 'w'], ""))
+        .unwrap_or_default();
+    let mut entries: Vec<_> = wslenv
+        .split(':')
+        .filter(|entry| !entry.is_empty() && entry.split('/').next() != Some(key))
+        .map(str::to_string)
+        .collect();
+    entries.push(format!(
+        "{key}/{flags}{}",
+        direction.trim_start_matches('/')
+    ));
     *wslenv = entries.join(":");
 }
 
@@ -309,33 +457,144 @@ pub(crate) fn append_to_wslenv(wslenv: &mut String, key: &str, suffix: &str) {
 mod tests {
     use super::{
         append_to_wslenv, apply_wsl_env, encode_for_powershell, format_powershell_command,
+        CLAUDE_SESSION_MARKER_ENV_VARS,
     };
+    use crate::agent::provider::{SpawnRecipe, WindowsShell};
+    use crate::models::EnvType;
     use base64::Engine;
+
+    /// Every marker as an explicit "present with this value" env override, so a
+    /// test can assert the scrub cleared something that was genuinely
+    /// inherited rather than something the command never carried.
+    fn markers_in_the_launching_session() -> Vec<(&'static str, Option<&'static std::ffi::OsStr>)> {
+        CLAUDE_SESSION_MARKER_ENV_VARS
+            .iter()
+            .map(|key| {
+                (
+                    *key,
+                    Some(std::ffi::OsStr::new("inherited-from-parent-session")),
+                )
+            })
+            .collect()
+    }
+
+    /// The regression from issue #2136: an agent spawned by a Buildmesh that
+    /// was itself launched from a Claude Code session inherits
+    /// `CLAUDE_CODE_CHILD_SESSION`, starts with "Transcript saving is off",
+    /// and writes no transcript for a Circuit gate to read.
+    #[test]
+    fn agent_spawn_drops_the_launching_claude_code_sessions_markers() {
+        let _env_guard = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        crate::env::with_env_vars(&markers_in_the_launching_session(), || {
+            let recipe = SpawnRecipe {
+                binary: "claude.exe",
+                base_args: vec!["--dangerously-skip-permissions".into()],
+                trailing_args: vec![],
+                windows_shell: WindowsShell::Direct,
+            };
+            let cmd = super::wrap(recipe, EnvType::Windows, None, None, ".", 4242, false)
+                .expect("an unsandboxed command always assembles");
+            for key in CLAUDE_SESSION_MARKER_ENV_VARS {
+                assert!(cmd.get_env(key).is_none(), "{key} reached a spawned agent: an agent launched from inside a Claude Code session would inherit the launching session's identity and, for CLAUDE_CODE_CHILD_SESSION, save no transcript (issue #2136)");
+            }
+        });
+    }
+
+    /// The background launch path is a second instance of the same leak: it
+    /// builds a `std::process::Command`, which does not share `wrap`'s loop.
+    #[test]
+    fn background_launch_drops_the_same_markers() {
+        let recipe = SpawnRecipe {
+            binary: "claude.exe",
+            base_args: vec!["--print".into()],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+        let cmd = super::background_command(&recipe, None);
+        // `get_envs` reports the command's explicit overrides, where a removal
+        // is the entry `(key, None)`.
+        let cleared: std::collections::BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in CLAUDE_SESSION_MARKER_ENV_VARS {
+            assert_eq!(
+                cleared.get(*key),
+                Some(&None),
+                "{key} must be explicitly removed from the background launch env"
+            );
+        }
+    }
+
+    /// The scrub is an explicit list precisely because Buildmesh sets `CLAUDE_*`
+    /// variables on purpose. A prefix rule over `CLAUDE*` would look tidier and
+    /// would silently undo the MiniMax naming side-channel and the Windows
+    /// sandbox config dir; this test is what keeps the list explicit.
+    #[test]
+    fn the_scrub_never_covers_a_variable_buildmesh_sets_deliberately() {
+        for deliberate in [
+            // provider_conf::minimax_backend_env — the naming side-channel.
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+            // sandbox::spawn — the Windows agent sandbox.
+            "CLAUDE_CONFIG_DIR",
+        ] {
+            assert!(!CLAUDE_SESSION_MARKER_ENV_VARS.contains(&deliberate), "{deliberate} is set by buildmesh on purpose and must survive the session-marker scrub");
+        }
+    }
 
     #[test]
     #[cfg(target_os = "linux")]
     #[ignore = "requires WSL with Windows interop enabled"]
     fn live_wsl_host_launches_windows_harnesses() {
-        use crate::agent::provider::{SpawnRecipe, WindowsShell};
-        use crate::models::EnvType;
         assert!(crate::env::is_wsl_host());
         let windows_temp = crate::env::windows_cli_home("AppData/Local/Temp").unwrap();
         let script_dir = tempfile::tempdir_in(&windows_temp).unwrap();
         let script = script_dir.path().join("probe script.cmd");
-        std::fs::write(&script, "@echo off\r\necho %BUILDMESH_SESSION_ID%> probe.txt\r\n").unwrap();
+        std::fs::write(
+            &script,
+            "@echo off\r\necho %BUILDMESH_SESSION_ID%> probe.txt\r\n",
+        )
+        .unwrap();
         for root in [std::path::Path::new("/tmp"), windows_temp.as_path()] {
-            let directory = tempfile::Builder::new().prefix("buildmesh reverse ").tempdir_in(root).unwrap();
+            let directory = tempfile::Builder::new()
+                .prefix("buildmesh reverse ")
+                .tempdir_in(root)
+                .unwrap();
             let spawn_path = crate::env::windows_path_from_wsl(directory.path().to_str().unwrap());
             for shell in [WindowsShell::PowerShell, WindowsShell::Cmd] {
                 let (binary, args) = if shell == WindowsShell::Cmd {
-                    (crate::env::windows_path_from_wsl(script.to_str().unwrap()), vec![])
+                    (
+                        crate::env::windows_path_from_wsl(script.to_str().unwrap()),
+                        vec![],
+                    )
                 } else {
                     ("powershell.exe".to_string(), vec!["-NoProfile".into(), "-EncodedCommand".into(),
                         encode_for_powershell("[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), $env:BUILDMESH_SESSION_ID)")])
                 };
-                let recipe = SpawnRecipe { binary: "probe", base_args: args, trailing_args: vec![], windows_shell: shell };
-                let mut command = super::wrap(recipe, EnvType::WindowsInterop, None, Some(&binary), &spawn_path, 8125, false)
-                    .expect("an unsandboxed command always assembles");
+                let recipe = SpawnRecipe {
+                    binary: "probe",
+                    base_args: args,
+                    trailing_args: vec![],
+                    windows_shell: shell,
+                };
+                let mut command = super::wrap(
+                    recipe,
+                    EnvType::WindowsInterop,
+                    None,
+                    Some(&binary),
+                    &spawn_path,
+                    8125,
+                    false,
+                )
+                .expect("an unsandboxed command always assembles");
                 apply_wsl_env(&mut command, EnvType::WindowsInterop, &[], &[]);
                 let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
                 let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
@@ -347,19 +606,32 @@ mod tests {
                     let mut buffer = [0; 4096];
                     let mut output = Vec::new();
                     while let Ok(count) = reader.read(&mut buffer) {
-                        if count == 0 { break; }
+                        if count == 0 {
+                            break;
+                        }
                         output.extend_from_slice(&buffer[..count]);
-                        if output.ends_with(b"\x1b[6n") { writer.write_all(b"\x1b[1;1R").unwrap(); }
+                        if output.ends_with(b"\x1b[6n") {
+                            writer.write_all(b"\x1b[1;1R").unwrap();
+                        }
                     }
                     output
                 });
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
                 let status = loop {
-                    if let Some(status) = child.try_wait().unwrap() { break status; }
-                    if std::time::Instant::now() >= deadline { child.kill().unwrap(); panic!("Windows PTY timed out: {shell:?} {spawn_path}"); }
+                    if let Some(status) = child.try_wait().unwrap() {
+                        break status;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        child.kill().unwrap();
+                        panic!("Windows PTY timed out: {shell:?} {spawn_path}");
+                    }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 };
-                assert!(status.success(), "{shell:?}: {spawn_path}: {}", String::from_utf8_lossy(&drain.join().unwrap()));
+                assert!(
+                    status.success(),
+                    "{shell:?}: {spawn_path}: {}",
+                    String::from_utf8_lossy(&drain.join().unwrap())
+                );
                 let result = directory.path().join("probe.txt");
                 assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "8125");
                 std::fs::remove_file(result).unwrap();
@@ -385,16 +657,33 @@ mod tests {
         let payload = "spaces 'quotes' \"double\" $HOME `literal`\nsecond line";
         let recipe = crate::agent::provider::SpawnRecipe {
             binary: "sh",
-            base_args: vec!["-c".into(), "printf '%s\\n' \"$PWD\" \"$BUILDMESH_SESSION_ID\" \"$1\" > probe.txt".into(), "probe".into(), payload.into()],
-            trailing_args: vec![], windows_shell: crate::agent::provider::WindowsShell::Direct,
+            base_args: vec![
+                "-c".into(),
+                "printf '%s\\n' \"$PWD\" \"$BUILDMESH_SESSION_ID\" \"$1\" > probe.txt".into(),
+                "probe".into(),
+                payload.into(),
+            ],
+            trailing_args: vec![],
+            windows_shell: crate::agent::provider::WindowsShell::Direct,
         };
-        let mut command = super::wrap(recipe, resolved.env_type, None, None, &resolved.spawn_path, 8123, false).unwrap();
+        let mut command = super::wrap(
+            recipe,
+            resolved.env_type,
+            None,
+            None,
+            &resolved.spawn_path,
+            8123,
+            false,
+        )
+        .unwrap();
         apply_wsl_env(&mut command, resolved.env_type, &[], &[]);
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
         assert!(child.wait().unwrap().success());
-        assert_eq!(std::fs::read_to_string(directory.path().join("probe.txt")).unwrap(),
-            format!("{}\n8123\n{payload}\n", resolved.spawn_path));
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("probe.txt")).unwrap(),
+            format!("{}\n8123\n{payload}\n", resolved.spawn_path)
+        );
     }
 
     #[test]
@@ -402,22 +691,40 @@ mod tests {
     #[ignore = "requires an installed default WSL distribution"]
     fn live_wsl_directory_runs_windows_cmd_harness() {
         let home = crate::env::wsl_home().unwrap();
-        let directory = tempfile::Builder::new().prefix("buildmesh-native-")
-            .tempdir_in(crate::env::to_host_path(&home.to_string_lossy())).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("buildmesh-native-")
+            .tempdir_in(crate::env::to_host_path(&home.to_string_lossy()))
+            .unwrap();
         let script_dir = tempfile::tempdir().unwrap();
         let script = script_dir.path().join("native probe.cmd");
         std::fs::write(&script, "@echo off\r\necho native-in-guest> probe.txt\r\n").unwrap();
         let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
         crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Windows);
         let recipe = crate::agent::provider::SpawnRecipe {
-            binary: "probe", base_args: vec![], trailing_args: vec![],
+            binary: "probe",
+            base_args: vec![],
+            trailing_args: vec![],
             windows_shell: crate::agent::provider::WindowsShell::Cmd,
         };
-        let command = super::wrap(recipe, resolved.env_type, None, script.to_str(), &resolved.spawn_path, 8124, false).unwrap();
+        let command = super::wrap(
+            recipe,
+            resolved.env_type,
+            None,
+            script.to_str(),
+            &resolved.spawn_path,
+            8124,
+            false,
+        )
+        .unwrap();
         let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
         let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
         assert!(child.wait().unwrap().success());
-        assert_eq!(std::fs::read_to_string(directory.path().join("probe.txt")).unwrap().trim(), "native-in-guest");
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("probe.txt"))
+                .unwrap()
+                .trim(),
+            "native-in-guest"
+        );
     }
 
     #[test]
@@ -437,7 +744,11 @@ mod tests {
             .any(|entry| entry.split('/').next() == Some("BUILDMESH_SESSION_ID")));
         command.env("BUILDMESH_HOOK_TOKEN", "test-token");
         apply_wsl_env(&mut command, crate::models::EnvType::Wsl, &[], &[]);
-        assert!(command.get_env("WSLENV").unwrap().to_string_lossy().split(':')
+        assert!(command
+            .get_env("WSLENV")
+            .unwrap()
+            .to_string_lossy()
+            .split(':')
             .any(|entry| entry.split('/').next() == Some("BUILDMESH_HOOK_TOKEN")));
     }
 
@@ -447,10 +758,7 @@ mod tests {
         append_to_wslenv(&mut wslenv, "CODEX_HOME", "/u");
         assert_eq!(wslenv, "SSH_AUTH_SOCK/up:CODEX_HOME/u");
         append_to_wslenv(&mut wslenv, "BUILDMESH_PORT", "/u");
-        assert_eq!(
-            wslenv,
-            "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u"
-        );
+        assert_eq!(wslenv, "SSH_AUTH_SOCK/up:CODEX_HOME/u:BUILDMESH_PORT/u");
     }
 
     /// #2034 — the end-to-end fail-closed assertion on the platform that owns
@@ -554,7 +862,11 @@ mod tests {
             .expect("valid base64");
 
         // First two bytes must be the UTF-16LE encoding of 'e' (0x65 0x00), not a BOM.
-        assert_eq!(&bytes[..2], &[0x65, 0x00], "leading bytes should be 'e' as UTF-16LE, not a BOM");
+        assert_eq!(
+            &bytes[..2],
+            &[0x65, 0x00],
+            "leading bytes should be 'e' as UTF-16LE, not a BOM"
+        );
 
         let decoded = decode_ps(&encoded);
         assert_eq!(decoded, "echo hi");
@@ -579,18 +891,30 @@ mod tests {
                     1. `default_provider` (per-mesh override)\n\
                     2. Buildmesh-wide default\n\
                     3. Anthropic (hardcoded fallback)";
-        let args = vec!["--anthropic".to_string(), "--prefill".to_string(), body.to_string()];
+        let args = vec![
+            "--anthropic".to_string(),
+            "--prefill".to_string(),
+            body.to_string(),
+        ];
         let cmd_str = format_powershell_command("claude", &args);
 
         // Must start with the call operator so PowerShell treats it as command invocation.
-        assert!(cmd_str.starts_with("& "), "command must use PowerShell call operator: {}", cmd_str);
+        assert!(
+            cmd_str.starts_with("& "),
+            "command must use PowerShell call operator: {}",
+            cmd_str
+        );
 
         // The binary and every arg must be wrapped in single quotes. After the
         // leading `& 'claude' `, there must be no bare newline outside of a quoted
         // string — i.e. every newline in the prefill stays inside the single-quoted
         // arg, not at the top level of the script.
         let after_call = cmd_str.strip_prefix("& ").unwrap();
-        assert!(after_call.starts_with("'claude'"), "binary must be single-quoted: {}", cmd_str);
+        assert!(
+            after_call.starts_with("'claude'"),
+            "binary must be single-quoted: {}",
+            cmd_str
+        );
 
         // The prefill body's newlines must appear inside a single-quoted region —
         // i.e. between an odd-numbered ' and the next '. We verify by checking
@@ -611,6 +935,10 @@ mod tests {
     fn format_powershell_command_escapes_embedded_single_quotes() {
         let args = vec!["--prefill".to_string(), "it's a test".to_string()];
         let cmd_str = format_powershell_command("claude", &args);
-        assert!(cmd_str.contains("'it''s a test'"), "expected doubled-quote escaping, got: {}", cmd_str);
+        assert!(
+            cmd_str.contains("'it''s a test'"),
+            "expected doubled-quote escaping, got: {}",
+            cmd_str
+        );
     }
 }
