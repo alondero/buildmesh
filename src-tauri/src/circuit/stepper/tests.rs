@@ -3134,6 +3134,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 2,
             error: "stale error".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(run.context.get("node.classify.classifier_error.2"), None);
@@ -3143,6 +3144,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 1,
             error: "claude: Failed to authenticate: OAuth session expired".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(
@@ -3171,6 +3173,7 @@ fn circuit_classifier_authentication_failure_is_visible_and_attempt_scoped() {
             node_id: "classify".into(),
             attempt: 2,
             error: "codex: new attempt failed".into(),
+            observed_at_ms: 0,
         },
     );
     assert_eq!(
@@ -3211,6 +3214,7 @@ fn circuit_classifier_quiet_failure_spends_budget_without_inventing_report_evide
         node_id: "classify".into(),
         attempt: 1,
         error: "codex: authentication failed".into(),
+        observed_at_ms: 0,
     };
     for _ in 0..5 {
         let transition = advance(&mut run, &event);
@@ -3233,6 +3237,162 @@ fn circuit_classifier_quiet_failure_spends_budget_without_inventing_report_evide
         .contains("codex: authentication failed"));
     assert!(!advance(&mut run, &event).context_changed);
     assert_eq!(run.state, RunState::Running);
+}
+
+fn classifier_timeout_error() -> String {
+    format!(
+        "mcode: {}",
+        crate::circuit::evaluator::CLASSIFIER_TIMEOUT_MESSAGE
+    )
+}
+
+#[test]
+fn repeated_classifier_timeouts_back_off_while_other_failures_keep_the_fast_cadence() {
+    let timeout = classifier_timeout_error();
+    let schedule: Vec<u128> = (1..MAX_CLASSIFIER_FAILURES)
+        .map(|failures| classifier_retry_cooldown_ms(failures, Some(&timeout)))
+        .collect();
+    assert_eq!(schedule, [60_000, 180_000, 600_000, 1_200_000]);
+    assert_eq!(
+        classifier_retry_cooldown_ms(MAX_CLASSIFIER_FAILURES + 4, Some(&timeout)),
+        1_200_000,
+        "past the schedule the wait stays at its last step"
+    );
+    // A bad login, a missing binary or an unrecognised verdict fails with a
+    // diagnostic the person can act on: that is not worth waiting out.
+    for error in [
+        None,
+        Some("codex: authentication failed"),
+        Some("mcode: classifier exited with exit code: 4: Model is not available"),
+    ] {
+        for failures in 0..=MAX_CLASSIFIER_FAILURES {
+            assert_eq!(classifier_retry_cooldown_ms(failures, error), 60_000);
+        }
+    }
+}
+
+/// Run 399: every `mcode exec` launch between 12:17:57 and 12:46:21 UTC hung
+/// in start-up, then the provider healed on its own. Five attempts at a fixed
+/// minute parked the gate after about five of those 28 minutes.
+#[test]
+fn the_timeout_back_off_outlasts_the_stall_that_failed_run_399() {
+    let stall_ms: u128 = (28 * 60 + 24) * 1_000;
+    let timeout = classifier_timeout_error();
+    let waiting: u128 = (1..MAX_CLASSIFIER_FAILURES)
+        .map(|failures| classifier_retry_cooldown_ms(failures, Some(&timeout)))
+        .sum();
+    assert!(
+        waiting > stall_ms,
+        "the waits between {MAX_CLASSIFIER_FAILURES} timed-out attempts total {waiting} ms, \
+         shorter than the {stall_ms} ms outage"
+    );
+}
+
+#[test]
+fn the_checkpoint_states_the_real_wait_before_the_next_classifier_attempt() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let step_error = |run: &RunView| run.step("classify").unwrap().error.clone().unwrap();
+    let outage = |error: String| CircuitEvent::ClassifierUnavailable {
+        node_id: "classify".into(),
+        attempt: 1,
+        error,
+        observed_at_ms: 0,
+    };
+
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 1 minute."),
+        "{}",
+        step_error(&run)
+    );
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 3 minutes"),
+        "{}",
+        step_error(&run)
+    );
+    advance(&mut run, &outage(classifier_timeout_error()));
+    assert!(
+        step_error(&run).contains("retrying after 10 minutes"),
+        "{}",
+        step_error(&run)
+    );
+
+    // A different failure resets the wait to the fast cadence.
+    advance(&mut run, &outage("codex: authentication failed".into()));
+    assert!(
+        step_error(&run).contains("retrying after 1 minute."),
+        "{}",
+        step_error(&run)
+    );
+}
+
+/// Review of PR 2178: the retry clock lived only in memory, so a restart
+/// during a 10-minute cooldown retried at once. The seam stamps each failure
+/// event with when it saw it (the stepper has no clock) and the stepper keeps
+/// that per gate attempt.
+#[test]
+fn a_classifier_failure_records_when_the_seam_saw_it() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let failed_at = |run: &RunView| {
+        run.context
+            .get("node.classify.classifier_failed_at_ms.1")
+            .map(str::to_owned)
+    };
+    assert_eq!(failed_at(&run), None);
+
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierUnavailable {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: classifier_timeout_error(),
+            observed_at_ms: 1_000_000,
+        },
+    );
+    assert_eq!(failed_at(&run).as_deref(), Some("1000000"));
+
+    // The report path publishes the error first, then the no-verdict turn.
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 1,
+            error: classifier_timeout_error(),
+            observed_at_ms: 1_180_000,
+        },
+    );
+    assert_eq!(failed_at(&run).as_deref(), Some("1180000"));
+
+    // A stale event for an earlier attempt must not stamp this one.
+    advance(
+        &mut run,
+        &CircuitEvent::ClassifierErrorObserved {
+            node_id: "classify".into(),
+            attempt: 2,
+            error: classifier_timeout_error(),
+            observed_at_ms: 9_999_999,
+        },
+    );
+    assert_eq!(failed_at(&run).as_deref(), Some("1180000"));
+    assert_eq!(
+        run.context.get("node.classify.classifier_failed_at_ms.2"),
+        None
+    );
 }
 
 /// Drive a gate_run from Pending up to the gate step existing. The

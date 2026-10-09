@@ -399,6 +399,7 @@ classifier outage
         node_id: "step",
         attempt: 1,
         error: "classifier offline",
+        observed_at_ms: 500,
     },
     TurnClassified {
         binding: None,
