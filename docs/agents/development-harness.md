@@ -165,16 +165,27 @@ The `ui-shot` mock renders charge their time to named phases in
 `scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,
 reading the mock fixtures, navigation, mount, the step script, importing the
 steps module, the selector wait, the screenshot, the browser close, and the
-dev-server stop. The launch is charged twice because a failed launch retries
-against a system Chromium; page setup is charged twice because there are two
-calls, `browser.newPage` and `page.addInitScript`. Reading the fixtures file and
-importing a steps module are separate phases too, since both are awaited before
-the phase they feed.
-`tests/integration/ui-shot.test.ts` prices its supervising wrapper above their
-sum and audits `scripts/ui-shot.mjs` against it, so a listed phase that stops
-passing its budget is caught rather than silently reverting to Playwright's own
-default — which is how this sum first came to sit below the child's real worst
-case (issue #2063). Raise a phase there and the wrapper widens with it.
+dev-server stop. Reading the fixtures file and importing a steps module are
+separate phases too, since both are awaited before the phase they feed.
+
+A supervising wrapper needs only **one** deadline, and it is derived rather than
+hand-summed: `UI_SHOT_WATCHDOG_DEADLINE_MS` is `UI_SHOT_WATCHDOG_MULTIPLE` times
+the slowest per-phase budget, both computed in that module from the budgets
+themselves. It replaced a 12-term sum of every phase (#2168). The sum was a
+second copy of the phase list, and the copy — not the code — was the invariant:
+nothing detected a phase present in neither copy, and keeping them in step cost
+eight review rounds on the pattern that introduced it. Raising any phase now
+widens the deadline with it, and no list is maintained twice.
+
+A child-side watchdog in `scripts/phase-watchdog.mjs` supplies the diagnostic a
+fixed deadline cannot. The child appends each phase name to a file as it enters
+one, and the wrapper reads that file when it kills the child, so the report is
+`ui-shot did not finish within 960000ms (killed while in phase: step script)`
+rather than a bare timeout. The file is used rather than a stderr marker because
+a killed child's pipes are lost with it; an appended file is already on disk.
+`tests/integration/ui-shot.test.ts` asserts on the phases a real run emits
+rather than auditing the script's source text, which could not see a phase in
+neither copy and matched the first occurrence of a call string.
 
 Phases Playwright cannot bound itself are bounded in `scripts/ui-shot-deadline.mjs`:
 the step script, importing the steps module, reading the mock fixtures, both
@@ -193,11 +204,6 @@ response is slow would otherwise look dead to a probe and be duplicated on a por
 already taken. The trade-off: something that holds the port but never answers HTTP
 now fails after the startup budget instead of being treated as absent and spawned
 over.
-
-The audit is deliberately a source check rather than a runtime one: the budgets
-are minutes long by design, so waiting them out would test patience, not wiring.
-It asserts the budget on each call site individually, since a file-wide search
-lets one site lose its budget while another's text still satisfies it.
 
 There is no established frontend formatter, so this harness uses ESLint and
 Git whitespace checks rather than imposing a new formatting policy. Clippy's

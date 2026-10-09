@@ -67,6 +67,7 @@ import { buildInitScript, loadFixtures } from './ui-mock/tauri-mock.mjs';
 import { startDevServer, stopDevServer } from './ui-shot-server.mjs';
 import { runSteps } from './ui-shot-steps.mjs';
 import { withDeadline } from './ui-shot-deadline.mjs';
+import { PHASE_FILE_ENV, createPhaseRecorder } from './phase-watchdog.mjs';
 import {
   BROWSER_LAUNCH_TIMEOUT_MS,
   BROWSER_CLOSE_TIMEOUT_MS,
@@ -81,6 +82,16 @@ import {
 } from './ui-shot-budgets.mjs';
 
 /**
+ * Announce the phase this run is entering.
+ *
+ * A supervising wrapper sets `BUILDMESH_PHASE_FILE`; the recorder appends the
+ * phase name there on every entry, so if the wrapper has to kill this child for
+ * exceeding its deadline it can report *which* phase was in flight instead of
+ * a bare timeout (#2168). Unsupervised runs record nothing on disk.
+ */
+const phase = createPhaseRecorder(process.env[PHASE_FILE_ENV]).record;
+
+/**
  * Launch Chromium, tolerating a host whose pre-installed browser doesn't
  * match the build Playwright pins (headless CI / Claude Code on the web,
  * where `PLAYWRIGHT_BROWSERS_PATH` points at a system Chromium). On a normal
@@ -92,9 +103,10 @@ import {
  *   3. $PLAYWRIGHT_BROWSERS_PATH/chromium (the symlink the web env provides)
  */
 async function launchChromium() {
-  // Priced rather than left on Playwright's 30s default, so the launch phase
-  // is one `UI_SHOT_STEP_BUDGETS_MS` actually accounts for (#2063). No options
-  // are threaded in, so nothing can override that budget.
+  // Priced rather than left on Playwright's 30s default, so no phase of this
+  // run falls back to a budget nothing accounts for (#2063). No options are
+  // threaded in, so nothing can override that budget.
+  phase('browser launch');
   const launch = { timeout: BROWSER_LAUNCH_TIMEOUT_MS };
   const override = arg('chromium', process.env.BUILDMESH_CHROMIUM);
   if (override) return chromium.launch({ ...launch, executablePath: override });
@@ -153,13 +165,15 @@ async function getPage() {
     let devServer = null;
     let browser;
     try {
+      if (serve) phase('dev-server startup');
       devServer = serve ? await startDevServer(mockUrl) : null;
       browser = await launchChromium();
       // Page setup is a Playwright protocol round trip with no `timeout`
       // argument of its own, so it is raced against a priced budget like the
       // close. Already inside the mock branch, so the budget is unconditional
-      // here. There are two such calls — `newPage` and `addInitScript` — so the
-      // sum charges this twice, once per call (#2063).
+      // here. There are two such calls — `newPage` and `addInitScript` — so this
+      // phase can be charged twice, once per call (#2063).
+      phase('page setup');
       const page = await withDeadline(
         browser.newPage({ viewport: { width: w || 1440, height: h || 900 } }),
         BROWSER_SETUP_TIMEOUT_MS,
@@ -168,11 +182,13 @@ async function getPage() {
       // Install the fake Tauri IPC before ANY app module runs. Reading the
       // fixtures file is itself awaited before `addInitScript` is reached, so it
       // carries its own budget rather than sitting outside every phase (#2063).
+      phase('fixtures load');
       const fixturesScript = buildInitScript(await withDeadline(
         loadFixtures(fixturesFile),
         FIXTURES_LOAD_TIMEOUT_MS,
         'Loading the mock fixtures',
       ));
+      phase('page setup');
       await withDeadline(
         page.addInitScript(fixturesScript),
         BROWSER_SETUP_TIMEOUT_MS,
@@ -200,12 +216,14 @@ async function getPage() {
       // under CPU load that first response alone can exceed 30s. Defaulting
       // made this fail intermittently with a misleading "start the dev server"
       // message even though `--serve` had just started one.
+      phase('navigation');
       await page.goto(mockUrl, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }).catch((e) => {
         throw new Error(
           `Could not load ${mockUrl}. Start the dev server (\`npm run dev\`), ` +
           `or pass --serve to have this script start it.\n${e.message}`
         );
       });
+      phase('mount wait');
       await page.locator('#root > *').first().waitFor({ state: 'attached', timeout: MOUNT_TIMEOUT_MS }).catch(() => {
         const details = pageErrors.length > 0 ? ` Page errors: ${pageErrors.join(' | ')}` : '';
         throw new Error(`[tauri-mock] #root never populated within ${MOUNT_TIMEOUT_MS / 1000}s.${details}`);
@@ -217,10 +235,14 @@ async function getPage() {
       // like the normal teardown. Already inside the mock branch, so the budget
       // is unconditional here.
       if (browser) {
+        phase('browser close');
         await withDeadline(browser.close(), BROWSER_CLOSE_TIMEOUT_MS, 'Closing the browser after setup failed')
           .catch((closeError) => { console.error('[ui-shot] teardown close after setup failure:', closeError.message); });
       }
-      if (devServer) await stopDevServer(devServer);
+      if (devServer) {
+        phase('dev-server stop');
+        await stopDevServer(devServer);
+      }
       throw e;
     }
   }
@@ -260,27 +282,35 @@ const mockHelper = {
 let failure = null;
 try {
   if (stepsFile) {
-    // Only `--mock` runs are supervised by the wrapper that budgets
-    // `UI_SHOT_STEP_BUDGETS_MS`. `--url` and CDP-attach drive a real app with no
-    // wrapper and no priced budget, so capping them here would impose a limit on
-    // real-app step scripts (`ui-shot-review-real.steps.mjs`) that nothing
-    // accounts for. Both budgets are null there, so the load and run phases stay
-    // unbounded, as they did before (#2063).
+    // Only `--mock` runs are supervised by a wrapper with a watchdog deadline
+    // (`UI_SHOT_WATCHDOG_DEADLINE_MS`). `--url` and CDP-attach drive a real app
+    // with no wrapper and no priced budget, so capping them here would impose a
+    // limit on real-app step scripts (`ui-shot-review-real.steps.mjs`) that
+    // nothing accounts for. Both budgets are null there, so the load and run
+    // phases stay unbounded, as they did before (#2063).
     await runSteps(
       stepsFile,
       { page, invoke, mock: mockHelper },
-      mock
-        ? { timeoutMs: STEP_SCRIPT_TIMEOUT_MS, moduleLoadTimeoutMs: STEP_MODULE_LOAD_TIMEOUT_MS }
-        : { timeoutMs: null, moduleLoadTimeoutMs: null },
+      {
+        timeoutMs: mock ? STEP_SCRIPT_TIMEOUT_MS : null,
+        moduleLoadTimeoutMs: mock ? STEP_MODULE_LOAD_TIMEOUT_MS : null,
+        // Both step phases are announced from inside `runSteps`, at the moment
+        // each is entered, so a wrapper that kills this child mid-step reports
+        // the phase that was actually in flight (#2168).
+        onPhase: phase,
+      },
     );
   }
 
   mkdirSync(dirname(resolve(out)), { recursive: true });
   if (selector) {
+    phase('selector wait');
     const el = page.locator(selector).first();
     await el.waitFor({ state: 'visible', timeout: ELEMENT_VISIBLE_TIMEOUT_MS });
+    phase('screenshot');
     await el.screenshot({ path: out, timeout: SCREENSHOT_TIMEOUT_MS });
   } else {
+    phase('screenshot');
     await page.screenshot({ path: out, timeout: SCREENSHOT_TIMEOUT_MS });
   }
   console.log(`Saved ${out} (page: ${page.url()})`);
@@ -299,6 +329,7 @@ try {
     // Scoped to `--mock` for the same reason as the step cap — in real-app modes
     // a hang here would fail a run that had already produced its screenshot, by a
     // number the wrapper does not budget.
+    phase('browser close');
     await withDeadline(
       browser.close(),
       mock ? BROWSER_CLOSE_TIMEOUT_MS : null,
@@ -309,7 +340,10 @@ try {
     else console.error('[ui-shot] browser close after a failed run:', closeError.message);
   } finally {
     // Only stop a dev server WE started (--serve); a reused one is left up.
-    if (devServer) await stopDevServer(devServer);
+    if (devServer) {
+      phase('dev-server stop');
+      await stopDevServer(devServer);
+    }
   }
 }
 if (failure) throw failure;
