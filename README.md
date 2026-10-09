@@ -119,7 +119,7 @@ To upgrade manually, install the new `.msi` or `-setup.exe` over the existing in
 
 ### Productivity
 - **Attention hook**: agents raise a notification when they need your input. Buildmesh listens for `idle_prompt` events on the Claude Code side and surfaces a "needs input" badge in the sidebar — no polling, no timers.
-- **Auto-named nodes**: agent nodes are auto-named from their first turn (LLM-generated slug) so a 10-agent swarm stays readable.
+- **Auto-named nodes**: nodes spawned from an issue, a pull request, or an Autopilot Circuit are named after it straight away (e.g. `gh123-fix-login`); other agent nodes are auto-named from their first turn (LLM-generated slug) so a 10-agent swarm stays readable.
 - **Session resume**: surviving processes and stored `cli_session_id`s mean a restart resumes where you left off. Crash recovery marks `Running` nodes as `Suspended` on startup.
 - **Build & run**: per-mesh build/run commands with auto-detection for Rust, Node, Tauri, JVM, Go, and Python projects.
 - **Terminal zoom slider**: a *Zoom* button in the title bar opens a text-size slider for every terminal pane (agent and build/run alike). It stays in step with the `Ctrl/Cmd +` / `Ctrl/Cmd -` / `Ctrl/Cmd 0` shortcuts and the `Ctrl`/`Cmd` + mouse-wheel gesture, and your chosen size is remembered across launches.
