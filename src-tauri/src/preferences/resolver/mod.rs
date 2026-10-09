@@ -21,41 +21,43 @@ pub mod cascade;
 pub mod catalog;
 pub mod default_provider;
 pub mod harness;
-pub mod pairings;
 pub mod pairing_compat;
+pub mod pairings;
 
 // ----- Re-exports: harness -----------------------------------------------
 
 #[allow(unused_imports)]
 pub use harness::{
     default_harness_profiles, harness_capabilities_for, harness_order, harness_profiles,
-    is_known_harness_id, merge_detected_profiles, resolve_harness_provider,
-    resolve_harness_provider_for, harness_runtime, resolved_harness_profile, set_harness_order,
+    harness_runtime, is_known_harness_id, merge_detected_profiles, resolve_harness_provider,
+    resolve_harness_provider_for, resolved_harness_profile, set_harness_order,
 };
 
 // ----- Re-exports: catalog -----------------------------------------------
 
 #[allow(unused_imports)]
-pub use catalog::{
-    default_provider_accounts, first_class_surfaces, harness_surface,
-    is_claude_compatible_id, keyed_first_class_catalog, provider_surfaces, surface_for_executor,
+pub(crate) use catalog::{
+    claude_harness_id, claude_harness_id_from, deepseek_default_tiers, keyed_first_class_template,
+    kimi_default_tiers, minimax_default_tiers, BUILTIN_PROVIDER_ACCOUNTS,
 };
 #[allow(unused_imports)]
-pub(crate) use catalog::{
-    BUILTIN_PROVIDER_ACCOUNTS, claude_harness_id, claude_harness_id_from, deepseek_default_tiers,
-    kimi_default_tiers, keyed_first_class_template, minimax_default_tiers,
+pub use catalog::{
+    default_provider_accounts, first_class_surfaces, harness_surface, is_claude_compatible_id,
+    keyed_first_class_catalog, provider_surfaces, surface_for_executor,
 };
 
 // ----- Re-exports: accounts ----------------------------------------------
 
 #[allow(unused_imports)]
 pub use accounts::{
-    minimax_api_key_resolved, provider_accounts, remove_provider_account, set_account_key_if_absent,
-    upsert_provider_account,
+    minimax_api_key_resolved, provider_accounts, provider_accounts_with_keys_in_preferences,
+    remove_provider_account, set_account_key_if_absent, upsert_provider_account,
 };
 
 // ----- Re-exports: pairings ----------------------------------------------
 
+#[allow(unused_imports)]
+pub(crate) use pairings::effective_pairings;
 #[allow(unused_imports)]
 pub use pairings::{
     compatible_providers_by_harness, compatible_providers_for_harness, effective_provider_pairings,
@@ -63,15 +65,13 @@ pub use pairings::{
     remove_provider_pairing, resolve_stored_pairing_and_account, set_proxied_provider_order,
     upsert_provider_pairing,
 };
-#[allow(unused_imports)]
-pub(crate) use pairings::effective_pairings;
 
 // ----- Re-exports: pairing_compat ---------------------------------------
 
 #[allow(unused_imports)]
-pub use pairing_compat::{pairing_compatibility, endpoint_model_descriptor};
-#[allow(unused_imports)]
 pub(crate) use pairing_compat::pairing_can_potentially_match;
+#[allow(unused_imports)]
+pub use pairing_compat::{endpoint_model_descriptor, pairing_compatibility};
 
 // ----- Re-exports: default_provider --------------------------------------
 
@@ -86,6 +86,6 @@ pub use default_provider::resolve_default_provider;
 // module so the cascade order lives in exactly one place.
 #[allow(unused_imports)]
 pub use cascade::{
-    apply_capability_mask, field_inputs, harness_config_str, resolve_field, CapabilityMaskForResolver,
-    HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
+    apply_capability_mask, field_inputs, harness_config_str, resolve_field,
+    CapabilityMaskForResolver, HarnessConfigField, ResolvedCascadeLayer, ResolvedCascadeView,
 };

@@ -6,13 +6,13 @@
 //! `save` round-trip + optional `app.emit`. They run on Tauri's IPC
 //! worker, NOT the bounded tokio pool. Issue #1380 review point 4.
 
+use crate::preferences::resolver::cascade::{
+    apply_capability_mask, field_inputs, harness_config_str,
+};
 use crate::preferences::{
     self, AppPreferences, CapabilityMaskForResolver, HarnessConfigField, HarnessConfigValue,
     HarnessProfile, ModelTiers, PairingVerification, PreferencesHealth, ProviderAccount,
     ProviderPairing, RecoveryOutcome, ResolvedCascadeView,
-};
-use crate::preferences::resolver::cascade::{
-    apply_capability_mask, field_inputs, harness_config_str,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -347,6 +347,20 @@ pub fn get_provider_accounts() -> Result<Vec<ProviderAccount>, String> {
     Ok(preferences::provider_accounts())
 }
 
+/// Provider-account ids whose API key is persisted in `preferences.json`
+/// rather than in the OS credential store (issue #2154), because the store
+/// could not be used. Empty is the healthy state: every key is in the
+/// credential store, and Settings must show no notice.
+///
+/// Separate from [`get_provider_accounts`] rather than a field on
+/// `ProviderAccount`: that struct is both the persisted shape and the wire
+/// type, so a storage-location flag on it would be written into
+/// `preferences.json` — a file this very flag is reporting on.
+#[command]
+pub fn get_provider_accounts_with_preferences_keys() -> Result<Vec<String>, String> {
+    Ok(preferences::provider_accounts_with_keys_in_preferences())
+}
+
 /// Keyed first-class catalog templates (MiniMax, Kimi, OpenRouter) for the
 /// Providers-page "Add provider" picker (ADR-0025). The UI filters out ids
 /// already present in [`get_provider_accounts`].
@@ -378,10 +392,7 @@ pub fn get_pairing_defaults(
 /// JS wrapper, but that only helps callers within the same component — other
 /// components with their own `providerData` state need an explicit signal.
 #[command]
-pub fn upsert_provider_account(
-    app: AppHandle,
-    account: ProviderAccount,
-) -> Result<(), String> {
+pub fn upsert_provider_account(app: AppHandle, account: ProviderAccount) -> Result<(), String> {
     let account_id = account.id.clone();
     let codex_harnesses = {
         let mut prefs = preferences::load()?;
@@ -440,7 +451,9 @@ pub fn get_pairing_verifications(
     env_type: Option<crate::models::EnvType>,
 ) -> Result<Vec<PairingVerification>, String> {
     let env_type = env_type.unwrap_or(crate::models::EnvType::Windows);
-    Ok(crate::services::provider_verification::current_statuses(env_type))
+    Ok(crate::services::provider_verification::current_statuses(
+        env_type,
+    ))
 }
 
 #[command]
@@ -541,10 +554,9 @@ pub fn attach_proxied_provider(
     model_tiers: Option<ModelTiers>,
 ) -> Result<(), String> {
     let should_verify = {
-        let surface =
-            preferences::harness_surface(&harness_id).ok_or_else(|| {
-                format!("harness '{harness_id}' does not speak a proxy-capable surface")
-            })?;
+        let surface = preferences::harness_surface(&harness_id).ok_or_else(|| {
+            format!("harness '{harness_id}' does not speak a proxy-capable surface")
+        })?;
         let mut pairing =
             preferences::pairing_for(&harness_id, &provider_id).unwrap_or_else(|| {
                 ProviderPairing {
@@ -579,16 +591,20 @@ pub fn attach_proxied_provider(
         if let Some(tiers) = model_tiers {
             pairing.model_tiers = tiers;
         }
-        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        if pairing
+            .base_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
             return Err(format!(
                 "base_url is required to attach provider '{provider_id}' to harness '{harness_id}'"
             ));
         }
         let compatibility = preferences::pairing_compatibility(&pairing);
         if !compatibility.compatible {
-            return Err(compatibility
-                .reason
-                .unwrap_or_else(|| "pairing does not satisfy the harness capability contract".into()));
+            return Err(compatibility.reason.unwrap_or_else(|| {
+                "pairing does not satisfy the harness capability contract".into()
+            }));
         }
         let mut prefs = preferences::load()?;
         if let Some(key) = api_key.as_deref().filter(|k| !k.is_empty()) {
@@ -637,7 +653,11 @@ pub fn update_provider_pairing(
         if let Some(tiers) = model_tiers {
             pairing.model_tiers = tiers;
         }
-        if pairing.base_url.as_deref().is_none_or(|s| s.trim().is_empty()) {
+        if pairing
+            .base_url
+            .as_deref()
+            .is_none_or(|s| s.trim().is_empty())
+        {
             return Err("base_url must be non-empty".to_string());
         }
         let should_verify = pairing.surface == preferences::ApiSurface::OpenAI;
@@ -837,22 +857,18 @@ pub fn get_resolved_harness_view(
     // outcome would understate the resolver's contract.
     let resolved_profile = preferences::resolved_harness_profile(&harness_id);
     let capabilities = preferences::harness_capabilities_for(&harness_id);
-    let resolved_executor = capabilities
-        .as_ref()
-        .map(|_| {
-            preferences::resolve_harness_provider(&harness_id)
-                .adapter()
-                .id()
-                .to_string()
-        });
+    let resolved_executor = capabilities.as_ref().map(|_| {
+        preferences::resolve_harness_provider(&harness_id)
+            .adapter()
+            .id()
+            .to_string()
+    });
 
     // Capability mask descriptor — same fields the spawn pipeline reads.
-    let mask_descriptor = capabilities
-        .as_ref()
-        .map(|caps| CapabilityMaskForResolver {
-            supports_model_override: caps.supports_model_override,
-            effort_control: caps.effort_control.clone(),
-        });
+    let mask_descriptor = capabilities.as_ref().map(|caps| CapabilityMaskForResolver {
+        supports_model_override: caps.supports_model_override,
+        effort_control: caps.effort_control.clone(),
+    });
 
     // Build the per-field cascade + apply the capability mask.
     let model = build_cascade_view(
@@ -960,14 +976,13 @@ mod resolved_view_tests {
     use super::*;
     use crate::agent::capabilities::EffortControlKind;
     use crate::preferences::resolver::{
-        apply_capability_mask as cascade_apply_capability_mask, field_inputs as cascade_field_inputs,
+        apply_capability_mask as cascade_apply_capability_mask,
+        field_inputs as cascade_field_inputs,
     };
 
     #[test]
     fn application_default_is_resolved() {
-        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
-            None, None, Some("opus-4"),
-        ));
+        let view = ResolvedCascadeView::for_field(cascade_field_inputs(None, None, Some("opus-4")));
         assert_eq!(view.resolved.as_deref(), Some("opus-4"));
         assert_eq!(view.layers.application.as_deref(), Some("opus-4"));
     }
@@ -978,9 +993,7 @@ mod resolved_view_tests {
         // `preferences::resolver::cascade::tests` — the same helper backs
         // both the spawn path and the IPC, so this is a redundant-but-
         // useful pin at the IPC layer.
-        let view = ResolvedCascadeView::for_field(cascade_field_inputs(
-            None, None, Some("opus-4"),
-        ));
+        let view = ResolvedCascadeView::for_field(cascade_field_inputs(None, None, Some("opus-4")));
         let caps = CapabilityMaskForResolver {
             supports_model_override: false,
             effort_control: EffortControlKind::None,
@@ -1023,11 +1036,8 @@ mod resolved_view_tests {
         ));
         std::fs::create_dir_all(&tmp).expect("create temp dir");
         crate::preferences::init_for_tests(tmp);
-        let view = get_resolved_harness_view(
-            "__definitely-not-a-real-id__".to_string(),
-            None,
-        )
-        .expect("IPC must succeed even for an unknown harness id");
+        let view = get_resolved_harness_view("__definitely-not-a-real-id__".to_string(), None)
+            .expect("IPC must succeed even for an unknown harness id");
         assert!(
             view.resolved_profile.is_none(),
             "unknown harness id must not fabricate a profile"
