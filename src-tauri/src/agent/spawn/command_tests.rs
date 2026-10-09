@@ -377,8 +377,7 @@ fn cascade_inputs_for_independent_fields() {
     };
 
     // Explicit model only — effort falls through to the app default.
-    let model_only =
-        cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
+    let model_only = cascade_inputs_for(Some("sonnet-4"), None, None, None, Some(&app_default));
     assert_eq!(model_only.model.explicit, Some("sonnet-4"));
     assert_eq!(model_only.effort.explicit, None);
     assert_eq!(model_only.effort.application, Some("high"));

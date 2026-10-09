@@ -169,10 +169,7 @@ pub(crate) enum InitialPromptDelivery {
 /// adapter that will prepare the process launch. The adapter owns the
 /// harness-specific safety rule; the callers only choose how to deliver the
 /// resulting prompt and therefore cannot grow provider-specific branches.
-pub(crate) fn initial_prompt_delivery(
-    spawn_option: &str,
-    prompt: &str,
-) -> InitialPromptDelivery {
+pub(crate) fn initial_prompt_delivery(spawn_option: &str, prompt: &str) -> InitialPromptDelivery {
     if prompt.trim().is_empty() {
         return InitialPromptDelivery::Fresh;
     }
@@ -365,9 +362,10 @@ pub fn default_prepare(
 /// short↔long flag swaps that the adapter would silently follow.
 #[cfg(test)]
 pub(crate) fn assert_flag_followed_by_value(args: &[String], flag: &str, value: &str) {
-    let idx = args.iter().position(|a| a == flag).unwrap_or_else(|| {
-        panic!("prepared recipe must contain {flag} flag; got args = {args:?}")
-    });
+    let idx = args
+        .iter()
+        .position(|a| a == flag)
+        .unwrap_or_else(|| panic!("prepared recipe must contain {flag} flag; got args = {args:?}"));
     assert_eq!(
         args.get(idx + 1).map(String::as_str),
         Some(value),
@@ -589,9 +587,18 @@ mod tests {
         };
         let prepared = default_prepare(adapter, input);
         let args: Vec<&str> = prepared.recipe.argv().collect();
-        let model_at = args.iter().position(|arg| *arg == "--model").expect("model flag");
-        let id_at = args.iter().position(|arg| *arg == "sess-xyz").expect("session id");
-        let prefill_at = args.iter().position(|arg| *arg == "continue").expect("prefill");
+        let model_at = args
+            .iter()
+            .position(|arg| *arg == "--model")
+            .expect("model flag");
+        let id_at = args
+            .iter()
+            .position(|arg| *arg == "sess-xyz")
+            .expect("session id");
+        let prefill_at = args
+            .iter()
+            .position(|arg| *arg == "continue")
+            .expect("prefill");
         assert!(
             model_at < id_at && id_at < prefill_at,
             "expected resume [OPTIONS] <id> <prompt>, got {args:?}"
@@ -733,7 +740,10 @@ mod tests {
         };
         let prepared = default_prepare(adapter, input);
         assert!(
-            !prepared.recipe.base_args.contains(&"--anything".to_string())
+            !prepared
+                .recipe
+                .base_args
+                .contains(&"--anything".to_string())
                 && !prepared
                     .recipe
                     .base_args

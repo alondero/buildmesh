@@ -341,7 +341,11 @@ pub fn resolve_agent_config(
     let model = resolve_field(inputs.model).filter(|_| capabilities.supports_model_override);
     let effort = resolve_effort(inputs.effort, &capabilities.effort_control);
     let extra_args = resolve_extra_args(capabilities, explicit_extra_args);
-    ResolvedAgentConfig { model, effort, extra_args }
+    ResolvedAgentConfig {
+        model,
+        effort,
+        extra_args,
+    }
 }
 
 /// Capability-masked extra-args resolver (issue #1358).
@@ -452,9 +456,8 @@ pub const CODEX_EFFORT_ALLOWED: &[&str] = &["none", "low", "medium", "high", "xh
 /// the levels its menu advertises — the seven-value vocabulary is the
 /// superset of every model's allowed set; the resolver drops anything the
 /// active model doesn't accept.
-pub const GROK_EFFORT_ALLOWED: &[&str] = &[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const GROK_EFFORT_ALLOWED: &[&str] =
+    &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The allowed values Command Code accepts for `--effort` (CLI reference
 /// `https://commandcode.ai/docs/reference/cli`).
@@ -555,7 +558,10 @@ mod tests {
         // completion/input/background signals under skip-permissions.
         assert!(matches!(
             anthropic.attention_capability,
-            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::SkipPermissions, .. }
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::SkipPermissions,
+                ..
+            }
         ));
         assert!(anthropic.produces_readable_transcript);
         assert!(anthropic.supports_model_override);
@@ -566,12 +572,19 @@ mod tests {
         assert_eq!(
             anthropic.effort_control,
             EffortControlKind::Closed {
-                allowed: CLAUDE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: CLAUDE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
         assert_eq!(
             anthropic.available_on,
-            vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
+            vec![
+                "windows".to_string(),
+                "macos".to_string(),
+                "linux".to_string()
+            ]
         );
 
         let codex = codex_caps();
@@ -583,7 +596,10 @@ mod tests {
         // signals under permission-ask mode. SessionStart is capture-only.
         assert!(matches!(
             codex.attention_capability,
-            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::PermissionAsk, .. }
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::PermissionAsk,
+                ..
+            }
         ));
         assert!(codex.produces_readable_transcript);
         assert!(codex.supports_model_override);
@@ -599,7 +615,11 @@ mod tests {
         );
         assert_eq!(
             codex.available_on,
-            vec!["macos".to_string(), "windows".to_string(), "linux".to_string()]
+            vec![
+                "macos".to_string(),
+                "windows".to_string(),
+                "linux".to_string()
+            ]
         );
 
         let cursor = cursor_caps();
@@ -629,7 +649,11 @@ mod tests {
         assert_eq!(cursor.effort_control, EffortControlKind::None);
         assert_eq!(
             cursor.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let agy = agy_caps();
@@ -640,7 +664,10 @@ mod tests {
         // signals only (no tool approvals under skip-permissions, #1367).
         assert!(matches!(
             agy.attention_capability,
-            AttentionCapability::Hook { launch_mode: AttentionLaunchMode::SkipPermissions, .. }
+            AttentionCapability::Hook {
+                launch_mode: AttentionLaunchMode::SkipPermissions,
+                ..
+            }
         ));
         // Issue #1283: AGY writes per-conversation JSONL, so the
         // transcript reader can hydrate the Node Digest / archive picker.
@@ -661,7 +688,11 @@ mod tests {
         );
         assert_eq!(
             agy.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let opencode = opencode_caps();
@@ -696,7 +727,11 @@ mod tests {
         // silently drifting the TS mirror.
         assert_eq!(
             opencode.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let terminal = terminal_caps();
@@ -725,7 +760,11 @@ mod tests {
         assert_eq!(kimi.effort_control, EffortControlKind::None);
         assert_eq!(
             kimi.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let grok = grok_caps();
@@ -768,7 +807,11 @@ mod tests {
         );
         assert_eq!(
             grok.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let mcode = mcode_caps();
@@ -804,7 +847,11 @@ mod tests {
         assert_eq!(mcode.effort_control, EffortControlKind::None);
         assert_eq!(
             mcode.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let dsh = dsh_caps();
@@ -824,7 +871,11 @@ mod tests {
         assert_eq!(dsh.effort_control, EffortControlKind::None);
         assert_eq!(
             dsh.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         let commandcode = commandcode_caps();
@@ -842,12 +893,19 @@ mod tests {
         assert_eq!(
             commandcode.effort_control,
             EffortControlKind::Closed {
-                allowed: COMMANDCODE_EFFORT_ALLOWED.iter().map(|s| s.to_string()).collect(),
+                allowed: COMMANDCODE_EFFORT_ALLOWED
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             }
         );
         assert_eq!(
             commandcode.available_on,
-            vec!["windows".to_string(), "macos".to_string(), "linux".to_string()]
+            vec![
+                "windows".to_string(),
+                "macos".to_string(),
+                "linux".to_string()
+            ]
         );
 
         let freebuff = freebuff_caps();
@@ -864,7 +922,11 @@ mod tests {
         assert_eq!(freebuff.effort_control, EffortControlKind::None);
         assert_eq!(
             freebuff.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
 
         // Issue #1708 — muse: durable per-session JSONL reader is wired
@@ -900,7 +962,11 @@ mod tests {
         // `muse::available_on_all_three_platforms`.
         assert_eq!(
             muse.available_on,
-            vec!["linux".to_string(), "macos".to_string(), "windows".to_string()]
+            vec![
+                "linux".to_string(),
+                "macos".to_string(),
+                "windows".to_string()
+            ]
         );
 
         // Issue #1773 — Cline is a Native Provider: it owns its own auth
@@ -926,7 +992,10 @@ mod tests {
                 trust,
                 min_version,
             } => {
-                assert_eq!(events, &vec![crate::agent::session_lifecycle::LifecycleKind::TurnCompleted]);
+                assert_eq!(
+                    events,
+                    &vec![crate::agent::session_lifecycle::LifecycleKind::TurnCompleted]
+                );
                 assert_eq!(*launch_mode, AttentionLaunchMode::SkipPermissions);
                 assert_eq!(*trust, None);
                 assert_eq!(
@@ -953,7 +1022,11 @@ mod tests {
         );
         assert_eq!(
             cline.available_on,
-            vec!["windows".to_string(), "linux".to_string(), "macos".to_string()]
+            vec![
+                "windows".to_string(),
+                "linux".to_string(),
+                "macos".to_string()
+            ]
         );
     }
 
@@ -1002,7 +1075,8 @@ mod tests {
     #[test]
     fn effort_control_descriptor_delegates_to_adapter_no_id_switch() {
         for adapter in [
-            &crate::agent::provider::adapters::ANTHROPIC as &dyn crate::agent::provider::AgentProvider,
+            &crate::agent::provider::adapters::ANTHROPIC
+                as &dyn crate::agent::provider::AgentProvider,
             &crate::agent::provider::adapters::CODEX,
             &crate::agent::provider::adapters::CURSOR,
             &crate::agent::provider::adapters::AGY,
@@ -1020,10 +1094,13 @@ mod tests {
             let from_trait = adapter.effort_control();
             let from_descriptor = capabilities_for(adapter).effort_control;
             assert_eq!(
-                from_trait, from_descriptor,
+                from_trait,
+                from_descriptor,
                 "effort_control must agree between trait method and descriptor for {}; \
                  trait = {:?}, descriptor = {:?}",
-                adapter.id(), from_trait, from_descriptor
+                adapter.id(),
+                from_trait,
+                from_descriptor
             );
         }
     }
