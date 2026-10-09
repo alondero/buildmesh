@@ -44,8 +44,8 @@ mod words;
 pub use engine::{buffers_size_bytes, cleanup, on_output, on_turn, reset_buffers};
 pub(crate) use engine::{naming_backend_env, resolve_claude_binary_in, ClaudeSearch, ANSI_ESCAPE};
 pub use slug::{
-    disambiguate_node_name, is_default_name, issue_node_name, on_spawn, pr_node_name,
-    pr_reviewer_node_name,
+    agent_reviewer_node_name, disambiguate_node_name, is_default_name, issue_node_name,
+    issue_reviewer_node_name, on_spawn, pr_node_name, pr_reviewer_node_name,
 };
 pub use wire::{NamingBackendFailedPayload, NodeRenamedPayload};
 
