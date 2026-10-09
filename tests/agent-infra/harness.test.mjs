@@ -407,6 +407,68 @@ test('a rejected independent review cannot complete a green task', t => {
   assert.equal(fixture.cli('finish').status, 2);
   assert.match(completion(fixture.cwd).reason, /APPROVE/);
 });
+test('batched review repairs can proceed before full verification but cannot finish', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  const update = spec => {
+    fixture.put('.task.json', JSON.stringify(spec));
+    const result = fixture.cli('update', '--spec', '.task.json');
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  const rejected = update({ phase: 'review', review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Owner state is stale', 'Owner update is missing'], summary: 'Complete initial findings batch' } });
+  assert.equal(rejected.review.findings.length, 2);
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  update({ phase: 'implement', nextAction: 'Run focused owner regressions and request follow-up review' });
+  const approved = update({ phase: 'review', review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Both findings resolved; approved the complete current change' } });
+  assert.equal(approved.reviewTree, fingerprint(fixture.cwd, task.base));
+  fixture.put('.harness/fast.json', JSON.stringify({ tree: approved.reviewTree, results: [{ id: 'fast-agent-rules', outcome: 'PASS' }] }));
+  assert.equal(existsSync(join(fixture.cwd, '.harness/receipt.json')), false);
+  const finished = fixture.cli('finish');
+  assert.equal(finished.status, 2);
+  assert.match(finished.stdout, /Verification is missing or stale/);
+  const stopped = JSON.parse(fixture.hook({ hook_event_name: 'Stop' }).stdout);
+  assert.equal(stopped.decision, 'block');
+  assert.match(stopped.reason, /Verification is missing or stale/);
+  assert.equal(JSON.parse(fixture.cli('status').stdout).task.phase, 'review');
+});
+
+test('review repairs require final-tree verification, acceptance and renewed independent approval', t => {
+  const fixture = repo(t);
+  const task = fixture.start();
+  passingReceipt(fixture, task);
+  const update = spec => {
+    fixture.put('.task.json', JSON.stringify(spec));
+    const result = fixture.cli('update', '--spec', '.task.json');
+    assert.equal(result.status, 0, result.stderr);
+  };
+  // Simulate all planned gates passing; leave acceptance and reviewer state intact.
+  const recordVerification = () => {
+    const gatePlan = planGates(changedPaths(fixture.cwd, task.base));
+    fixture.put('.harness/receipt.json', JSON.stringify({ root: fixture.cwd, taskId: task.id, base: task.base, tree: fingerprint(fixture.cwd, task.base), full: false, gatePlan, gates: gatePlan.map(gate => ({ id: gate.id, outcome: 'PASS' })), outcome: 'PASS' }));
+  };
+  update({ review: { reviewer: 'independent fixture', verdict: 'REQUEST_CHANGES', findings: ['Update the owner state'], summary: 'Repair required' } });
+  fixture.put('src/owner.ts', 'export const owner = 2;\n');
+  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Repair inspected; approved the complete current change' } });
+  assert.equal(fixture.cli('finish').status, 2);
+  assert.match(completion(fixture.cwd).reason, /Verification is missing or stale/);
+
+  recordVerification();
+  assert.equal(fixture.cli('finish').status, 2, 'the original acceptance evidence remains stale');
+  assert.match(completion(fixture.cwd).reason, /one evidence entry per acceptance criterion/);
+  update({ evidence: ['Observed owner state after the repair'] });
+  assert.equal(completion(fixture.cwd).outcome, 'PASS');
+
+  fixture.put('src/owner.ts', 'export const owner = 3;\n');
+  recordVerification();
+  update({ evidence: ['Observed owner state after the subsequent change'] });
+  assert.equal(fixture.cli('finish').status, 2, 'fresh checks and acceptance cannot carry approval across an unreviewed edit');
+  assert.match(completion(fixture.cwd).reason, /independent APPROVE/);
+  update({ review: { reviewer: 'independent fixture', verdict: 'APPROVE', findings: [], summary: 'Subsequent edit inspected; approved the complete final change' } });
+  assert.equal(fixture.cli('finish').status, 0);
+  assert.equal(JSON.parse(fixture.cli('status').stdout).task.phase, 'complete');
+});
+
 test('package scope narrows harness commands but never dependencies or product scripts', t => {
   const fixture = repo(t);
   const initial = { scripts: { build: 'tsc', 'test:agent': 'node --test original.test.mjs' }, dependencies: { react: '19' } };
