@@ -142,6 +142,7 @@ const MCODE_PLUGIN_DESCRIPTION: &str =
 /// Per-handler timeout, in seconds (the mcode 0.4+ unit; the v0.3.x spec used
 /// milliseconds and 0.4+ accepts either — we pin one).
 const MCODE_HOOK_TIMEOUT_SECONDS: u64 = 5;
+const _: () = assert!(MCODE_HOOK_TIMEOUT_SECONDS > 0);
 
 /// Events Buildmesh provisions into the mcode plugin manifest. `Stop` (turn
 /// finished) is the validated signal that drives Node Digest turn completion.
@@ -2190,10 +2191,6 @@ defaultModelThinking:
             MCODE_PROVISIONED_EVENTS,
             &["SessionStart", "Stop", "PermissionRequest"],
             "SessionStart is provisioned for capture without publishing Ready, but remains unvalidated; Stop completes a turn"
-        );
-        assert!(
-            MCODE_HOOK_TIMEOUT_SECONDS > 0,
-            "hook timeout must be positive: {MCODE_HOOK_TIMEOUT_SECONDS}"
         );
     }
 

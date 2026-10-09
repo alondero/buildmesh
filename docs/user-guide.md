@@ -632,11 +632,10 @@ without changing mcode's global model default. Leave the field blank to inherit
 the application default from **Settings → Launch Configurations**, in the
 **Agent Harness defaults** section, then mcode's own default.
 Set MiniMax Code's **Model** under **Settings → Launch Configurations**, in the
-**Agent Harness defaults** section, to apply it to launches without an explicit
-model. Previously stored MiniMax Code
-model defaults now take effect too. This was verified with
-`mcode 0.6.5`; older installations may need an update. MiniMax Code has no
-configurable effort control. See the [MiniMax CLI model reference docs](https://agent.minimax.io/docs/cli/features#model-references).
+**Agent Harness defaults** section, to apply it to launches whose configuration
+has no model. Previously stored MiniMax Code model defaults now take effect too.
+This was verified with `mcode 0.6.5`; older installations may need an update.
+MiniMax Code has no configurable effort control. See the [MiniMax CLI model reference docs](https://agent.minimax.io/docs/cli/features#model-references).
 
 Adding or enabling a known provider creates compatible routes; configurations
 are only the recipes you save, so each harness submenu starts with none.
