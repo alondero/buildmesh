@@ -1,4 +1,6 @@
-use crate::agent::capabilities::EffortControlKind;
+use crate::agent::capabilities::{
+    EffortControlKind, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
+};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -276,11 +278,37 @@ impl AgentProvider for AgyAdapter {
     }
 
     fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--dangerously-skip-permissions` via
+        // `permission_args` in `default_prepare`.
         SpawnRecipe {
             binary: "agy",
-            base_args: vec!["--dangerously-skip-permissions".into()],
+            base_args: Vec::new(),
             trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Antigravity's own flag through.
+    /// Unattended keeps today's `--dangerously-skip-permissions`.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--dangerously-skip-permissions",
+                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Antigravity asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -552,6 +580,7 @@ mod tests {
             model: None,
             effort: Some("high".to_string()),
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
@@ -586,12 +615,13 @@ mod tests {
             args.contains(&"--sandbox".to_string()),
             "agy recipe must carry --sandbox when mesh.sandbox=true; got args = {args:?}"
         );
-        // The flag must appear AFTER the base-recipe flags (`--dangerously-skip-permissions`)
-        // so it's grouped with the harness's own switches, not the binary.
+        // The flag must appear AFTER the permission-layer flags
+        // (`--dangerously-skip-permissions`, issue #2151) so it's grouped
+        // with the harness's own switches, not the binary.
         let skip_perm = args
             .iter()
             .position(|a| a == "--dangerously-skip-permissions")
-            .expect("base recipe carries --dangerously-skip-permissions");
+            .expect("unattended permission default carries --dangerously-skip-permissions");
         let sandbox_pos = args
             .iter()
             .position(|a| a == "--sandbox")

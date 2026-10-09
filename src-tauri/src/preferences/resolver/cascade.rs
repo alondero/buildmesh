@@ -159,6 +159,13 @@ pub fn apply_capability_mask(
 /// [`crate::agent::capabilities::HarnessCapabilities`] so the IPC command
 /// doesn't have to serialize the full descriptor (which includes
 /// platform-list + attention capability that the UI doesn't render).
+///
+/// Deliberately model + effort only (issue #2151, review round 1): there
+/// is no permission cascade view — permission has no mesh/explicit layers
+/// to cascade, and the Settings UI reads the full `HarnessCapabilities`
+/// for the mode list — so mask fields for it would be write-only wire
+/// weight. The spawn path masks permission separately in
+/// `agent::capabilities::resolve_agent_config`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "CapabilityMaskForResolver.ts")]
 pub struct CapabilityMaskForResolver {
@@ -237,11 +244,8 @@ mod tests {
 
     #[test]
     fn cascade_view_falls_through_whitespace_layers() {
-        let view = ResolvedCascadeView::for_field(field_inputs(
-            Some("   "),
-            Some(""),
-            Some("opus-4"),
-        ));
+        let view =
+            ResolvedCascadeView::for_field(field_inputs(Some("   "), Some(""), Some("opus-4")));
         assert_eq!(view.resolved.as_deref(), Some("opus-4"));
         assert!(view.layers.explicit.is_none());
         assert!(view.layers.mesh.is_none());

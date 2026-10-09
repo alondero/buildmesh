@@ -2,6 +2,7 @@
 import type { AttentionCapability } from "./AttentionCapability";
 import type { BackgroundInferenceCapability } from "./BackgroundInferenceCapability";
 import type { EffortControlKind } from "./EffortControlKind";
+import type { PermissionModeOption } from "./PermissionModeOption";
 
 /**
  * Backend-owned **Harness Capability Contract** (issue #1149, prefactor for
@@ -104,6 +105,21 @@ is_plain_terminal: boolean,
  * drops any resolved effort value that doesn't match.
  */
 effort_control: EffortControlKind, 
+/**
+ * The launch permission modes this harness supports (issue #2151).
+ * Empty means the harness has no permission flag — Settings renders
+ * the "this harness has no such flag" line instead of a control and
+ * the launch path contributes no approval argv. Otherwise the first
+ * entry is the unattended default (see
+ * [`crate::agent::provider::AgentProvider::default_permission_mode`]).
+ */
+permission_modes: Array<PermissionModeOption>, 
+/**
+ * The mode used when no layer supplies one. `None` when the harness
+ * has no modes. `Some` preserves today's unattended launch for
+ * existing meshes until the person changes the setting.
+ */
+default_permission_mode: string | null, 
 /**
  * Host platforms where this harness runs (snake_case names — `"windows"`,
  * `"macos"`, `"linux"`). Used by the Spawn Menu and by future

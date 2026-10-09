@@ -182,6 +182,7 @@
 //! template if one ever does (`HarnessConfigValue` + `ResolvedAgentConfig` +
 //! capability gate + an adapter `*_args` helper, never a provider-name check at
 //! a call site).
+use crate::agent::capabilities::{PermissionModeOption, PERMISSION_MODE_UNATTENDED};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, ResolvedPath, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -595,15 +596,9 @@ impl AgentProvider for MuseAdapter {
         }
     }
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
-        // Issue #1705: bake `--disable-approval`. See the module docstring
-        // for the rationale (sibling-harness precedent; `--yolo` rejected
-        // as too wide; outer sandbox stays on).
-        //
-        // Issue #1788: bake `--disable-sandbox` alongside `--disable-approval`.
-        // Muse's own OS sandbox stays on with the approval flag alone and
-        // blocks the agent shell from the OS credential keyring, breaking
-        // gh/git auth that every other harness inherits. See the module
-        // docstring "Inner OS sandbox" section.
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--disable-approval --disable-sandbox` via
+        // `permission_args` in `default_prepare`.
         //
         // Binary stem branches on `Platform::Windows` to `muse.exe`,
         // mirroring `claude_direct_recipe` at `provider/mod.rs:145-156`.
@@ -621,9 +616,36 @@ impl AgentProvider for MuseAdapter {
         };
         SpawnRecipe {
             binary,
-            base_args: vec!["--disable-approval".into(), "--disable-sandbox".into()],
+            base_args: Vec::new(),
             trailing_args: vec![],
             windows_shell: WindowsShell::Direct,
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Muse's own flags through. Unattended
+    /// keeps today's `--disable-approval --disable-sandbox` (issues #1705,
+    /// #1788 — the approval flag alone leaves Muse's own OS sandbox on,
+    /// which blocks the agent shell from the OS credential keyring). That
+    /// inner OS sandbox is Muse's own control and is separate from
+    /// Buildmesh's per-Mesh Sandbox toggle.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--disable-approval --disable-sandbox",
+                "Prompts off + Muse's own OS sandbox off (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flags)",
+                "Muse asks for approval like a human-launched session (its own OS sandbox stays on).",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--disable-approval".into(), "--disable-sandbox".into()]
+        } else {
+            Vec::new()
         }
     }
     fn supports_resume(&self) -> bool {
@@ -958,12 +980,14 @@ mod tests {
                  Windows → muse.exe (mirrors claude_direct_recipe's \
                  claude.exe branch), others → muse"
             );
-            assert_eq!(
-                recipe.base_args,
-                vec!["--disable-approval".to_string(), "--disable-sandbox".to_string()],
-                "muse base recipe must be exactly \n                `[\"--disable-approval\", \"--disable-sandbox\"]` \
-                 on {platform:?} (approval policy #1705; sandbox off so the \
-                 agent shell reaches the OS credential keyring, #1788); got {:?}",
+            // Issue #2151: bare base recipe — `--disable-approval` +
+            // `--disable-sandbox` (approval policy #1705; sandbox off so
+            // the agent shell reaches the OS credential keyring, #1788)
+            // come from the effective permission mode in
+            // `default_prepare`, never from a hidden argv.
+            assert!(
+                recipe.base_args.is_empty(),
+                "muse base recipe must be bare on {platform:?}; got {:?}",
                 recipe.base_args
             );
             assert!(
@@ -1015,27 +1039,28 @@ mod tests {
 
     // -- Prepared-launch evidence (issue #1705 round-1 review) ------------
     //
-    // The per-platform pin above proves `spawn_recipe()` itself returns the
-    // baked policy; it does not prove the policy survives `default_prepare`
-    // composition. The two tests below route fresh + resume launches through
-    // the real orchestration seam (`agent::launch::default_prepare`) so the
-    // baked flag is proven to land in the final argv alongside the model
-    // override, the prefill text, and the resume id, in the documented order.
-    // Without these, a future refactor that reorders the layers (e.g.
-    // prepending `--model` before `--disable-approval`) would slip past the
-    // per-platform pin but break a real spawn.
+    // The per-platform pin above proves `spawn_recipe()` itself stays bare
+    // (issue #2151: no hidden unattended argv); it does not prove the
+    // effective permission mode lands in the final argv. The two tests
+    // below route fresh + resume launches through the real orchestration
+    // seam (`agent::launch::default_prepare`) so the permission-layer
+    // flags are proven to land in the final argv alongside the model
+    // override, the prefill text, and the resume id, in the documented
+    // order. Without these, a future refactor that reorders the layers
+    // (e.g. prepending `--model` before `--disable-approval`) would slip
+    // past the per-platform pin but break a real spawn.
     //
     // Mirrors OpenCode's `fresh_recipe_forwards_model_and_prompt_without_session_id`
     // and `resume_recipe_carries_session_flag` — the engineering contract
     // (`docs/agents/engineering.md`) requires testing fresh AND resume paths
     // for changed launch recipes.
 
-    /// Issue #1705 + #1788 fresh launch: the baked `--disable-approval` +
-    /// `--disable-sandbox` must land ahead of the model override and the
-    /// prefill text in the final argv. Pin the exact `base_args` vector so a
-    /// future reorder that pushes `--disable-approval` past `--model` (or
-    /// drops either flag during layer composition) trips here, not in
-    /// production.
+    /// Issue #1705 + #1788 fresh launch, via the #2151 permission layer:
+    /// the unattended default's `--disable-approval` + `--disable-sandbox`
+    /// must land ahead of the model override and the prefill text in the
+    /// final argv. Pin the exact `base_args` vector so a future reorder
+    /// that pushes `--disable-approval` past `--model` (or drops either
+    /// flag during layer composition) trips here, not in production.
     #[test]
     fn default_prepare_fresh_launch_carries_disable_approval_with_model_and_prefill() {
         use crate::agent::capabilities::ResolvedAgentConfig;
@@ -1045,6 +1070,7 @@ mod tests {
             model: Some("claude-sonnet-4-5".to_string()),
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
@@ -1214,6 +1240,7 @@ mod tests {
             // The escape hatch itself is out of scope; the pin covers what
             // Buildmesh composes around it.
             extra_args: None,
+            permission_mode: None,
         };
         let session_id = "12345678-1234-4234-8234-123456789abc";
         let modes = [

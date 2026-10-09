@@ -48,9 +48,12 @@ fn base_flags() -> Vec<String> {
 }
 
 fn base_flags_with_sandbox(sandbox: &str) -> Vec<String> {
+    // Issue #2151: bare of approval flags — `--ask-for-approval never`
+    // moved to `permission_args` so Settings owns the choice. `--sandbox`
+    // stays here (it is the sandbox control, separate per #542/#828/#1053/
+    // #2034), as does `--dangerously-bypass-hook-trust` (hook trust, not
+    // tool approval).
     vec![
-        "--ask-for-approval".into(),
-        "never".into(),
         "--sandbox".into(),
         sandbox.into(),
         // Do not force `--no-alt-screen`: Codex's fullscreen transcript avoids
@@ -1624,11 +1627,40 @@ impl AgentProvider for CodexAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare of approval flags (`base_flags` no longer
+        // carries `--ask-for-approval never`). The effective permission
+        // mode contributes it via `permission_args` in `default_prepare`.
         SpawnRecipe {
             binary: "codex",
             base_args: base_flags(),
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Codex's own approval flag through.
+    /// Unattended keeps today's `--ask-for-approval never`. `--sandbox`
+    /// and `--dangerously-bypass-hook-trust` are not part of this choice
+    /// (sandbox control and hook trust respectively).
+    fn permission_modes(&self) -> Vec<crate::agent::capabilities::PermissionModeOption> {
+        use crate::agent::capabilities::PermissionModeOption;
+        vec![
+            PermissionModeOption::unattended(
+                "--ask-for-approval never",
+                "Approvals off (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Codex asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == crate::agent::capabilities::PERMISSION_MODE_UNATTENDED {
+            vec!["--ask-for-approval".into(), "never".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -3957,16 +3989,98 @@ trust_level = "trusted"
             .iter()
             .position(|arg| arg == "resume")
             .expect("resume subcommand");
-        let flag_at = resume
-            .base_args
+        assert_eq!(
+            resume_at, 0,
+            "expected `codex resume [OPTIONS]` then trailing id, got {:?} + {:?}",
+            resume.base_args, resume.trailing_args
+        );
+        // Issue #2151: the raw resume recipe is bare of approval flags —
+        // `--ask-for-approval never` comes from the effective permission
+        // mode in `default_prepare` (pinned by
+        // `permission_mode_changes_argv_of_next_spawn` below), never from
+        // a hidden argv.
+        assert!(
+            !resume
+                .base_args
+                .iter()
+                .any(|arg| arg == "--ask-for-approval"),
+            "raw resume recipe must carry no approval flags; got {:?}",
+            resume.base_args
+        );
+    }
+
+    /// Issue #2151 regression pin: the prepared resume argv carries the
+    /// unattended `--ask-for-approval never` (today's behavior) ahead of
+    /// the trailing session id, and prompt mode drops it.
+    #[test]
+    fn permission_mode_changes_argv_of_next_spawn() {
+        use crate::agent::capabilities::{
+            ResolvedAgentConfig, PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED,
+        };
+        use crate::agent::launch::{default_prepare, HarnessLaunchInput, SessionIdModeRef};
+        use crate::models::EnvType;
+
+        fn prepared_argv(mode: Option<&str>) -> Vec<String> {
+            let config = ResolvedAgentConfig {
+                model: None,
+                effort: None,
+                extra_args: None,
+                permission_mode: mode.map(str::to_string),
+            };
+            let input = HarnessLaunchInput {
+                platform: Platform::Windows,
+                runtime: EnvType::Windows,
+                session: SessionIdModeRef::Resume("sid-123"),
+                config: &config,
+                prefill: None,
+                sandbox: false,
+            };
+            default_prepare(&CODEX, input).recipe.base_args
+        }
+
+        // No stored value: today's unattended behavior is preserved, and
+        // the approval flag stays ahead of the trailing session id.
+        let default_argv = prepared_argv(None);
+        let approval_at = default_argv
             .iter()
             .position(|arg| arg == "--ask-for-approval")
-            .expect("approval flag");
+            .expect("default resume argv must carry --ask-for-approval");
+        assert_eq!(
+            default_argv.get(approval_at + 1).map(String::as_str),
+            Some("never"),
+            "resume argv must pair --ask-for-approval with never; got {default_argv:?}"
+        );
+        assert_eq!(
+            default_argv.first().map(String::as_str),
+            Some("resume"),
+            "resume subcommand must stay first; got {default_argv:?}"
+        );
+        // Explicit unattended: same flag.
         assert!(
-            resume_at < flag_at,
-            "expected `codex resume [OPTIONS]` then trailing id, got {:?} + {:?}",
-            resume.base_args,
-            resume.trailing_args
+            prepared_argv(Some(PERMISSION_MODE_UNATTENDED))
+                .windows(2)
+                .any(|pair| pair == ["--ask-for-approval", "never"]),
+            "unattended resume must carry --ask-for-approval never"
+        );
+        // Prompt: the approval pair is gone; sandbox + hook trust stay.
+        let prompt_argv = prepared_argv(Some(PERMISSION_MODE_PROMPT));
+        assert!(
+            !prompt_argv.iter().any(|arg| arg == "--ask-for-approval"),
+            "prompt resume must not carry --ask-for-approval; got {prompt_argv:?}"
+        );
+        assert!(
+            prompt_argv.contains(&"--sandbox".to_string()),
+            "prompt mode must not drop the sandbox control; got {prompt_argv:?}"
+        );
+        // The mode descriptor the setting UI renders stays in sync with
+        // the argv the spawn path emits.
+        let modes = CODEX.permission_modes();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].id, PERMISSION_MODE_UNATTENDED);
+        assert!(modes[0].label.contains("--ask-for-approval"));
+        assert_eq!(
+            CODEX.default_permission_mode().as_deref(),
+            Some(PERMISSION_MODE_UNATTENDED)
         );
     }
 }

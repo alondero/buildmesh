@@ -775,6 +775,46 @@ data over the network. Read
 [Agent sandboxing](../README.md#agent-sandboxing-security-experimental) before
 enabling it for untrusted prompts.
 
+## Harness permission modes
+
+Buildmesh starts the agent CLI you installed — it does not re-implement that
+CLI's approvals. Each harness decides for itself when to ask before acting,
+and Buildmesh passes the harness's own flag through unchanged. What acts is
+the agent; Buildmesh only facilitates the launch.
+
+Per harness, **Settings → Harnesses → Agent Harness defaults** offers a
+**Permission mode**: the harness's auto/unattended mode (its own flag) or
+prompt mode (launch the CLI bare so it asks the way a human-launched session
+would). The card shows the effective mode in the harness's own words, and the
+Spawn Menu shows it under each harness name. Changing the setting changes the
+arguments of the next spawn; existing meshes keep today's unattended behavior
+until you change it — unattended runs, including Autopilot Circuits, need the
+auto mode because there is nobody to answer a prompt.
+
+| Harness | Unattended flag | Prompt mode |
+|---|---|---|
+| Claude Code | `--dangerously-skip-permissions` | Asks |
+| Antigravity | `--dangerously-skip-permissions` | Asks |
+| Codex | `--ask-for-approval never` | CLI default (asks); sandbox and hook trust unchanged |
+| Cursor | `--force` | Asks |
+| OpenCode | `--auto` | Asks |
+| Command Code | `--yolo` | Asks |
+| Meta Muse | `--disable-approval --disable-sandbox` | Asks (its own OS sandbox stays on) |
+| MiniMax Code | Full Access (`permissionMode: bypassPermissions`, pinned in its config) | Not offered — always Full Access |
+| Kimi Code, Grok Code, Cline, DeepSeek Harness, Freebuff, Terminal | No permission flag | Each runs with its own defaults |
+
+Three things this is not:
+
+- **Not the sandbox.** The per-Mesh **Sandbox** toggle confines the agent
+  process at the OS level; the permission mode only controls whether the
+  harness asks first. They compose: a sandboxed agent can still run prompts
+  off, and a prompting agent can still run unsandboxed.
+- **Not the attention hooks.** The [Attention hooks Buildmesh installs on disk](#attention-hooks-buildmesh-installs-on-disk)
+  report lifecycle events back to Buildmesh; they never approve anything.
+- **Not a Buildmesh allow-list.** Nothing you pick here grants the agent
+  abilities its own CLI would refuse; it only selects which of the harness's
+  own approval postures to launch with.
+
 ## Build and Run
 
 Configure **Build command** and **Run command** in Project Settings, or choose a

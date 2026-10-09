@@ -8,13 +8,17 @@
     {
       "value": 1120000,
       "reason": "PR #2080 added the circuit Run Card's wall-clock labels and the \"What to do next\" recovery panel to the Probe entry chunk via `src/components/Probe/CircuitRunCard.tsx` and `src/components/Circuits/runIdentity.ts` (+2.3 kB minified raw). The Run History Drawer, historyPresentation, and RunNextStepsPanel code-split into `CircuitsProbeTab-*.js` so they do not count here. Bumping the raw cap by 10 kB absorbs the feature plus a small margin for future probe-include fixes; the gzip cap stays unchanged at 360 kB (the axis that governs first-paint transfer) and the entry CSS cap is unaffected."
+    },
+    {
+      "value": 1130000,
+      "reason": "Issue #2151 added the per-harness permission-mode UI to the entry chunk: the mode select plus effective-mode line in `src/components/AppSettings/HarnessDefaultsSection.tsx` and the mode line on Spawn Menu rows in `src/components/Providers/GroupedProviderMenu.tsx` (+4.8 kB minified raw, measured 1124897 B vs the 1120000 B cap). The mode labels and descriptions ride over IPC at runtime so only the controls count here. Bumping the raw cap by 10 kB absorbs the feature plus a small margin; the gzip cap stays unchanged at 360 kB (transfer axis retains ~24 kB of headroom) and the entry CSS cap is unaffected (no new styles — existing utilities only)."
     }
   ],
   "checks": [
     {
       "label": "Desktop entry JS (dist/assets/index-*.js)",
       "pattern": "index-*.js",
-      "maxRaw": 1120000,
+      "maxRaw": 1130000,
       "maxGzip": 360000
     },
     {

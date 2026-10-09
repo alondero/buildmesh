@@ -310,6 +310,14 @@ pub(crate) fn cascade_inputs_for<'a>(
             mesh: mesh_effort,
             application: app_default.and_then(|v| v.effort.as_deref()),
         },
+        // Issue #2151: only the application layer carries a permission
+        // mode today (the per-harness Settings default) — there is no
+        // per-launch or per-mesh permission slot yet.
+        permission_mode: crate::agent::capabilities::FieldInputs {
+            explicit: None,
+            mesh: None,
+            application: app_default.and_then(|v| v.permission_mode.as_deref()),
+        },
     }
 }
 
