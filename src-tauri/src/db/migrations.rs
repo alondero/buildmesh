@@ -145,7 +145,15 @@ use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
 /// v45 adds nullable `circuit_run_history.source` / `.disposition` so every
 /// causal-trace event names its provenance and what Buildmesh did with it
 /// (issue #1909 / #1847).
-pub(crate) const SCHEMA_VERSION: u32 = 46;
+///
+/// v47 — Actionable blocked worktree cleanup (issue #2139). Adds the failure
+/// bookkeeping to `pending_worktree_removals`: `attempt_count`,
+/// `last_attempt_at`, `last_operation`, `last_error`, `retry_not_before`,
+/// `notified_error` and `notified_at`. Existing rows read back as "never
+/// attempted, nothing failed, no notification sent" via the COALESCE/NULL
+/// defaults, so a queue row left by an older build behaves exactly as it did
+/// before.
+pub(crate) const SCHEMA_VERSION: u32 = 47;
 
 // ---------------------------------------------------------------------------
 // ColumnSpec — one column the runner knows how to add and read back.
@@ -810,6 +818,64 @@ const SPECS: &[ColumnSpec] = &[
         column: "lifecycle_snapshot",
         type_with_default: "TEXT",
         read_default: ReadDefault::Nullable,
+    },
+    // ============================================================
+    // pending_worktree_removals
+    // ============================================================
+    // v47 — blocked cleanup is persisted, backed off, and suppressed instead of
+    // warned about on every drain (issue #2139). `attempt_count` /
+    // `last_attempt_at` / `last_operation` / `last_error` are the evidence the
+    // UI shows; `retry_not_before` is the backoff deadline the drain honours;
+    // `notified_error` is the blocker signature the user was last told about,
+    // so an unchanged blocker warns once rather than every drain.
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "attempt_count",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "last_attempt_at",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "last_operation",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "last_error",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "retry_not_before",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "notified_error",
+        type_with_default: "TEXT",
+        read_default: ReadDefault::Nullable,
+    },
+    ColumnSpec {
+        version: 47,
+        table: "pending_worktree_removals",
+        column: "notified_at",
+        type_with_default: "INTEGER NOT NULL DEFAULT 0",
+        read_default: ReadDefault::CoalesceInt(0),
     },
     // ============================================================
     // autopilot_runs

@@ -27,6 +27,7 @@ mod session_capture;
 mod session_naming;
 mod startup;
 mod windowing;
+pub mod worktree_blockers;
 
 use tauri::Manager;
 
@@ -234,6 +235,13 @@ pub fn run() {
             commands::agent_node::get_agent_node,
             commands::agent_node::delete_agent_node,
             commands::agent_node::get_worktree_close_safety,
+            // Blocked worktree cleanup (issue #2139): the durable evidence and
+            // the actions the blocked-cleanup dialog acts on.
+            commands::agent_node::list_pending_worktree_removals,
+            commands::agent_node::retry_worktree_cleanup,
+            commands::agent_node::dismiss_worktree_cleanup,
+            commands::agent_node::diagnose_worktree_cleanup_blockers,
+            commands::agent_node::release_worktree_cleanup_blocker,
             commands::agent_node::rename_agent_node,
             commands::agent_node::update_agent_node_positions,
             commands::agent_node::regenerate_agent_node,

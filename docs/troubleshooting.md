@@ -396,6 +396,41 @@ fast-forward would overwrite.
 
 Do not reset or delete a worktree as a first response to a sync warning.
 
+## Closing a node leaves "Worktree cleanup blocked"
+
+Closing a node removes it from the UI immediately; its worktree folder is then
+removed in the background. Windows refuses to remove a folder while any process
+holds a handle inside it, so the cleanup can stay blocked. When it does, the
+**Worktree cleanup blocked** dialog opens with the node's name, the full folder
+path, the step that failed and the OS error — for example "being used by another
+process":
+
+1. **What is holding it?** lists the processes whose working directory or
+   executable sits inside that folder. Closing those folders in those programs
+   (or the programs themselves) is usually the whole fix. Explorer parked on a
+   folder is the classic case; a background dev server or a shell whose working
+   directory is inside the worktree is the next most common.
+2. **Retry** attempts the removal again immediately. It is safe to press more
+   than once: failed retries are recorded and the automatic retry backs off
+   rather than hammering the folder.
+3. **Keep worktree** stops the cleanup and keeps the folder. If a removal had
+   already moved the folder aside, Buildmesh moves it back and tells you if the
+   result was incomplete; if it could not move it back, the entry stays queued
+   and keeps retrying.
+4. **Copy diagnostics** produces one text block (node, path, failed step, OS
+   error, attempts and the processes found) for a bug report. The list refreshes
+   from the queue, so the dialog always shows what the background cleanup knows.
+
+Ending a process from that dialog is deliberate and yours: it names the process,
+it is only offered for a process that is still holding that folder, and it also
+ends the processes that one started. Buildmesh never closes an application by
+itself.
+
+If nothing is listed, the holder may be one the process-level read cannot see
+(a program that opened a file handle without a working directory in the tree).
+Copy the diagnostics and retry after closing the programs you have open on that
+folder.
+
 ## Cloning a repository fails
 
 **Clone from GitHub** in the New Mesh dialog runs a plain `git clone` with your

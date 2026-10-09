@@ -133,6 +133,56 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// A spawned test child that is killed *and reaped* when it goes out of
+    /// scope.
+    ///
+    /// Issue #2139's audit: a test that spawns a pinning child (a shell with its
+    /// working directory inside a worktree, holding an inherited stdout handle)
+    /// and then asserts something that fails leaks that child. On Windows the
+    /// directory stays pinned for the child's whole natural lifetime — the next
+    /// test's `TestDir` drop then fails, and a Windows instance accumulates
+    /// exactly the stray "sleeper" processes issue #2139 was called about.
+    /// Killing in a `Drop` guard means a failing assertion cannot become a
+    /// leaked folder handle.
+    ///
+    /// `wait()` matters as much as `kill()`: an unreaped child keeps its handle
+    /// table (and therefore its directory handles) alive until it exits, so the
+    /// guard reaps before it reports the directory free again.
+    pub(crate) struct ScopedChild(std::process::Child);
+
+    impl ScopedChild {
+        /// Spawn `command` and own its lifetime.
+        pub(crate) fn spawn(mut command: std::process::Command) -> Self {
+            let child = command
+                .spawn()
+                .expect("spawning the test's child process must succeed");
+            Self(child)
+        }
+
+        /// The child's pid, for process-table assertions.
+        pub(crate) fn id(&self) -> u32 {
+            self.0.id()
+        }
+
+        /// Reap the child now instead of at the end of the test.
+        ///
+        /// A test that kills the child itself (the "removal succeeds once the
+        /// pinning process is gone" shape) wants the handle released before the
+        /// assertion, and on Windows a terminated-but-unreaped process keeps its
+        /// handle table alive — the directory stays pinned for the length of
+        /// the wait.
+        pub(crate) fn reap(&mut self) {
+            let _ = self.0.wait();
+        }
+    }
+
+    impl Drop for ScopedChild {
+        fn drop(&mut self) {
+            crate::process_util::kill_process_tree(self.0.id());
+            let _ = self.0.wait();
+        }
+    }
+
     /// Init a repo with one initial commit containing the given files.
     /// `path` is expected to exist (callers pass a `TestDir`).
     pub(crate) fn init_repo_with_commit(path: &Path, files: &[(&str, &str)]) -> git2::Repository {

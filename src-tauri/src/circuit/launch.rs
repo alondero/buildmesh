@@ -20,9 +20,13 @@
 //! marker never appears (unexpected dialog, provider without echo), the
 //! watcher gives up after [`WATCH_TIMEOUT`] with a warning — the node is
 //! left for the human, never blind-driven.
+//!
+//! The echo is matched on the end of the prefill the composer keeps in view,
+//! not always its start — see [`marker_hint_for_prefill`].
 
-use std::time::{Duration, Instant};
+use super::delivery::{TAIL_ANCHOR_CHARS, VISIBLE_PASTE_TEXT_LIMIT};
 use super::evaluator;
+use std::time::{Duration, Instant};
 
 /// Output must be quiet this long (after the marker appears) before Enter.
 pub(crate) const MIN_QUIET_MS: u128 = 1_500;
@@ -80,25 +84,58 @@ pub(crate) fn normalize_for_match(s: &str) -> String {
 /// user-authored prompt, so the launch watcher silently timed out after
 /// [`WATCH_TIMEOUT`] without submitting the prefill).
 ///
-/// Strategy: take the first ≤[`MAX_MARKER_CHARS_NORMALIZED`] characters of
-/// the *normalized* prefill, gated by [`MIN_MARKER_CHARS_DISTINCTIVE`].
+/// Strategy: confirm the *normalized* prefill against the harness's drawn
+/// input box, gated by [`MIN_MARKER_CHARS_DISTINCTIVE`].
 /// `normalize_for_match` strips the TUI's box-drawing characters and
-/// whitespace, so the leading fragment survives any line wrap the input
-/// box does. The fragment is by construction a substring of the normalized
-/// prefill, so the watcher's `ready_to_submit` finds it the moment the
-/// harness draws the input box. A prefill that normalizes below the
-/// distinctiveness threshold returns an empty marker; the empty-marker
-/// guard in `ready_to_submit` then defers to the [`WATCH_TIMEOUT`]
-/// warning rather than firing Enter blind.
+/// whitespace, so the fragment survives any line wrap the input box does. A
+/// prefill that normalizes below the distinctiveness threshold returns an
+/// empty marker; the empty-marker guard in `ready_to_submit` then defers to
+/// the [`WATCH_TIMEOUT`] warning rather than firing Enter blind.
+///
+/// # Which end of the prefill confirms readiness
+///
+/// A prefill the composer draws in full is confirmed by its head: a fragment of
+/// ≤[`MAX_MARKER_CHARS_NORMALIZED`] characters, distinctive against boot chrome
+/// yet short enough to survive any wrap. A prefill longer than the input box
+/// scrolls — the harness keeps the text nearest the cursor in view and the head
+/// leaves the frame — so it is confirmed by its [`TAIL_ANCHOR_CHARS`]-character
+/// tail instead. See the section below.
+///
+/// The marker is by construction a substring of the normalized prefill, so the
+/// watcher's `ready_to_submit` matches the moment the harness draws the
+/// corresponding span.
+///
+/// # Long prefills anchor on their tail, not their head
+///
+/// The leading fragment is only *drawn* while the composer shows the start of
+/// the staged text. A harness input box scrolls, so once a prefill is longer
+/// than the box it keeps the text nearest the cursor — its tail — in view and
+/// scrolls the head out of frame. Head-anchoring such a prefill waits for a
+/// marker the harness will never draw, so the watcher burns [`WATCH_TIMEOUT`]
+/// and leaves a staged prompt unsubmitted.
+///
+/// `circuit::delivery` applies the same span to PTY pastes for the same reason
+/// (issue #2061/#2108). The two paths share the constants, not the policy: the
+/// paste path gates on each adapter's declared policy, so this span is consulted
+/// only by an adapter declaring a rendered gate that takes a tail anchor; a
+/// rendered-gate adapter confirms a long draft against that evidence, while an
+/// adapter on the generic path collects no paste evidence and submits on timing.
+/// The prefill path has no adapter-declared policy, so every prefill past the
+/// limit anchors on its tail.
 pub(crate) fn marker_hint_for_prefill(prefill: &str) -> String {
     let normalized = normalize_for_match(prefill);
-    if normalized.chars().count() < MIN_MARKER_CHARS_DISTINCTIVE {
+    let chars = normalized.chars().count();
+    if chars < MIN_MARKER_CHARS_DISTINCTIVE {
         return String::new();
     }
-    normalized
-        .chars()
-        .take(MAX_MARKER_CHARS_NORMALIZED)
-        .collect()
+    if chars <= VISIBLE_PASTE_TEXT_LIMIT {
+        return normalized
+            .chars()
+            .take(MAX_MARKER_CHARS_NORMALIZED)
+            .collect();
+    }
+    let skip = chars - TAIL_ANCHOR_CHARS;
+    normalized.chars().skip(skip).collect()
 }
 
 /// Pure readiness decision: the (normalized) marker is on screen and output
@@ -135,6 +172,8 @@ pub(crate) fn watch_and_submit_for_circuit(_app: tauri::AppHandle, node_id: i64,
         // re-normalize here (idempotent but a needless pass over the
         // string each tick). The tail is normalized inside the poll
         // loop because it's a fresh evaluator read every iteration.
+        // The marker is the span the composer keeps in view — the head
+        // of a short draft, the tail of one long enough to scroll.
         let marker = marker_hint_for_prefill(&prefill);
         let deadline = Instant::now() + WATCH_TIMEOUT;
         loop {
@@ -224,18 +263,17 @@ mod tests {
         // `initial_prompt()`); the loop prefill is taken verbatim, just
         // like `SpawnIntent::Loop`. Routing through the source of truth
         // keeps the marker test honest if anyone changes the wording.
-        let issue_prefill = crate::agent::spawn::SpawnIntent::Issue(
-            crate::agent::spawn::IssueContext {
+        let issue_prefill =
+            crate::agent::spawn::SpawnIntent::Issue(crate::agent::spawn::IssueContext {
                 owner: "alondero".into(),
                 repo: "buildmesh".into(),
                 number: 358,
                 title: "Fix the login flow".into(),
                 template: None,
-            },
-        )
-        .initial_prompt()
-        .expect("issue intent always has a prompt")
-        .into_string();
+            })
+            .initial_prompt()
+            .expect("issue intent always has a prompt")
+            .into_string();
         for prefill in [
             issue_prefill,
             "Iterate on the failing test cases".to_string(),
@@ -256,16 +294,81 @@ mod tests {
         }
     }
 
-    /// `word ` × 100 → 400 alphanumerics → cap at MAX_MARKER_CHARS_NORMALIZED.
-    /// The constant name is asserted (not just `30`) so a future tuning
-    /// of the cap is forced to update both the helper and the pin in
-    /// one review.
+    /// A prompt the composer draws whole keeps the head anchor, capped at
+    /// MAX_MARKER_CHARS_NORMALIZED. The constant name is asserted (not just
+    /// `30`) so a future tuning of the cap is forced to update both the
+    /// helper and the pin in one review.
     #[test]
-    fn marker_hint_for_prefill_truncates_a_long_prefill_to_max_marker_chars() {
-        let long = "word ".repeat(100);
-        let marker = marker_hint_for_prefill(&long);
+    fn marker_hint_for_prefill_caps_a_visible_prefill_at_max_marker_chars() {
+        let visible = "word ".repeat(20);
+        assert!(
+            normalize_for_match(&visible).chars().count() <= VISIBLE_PASTE_TEXT_LIMIT,
+            "fixture precondition: this prefill is drawn inline, so its head is on screen"
+        );
+        let marker = marker_hint_for_prefill(&visible);
         assert_eq!(marker.chars().count(), MAX_MARKER_CHARS_NORMALIZED);
-        assert!(marker.chars().all(|c| c == 'w' || c == 'o' || c == 'r' || c == 'd'));
+        assert!(marker
+            .chars()
+            .all(|c| c == 'w' || c == 'o' || c == 'r' || c == 'd'));
+    }
+
+    /// A prefill longer than the composer can draw scrolls: the head leaves
+    /// the frame and only the tail stays visible. The marker must therefore
+    /// come from the tail, or the watcher waits out `WATCH_TIMEOUT` for a
+    /// marker the harness never paints.
+    #[test]
+    fn marker_hint_for_prefill_anchors_on_the_tail_of_a_long_prefill() {
+        let long = "word ".repeat(100);
+        let normalized = normalize_for_match(&long);
+        assert!(
+            normalized.chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
+            "fixture precondition: this prefill scrolls its head out of the input box"
+        );
+        let marker = marker_hint_for_prefill(&long);
+        assert_eq!(marker.chars().count(), TAIL_ANCHOR_CHARS);
+        // Drawn from the end, not the start.
+        assert_eq!(
+            marker,
+            normalized
+                .chars()
+                .skip(normalized.chars().count() - TAIL_ANCHOR_CHARS)
+                .collect::<String>(),
+        );
+    }
+
+    /// The regression itself, pinned to a real prompt rather than a synthetic
+    /// string: the Circuit PR reviewer prompt is ~1.5 KB, well past the limit,
+    /// so a head-anchored watcher waits for a marker the harness scrolls out of
+    /// its input box. Its marker must be the tail, and that tail must be
+    /// reachable in a tail-only echo of the drawn input box.
+    #[test]
+    fn circuit_reviewer_prefill_marker_survives_a_scrolled_input_box() {
+        let reviewer = crate::circuit::model::CircuitGraph::pr_review_prompt();
+        let normalized = normalize_for_match(&reviewer);
+        assert!(
+            normalized.chars().count() > VISIBLE_PASTE_TEXT_LIMIT,
+            "fixture precondition: the reviewer prompt scrolls ({} normalized chars)",
+            normalized.chars().count(),
+        );
+        let marker = marker_hint_for_prefill(&reviewer);
+        assert_eq!(marker.chars().count(), TAIL_ANCHOR_CHARS);
+        // What a scrolled composer actually draws: the tail of the staged
+        // prompt, wrapped and framed by the input box, with its head scrolled
+        // out of frame. The head-anchored marker is absent from that frame.
+        let visible_tail = format!(
+            "╭─╮\n│ {} │\n╰─╯",
+            &normalized[normalized.chars().count() - TAIL_ANCHOR_CHARS..]
+        );
+        let head_marker = &normalized[..MAX_MARKER_CHARS_NORMALIZED];
+        assert!(
+            !normalize_for_match(&visible_tail).contains(head_marker),
+            "a scrolled input box must not contain the head fragment the old marker waited for",
+        );
+        assert!(ready_to_submit(
+            &normalize_for_match(&visible_tail),
+            &marker,
+            MIN_QUIET_MS
+        ));
     }
 
     // Short prompts like `"claude"`, `"grok"`, or `"minimax"` survive

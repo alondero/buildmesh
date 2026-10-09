@@ -538,8 +538,12 @@ correct or safe by itself:
 - A node's Build and Run utilities can run in the node worktree; root commands
   can be configured separately in Project Settings.
 - Closing a node removes it from the UI first and cleans its worktree in the
-  background. A cleanup warning means the directory may still exist; do not
-  recreate or manually delete it until you have checked the warning.
+  background. If the directory cannot be removed — most often because another
+  app is holding a folder open — a **Worktree cleanup blocked** dialog opens.
+  It names the node, the full folder path and the step that failed, and offers
+  the recovery: copy the path or the diagnostics, see which processes may be
+  holding the folder, retry now, or keep the worktree and stop the cleanup.
+  Buildmesh keeps retrying in the background while the entry is queued.
 - The Mesh may sync from its configured upstream before a new node is created.
   A sync warning does not silently discard the local worktree; inspect the
   Mesh health and Git status before retrying.
