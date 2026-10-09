@@ -105,8 +105,24 @@ fn highlight_content(content: &str, path: &str) -> String {
 
     let theme = &THEME_SET.themes["base16-ocean.dark"];
 
-    highlighted_html_for_string(content, &SYNTAX_SET, syntax, theme)
-        .unwrap_or_else(|_| content.to_string())
+    highlighted_or_escape(
+        content,
+        highlighted_html_for_string(content, &SYNTAX_SET, syntax, theme),
+    )
+}
+
+/// Resolve a whole-string highlight result, rendering the file text as text
+/// when syntect failed.
+///
+/// `old_highlighted` / `new_highlighted` are server-generated HTML on the
+/// `DiffHunk` wire type, consumed by a diff view that injects sibling
+/// highlight fields with `dangerouslySetInnerHTML` under a `null` CSP (#830).
+/// So this arm must escape: returning raw file contents turns markup in any
+/// opened file into live script. The success arm is safe alone — syntect
+/// escapes its own output — which is why only the error arm needs escaping.
+/// Same helper as the per-line fallback (#2152).
+fn highlighted_or_escape(content: &str, highlighted: Result<String, syntect::Error>) -> String {
+    highlighted.unwrap_or_else(|_| html_escape(content))
 }
 
 /// Minimal HTML escape for the highlighting fallback path, so a line we
@@ -1027,6 +1043,52 @@ mod tests {
     fn highlight_content_handles_unknown_extension() {
         let result = highlight_content("random text", "file.xyz123");
         assert!(result.contains("random text"));
+    }
+
+    /// Issue #2152: when syntect fails, `highlight_content` used to hand the raw
+    /// file contents back as HTML. The diff view injects these highlight fields
+    /// with `dangerouslySetInnerHTML` under a `null` CSP (#830), so markup in a
+    /// file became live script. Forcing the error arm is the only way to reach it
+    /// — a real syntect failure needs a corrupt syntax set or theme.
+    #[test]
+    fn highlight_content_failure_fallback_escapes_file_text() {
+        let forced: Result<String, syntect::Error> =
+            Err(syntect::Error::LoadingError(syntect::LoadingError::BadPath));
+        let result = highlighted_or_escape("<script>alert(1)</script>\n", forced);
+
+        assert!(
+            !result.contains('<'),
+            "a highlighting failure must not emit raw markup, got: {result}"
+        );
+        assert_eq!(result, "&lt;script&gt;alert(1)&lt;/script&gt;\n");
+    }
+
+    /// The escaped fallback renders identically to the per-line path's, so
+    /// markup stays inert whether or not the whole-string highlight succeeded.
+    #[test]
+    fn highlight_content_failure_fallback_matches_line_escape() {
+        let forced: Result<String, syntect::Error> =
+            Err(syntect::Error::LoadingError(syntect::LoadingError::BadPath));
+        let content = "if a < b && c > d { \"<b>\" }";
+
+        assert_eq!(highlighted_or_escape(content, forced), html_escape(content));
+    }
+
+    /// Guards the success arm too: syntect escapes the source text itself, so a
+    /// normal highlight must not carry a raw tag either. This is why only the
+    /// error arm needed the fix.
+    #[test]
+    fn highlight_content_success_path_leaves_markup_escaped_by_syntect() {
+        let result = highlight_content("<script>alert(1)</script>\n", "attack.html");
+
+        assert!(
+            !result.contains("<script"),
+            "syntect's own HTML must not carry a raw <script tag, got: {result}"
+        );
+        assert!(
+            result.contains("<span"),
+            "expected the escaped source text inside syntect's markup, got: {result}"
+        );
     }
 
     /// Per-test fixture: a unique temp directory under `%TEMP%` for
