@@ -13,6 +13,14 @@ without one, for the canonical scope-selected gate and durable receipt. Read
 current acceptance/review evidence and `finish`. Reuse unchanged passing gates;
 do not replace a failed full check with a successful subset.
 
+During independent-review repairs, follow
+[Review and repair](../../../docs/agents/development-harness.md#review-and-repair):
+batch fixes, run fast checks plus affected behavioral regressions, and expand
+checks when the repair changes shared contracts or runtime boundaries. A fresh
+full verify is not a prerequisite for each follow-up review. Run scope-complete
+`npm run verify` for the stable candidate before handoff, then record acceptance
+evidence and independent approval of that same final tree.
+
 ## Tiers
 
 Default to standard; narrow to affected layers for documentation-only or frontend-only changes and state the scope.
