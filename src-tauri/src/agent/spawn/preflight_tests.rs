@@ -1,10 +1,11 @@
 //! Tests for the provider-binary preflight (issue #823).
 //!
-//! The decision is exercised through `check_spawn_binary`, whose filesystem
-//! probe is injected, so both branches are covered without depending on what
-//! is installed on the machine running the suite.
+//! The filesystem probe is injected, so both branches are covered without
+//! depending on what is installed on the machine running the suite — and
+//! without encoding a platform assumption, which is what broke the non-Windows
+//! CI run on the first draft of this PR.
 
-use super::preflight::{check_spawn_binary, Preflight};
+use super::preflight::{check_spawn_binary, ensure_spawn_binary_with, Preflight};
 use crate::agent::launch_routing::PreparedLaunchRouting;
 use crate::models::EnvType;
 use crate::models::Provider;
@@ -30,6 +31,7 @@ fn resolved_override_launches() {
     let preflight = check_spawn_binary(
         Provider::Anthropic,
         Some(Path::new(r"C:\npm\claude.cmd")),
+        "claude",
         &|_path| true,
         &no_stem,
     );
@@ -41,6 +43,7 @@ fn stale_override_reports_the_missing_file() {
     let preflight = check_spawn_binary(
         Provider::Anthropic,
         Some(Path::new(r"C:\npm\claude.cmd")),
+        "claude",
         &no_file,
         &no_stem,
     );
@@ -66,6 +69,7 @@ fn stale_override_is_reported_even_when_the_stem_resolves() {
     let preflight = check_spawn_binary(
         Provider::Anthropic,
         Some(Path::new("/gone/claude")),
+        "claude",
         &no_file,
         &|_stem| Some(PathBuf::from("/somewhere/else/claude")),
     );
@@ -73,9 +77,33 @@ fn stale_override_is_reported_even_when_the_stem_resolves() {
     assert!(message.contains("/gone/claude"), "{message}");
 }
 
+/// `check_spawn_binary` must resolve exactly the stem its caller handed it —
+/// the derivation is the caller's job, and a mismatch here would mean the
+/// preflight validated a different program than the spawn dispatches.
+#[test]
+fn check_resolves_the_stem_it_is_given() {
+    let probed = std::cell::RefCell::new(String::new());
+    let verdict = check_spawn_binary(
+        Provider::Anthropic,
+        None,
+        "sentinel-cli-no-install-produces-this",
+        &no_file,
+        &|stem| {
+            *probed.borrow_mut() = stem.to_string();
+            None
+        },
+    );
+    assert_eq!(*probed.borrow(), "sentinel-cli-no-install-produces-this");
+    let message = missing_message(verdict);
+    assert!(
+        message.contains("sentinel-cli-no-install-produces-this"),
+        "the miss must name the stem that was probed: {message}"
+    );
+}
+
 #[test]
 fn bare_stem_resolving_through_the_enriched_path_launches() {
-    let preflight = check_spawn_binary(Provider::Anthropic, None, &no_file, &|_stem| {
+    let preflight = check_spawn_binary(Provider::Anthropic, None, "claude", &no_file, &|_stem| {
         Some(PathBuf::from("/opt/homebrew/bin/claude"))
     });
     assert!(matches!(preflight, Preflight::Ready));
@@ -83,7 +111,7 @@ fn bare_stem_resolving_through_the_enriched_path_launches() {
 
 #[test]
 fn unresolvable_bare_stem_names_the_missing_command() {
-    let preflight = check_spawn_binary(Provider::Anthropic, None, &no_file, &no_stem);
+    let preflight = check_spawn_binary(Provider::Anthropic, None, "claude", &no_file, &no_stem);
     let message = missing_message(preflight);
     assert!(
         message.contains('`') && message.contains("command wasn't found"),
@@ -97,22 +125,60 @@ fn unresolvable_bare_stem_names_the_missing_command() {
 
 /// Each adapter's own stem is the one probed, so a harness with a non-obvious
 /// binary name reports its real name rather than a generic "agent".
+///
+/// The expected stems are **derived from the adapters, not hardcoded**: the
+/// recipe binary is platform-dependent (Claude Code is `claude.exe` on Windows
+/// and `claude` everywhere else), so a literal table made this test fail on the
+/// Linux and macOS CI runners. Deriving them keeps the assertion meaningful —
+/// it still fails if `ensure_spawn_binary` probes some other name — without
+/// encoding a platform assumption. `host_native_env_type` is
+/// `EnvType::Windows` on a Windows host, which is what `recipe_binary_for`
+/// maps onto `Platform::current()`.
 #[test]
 fn the_probed_stem_is_the_adapter_recipe_binary() {
-    for (provider, stem) in [
-        (Provider::Anthropic, "claude.exe"),
-        (Provider::Codex, "codex"),
-        (Provider::OpenCode, "opencode"),
-        (Provider::Cline, "cline"),
-        (Provider::Kimi, "kimi"),
+    for provider in [
+        Provider::Anthropic,
+        Provider::Codex,
+        Provider::OpenCode,
+        Provider::Cline,
+        Provider::Kimi,
     ] {
+        let expected = crate::agent::launch_routing::recipe_binary_for(provider, EnvType::Windows);
         let probed = std::cell::RefCell::new(String::new());
-        let _ = check_spawn_binary(provider, None, &no_file, &|stem| {
-            *probed.borrow_mut() = stem.to_string();
-            None
-        });
-        assert_eq!(*probed.borrow(), stem, "wrong stem probed for {provider:?}");
+        let _ = ensure_spawn_binary_with(
+            provider,
+            EnvType::Windows,
+            &PreparedLaunchRouting::Native { executable: None },
+            &no_file,
+            &|stem| {
+                *probed.borrow_mut() = stem.to_string();
+                None
+            },
+        );
+        assert_eq!(
+            *probed.borrow(),
+            expected,
+            "wrong stem probed for {provider:?}"
+        );
     }
+}
+
+/// Guards the platform variance that broke the Linux CI run: Claude Code's
+/// recipe binary carries the `.exe` suffix only on Windows, so the stem this
+/// module probes genuinely differs per platform. A literal stem table is what
+/// made the suite fail on `ubuntu-latest` (review finding 1 on PR #2160).
+#[test]
+fn the_anthropic_stem_carries_the_exe_suffix_only_on_windows() {
+    let stem =
+        crate::agent::launch_routing::recipe_binary_for(Provider::Anthropic, EnvType::Windows);
+    assert_eq!(
+        stem,
+        if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        }
+    );
 }
 
 #[test]
@@ -214,14 +280,17 @@ fn guest_mesh_runtimes_are_exempt() {
     }
 }
 
-/// The host-native mesh spawn is the one the preflight actually guards: with
-/// nothing resolvable it must refuse before the PTY opens.
+/// A host-native routing whose resolved override no longer exists on disk must
+/// refuse before the PTY opens.
+///
+/// This exercises the **override** branch through the real entry point: the
+/// routing carries an absolute path, so `wrap` would dispatch that exact file.
+/// (Review finding 3 on PR #2160: this test previously carried a comment
+/// claiming it covered the unresolvable bare-stem search, which it never
+/// reached. The bare-stem branch is covered by
+/// `host_native_unresolvable_bare_stem_refuses_the_spawn` below.)
 #[test]
-fn host_native_miss_refuses_the_spawn() {
-    // A harness the host genuinely cannot resolve. `Terminal` is excluded,
-    // and every other adapter's real stem is what `resolve_spawn_binary`
-    // searches for; using a stem no install produces keeps the assertion
-    // independent of what is on the machine running the suite.
+fn host_native_missing_override_path_refuses_the_spawn() {
     let routing = PreparedLaunchRouting::Native {
         executable: Some(PathBuf::from(r"C:\definitely\not\here\missing-cli.exe")),
     };
@@ -229,6 +298,47 @@ fn host_native_miss_refuses_the_spawn() {
         super::preflight::ensure_spawn_binary(Provider::Codex, EnvType::Windows, &routing),
         Preflight::Missing(_)
     ));
+}
+
+/// The other host-native branch: no override at all, so `wrap` falls back to
+/// the bare recipe stem and the enriched search cannot find it.
+///
+/// Driving this through `ensure_spawn_binary_with` with an injected resolver is
+/// what makes it a real test — depending on the machine's installed CLIs (or on
+/// a stem literal) is exactly what made the previous version of this file fail
+/// on non-Windows CI.
+#[test]
+fn host_native_unresolvable_bare_stem_refuses_the_spawn() {
+    let verdict = ensure_spawn_binary_with(
+        Provider::Anthropic,
+        EnvType::Windows,
+        &PreparedLaunchRouting::Native { executable: None },
+        &no_file,
+        &no_stem,
+    );
+    let message = missing_message(verdict);
+    assert!(
+        message.contains("command wasn't found"),
+        "the bare-stem miss must name the missing command: {message}"
+    );
+    assert!(
+        message.contains("Anthropic (Claude)"),
+        "the message must name the harness the user clicked: {message}"
+    );
+}
+
+/// The bare stem resolving through the enriched search must NOT block the
+/// spawn — the preflight only rejects what a shell lookup would also miss.
+#[test]
+fn host_native_resolvable_bare_stem_lets_the_spawn_proceed() {
+    let verdict = ensure_spawn_binary_with(
+        Provider::Anthropic,
+        EnvType::Windows,
+        &PreparedLaunchRouting::Native { executable: None },
+        &no_file,
+        &|_stem| Some(PathBuf::from("/opt/homebrew/bin/claude")),
+    );
+    assert!(matches!(verdict, Preflight::Ready));
 }
 
 fn codex_verification_descriptor() -> crate::agent::provider::compatibility::EndpointModelDescriptor

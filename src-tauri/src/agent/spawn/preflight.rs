@@ -66,6 +66,28 @@ pub(super) fn ensure_spawn_binary(
     host_env_type: EnvType,
     routing: &PreparedLaunchRouting,
 ) -> Preflight {
+    ensure_spawn_binary_with(
+        provider,
+        host_env_type,
+        routing,
+        &|path| path.is_file(),
+        &|stem| crate::agent::detection::resolve_spawn_binary(stem),
+    )
+}
+
+/// The decision, with the filesystem probe injected so the unit tests can
+/// exercise both branches without touching a real disk or the real `PATH`.
+///
+/// Split from [`ensure_spawn_binary`] so a test can force the bare-stem
+/// branch (no override, unresolvable stem) on any machine, whatever CLIs it
+/// happens to have installed.
+pub(super) fn ensure_spawn_binary_with(
+    provider: Provider,
+    host_env_type: EnvType,
+    routing: &PreparedLaunchRouting,
+    is_file: &dyn Fn(&Path) -> bool,
+    resolve_stem: &dyn Fn(&str) -> Option<std::path::PathBuf>,
+) -> Preflight {
     // A plain shell is not something a user installs. Checking it would only
     // ever produce an unactionable message.
     if provider == Provider::Terminal {
@@ -79,19 +101,29 @@ pub(super) fn ensure_spawn_binary(
         return Preflight::Ready;
     }
 
+    // The stem must come from the *resolved* runtime, not a hardcoded variant:
+    // `recipe_binary_for` maps the runtime onto a `Platform`, so passing a
+    // guessed `EnvType::Windows` here would silently pick the wrong binary if
+    // the runtime taxonomy ever gains a variant that does not map to
+    // `Platform::current()`.
     check_spawn_binary(
         provider,
         routing.executable_override(),
-        &|path| path.is_file(),
-        &|stem| crate::agent::detection::resolve_spawn_binary(stem),
+        crate::agent::launch_routing::recipe_binary_for(provider, env_type),
+        is_file,
+        resolve_stem,
     )
 }
 
-/// The decision, with the filesystem probe injected so the unit tests can
-/// exercise both branches without touching a real disk or the real `PATH`.
+/// Whether the executable `wrap` will dispatch exists, given the override (if
+/// the routing resolved one) and the bare stem it would otherwise fall back to.
+///
+/// Both filesystem operations are injected so the unit tests can exercise
+/// each branch without a real disk or the real `PATH`.
 pub(super) fn check_spawn_binary(
     provider: Provider,
     executable_override: Option<&Path>,
+    stem: &str,
     is_file: &dyn Fn(&Path) -> bool,
     resolve_stem: &dyn Fn(&str) -> Option<std::path::PathBuf>,
 ) -> Preflight {
@@ -108,9 +140,8 @@ pub(super) fn check_spawn_binary(
     }
 
     // No override: `wrap` falls back to the bare recipe stem and lets the
-    // shell search for it. Resolve the same stem through the enriched search
-    // to learn whether that lookup would succeed.
-    let stem = crate::agent::launch_routing::recipe_binary_for(provider, EnvType::Windows);
+    // shell search for it. Resolve that same stem through the enriched search
+    // to learn whether the lookup would succeed.
     if resolve_stem(stem).is_some() {
         Preflight::Ready
     } else {

@@ -73,6 +73,8 @@ Two exemptions are load-bearing, both cases where host-side probing would be wro
 
 `PreparedLaunchRouting::pinned_runtime()` is how the check learns the runtime when the routing pins one itself: `CodexProxy` selects its npm-shim install during prepare, so its binary must be checked on *that* runtime rather than the one the mesh path implies. `Native` / `Environment` return `None` and inherit the mesh path's runtime — they must not pin one, or a WSL mesh would silently exempt every harness. When adding a routing variant that resolves its own runtime, return it here or the preflight will check the wrong filesystem.
 
+The stem comes from `recipe_binary_for(provider, env_type)` using the **resolved** runtime, never a hardcoded `EnvType` variant: that function maps a runtime onto a `Platform`, and the mapping is platform-dependent (Claude Code's recipe binary is `claude.exe` on Windows and `claude` on macOS/Linux). `ensure_spawn_binary_with` takes the resolver as an argument so tests can force the bare-stem branch without depending on which CLIs the runner has — a test that hardcoded `claude.exe` failed the Linux and macOS CI runners on the first draft of this change (#2160 review). Keep preflight tests off literal stem tables; derive the expectation from `recipe_binary_for` and assert the platform variance separately with `cfg!`.
+
 ### ProcessRegistry — Runtime State
 Agent state lives in a **static** `ProcessRegistry`: `HashMap<i64, Arc<AgentProcess>>` using `once_cell::sync::Lazy`. The DB is **not** the source of truth for running agents — it's only used for `cli_session_id` persistence across restarts.
 
