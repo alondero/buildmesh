@@ -41,8 +41,9 @@ pub(crate) const VISIBLE_PASTE_TEXT_LIMIT: usize = 256;
 /// tail of the staged text in view, so this span is how a long draft is
 /// confirmed. The two paths share the cutoff and the width, not the policy —
 /// this constant applies only to an adapter that declares a rendered gate
-/// taking a tail anchor (`Generic` collects no text proof at all), while the
-/// prefill path has no adapter-declared policy and always applies it.
+/// taking a tail anchor (`Generic` collects no paste evidence at all and
+/// submits on timing), while the prefill path has no adapter-declared policy
+/// and always applies it.
 pub(crate) const TAIL_ANCHOR_CHARS: usize = 64;
 /// Bound ambiguous reconstruction per output snapshot. Exhaustion leaves the
 /// paste unconfirmed; it never authorizes Enter or extends the readiness budget.
