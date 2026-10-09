@@ -552,15 +552,28 @@ pub(super) fn has_unconsumed_classifier_evidence(view: &RunView, node_id: &str) 
                 // observed in `evaluated_evidence_owner`. That report has been
                 // judged and rejected, so treating it as unconsumed made an
                 // unchanged parked report re-classify on every observation tick.
-                // A different owner — a new native turn or agent — still counts
-                // as unconsumed evidence.
+                //
+                // A refused verdict is only valid for the blocker state that
+                // refused it. Acceptance also reads live state — open owned
+                // work, lifecycle blockers, evidence conflicts — which moves
+                // neither the revision nor the owner, so that state is keyed
+                // separately and re-admits the gate when it changes.
+                let observed_owner_suppressed = view
+                    .context
+                    .get(&format!("node.{node_id}.evaluated_evidence_owner"))
+                    == encoded.as_deref();
+                let blocker = view
+                    .report_blocker(node_id)
+                    .and_then(|blocker| serde_json::to_string(&blocker).ok())
+                    .unwrap_or_default();
+                let blocker_matches = view
+                    .context
+                    .get(&format!("node.{node_id}.evaluated_evidence_blocker"))
+                    .map_or(true, |recorded| recorded == blocker);
                 view.context
                     .get(&format!("node.{node_id}.classified_evidence_owner"))
                     != encoded.as_deref()
-                    && view
-                        .context
-                        .get(&format!("node.{node_id}.evaluated_evidence_owner"))
-                        != encoded.as_deref()
+                    && (!observed_owner_suppressed || !blocker_matches)
             })
     })
 }

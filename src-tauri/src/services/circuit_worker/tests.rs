@@ -2811,11 +2811,76 @@ fn view_with_outstanding_lineage_work() -> RunView {
     view
 }
 
+/// Regression guard (PR review of #2138): a gate parked because owned work was
+/// open must recover when that work finishes, even though the report text and
+/// the evidence owner are unchanged. The refusal depends on `report_blocker`
+/// (open children, lifecycle blockers, evidence conflicts), none of which are
+/// part of the report revision or the evidence owner — so a dedupe key built
+/// from those two alone hides the clearing of the blocker forever.
+#[test]
+fn parked_gate_rejudges_when_the_blocking_work_completes() {
+    use crate::circuit::observation::WorkEvidence;
+    let mut view = view_with_outstanding_lineage_work();
+    let report = "Published the PR but the push could not complete.";
+    advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified,
+        "open owned work refuses the binding and parks the gate"
+    );
+    // The child completes. Report text and evidence owner are untouched.
+    let settled = WorkEvidence::default();
+    view.context.set(
+        "node.implementer.evidence.1",
+        serde_json::to_string(&settled).unwrap(),
+    );
+    assert!(
+        view.report_blocker("finish_classifier").is_none(),
+        "the blocker has cleared"
+    );
+    assert!(
+        should_classify_report(
+            &view,
+            "finish_classifier",
+            SessionStatus::AwaitingInput,
+            report,
+            None
+        ),
+        "a cleared blocker must re-admit the parked gate, or it stays Unverified \
+         until the agent writes a new report or someone presses Recheck"
+    );
+    // And the stepper must actually accept the verdict now the blocker is gone.
+    let reopened = advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Continue),
+            output: Some(report.into()),
+        },
+    );
+    assert_ne!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified,
+        "the stepper re-checks what the worker hands it, so the gate recovers: {:?}",
+        reopened.step_writes
+    );
+}
+
 /// Issue #2138: a gate parked Unverified on an unbindable report recorded an
 /// identical classification on every ~10s observation tick, because neither
 /// `evaluated_report_revision` nor `classified_evidence_owner` was stamped when
 /// the classification was refused. `should_classify_report` therefore read the
 /// unchanged report as never judged and re-classified forever.
+/// Fails on the pre-fix code, which re-admits the unchanged report.
 #[test]
 fn parked_unverified_gate_is_not_reclassified_on_an_unchanged_report() {
     let mut view = view_with_outstanding_lineage_work();
@@ -2852,6 +2917,8 @@ fn parked_unverified_gate_is_not_reclassified_on_an_unchanged_report() {
 
 /// The suppression is scoped to the *unchanged* report: fresh evidence — a new
 /// revision, or the same text from a new native turn — still re-classifies.
+/// This passes on the pre-fix code too; it guards the fix from over-suppressing
+/// rather than reproducing the original defect.
 #[test]
 fn parked_unverified_gate_reclassifies_when_the_report_or_turn_changes() {
     let mut view = view_with_outstanding_lineage_work();
@@ -2902,11 +2969,11 @@ fn parked_unverified_gate_reclassifies_when_the_report_or_turn_changes() {
 /// by hundreds of identical `classification` rows per parked gate, each with a
 /// fresh `step_transition: unverified` and `checkpoint_reason`.
 ///
-/// This drives the real per-tick path — `should_classify_report` decides whether
-/// the tick interprets the report at all, and the stepper's `advance` is only
-/// invoked when it does. Asserting on the stepper alone would miss the defect,
-/// because `advance` faithfully records whatever it is handed; the unbounded
-/// growth came from the gate re-admitting an unchanged report every tick.
+/// Each tick runs the real gate and, when the gate admits it, is advanced and
+/// committed — so the row counts below measure what a repeated tick really
+/// appends. Asserting on the stepper alone would miss the defect, because
+/// `advance` faithfully records whatever it is handed; the unbounded growth came
+/// from the gate re-admitting an unchanged report on every tick.
 #[test]
 fn repeated_ticks_on_a_parked_gate_append_no_ledger_rows() {
     let mut view = view_with_outstanding_lineage_work();
@@ -2998,28 +3065,37 @@ fn repeated_ticks_on_a_parked_gate_append_no_ledger_rows() {
         StepStatus::Unverified
     );
     assert_eq!(first.classifications.len(), 1);
-    // Five more observation ticks of the same unchanged report.
+    commit(&mut db, &view, &first);
+    // Five more observation ticks of the same unchanged report. Each tick runs
+    // the real gate and, when admitted, is advanced and committed — so the
+    // assertions below genuinely measure the rows a repeated tick would append.
     for tick in 0..5 {
-        assert!(
-            !should_classify_report(
-                &view,
-                "finish_classifier",
-                SessionStatus::AwaitingInput,
-                report,
-                None
-            ),
-            "tick {tick} re-admitted an unchanged parked report"
-        );
-        // The gate refuses it, so the tick publishes no classification event and
-        // therefore no step write and nothing further to commit.
+        if should_classify_report(
+            &view,
+            "finish_classifier",
+            SessionStatus::AwaitingInput,
+            report,
+            None,
+        ) {
+            let transition = advance_with_report_evidence(
+                &mut view,
+                &CircuitEvent::TurnClassified {
+                    binding: None,
+                    node_id: "finish_classifier".into(),
+                    classification: Some(crate::circuit::evaluator::Classification::Blocked),
+                    output: Some(report.into()),
+                },
+            );
+            commit(&mut db, &view, &transition);
+            panic!("tick {tick} re-admitted an unchanged parked report");
+        }
         assert_eq!(
             view.step("finish_classifier").unwrap().status,
-            StepStatus::Unverified
+            StepStatus::Unverified,
+            "the gate is never disturbed by a suppressed tick"
         );
     }
-    commit(&mut db, &view, &first);
-    // The single committed interpretation is recorded exactly once, and the
-    // unverified park contributes one transition and one checkpoint reason.
+    // One interpretation, and one transition and checkpoint reason for the park.
     assert_eq!(kind_count(&db, "classification"), 1, "{:?}", rows(&db));
     assert_eq!(kind_count(&db, "step_transition"), 1, "{:?}", rows(&db));
     assert_eq!(kind_count(&db, "checkpoint_reason"), 1, "{:?}", rows(&db));

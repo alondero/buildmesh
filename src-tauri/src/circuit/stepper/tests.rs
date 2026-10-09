@@ -302,6 +302,56 @@ fn observation_blockers_are_typed_deduplicated_and_attempt_scoped() {
         .contains("question or permission"));
 }
 
+/// Issue #2138: `unverify_step` guards roughly thirteen call sites, and every
+/// emitted `StepWrite` becomes a `step_transition` row — plus a
+/// `checkpoint_reason` when the status is `unverified`. Re-parking a step that is
+/// already Unverified for the same reason and outcome must write nothing, or the
+/// ledger grows on every observation tick.
+#[test]
+fn unverify_step_writes_nothing_when_the_step_is_already_parked_for_the_same_reason() {
+    let mut run = linear_run();
+    advance(&mut run, &CircuitEvent::Triggered);
+    advance(&mut run, &tick(1));
+    let reason = "Waiting for fresh evidence.".to_string();
+
+    let mut transition = Transition::default();
+    super::unverify_step(&mut run, &mut transition, "spawn", reason.clone());
+    assert_eq!(
+        transition.step_writes.len(),
+        1,
+        "the first park must be durable"
+    );
+    assert_eq!(transition.step_writes[0].status, StepStatus::Unverified);
+    assert_eq!(run.step("spawn").unwrap().status, StepStatus::Unverified);
+    assert_eq!(
+        run.step("spawn").unwrap().error.as_deref(),
+        Some(reason.as_str())
+    );
+
+    for repeat in 0..3 {
+        let mut repeated = Transition::default();
+        super::unverify_step(&mut run, &mut repeated, "spawn", reason.clone());
+        assert!(
+            repeated.step_writes.is_empty(),
+            "repeat {repeat} appended a duplicate step_transition/checkpoint_reason"
+        );
+    }
+
+    // A genuinely different reason is new information and must be recorded.
+    let mut changed = Transition::default();
+    super::unverify_step(
+        &mut run,
+        &mut changed,
+        "spawn",
+        "A different blocker.".to_string(),
+    );
+    assert_eq!(changed.step_writes.len(), 1);
+    assert_eq!(
+        changed.step_writes[0].error,
+        Some(Some("A different blocker.".to_string()))
+    );
+}
+
 #[test]
 fn known_background_work_keeps_the_step_running_with_an_explicit_blocker() {
     use super::super::observation::CircuitObservationBlocker;
