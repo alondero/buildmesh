@@ -69,6 +69,58 @@ pub enum EffortControlKind {
     },
 }
 
+/// Stable permission-mode ids (issue #2151).
+///
+/// Every harness that exposes a permission choice uses this uniform
+/// vocabulary; the per-harness difference is the argv each id maps to
+/// (see [`crate::agent::provider::AgentProvider::permission_args`]) and
+/// the harness-words label in [`PermissionModeOption`]. `unattended`
+/// reproduces today's launch flags so existing meshes keep working until
+/// the person changes the setting; `prompt` launches the CLI the way a
+/// human would (no extra approval flags).
+pub const PERMISSION_MODE_UNATTENDED: &str = "unattended";
+pub const PERMISSION_MODE_PROMPT: &str = "prompt";
+
+/// One launch permission mode a harness supports (issue #2151).
+///
+/// Buildmesh passes the harness's own flag through — it is not a separate
+/// permission system. The `label` names the mode in the harness's own
+/// words (e.g. `"--dangerously-skip-permissions"`) so Settings and the
+/// Spawn Menu show the actual CLI surface, not a Buildmesh abstraction.
+///
+/// Generated to `src/types/generated/PermissionModeOption.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PermissionModeOption.ts")]
+pub struct PermissionModeOption {
+    /// Stable id (`unattended` or `prompt`).
+    pub id: String,
+    /// Display in the harness's own words (the flag, or the no-flag state).
+    pub label: String,
+    /// One-line explanation of what the mode does.
+    pub description: String,
+}
+
+impl PermissionModeOption {
+    /// The unattended/auto mode carrying the harness's own flag(s).
+    pub fn unattended(label: &str, description: &str) -> Self {
+        Self {
+            id: PERMISSION_MODE_UNATTENDED.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
+        }
+    }
+
+    /// The prompt mode: no extra approval flags, the CLI asks the way a
+    /// human-launched session would.
+    pub fn prompt(label: &str, description: &str) -> Self {
+        Self {
+            id: PERMISSION_MODE_PROMPT.to_string(),
+            label: label.to_string(),
+            description: description.to_string(),
+        }
+    }
+}
+
 /// Stringify a [`Platform`] for the wire type. Stable across hosts so the
 /// frontend can do an exact-match lookup.
 pub fn platform_name(platform: Platform) -> &'static str {
@@ -239,6 +291,17 @@ pub struct HarnessCapabilities {
     /// The kind of effort control this harness accepts. The capability mask
     /// drops any resolved effort value that doesn't match.
     pub effort_control: EffortControlKind,
+    /// The launch permission modes this harness supports (issue #2151).
+    /// Empty means the harness has no permission flag — Settings renders
+    /// the "this harness has no such flag" line instead of a control and
+    /// the launch path contributes no approval argv. Otherwise the first
+    /// entry is the unattended default (see
+    /// [`crate::agent::provider::AgentProvider::default_permission_mode`]).
+    pub permission_modes: Vec<PermissionModeOption>,
+    /// The mode used when no layer supplies one. `None` when the harness
+    /// has no modes. `Some` preserves today's unattended launch for
+    /// existing meshes until the person changes the setting.
+    pub default_permission_mode: Option<String>,
     /// Host platforms where this harness runs (snake_case names — `"windows"`,
     /// `"macos"`, `"linux"`). Used by the Spawn Menu and by future
     /// application-default routing.
@@ -267,6 +330,12 @@ pub struct ResolvedAgentConfig {
     /// string — the launch path's `adapter.extra_args_args(...)` (added in
     /// the same slice) splits on whitespace into the final argv tokens.
     pub extra_args: Option<String>,
+    /// Capability-masked permission-mode id (issue #2151), or `None` when
+    /// no layer supplied one, the value wasn't in the harness's mode
+    /// vocabulary, or the harness has no permission flag. `None` launches
+    /// with the harness's unattended default (today's flags) — see
+    /// `default_prepare`.
+    pub permission_mode: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,12 +378,17 @@ pub struct FieldInputs<'a> {
     pub application: Option<&'a str>,
 }
 
-/// Per-field inputs to the configuration resolver. `model` and `effort` are
-/// resolved independently so each layer's cascade runs per field.
+/// Per-field inputs to the configuration resolver. `model`, `effort`, and
+/// `permission_mode` are resolved independently so each layer's cascade
+/// runs per field.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AgentConfigInputs<'a> {
     pub model: FieldInputs<'a>,
     pub effort: FieldInputs<'a>,
+    /// Permission-mode cascade. Today only the application layer carries a
+    /// value (the per-harness Settings default, issue #2151) — there is no
+    /// per-launch or per-mesh permission slot yet.
+    pub permission_mode: FieldInputs<'a>,
 }
 
 // ---------------------------------------------------------------------------
@@ -341,10 +415,13 @@ pub fn resolve_agent_config(
     let model = resolve_field(inputs.model).filter(|_| capabilities.supports_model_override);
     let effort = resolve_effort(inputs.effort, &capabilities.effort_control);
     let extra_args = resolve_extra_args(capabilities, explicit_extra_args);
+    let permission_mode =
+        resolve_permission_mode(inputs.permission_mode, &capabilities.permission_modes);
     ResolvedAgentConfig {
         model,
         effort,
         extra_args,
+        permission_mode,
     }
 }
 
@@ -396,6 +473,18 @@ fn resolve_effort(field: FieldInputs<'_>, control: &EffortControlKind) -> Option
         EffortControlKind::InlineConfig { allowed, .. } => allowed,
     };
     resolve_field(field).filter(|v| allowed.iter().any(|a| a == v))
+}
+
+/// Apply the capability mask for the permission-mode field (issue #2151).
+/// The resolved id is forwarded only when it names one of the harness's
+/// own modes; anything else (including any value for a harness with no
+/// modes) collapses to `None` so the launch falls back to the harness's
+/// unattended default.
+fn resolve_permission_mode(
+    field: FieldInputs<'_>,
+    modes: &[PermissionModeOption],
+) -> Option<String> {
+    resolve_field(field).filter(|v| modes.iter().any(|m| m.id == *v))
 }
 
 /// Trim and drop empties. Pure helper so every layer flows through the same
@@ -1120,6 +1209,7 @@ mod tests {
                 mesh: Some("medium"),
                 application: Some("low"),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("explicit-model"));
@@ -1142,6 +1232,7 @@ mod tests {
                 mesh: Some(""),
                 application: Some("medium"),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4"));
@@ -1162,6 +1253,7 @@ mod tests {
                 application: None,
             },
             effort: FieldInputs::default(),
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(
@@ -1188,6 +1280,7 @@ mod tests {
                     mesh: Some("medium"),
                     application: Some("low"),
                 },
+                permission_mode: FieldInputs::default(),
             };
             let resolved = resolve_agent_config(&caps, inputs.clone(), None);
             assert!(
@@ -1212,6 +1305,7 @@ mod tests {
                 mesh: None,
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
@@ -1232,6 +1326,7 @@ mod tests {
                 mesh: None,
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let codex = resolve_agent_config(&codex_caps(), inputs.clone(), None);
         assert_eq!(
@@ -1273,6 +1368,7 @@ mod tests {
                 mesh: Some("high"),
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1295,6 +1391,7 @@ mod tests {
                 mesh: Some("high"),
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert!(resolved.model.is_none());
@@ -1317,6 +1414,7 @@ mod tests {
                 mesh: Some("\n"),
                 application: Some("\t"),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None);
@@ -1338,6 +1436,7 @@ mod tests {
                 mesh: None,
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus"));
@@ -1363,6 +1462,7 @@ mod tests {
                 mesh: Some("low"),
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&terminal_caps(), inputs, None);
         assert_eq!(resolved.model, None);
@@ -1419,6 +1519,7 @@ mod tests {
                 mesh: None,
                 application: Some("high"),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1445,6 +1546,7 @@ mod tests {
                 mesh: None,
                 application: Some("high"),
             },
+            permission_mode: FieldInputs::default(),
         };
         // Issue #1286: agy now accepts `--effort <low|medium|high>`, so
         // the application's `high` value passes the mask. Switch the
@@ -1475,6 +1577,7 @@ mod tests {
                 application: None,
             },
             effort: FieldInputs::default(),
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert!(
@@ -1501,6 +1604,7 @@ mod tests {
                 mesh: None,
                 application: Some("  high  "),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model, None, "whitespace-only model collapses");
@@ -1523,6 +1627,7 @@ mod tests {
                 application: Some("opus-4-1"),
             },
             effort: FieldInputs::default(),
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("sonnet-4"));
@@ -1555,6 +1660,7 @@ mod tests {
                 mesh: None,
                 application: Some("high"),
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
@@ -1584,9 +1690,127 @@ mod tests {
                 mesh: Some("high"),
                 application: None,
             },
+            permission_mode: FieldInputs::default(),
         };
         let resolved = resolve_agent_config(&anthropic_caps(), inputs, None);
         assert_eq!(resolved.model.as_deref(), Some("opus-4-1"));
         assert_eq!(resolved.effort.as_deref(), Some("high"));
+    }
+
+    /// Issue #2151 pin — every adapter's permission contract: harnesses
+    /// with a CLI approval flag expose `[unattended, prompt]` (unattended
+    /// first, which is also the default); mcode exposes its singleton
+    /// Full Access pin; harnesses with no flag expose no modes and no
+    /// default.
+    #[test]
+    fn permission_modes_match_adapter_contract() {
+        let flag_harnesses = [
+            (
+                "anthropic",
+                anthropic_caps(),
+                "--dangerously-skip-permissions",
+            ),
+            ("codex", codex_caps(), "--ask-for-approval"),
+            ("cursor", cursor_caps(), "--force"),
+            ("agy", agy_caps(), "--dangerously-skip-permissions"),
+            ("opencode", opencode_caps(), "--auto"),
+            ("commandcode", commandcode_caps(), "--yolo"),
+            ("muse", muse_caps(), "--disable-approval"),
+        ];
+        for (id, caps, flag) in flag_harnesses {
+            assert_eq!(caps.permission_modes.len(), 2, "{id}");
+            assert_eq!(
+                caps.permission_modes[0].id, PERMISSION_MODE_UNATTENDED,
+                "{id}"
+            );
+            assert!(
+                caps.permission_modes[0].label.contains(flag),
+                "{id}: unattended label must name the harness's own flag"
+            );
+            assert_eq!(caps.permission_modes[1].id, PERMISSION_MODE_PROMPT, "{id}");
+            assert_eq!(
+                caps.default_permission_mode.as_deref(),
+                Some(PERMISSION_MODE_UNATTENDED),
+                "{id}"
+            );
+        }
+
+        // mcode: singleton Full Access (config pin, no CLI flag).
+        let mcode = mcode_caps();
+        assert_eq!(mcode.permission_modes.len(), 1);
+        assert_eq!(mcode.permission_modes[0].id, PERMISSION_MODE_UNATTENDED);
+        assert_eq!(
+            mcode.default_permission_mode.as_deref(),
+            Some(PERMISSION_MODE_UNATTENDED)
+        );
+
+        // No-flag harnesses: no modes, no default.
+        for caps in [
+            terminal_caps(),
+            kimi_caps(),
+            grok_caps(),
+            dsh_caps(),
+            freebuff_caps(),
+            cline_caps(),
+        ] {
+            assert!(
+                caps.permission_modes.is_empty(),
+                "{} must expose no permission modes",
+                caps.harness_id
+            );
+            assert_eq!(
+                caps.default_permission_mode, None,
+                "{} must have no permission default",
+                caps.harness_id
+            );
+        }
+    }
+
+    /// Issue #2151 resolver pin: a stored mode that names one of the
+    /// harness's own modes resolves; anything else (including any value
+    /// for a modeless harness) collapses to `None` so the launch falls
+    /// back to the unattended default.
+    #[test]
+    fn resolver_forwards_valid_permission_mode_and_drops_the_rest() {
+        fn inputs_with(application: Option<&str>) -> AgentConfigInputs<'_> {
+            AgentConfigInputs {
+                model: FieldInputs::default(),
+                effort: FieldInputs::default(),
+                permission_mode: FieldInputs {
+                    explicit: None,
+                    mesh: None,
+                    application,
+                },
+            }
+        }
+
+        let resolved = resolve_agent_config(
+            &anthropic_caps(),
+            inputs_with(Some(PERMISSION_MODE_PROMPT)),
+            None,
+        );
+        assert_eq!(
+            resolved.permission_mode.as_deref(),
+            Some(PERMISSION_MODE_PROMPT)
+        );
+
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs_with(Some("turbo")), None);
+        assert_eq!(
+            resolved.permission_mode, None,
+            "an unknown mode must fall back to the harness default"
+        );
+
+        let resolved = resolve_agent_config(
+            &terminal_caps(),
+            inputs_with(Some(PERMISSION_MODE_PROMPT)),
+            None,
+        );
+        assert_eq!(
+            resolved.permission_mode, None,
+            "a harness with no modes must drop every value"
+        );
+
+        let resolved = resolve_agent_config(&anthropic_caps(), inputs_with(None), None);
+        assert_eq!(resolved.permission_mode, None);
     }
 }

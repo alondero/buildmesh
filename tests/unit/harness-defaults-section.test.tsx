@@ -1,11 +1,17 @@
 /**
  * Settings → Harnesses → Agent Harness defaults: application-level model +
- * effort defaults per Agent Harness (issue #1150 / #1148). Pinned contract:
+ * effort + permission-mode defaults per Agent Harness (issue #1150 /
+ * #1148, permission in #2151). Pinned contract:
  *
  *   * Capability gating — a harness with `supports_model_override = false`
  *     AND `EffortControlKind::None` renders the no-configurable-defaults
  *     state (no input, no select).
  *   * Effort choices and guidance match each harness's declared vocabulary.
+ *   * Permission select offers the harness's own modes in its own words
+ *     and commits via `set_harness_default` on blur; the effective line
+ *     names the mode the next spawn uses. A single enforced mode renders
+ *     as read-only text; a harness with no flag renders the written
+ *     "no such flag" line instead of a control.
  *   * Save commits via `set_harness_default` on blur (mirrors the existing
  *     autopilot-pool commit pattern); a failed save rolls the draft back
  *     to the last confirmed value so the visible card never lies about
@@ -31,6 +37,9 @@ function capsFixture(harness_id: string, opts: {
   effortKind: 'none' | 'closed' | 'inline_config';
   effortAllowed?: string[];
   effortKey?: string;
+  // Issue #2151: permission modes in the harness's own words. Omitted
+  // (or empty) means the harness has no permission flag.
+  permissionModes?: Array<{ id: string; label: string; description: string }>;
 }): Pick<ProviderInfo, 'capabilities'>['capabilities'] {
   const effort_control =
     opts.effortKind === 'none'
@@ -38,6 +47,7 @@ function capsFixture(harness_id: string, opts: {
       : opts.effortKind === 'closed'
         ? ({ kind: 'closed' as const, allowed: opts.effortAllowed ?? [] })
         : ({ kind: 'inline_config' as const, key: opts.effortKey ?? 'model_reasoning_effort', allowed: opts.effortAllowed ?? [] });
+  const permission_modes = opts.permissionModes ?? [];
   return {
     harness_id,
     supports_resume: false,
@@ -49,8 +59,10 @@ function capsFixture(harness_id: string, opts: {
     supports_prefill: false,
     is_plain_terminal: harness_id === 'terminal',
     effort_control,
+    permission_modes,
+    default_permission_mode: permission_modes[0]?.id ?? null,
     available_on: ['windows'],
-  };
+  } as Pick<ProviderInfo, 'capabilities'>['capabilities'];
 }
 
 function providerFixture(
@@ -73,15 +85,29 @@ function providerFixture(
   };
 }
 
+const CLAUDE_MODES = [
+  { id: 'unattended', label: '--dangerously-skip-permissions', description: 'Prompts off.' },
+  { id: 'prompt', label: 'Prompts on (no flag)', description: 'Claude Code asks.' },
+];
 const CLAUDE_ROW = providerFixture(
   'claude',
   'claude',
-  capsFixture('claude', { supports_model: true, effortKind: 'closed', effortAllowed: ['low', 'medium', 'high', 'xhigh', 'max'] }),
+  capsFixture('claude', { supports_model: true, effortKind: 'closed', effortAllowed: ['low', 'medium', 'high', 'xhigh', 'max'], permissionModes: CLAUDE_MODES }),
 );
 const CODEX_ROW = providerFixture(
   'codex',
   'codex',
-  capsFixture('codex', { supports_model: true, effortKind: 'inline_config', effortAllowed: ['none', 'low', 'medium', 'high', 'xhigh'] }),
+  capsFixture('codex', { supports_model: true, effortKind: 'inline_config', effortAllowed: ['none', 'low', 'medium', 'high', 'xhigh'], permissionModes: [
+    { id: 'unattended', label: '--ask-for-approval never', description: 'Approvals off.' },
+    { id: 'prompt', label: 'Prompts on (no flag)', description: 'Codex asks.' },
+  ] }),
+);
+const MCODE_ROW = providerFixture(
+  'mcode',
+  'mcode',
+  capsFixture('mcode', { supports_model: false, effortKind: 'none', permissionModes: [
+    { id: 'unattended', label: 'Full Access (permissionMode: bypassPermissions)', description: 'Pinned in config.yaml.' },
+  ] }),
 );
 const AGY_ROW = providerFixture(
   'agy',
@@ -100,7 +126,7 @@ const TERMINAL_ROW = providerFixture(
 );
 
 function mockBackend(opts: {
-  defaults?: Record<string, { model: string | null; effort: string | null }>;
+  defaults?: Record<string, { model: string | null; effort: string | null; permission_mode?: string | null }>;
   providers?: ProviderInfo[];
   failOnSave?: boolean;
 } = {}) {
@@ -253,7 +279,7 @@ describe('Settings — Agent Harness defaults', () => {
     const last = calls['set_harness_default']!.at(-1);
     expect(last).toEqual({
       profileId: 'claude',
-      value: { model: 'opus-4-1', effort: null },
+      value: { model: 'opus-4-1', effort: null, permission_mode: null },
     });
   });
 
@@ -303,6 +329,71 @@ describe('Settings — Agent Harness defaults', () => {
     mockBackend({ providers: [TERMINAL_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
     const empty = await screen.findByTestId('harness-default-empty-terminal');
-    expect(empty.textContent).toMatch(/does not accept model or effort overrides/i);
+    expect(empty.textContent).toMatch(/does not accept model, effort, or permission-mode overrides/i);
+  });
+
+  it('permission select offers the harness modes in its own words and commits on blur', async () => {
+    const calls = mockBackend({ providers: [CLAUDE_ROW] });
+    const user = userEvent.setup();
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const select = await screen.findByTestId<HTMLSelectElement>('harness-permission-select-claude');
+    const options = Array.from(select.querySelectorAll('option')).map((o) => o.value);
+    expect(options).toEqual(['', 'unattended', 'prompt']);
+    // The harness-words label is the visible text of the default option.
+    expect(select.querySelector('option[value="unattended"]')?.textContent)
+      .toBe('--dangerously-skip-permissions');
+    // No stored value: the effective line names the harness default.
+    const effective = await screen.findByTestId('harness-permission-effective-claude');
+    expect(effective.textContent).toMatch(/Effective: --dangerously-skip-permissions \(harness default\)/);
+
+    await user.selectOptions(select, 'prompt');
+    select.blur();
+
+    await waitFor(() => expect(calls['set_harness_default']).toBeTruthy());
+    const last = calls['set_harness_default']!.at(-1);
+    expect(last).toEqual({
+      profileId: 'claude',
+      value: { model: null, effort: null, permission_mode: 'prompt' },
+    });
+    // After commit the effective line follows the stored choice.
+    await waitFor(() => expect(screen.getByTestId('harness-permission-effective-claude').textContent)
+      .toMatch(/Effective: Prompts on \(no flag\)/));
+  });
+
+  it('hydrated permission default preselects the stored mode as custom', async () => {
+    mockBackend({
+      defaults: { codex: { model: null, effort: null, permission_mode: 'prompt' } },
+      providers: [CODEX_ROW],
+    });
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const select = await screen.findByTestId<HTMLSelectElement>('harness-permission-select-codex');
+    await waitFor(() => expect(select.value).toBe('prompt'));
+    const effective = await screen.findByTestId('harness-permission-effective-codex');
+    // A stored choice renders without the "(harness default)" marker.
+    expect(effective.textContent).toMatch(/Effective: Prompts on \(no flag\)/);
+    expect(effective.textContent).not.toMatch(/harness default/);
+  });
+
+  it('single enforced mode renders as read-only text, not a select', async () => {
+    mockBackend({ providers: [MCODE_ROW] });
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    const fixed = await screen.findByTestId('harness-permission-fixed-mcode');
+    expect(fixed.textContent).toBe('Full Access (permissionMode: bypassPermissions)');
+    expect(screen.queryByTestId('harness-permission-select-mcode')).toBeNull();
+  });
+
+  it('harness with model control but no flag renders the no-such-flag line', async () => {
+    mockBackend({ providers: [AGY_ROW] });
+    render(<AppSettingsModal onClose={() => {}} />);
+
+    // Agy keeps its model input (unchanged behavior) …
+    await screen.findByTestId('harness-default-model-input-agy');
+    // … and gains the written "no such flag" line instead of a control.
+    const line = await screen.findByTestId('harness-permission-noflag-agy');
+    expect(line.textContent).toMatch(/has no permission flag/i);
+    expect(screen.queryByTestId('harness-permission-select-agy')).toBeNull();
   });
 });

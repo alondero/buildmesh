@@ -189,6 +189,7 @@ fn capability_recipe_coherence() {
             model: Some(model_value.to_string()),
             effort: Some(effort_value.to_string()),
             extra_args: None,
+            permission_mode: None,
         };
         let prefill_text = "fix the auth bug in handler.rs";
         let input = make_input(
@@ -309,6 +310,73 @@ fn capability_recipe_coherence() {
             sandbox_args,
             sandbox_prepared.recipe.base_args
         );
+
+        // 5. Permission-flag coherence (issue #2151). The bare base
+        //    recipe carries no approval flags; `default_prepare`
+        //    contributes the effective mode's args. The descriptor must
+        //    match the adapter's own mode list (the `capabilities()`
+        //    composition), and with no resolved mode the harness default
+        //    applies — so the prepared recipe carries exactly the
+        //    default mode's contribution. A second pass with prompt mode
+        //    must drop the unattended contribution.
+        assert_eq!(
+            caps.permission_modes,
+            adapter.permission_modes(),
+            "permission_modes / descriptor mismatch for {}",
+            adapter.id(),
+        );
+        assert_eq!(
+            caps.default_permission_mode,
+            adapter.default_permission_mode(),
+            "default_permission_mode / descriptor mismatch for {}",
+            adapter.id(),
+        );
+        let default_args = caps
+            .default_permission_mode
+            .as_deref()
+            .map(|m| adapter.permission_args(m))
+            .unwrap_or_default();
+        for expected in &default_args {
+            assert!(
+                args.contains(expected),
+                "permission-flag / default mismatch for {}: \
+                 prepared recipe must carry the default mode's {:?}; args = {:?}",
+                adapter.id(),
+                expected,
+                args
+            );
+        }
+        if caps
+            .permission_modes
+            .iter()
+            .any(|m| m.id == crate::agent::capabilities::PERMISSION_MODE_PROMPT)
+        {
+            let prompt_config = ResolvedAgentConfig {
+                permission_mode: Some(
+                    crate::agent::capabilities::PERMISSION_MODE_PROMPT.to_string(),
+                ),
+                ..config.clone()
+            };
+            let prompt_input = make_input(
+                Platform::Linux,
+                SessionIdModeRef::None,
+                &prompt_config,
+                Some(prefill_text),
+            );
+            let prompt_prepared = crate::agent::launch::default_prepare(adapter, prompt_input);
+            let unattended_args =
+                adapter.permission_args(crate::agent::capabilities::PERMISSION_MODE_UNATTENDED);
+            for dropped in &unattended_args {
+                assert!(
+                    !prompt_prepared.recipe.base_args.contains(dropped),
+                    "permission-flag / prompt mismatch for {}: \
+                     prompt recipe must not carry the unattended {:?}; args = {:?}",
+                    adapter.id(),
+                    dropped,
+                    prompt_prepared.recipe.base_args
+                );
+            }
+        }
     }
     assert!(
         any_adapters >= 9,
@@ -350,6 +418,7 @@ fn mcode_recipe_carries_model_arg_under_coherence_matrix() {
         model: Some("minimax/MiniMax-Text-01".to_string()),
         effort: None,
         extra_args: None,
+        permission_mode: None,
     };
     let input = make_input(
         Platform::Macos,
@@ -387,6 +456,7 @@ fn cascade_inputs_for_populates_explicit_slot_for_both_fields() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -425,6 +495,7 @@ fn cascade_inputs_for_collapses_whitespace_explicit_to_none() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -468,6 +539,7 @@ fn cascade_inputs_for_independent_fields() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
 
     // Explicit model only — effort falls through to the app default.
@@ -495,6 +567,7 @@ fn cascade_inputs_for_layer1_wins_over_mesh_and_application_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("sonnet-4"),
@@ -530,6 +603,7 @@ fn cascade_inputs_for_empty_explicit_falls_through_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let inputs = cascade_inputs_for(
         Some("   "),
@@ -605,6 +679,7 @@ fn spawn_request_explicit_wins_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("sonnet-4".into()),
         effort: Some("medium".into()),
+        permission_mode: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,
@@ -652,6 +727,7 @@ fn spawn_request_whitespace_explicit_falls_through_at_resolver() {
     let app_default = HarnessConfigValue {
         model: Some("opus-4-1".into()),
         effort: Some("high".into()),
+        permission_mode: None,
     };
     let resolved = resolve_spawn_config(
         Provider::Anthropic,

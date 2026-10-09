@@ -9,7 +9,7 @@ pub mod compatibility;
 pub mod muse;
 pub mod provider_conf;
 
-use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities};
+use crate::agent::capabilities::{EffortControlKind, HarnessCapabilities, PermissionModeOption};
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
 use std::future::Future;
@@ -148,9 +148,13 @@ pub fn claude_direct_recipe(platform: Platform) -> SpawnRecipe {
         Platform::Windows => "claude.exe",
         _ => "claude",
     };
+    // Issue #2151: the recipe is bare — no approval flags. The effective
+    // permission mode contributes `--dangerously-skip-permissions` via
+    // `permission_args` in `default_prepare`, so Settings (not a hidden
+    // argv) owns the choice.
     SpawnRecipe {
         binary,
-        base_args: vec!["--dangerously-skip-permissions".into()],
+        base_args: Vec::new(),
         trailing_args: Vec::new(),
         windows_shell: WindowsShell::Direct,
     }
@@ -273,6 +277,26 @@ impl From<&str> for SpawnOptionId {
     }
 }
 
+/// The resolved launch permission mode for one Spawn Menu row (issue
+/// #2151): the stored per-harness default when one is set, else the
+/// harness's unattended default. Computed by the backend at
+/// `listProviders` time so every spawn surface shows the same mode the
+/// next spawn will use, in the harness's own words.
+///
+/// Generated to `src/types/generated/EffectivePermissionMode.ts`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export, export_to = "EffectivePermissionMode.ts")]
+pub struct EffectivePermissionMode {
+    /// Resolved mode id (`unattended` or `prompt`).
+    pub mode_id: String,
+    /// The mode's harness-words label (e.g. `--dangerously-skip-permissions`).
+    pub label: String,
+    /// One-line explanation (shown as a tooltip on the spawn row).
+    pub description: String,
+    /// True when no stored override exists (the harness default applies).
+    pub is_default: bool,
+}
+
 /// Frontend-facing **Spawn Option** wire type (ADR-0016, issue #575). One row
 /// per clickable entry in the Spawn Menu — either a bare **Agent Harness** (a
 /// native launch, e.g. clicking "Claude Code" boots Claude Code with its
@@ -370,6 +394,13 @@ pub struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub unavailable_reason: Option<String>,
+    /// Resolved launch permission mode for this row's harness (issue
+    /// #2151). `None` for harnesses with no permission flag. Present on
+    /// every row of a harness that has modes (native and proxied share
+    /// the harness default); the Spawn Menu renders it on the native row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub effective_permission: Option<EffectivePermissionMode>,
 }
 
 /// Paste-gate policy for a staged multiline prompt (issue #2061).
@@ -781,6 +812,38 @@ pub trait AgentProvider: Send + Sync {
         EffortControlKind::None
     }
 
+    /// The launch permission modes this harness supports (issue #2151).
+    ///
+    /// The default empty vec means "no permission flag" — Settings
+    /// renders the "this harness has no such flag" line and the launch
+    /// path contributes no approval argv. A harness with a choice returns
+    /// its unattended entry first and its prompt entry second; a harness
+    /// with a single enforced mode (mcode's Full Access pin, which the TUI
+    /// exposes no flag for) returns one entry.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        Vec::new()
+    }
+
+    /// The mode used when no layer supplies one. The default is the first
+    /// entry of [`AgentProvider::permission_modes`] (the unattended entry
+    /// by the ordering convention above), or `None` when the harness has
+    /// no modes. `Some` preserves today's unattended launch for existing
+    /// meshes until the person changes the setting.
+    fn default_permission_mode(&self) -> Option<String> {
+        self.permission_modes().first().map(|m| m.id.clone())
+    }
+
+    /// Argv contributed by the effective permission mode (issue #2151).
+    /// `default_prepare` calls this exactly once per spawn with the
+    /// resolved mode id; [`AgentProvider::spawn_recipe`] itself must stay
+    /// bare so no adapter keeps a hidden unattended argv. An unknown id
+    /// contributes nothing (prompt-equivalent) — the resolver already
+    /// masks unknown values, so this is defence in depth.
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        let _ = mode_id;
+        Vec::new()
+    }
+
     /// The capability contract this harness advertises for its normal
     /// launch mode (issue #1149, refactored in #1179).
     ///
@@ -816,6 +879,8 @@ pub trait AgentProvider: Send + Sync {
             supports_prefill: self.supports_prefill(),
             is_plain_terminal: self.is_plain_terminal(),
             effort_control,
+            permission_modes: self.permission_modes(),
+            default_permission_mode: self.default_permission_mode(),
             available_on: platforms,
         }
     }

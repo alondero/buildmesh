@@ -868,6 +868,8 @@ pub fn get_resolved_harness_view(
     let mask_descriptor = capabilities.as_ref().map(|caps| CapabilityMaskForResolver {
         supports_model_override: caps.supports_model_override,
         effort_control: caps.effort_control.clone(),
+        permission_modes: caps.permission_modes.clone(),
+        default_permission_mode: caps.default_permission_mode.clone(),
     });
 
     // Build the per-field cascade + apply the capability mask.
@@ -911,6 +913,9 @@ fn read_mesh_legacy(mesh_id: i64) -> Result<Option<HarnessConfigValue>, String> 
     let legacy = HarnessConfigValue {
         model: row.model.clone(),
         effort: row.effort.clone(),
+        // The legacy mesh row has no permission column (issue #2151 adds
+        // only the application-layer slot).
+        permission_mode: None,
     };
     Ok(if legacy.model.is_some() || legacy.effort.is_some() {
         Some(legacy)
@@ -997,6 +1002,8 @@ mod resolved_view_tests {
         let caps = CapabilityMaskForResolver {
             supports_model_override: false,
             effort_control: EffortControlKind::None,
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let masked = cascade_apply_capability_mask(view, "model", &caps);
         assert_eq!(masked.resolved, None);

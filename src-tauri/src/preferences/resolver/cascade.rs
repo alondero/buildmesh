@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::super::model::HarnessConfigValue;
-use crate::agent::capabilities::{EffortControlKind, FieldInputs};
+use crate::agent::capabilities::{EffortControlKind, FieldInputs, PermissionModeOption};
 
 /// Whitespace-normalised first-non-empty-layer picker for one field. Every
 /// layer is trimmed; a layer that is empty or whitespace-only collapses to
@@ -164,6 +164,10 @@ pub fn apply_capability_mask(
 pub struct CapabilityMaskForResolver {
     pub supports_model_override: bool,
     pub effort_control: EffortControlKind,
+    /// Launch permission modes (issue #2151). Empty = no permission flag.
+    pub permission_modes: Vec<PermissionModeOption>,
+    /// Mode used when no layer supplies one (`None` = no modes).
+    pub default_permission_mode: Option<String>,
 }
 
 /// True iff `value` is in the harness's allowed effort vocabulary, or the
@@ -237,11 +241,8 @@ mod tests {
 
     #[test]
     fn cascade_view_falls_through_whitespace_layers() {
-        let view = ResolvedCascadeView::for_field(field_inputs(
-            Some("   "),
-            Some(""),
-            Some("opus-4"),
-        ));
+        let view =
+            ResolvedCascadeView::for_field(field_inputs(Some("   "), Some(""), Some("opus-4")));
         assert_eq!(view.resolved.as_deref(), Some("opus-4"));
         assert!(view.layers.explicit.is_none());
         assert!(view.layers.mesh.is_none());
@@ -261,6 +262,8 @@ mod tests {
         let caps = CapabilityMaskForResolver {
             supports_model_override: false,
             effort_control: EffortControlKind::None,
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let masked = apply_capability_mask(view, "model", &caps);
         assert_eq!(
@@ -282,6 +285,8 @@ mod tests {
             effort_control: EffortControlKind::Closed {
                 allowed: vec!["low".into(), "medium".into(), "high".into()],
             },
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let masked = apply_capability_mask(view, "effort", &caps);
         assert_eq!(masked.resolved.as_deref(), Some("high"));
@@ -295,6 +300,8 @@ mod tests {
             effort_control: EffortControlKind::Closed {
                 allowed: vec!["low".into(), "medium".into(), "high".into()],
             },
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let masked = apply_capability_mask(view, "effort", &caps);
         assert_eq!(
@@ -309,6 +316,8 @@ mod tests {
         let caps = CapabilityMaskForResolver {
             supports_model_override: true,
             effort_control: EffortControlKind::None,
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
         };
         let masked = apply_capability_mask(view, "effort", &caps);
         assert_eq!(masked.resolved, None);

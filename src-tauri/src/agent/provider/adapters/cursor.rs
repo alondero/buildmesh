@@ -32,8 +32,12 @@
 //! and detects a stale Buildmesh entry by URL substring so re-provisioning
 //! is idempotent (issue #886).
 
-use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
-use crate::agent::provider::{AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell};
+use crate::agent::capabilities::{
+    AttentionCapability, AttentionLaunchMode, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
+};
+use crate::agent::provider::{
+    AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
+};
 use crate::agent::session_lifecycle::LifecycleKind;
 use crate::env::ResolvedPath;
 use crate::models::EnvType;
@@ -108,7 +112,9 @@ const BUILDMESH_HOOK_MARKER: &str = "/api/attention/";
 /// macOS or Linux build never emits cmd syntax.
 fn hook_command(env_type: EnvType) -> String {
     if env_type == EnvType::WindowsInterop {
-        if let Some(command) = crate::env::windows_attention_command(None) { return command; }
+        if let Some(command) = crate::env::windows_attention_command(None) {
+            return command;
+        }
     }
     if cfg!(target_os = "windows") && env_type == EnvType::Windows {
         "curl.exe -sf --connect-timeout 1 --max-time 2 -X POST -H \"Content-Type: application/json\" --data-binary @- http://localhost:%BUILDMESH_PORT%/api/attention/%BUILDMESH_SESSION_ID% >nul 2>nul || exit 0"
@@ -227,9 +233,7 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
     if settings.get("hooks").is_none() {
         settings["hooks"] = serde_json::json!({});
     }
-    let hooks = settings
-        .get_mut("hooks")
-        .expect("hooks key inserted above");
+    let hooks = settings.get_mut("hooks").expect("hooks key inserted above");
     if !hooks.is_object() {
         return Err(format!(
             "cursor hooks.json `hooks` must be a JSON object; got {}",
@@ -246,15 +250,10 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
             settings_kind(stop)
         ));
     }
-    let stop_array = stop
-        .as_array_mut()
-        .expect("verified is_array above");
+    let stop_array = stop.as_array_mut().expect("verified is_array above");
     let new_handler = serde_json::json!({ "command": command });
     let mut changed = false;
-    if let Some(existing) = stop_array
-        .iter_mut()
-        .find(|h| is_buildmesh_handler(h))
-    {
+    if let Some(existing) = stop_array.iter_mut().find(|h| is_buildmesh_handler(h)) {
         if *existing != new_handler {
             *existing = new_handler;
             changed = true;
@@ -305,13 +304,39 @@ impl AgentProvider for CursorAdapter {
     }
 
     fn spawn_recipe(&self, platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--force` via `permission_args` in
+        // `default_prepare`. Cursor documents `--force` as allowing
+        // commands unless denied; `--trust` is a print-mode option, not
+        // an interactive-TUI flag.
         SpawnRecipe {
             binary: "cursor-agent",
-            // Cursor documents `--force` as allowing commands unless denied.
-            // `--trust` is a print-mode option, not an interactive-TUI flag.
-            base_args: vec!["--force".into()],
+            base_args: Vec::new(),
             trailing_args: Vec::new(),
             windows_shell: shell_for(platform),
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Cursor's own `--force` flag through.
+    /// Unattended keeps today's behavior.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--force",
+                "Commands allowed unless denied (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Cursor asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--force".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -350,7 +375,10 @@ impl AgentProvider for CursorAdapter {
         // step we never take and trip a future caller that assumes
         // the descriptor's promise (issue #1368 review point 2).
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::BackgroundRunning,
+            ],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: None,
             // Issue #1368: pin the validated Cursor release (1.0.0) so
@@ -452,15 +480,26 @@ mod tests {
 
     #[test]
     fn spawn_recipe_uses_cmd_only_on_windows() {
+        // Issue #2151: base recipes are bare — `--force` comes from the
+        // effective permission mode in `default_prepare`, never from a
+        // hidden argv.
         let windows = CURSOR.spawn_recipe(Platform::Windows, EnvType::Windows);
         assert_eq!(windows.binary, "cursor-agent");
-        assert_eq!(windows.base_args, vec!["--force"]);
+        assert!(
+            windows.base_args.is_empty(),
+            "base recipe must carry no approval flags; got {:?}",
+            windows.base_args
+        );
         assert!(matches!(windows.windows_shell, WindowsShell::Cmd));
 
         for platform in [Platform::Linux, Platform::Macos] {
             let recipe = CURSOR.spawn_recipe(platform, EnvType::Windows);
             assert_eq!(recipe.binary, "cursor-agent");
-            assert_eq!(recipe.base_args, vec!["--force"]);
+            assert!(
+                recipe.base_args.is_empty(),
+                "base recipe must carry no approval flags; got {:?}",
+                recipe.base_args
+            );
             assert!(
                 matches!(recipe.windows_shell, WindowsShell::Direct),
                 "{platform:?} must use WindowsShell::Direct"
@@ -564,7 +603,10 @@ mod tests {
         assert!(hooks.is_object(), "top-level must be an object: {hooks}");
         assert_eq!(hooks["version"], serde_json::json!(1));
         let hooks_obj = hooks.get("hooks").expect("hooks key missing");
-        assert!(hooks_obj.is_object(), "`hooks` must be an object: {hooks_obj}");
+        assert!(
+            hooks_obj.is_object(),
+            "`hooks` must be an object: {hooks_obj}"
+        );
 
         // stop is an array; the Buildmesh handler lives at index 0.
         let stop_array = hooks_obj["stop"]
@@ -690,11 +732,10 @@ mod tests {
             "sibling handler must be preserved alongside Buildmesh: {stop:?}"
         );
         assert!(
-            stop.iter()
-                .any(|h| h["command"]
-                    .as_str()
-                    .unwrap_or("")
-                    .contains("/api/attention/")),
+            stop.iter().any(|h| h["command"]
+                .as_str()
+                .unwrap_or("")
+                .contains("/api/attention/")),
             "Buildmesh handler must be present: {stop:?}"
         );
         assert!(
@@ -714,11 +755,14 @@ mod tests {
     fn encoded_windows_callback_is_replaced_on_repeat_provision() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("hooks.json");
-        let callback = |value| format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
-            crate::env::encode_powershell(&format!("echo '/api/attention/' $env:BUILDMESH_PORT $env:BUILDMESH_SESSION_ID '{value}'")));
+        let callback = |value| {
+            format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {}",
+            crate::env::encode_powershell(&format!("echo '/api/attention/' $env:BUILDMESH_PORT $env:BUILDMESH_SESSION_ID '{value}'")))
+        };
         ensure_hooks_json(&path, &callback("old")).unwrap();
         ensure_hooks_json(&path, &callback("new")).unwrap();
-        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let hooks: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let stop = hooks["hooks"]["stop"].as_array().unwrap();
         assert_eq!(stop.len(), 1);
         assert_eq!(stop[0]["command"], callback("new"));
@@ -763,7 +807,11 @@ mod tests {
             "stale body must be replaced, not preserved: {cmd}"
         );
         assert!(
-            cmd.contains(if cfg!(windows) { "%BUILDMESH_PORT%" } else { "$BUILDMESH_PORT" }),
+            cmd.contains(if cfg!(windows) {
+                "%BUILDMESH_PORT%"
+            } else {
+                "$BUILDMESH_PORT"
+            }),
             "replaced body must use the live Windows env-var syntax: {cmd}"
         );
     }
@@ -931,11 +979,7 @@ mod tests {
         let cursor_dir = temp.path().join(".cursor");
         std::fs::create_dir_all(&cursor_dir).unwrap();
         let path = cursor_dir.join("hooks.json");
-        std::fs::write(
-            &path,
-            r#"{ "version": 2, "hooks": { "stop": [] } }"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{ "version": 2, "hooks": { "stop": [] } }"#).unwrap();
 
         let path_str = project_to_string(temp.path());
         let resolved = ResolvedPath {

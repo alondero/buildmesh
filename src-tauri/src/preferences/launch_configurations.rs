@@ -309,6 +309,14 @@ fn resolve_plan(
                 mesh: None,
                 application: app.and_then(|c| c.effort.as_deref()),
             },
+            // Issue #2151: launch recipes carry no permission slot of
+            // their own — the per-harness Settings default applies, same
+            // as a direct spawn.
+            permission_mode: FieldInputs {
+                explicit: None,
+                mesh: None,
+                application: app.and_then(|c| c.permission_mode.as_deref()),
+            },
         },
         extra.as_deref(),
     );
@@ -593,6 +601,7 @@ mod tests {
             HarnessConfigValue {
                 model: Some("minimax/application-default".into()),
                 effort: None,
+                permission_mode: None,
             },
         );
         let plan = launch_configurations::resolve_for_edit(&prefs, "launch/mcode-review").unwrap();
@@ -730,6 +739,7 @@ mod tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("sonnet".into()),
                 effort: Some("high".into()),
+                permission_mode: None,
             },
         );
         prefs
@@ -812,6 +822,7 @@ mod tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("app".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let plan = resolve(&prefs, "claude", &Default::default()).unwrap();

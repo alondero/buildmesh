@@ -5968,6 +5968,7 @@ fn circuit_review_spawn_uses_frozen_plan_before_graph_parent_and_defaults() {
         crate::preferences::HarnessConfigValue {
             model: Some("gpt-6-luna".into()),
             effort: Some("low".into()),
+            permission_mode: None,
         },
     );
     let plan =

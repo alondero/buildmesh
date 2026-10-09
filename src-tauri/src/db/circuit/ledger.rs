@@ -2243,6 +2243,7 @@ mod reviewer_tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let run = create_circuit_run_prepared_locked(
@@ -2317,6 +2318,7 @@ mod reviewer_tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(
@@ -2460,6 +2462,7 @@ mod reviewer_tests {
             crate::preferences::HarnessConfigValue {
                 model: Some("gpt-6-luna".into()),
                 effort: Some("low".into()),
+                permission_mode: None,
             },
         );
         let first = create_node_circuit_run_with_recovery_locked(

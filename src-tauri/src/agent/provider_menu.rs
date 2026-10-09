@@ -11,7 +11,7 @@
 //! (`compose_provider_menu`, `order_providers`, `order_proxied_children`,
 //! `provider_info_for`, `provider_info_for_pairing`) are the unit-test seam.
 
-use crate::agent::provider::{Platform, ProviderInfo};
+use crate::agent::provider::{AgentProvider, EffectivePermissionMode, Platform, ProviderInfo};
 use tauri::command;
 
 /// Compose the `ProviderInfo` (Spawn Option) row for a single harness profile on the
@@ -35,8 +35,13 @@ use tauri::command;
 /// `provider_id`, `is_proxied = false`. `harness_id == profile.id` is the
 /// grouping key the frontend uses to bucket rows under their harness header
 /// (issue #575 / ADR-0016).
-pub(crate) fn provider_info_for(profile: &crate::preferences::HarnessProfile, host: Platform) -> Option<ProviderInfo> {
-    if !profile_runtime_supported(profile, host) { return None; }
+pub(crate) fn provider_info_for(
+    profile: &crate::preferences::HarnessProfile,
+    host: Platform,
+) -> Option<ProviderInfo> {
+    if !profile_runtime_supported(profile, host) {
+        return None;
+    }
     let adapter = crate::models::Provider::from_db_str(&profile.harness).adapter();
     let target = profile_platform(profile, host);
     if !adapter.available_on().contains(&target) {
@@ -71,6 +76,7 @@ fn profile_row(profile: &crate::preferences::HarnessProfile) -> ProviderInfo {
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        effective_permission: None,
     }
 }
 
@@ -104,11 +110,17 @@ pub(super) fn provider_info_for_pairing(
         .map(|p| crate::models::Provider::from_db_str(&p.harness))
         .unwrap_or_else(|| crate::models::Provider::from_db_str(&pairing.harness_id));
     let adapter = executor.adapter();
-    if profiles.iter().any(|p| p.id == pairing.harness_id && !profile_runtime_supported(p, host)) {
+    if profiles
+        .iter()
+        .any(|p| p.id == pairing.harness_id && !profile_runtime_supported(p, host))
+    {
         return None;
     }
-    let target = profiles.iter().find(|p| p.id == pairing.harness_id)
-        .map(|p| profile_platform(p, host)).unwrap_or(host);
+    let target = profiles
+        .iter()
+        .find(|p| p.id == pairing.harness_id)
+        .map(|p| profile_platform(p, host))
+        .unwrap_or(host);
     if !adapter.available_on().contains(&target) {
         return None;
     }
@@ -124,10 +136,14 @@ pub(super) fn provider_info_for_pairing(
         is_proxied: true,
         group_key: pairing.harness_id.clone(),
         capabilities: crate::agent::capabilities::capabilities_for(adapter),
-        runtime: profiles.iter().find(|profile| profile.id == pairing.harness_id).and_then(|profile| profile.runtime),
+        runtime: profiles
+            .iter()
+            .find(|profile| profile.id == pairing.harness_id)
+            .and_then(|profile| profile.runtime),
         configurations: Vec::new(),
         configuration: None,
         unavailable_reason: None,
+        effective_permission: None,
     })
 }
 
@@ -142,7 +158,9 @@ fn profile_runtime_supported(profile: &crate::preferences::HarnessProfile, host:
 fn profile_platform(profile: &crate::preferences::HarnessProfile, host: Platform) -> Platform {
     match profile.runtime {
         Some(crate::models::EnvType::Wsl) => Platform::Linux,
-        Some(crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop) => Platform::Windows,
+        Some(crate::models::EnvType::Windows | crate::models::EnvType::WindowsInterop) => {
+            Platform::Windows
+        }
         None => host,
     }
 }
@@ -159,8 +177,12 @@ mod runtime_tests {
         // because `profile_platform` resolves `runtime: Some(Wsl)` to
         // `Platform::Linux`, which was already in `available_on()`.
         let native = crate::preferences::HarnessProfile {
-            id: "muse".into(), name: "Meta Muse".into(), harness: "muse".into(),
-            runtime: None, wsl_distro: None, executable: None,
+            id: "muse".into(),
+            name: "Meta Muse".into(),
+            harness: "muse".into(),
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&native, Platform::Windows)
             .expect("muse is available on Windows once Platform::Windows is in available_on()");
@@ -171,8 +193,12 @@ mod runtime_tests {
 
         // WSL fallback profile — preserved from the pre-fix behaviour.
         let wsl = crate::preferences::HarnessProfile {
-            id: "muse-wsl".into(), name: "Meta Muse (WSL)".into(), harness: "muse".into(),
-            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: None, executable: None,
+            id: "muse-wsl".into(),
+            name: "Meta Muse (WSL)".into(),
+            harness: "muse".into(),
+            runtime: Some(crate::models::EnvType::Wsl),
+            wsl_distro: None,
+            executable: None,
         };
         let wsl_info = provider_info_for(&wsl, Platform::Windows).unwrap();
         assert_eq!(wsl_info.id, "muse-wsl");
@@ -205,9 +231,13 @@ pub(super) fn compose_provider_menu(
     order: &[String],
     proxied_order: &[crate::preferences::ProxiedProviderOrder],
 ) -> Vec<ProviderInfo> {
-    let menu_profiles = profiles.iter().filter(|profile| crate::agent::detection::visible_in_spawn_menu(profile, host))
-        .cloned().collect::<Vec<_>>();
-    let visible_profiles = crate::agent::detection::preferred_profiles(&menu_profiles, host, distro);
+    let menu_profiles = profiles
+        .iter()
+        .filter(|profile| crate::agent::detection::visible_in_spawn_menu(profile, host))
+        .cloned()
+        .collect::<Vec<_>>();
+    let visible_profiles =
+        crate::agent::detection::preferred_profiles(&menu_profiles, host, distro);
     let mut rows: Vec<ProviderInfo> = visible_profiles
         .iter()
         .filter_map(|profile| provider_info_for(profile, host))
@@ -220,13 +250,25 @@ pub(super) fn compose_provider_menu(
         // A route attached to a runtime-suffixed mirror of a natively-installed
         // harness is the same redundant choice as the mirror profile itself
         // (issue #1864), so drop it alongside the profile.
-        let hidden_mirror = if let Some(profile) = profiles.iter().find(|profile| profile.id == pairing.harness_id) {
+        let hidden_mirror = if let Some(profile) = profiles
+            .iter()
+            .find(|profile| profile.id == pairing.harness_id)
+        {
             !crate::agent::detection::visible_in_spawn_menu(profile, host)
         } else {
-            host == Platform::Windows && crate::agent::detection::canonical_wsl_harness(&pairing.harness_id)
-                .is_some_and(|harness| crate::models::Provider::from_db_str(harness).adapter().available_on().contains(&host))
+            host == Platform::Windows
+                && crate::agent::detection::canonical_wsl_harness(&pairing.harness_id).is_some_and(
+                    |harness| {
+                        crate::models::Provider::from_db_str(harness)
+                            .adapter()
+                            .available_on()
+                            .contains(&host)
+                    },
+                )
         };
-        if hidden_mirror { continue; }
+        if hidden_mirror {
+            continue;
+        }
         let Some(account) = accounts.iter().find(|a| a.id == pairing.provider_id) else {
             continue;
         };
@@ -280,7 +322,73 @@ pub(crate) fn available_providers() -> Vec<ProviderInfo> {
     available_providers_with_preferences(crate::preferences::load().ok())
 }
 
-fn available_providers_with_preferences(prefs: Option<crate::preferences::AppPreferences>) -> Vec<ProviderInfo> {
+/// Resolve the effective launch permission mode for one harness (issue
+/// #2151): the stored per-harness default when it names one of the
+/// adapter's own modes, else the adapter's unattended default. `None`
+/// for harnesses with no modes.
+///
+/// Pure over the already-loaded prefs snapshot (no `preferences::load()`)
+/// so unit tests pin it without touching global state. The harness half
+/// of a composite Spawn Option id (`"<harness>:<provider>"`) resolves to
+/// the same entry — native and proxied rows of one harness share it.
+fn effective_permission_for(
+    harness_id: &str,
+    prefs: &crate::preferences::AppPreferences,
+) -> Option<EffectivePermissionMode> {
+    let adapter = crate::preferences::resolve_harness_provider(harness_id).adapter();
+    let stored = prefs
+        .harness_defaults
+        .get(harness_id)
+        .and_then(|v| v.permission_mode.as_deref());
+    effective_permission_for_adapter(adapter, stored)
+}
+
+/// Pure adapter-level core of [`effective_permission_for`]: no prefs, no
+/// disk — the unit-test seam. A stored value that names no known mode
+/// (stale after an adapter change) falls back to the adapter default.
+fn effective_permission_for_adapter(
+    adapter: &dyn AgentProvider,
+    stored: Option<&str>,
+) -> Option<EffectivePermissionMode> {
+    let modes = adapter.permission_modes();
+    if modes.is_empty() {
+        return None;
+    }
+    let stored = stored
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| modes.iter().any(|m| m.id == *s));
+    let mode_id = stored
+        .map(str::to_string)
+        .or_else(|| adapter.default_permission_mode())?;
+    let option = modes.iter().find(|m| m.id == mode_id)?;
+    Some(EffectivePermissionMode {
+        mode_id: option.id.clone(),
+        label: option.label.clone(),
+        description: option.description.clone(),
+        is_default: stored.is_none(),
+    })
+}
+
+/// Stamp the resolved launch permission mode onto every menu row (issue
+/// #2151) from the already-loaded prefs snapshot. Runs after
+/// `configuration_menu` so saved-configuration rows carry it too; the
+/// per-profile constructors stay pure (see `profile_row`).
+fn stamp_effective_permission(
+    menu: Vec<ProviderInfo>,
+    prefs: &crate::preferences::AppPreferences,
+) -> Vec<ProviderInfo> {
+    menu.into_iter()
+        .map(|mut row| {
+            row.effective_permission = effective_permission_for(&row.harness_id, prefs);
+            row
+        })
+        .collect()
+}
+
+fn available_providers_with_preferences(
+    prefs: Option<crate::preferences::AppPreferences>,
+) -> Vec<ProviderInfo> {
     // Issue #1937: this derivation dominates the Settings -> Providers load,
     // so each derivation emits one `info` line (lands in `logs\buildmesh.log`
     // on a default install) with the total wall-clock and the Codex probe cost.
@@ -301,7 +409,11 @@ fn available_providers_with_preferences(prefs: Option<crate::preferences::AppPre
     let needs_codex = configured_pairings
         .iter()
         .any(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI);
-    let foreign_runtime = if crate::env::is_wsl_host() { crate::models::EnvType::WindowsInterop } else { crate::models::EnvType::Wsl };
+    let foreign_runtime = if crate::env::is_wsl_host() {
+        crate::models::EnvType::WindowsInterop
+    } else {
+        crate::models::EnvType::Wsl
+    };
     // Snapshot cache state before probing (issue #1948): `false` covers both
     // a cold cache and "no probe ran" when `needs_codex` is false (the probe
     // duration is 0 then, so the line still reads unambiguously).
@@ -346,18 +458,23 @@ fn available_providers_with_preferences(prefs: Option<crate::preferences::AppPre
                         account,
                         crate::models::EnvType::Windows,
                         native_codex.as_ref(),
+                    ) || crate::services::provider_verification::launchable_on_runtime(
+                        pairing,
+                        account,
+                        foreign_runtime,
+                        wsl_codex.as_ref(),
                     )
-                        || crate::services::provider_verification::launchable_on_runtime(
-                            pairing,
-                            account,
-                            foreign_runtime,
-                            wsl_codex.as_ref(),
-                        )
                 })
         })
         .collect();
-    let profiles = crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles());
-    let distro = if cfg!(windows) { crate::env::get_default_wsl_distro() } else { None };
+    let profiles = crate::agent::detection::currently_installed_profiles(
+        crate::preferences::harness_profiles(),
+    );
+    let distro = if cfg!(windows) {
+        crate::env::get_default_wsl_distro()
+    } else {
+        None
+    };
     let menu = compose_provider_menu(
         profiles,
         accounts,
@@ -370,7 +487,8 @@ fn available_providers_with_preferences(prefs: Option<crate::preferences::AppPre
     let menu = match prefs {
         Some(mut prefs) => {
             crate::preferences::launch_configurations::reconcile(&mut prefs);
-            configuration_menu(menu, &prefs, Platform::current())
+            let menu = configuration_menu(menu, &prefs, Platform::current());
+            stamp_effective_permission(menu, &prefs)
         }
         None => menu,
     };
@@ -407,24 +525,51 @@ fn available_providers_with_preferences(prefs: Option<crate::preferences::AppPre
 // Keep the native harness rows as submenu parents. Route rows still serve
 // selectors that choose a provider directly; configuration rows carry launch
 // availability, including the reason a saved recipe cannot start.
-fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::AppPreferences, host: Platform) -> Vec<ProviderInfo> {
-    let available = menu.iter().map(|row| row.id.clone()).collect::<std::collections::HashSet<_>>();
+fn configuration_menu(
+    mut menu: Vec<ProviderInfo>,
+    prefs: &crate::preferences::AppPreferences,
+    host: Platform,
+) -> Vec<ProviderInfo> {
+    let available = menu
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<std::collections::HashSet<_>>();
     for configuration in &prefs.spawn_configurations {
-        let id = crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
+        let id =
+            crate::agent::provider::SpawnOptionId::from(configuration.spawn_option_id.as_str());
         let wsl_harness = crate::agent::detection::canonical_wsl_harness(id.harness_id());
         let fallback = crate::preferences::HarnessProfile {
-            id: id.harness_id.clone(), name: id.harness_id.clone(),
-            harness: wsl_harness.map(str::to_owned).unwrap_or_else(|| if id.harness_id == "claude" { "anthropic".into() } else { id.harness_id.clone() }),
-            runtime: wsl_harness.map(|_| crate::models::EnvType::Wsl), wsl_distro: None, executable: None,
+            id: id.harness_id.clone(),
+            name: id.harness_id.clone(),
+            harness: wsl_harness.map(str::to_owned).unwrap_or_else(|| {
+                if id.harness_id == "claude" {
+                    "anthropic".into()
+                } else {
+                    id.harness_id.clone()
+                }
+            }),
+            runtime: wsl_harness.map(|_| crate::models::EnvType::Wsl),
+            wsl_distro: None,
+            executable: None,
         };
-        let profile = prefs.harness_profiles.iter().find(|p| p.id == id.harness_id()).unwrap_or(&fallback);
-        if !crate::agent::detection::visible_in_spawn_menu(profile, host) { continue; }
+        let profile = prefs
+            .harness_profiles
+            .iter()
+            .find(|p| p.id == id.harness_id())
+            .unwrap_or(&fallback);
+        if !crate::agent::detection::visible_in_spawn_menu(profile, host) {
+            continue;
+        }
         if !menu.iter().any(|row| row.id == id.harness_id()) {
             let mut header = profile_row(profile);
-            header.unavailable_reason = Some("Harness is unavailable; install and enable it".into());
+            header.unavailable_reason =
+                Some("Harness is unavailable; install and enable it".into());
             menu.push(header);
         }
-        let mut row = menu.iter().find(|r| r.id == configuration.spawn_option_id).cloned()
+        let mut row = menu
+            .iter()
+            .find(|r| r.id == configuration.spawn_option_id)
+            .cloned()
             .unwrap_or_else(|| profile_row(profile));
         row.id = configuration.id.clone();
         row.label = configuration.name.clone();
@@ -432,16 +577,27 @@ fn configuration_menu(mut menu: Vec<ProviderInfo>, prefs: &crate::preferences::A
         row.is_proxied = id.is_proxied();
         row.configuration = Some(configuration.clone());
         row.configurations.clear();
-        row.unavailable_reason = crate::preferences::launch_configurations::resolve(prefs, &configuration.id,
-            &Default::default()).err();
+        row.unavailable_reason = crate::preferences::launch_configurations::resolve(
+            prefs,
+            &configuration.id,
+            &Default::default(),
+        )
+        .err();
         if row.unavailable_reason.is_none() && !available.contains(&configuration.spawn_option_id) {
-            row.unavailable_reason = Some(if id.is_proxied() && available.contains(id.harness_id()) {
-                "Provider Route needs verification for this harness/runtime; open advanced routes".into()
-            } else { "Harness is unavailable; install and enable it".into() });
+            row.unavailable_reason = Some(
+                if id.is_proxied() && available.contains(id.harness_id()) {
+                    "Provider Route needs verification for this harness/runtime; open advanced routes".into()
+                } else {
+                    "Harness is unavailable; install and enable it".into()
+                },
+            );
         }
         menu.push(row);
     }
-    order_proxied_children(order_providers(menu, &prefs.harness_order), &prefs.proxied_provider_order)
+    order_proxied_children(
+        order_providers(menu, &prefs.harness_order),
+        &prefs.proxied_provider_order,
+    )
 }
 
 /// Within each harness bucket, sort **Proxied Provider** children by the
@@ -516,7 +672,10 @@ pub(super) fn order_proxied_children(
 /// distinct ranks so the tiebreak is moot for them; Proxied rows share their
 /// parent's `harness_id` and the stable sort keeps the native header ahead
 /// of its children (the native row is built first in `compose_provider_menu`).
-pub(super) fn order_providers(mut providers: Vec<ProviderInfo>, order: &[String]) -> Vec<ProviderInfo> {
+pub(super) fn order_providers(
+    mut providers: Vec<ProviderInfo>,
+    order: &[String],
+) -> Vec<ProviderInfo> {
     providers.sort_by(|a, b| {
         let key_a = (
             a.harness_id == "terminal",
@@ -548,27 +707,50 @@ fn routing_options(
     host: Platform,
     distro: Option<&str>,
 ) -> Vec<ProviderInfo> {
-    let pairings = prefs.provider_pairings.iter().filter(|pairing| {
-        pairing.surface == crate::preferences::ApiSurface::OpenAI || accounts.iter()
-            .find(|account| account.id == pairing.provider_id)
-            .is_some_and(|account| crate::services::provider_verification::launchable_on_runtime(
-                pairing, account, crate::models::EnvType::Windows, None,
-            ))
-    }).cloned().collect();
+    let pairings = prefs
+        .provider_pairings
+        .iter()
+        .filter(|pairing| {
+            pairing.surface == crate::preferences::ApiSurface::OpenAI
+                || accounts
+                    .iter()
+                    .find(|account| account.id == pairing.provider_id)
+                    .is_some_and(|account| {
+                        crate::services::provider_verification::launchable_on_runtime(
+                            pairing,
+                            account,
+                            crate::models::EnvType::Windows,
+                            None,
+                        )
+                    })
+        })
+        .cloned()
+        .collect();
     let menu = compose_provider_menu(
-        profiles, accounts, pairings, host, distro,
-        &prefs.harness_order, &prefs.proxied_provider_order,
+        profiles,
+        accounts,
+        pairings,
+        host,
+        distro,
+        &prefs.harness_order,
+        &prefs.proxied_provider_order,
     );
-    let pending_routes = prefs.provider_pairings.iter()
+    let pending_routes = prefs
+        .provider_pairings
+        .iter()
         .filter(|pairing| pairing.surface == crate::preferences::ApiSurface::OpenAI)
         .map(|pairing| format!("{}:{}", pairing.harness_id, pairing.provider_id))
         .collect::<std::collections::HashSet<_>>();
     let mut menu = configuration_menu(menu, prefs, host);
     for row in &mut menu {
-        let selection = row.configuration.as_ref().map(|configuration| configuration.spawn_option_id.as_str())
+        let selection = row
+            .configuration
+            .as_ref()
+            .map(|configuration| configuration.spawn_option_id.as_str())
             .unwrap_or(&row.id);
         if pending_routes.contains(selection) && row.unavailable_reason.is_none() {
-            row.unavailable_reason = Some("Runtime verification pending; retry provider checks if needed".into());
+            row.unavailable_reason =
+                Some("Runtime verification pending; retry provider checks if needed".into());
         }
     }
     menu
@@ -579,15 +761,22 @@ pub async fn list_routing_options() -> Result<Vec<ProviderInfo>, String> {
     crate::commands::run_blocking("list_routing_options", || {
         let mut prefs = crate::preferences::load()?;
         crate::preferences::launch_configurations::reconcile(&mut prefs);
-        let distro = if cfg!(windows) { crate::env::cached_default_wsl_distro() } else { None };
+        let distro = if cfg!(windows) {
+            crate::env::cached_default_wsl_distro()
+        } else {
+            None
+        };
         Ok(routing_options(
             &prefs,
-            crate::agent::detection::currently_installed_profiles(crate::preferences::harness_profiles()),
+            crate::agent::detection::currently_installed_profiles(
+                crate::preferences::harness_profiles(),
+            ),
             crate::preferences::provider_accounts(),
             Platform::current(),
             distro.as_deref(),
         ))
-    }).await
+    })
+    .await
 }
 
 /// Tauri command — returns the derived Spawn Menu to the desktop / mobile
@@ -611,13 +800,53 @@ mod tests {
     use super::*;
     use crate::preferences::ProxiedProviderOrder;
 
+    /// Issue #2151: the pure adapter-level core resolves the stored mode
+    /// when valid, falls back to the unattended default when absent,
+    /// blank, or stale — and reports `None` for harnesses with no modes.
+    #[test]
+    fn effective_permission_resolves_default_stored_and_stale() {
+        use crate::agent::capabilities::{PERMISSION_MODE_PROMPT, PERMISSION_MODE_UNATTENDED};
+        use crate::agent::provider::adapters::{ANTHROPIC, OPENCODE, TERMINAL};
+
+        // No stored value: the harness unattended default, marked default.
+        let mode = effective_permission_for_adapter(&ANTHROPIC, None).expect("claude has modes");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_UNATTENDED);
+        assert!(mode.label.contains("--dangerously-skip-permissions"));
+        assert!(mode.is_default);
+
+        // Stored prompt: honored, marked custom.
+        let mode =
+            effective_permission_for_adapter(&ANTHROPIC, Some("prompt")).expect("prompt stored");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_PROMPT);
+        assert!(!mode.is_default);
+
+        // Stale value (no longer a known mode): falls back to default.
+        let mode =
+            effective_permission_for_adapter(&ANTHROPIC, Some("turbo")).expect("stale falls back");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_UNATTENDED);
+        assert!(mode.is_default);
+
+        // Blank stored value: same as absent.
+        let mode =
+            effective_permission_for_adapter(&OPENCODE, Some("   ")).expect("blank falls back");
+        assert_eq!(mode.mode_id, PERMISSION_MODE_UNATTENDED);
+        assert!(mode.label.contains("--auto"));
+
+        // Modeless harness: always None, even with a stored value.
+        assert!(effective_permission_for_adapter(&TERMINAL, None).is_none());
+        assert!(effective_permission_for_adapter(&TERMINAL, Some("prompt")).is_none());
+    }
+
     #[test]
     fn provider_ipc_reports_failed_reads_while_internal_discovery_keeps_its_fallback() {
         let scratch = tempfile::tempdir().unwrap();
         std::fs::create_dir(scratch.path().join("preferences.json")).unwrap();
         crate::preferences::init_for_tests(scratch.path().into());
         let error = list_providers_blocking().unwrap_err();
-        assert!(error.starts_with("failed to read preferences.json:"), "{error}");
+        assert!(
+            error.starts_with("failed to read preferences.json:"),
+            "{error}"
+        );
         assert!(available_providers().iter().any(|row| row.id == "terminal"));
         crate::preferences::reset_for_tests();
     }
@@ -626,7 +855,8 @@ mod tests {
     fn routing_catalog_preserves_specific_configuration_failures() {
         for failure in ["credential", "disabled", "model"] {
             let mut prefs = crate::preferences::AppPreferences {
-                harness_profiles: vec![profile("codex", "codex")], ..Default::default()
+                harness_profiles: vec![profile("codex", "codex")],
+                ..Default::default()
             };
             let mut account = acct("minimax", true, Some("fixture"));
             let mut pairing = claude_pairing("minimax");
@@ -640,13 +870,33 @@ mod tests {
             }
             prefs.provider_accounts = vec![account.clone()];
             prefs.provider_pairings = vec![pairing];
-            prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-                id: "launch/audit".into(), name: "Audit".into(), spawn_option_id: "codex:minimax".into(), ..Default::default()
-            });
-            let expected = crate::preferences::launch_configurations::resolve(&prefs, "launch/audit", &Default::default()).unwrap_err();
-            let menu = routing_options(&prefs, prefs.harness_profiles.clone(), vec![account], Platform::Windows, None);
+            prefs.spawn_configurations.push(
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/audit".into(),
+                    name: "Audit".into(),
+                    spawn_option_id: "codex:minimax".into(),
+                    ..Default::default()
+                },
+            );
+            let expected = crate::preferences::launch_configurations::resolve(
+                &prefs,
+                "launch/audit",
+                &Default::default(),
+            )
+            .unwrap_err();
+            let menu = routing_options(
+                &prefs,
+                prefs.harness_profiles.clone(),
+                vec![account],
+                Platform::Windows,
+                None,
+            );
             let row = menu.iter().find(|row| row.id == "launch/audit").unwrap();
-            assert_eq!(row.unavailable_reason.as_deref(), Some(expected.as_str()), "{failure} remediation was replaced");
+            assert_eq!(
+                row.unavailable_reason.as_deref(),
+                Some(expected.as_str()),
+                "{failure} remediation was replaced"
+            );
             assert!(!expected.contains("pending"));
         }
     }
@@ -656,12 +906,24 @@ mod tests {
         let mut prefs = crate::preferences::AppPreferences::default();
         let mut invalid = claude_pairing("moonshot");
         invalid.model_tiers.default = None;
-        prefs.provider_pairings = vec![claude_pairing("minimax"), invalid, claude_pairing("custom")];
+        prefs.provider_pairings =
+            vec![claude_pairing("minimax"), invalid, claude_pairing("custom")];
         let mut blank = acct("custom", true, Some("   "));
         blank.claude_compatible = true;
-        let menu = routing_options(&prefs, vec![profile("claude", "anthropic")],
-            vec![acct("minimax", true, Some("fixture")), acct("moonshot", true, Some("fixture")), blank], Platform::Windows, None);
-        assert!(menu.iter().any(|row| row.id == "claude:minimax" && row.unavailable_reason.is_none()));
+        let menu = routing_options(
+            &prefs,
+            vec![profile("claude", "anthropic")],
+            vec![
+                acct("minimax", true, Some("fixture")),
+                acct("moonshot", true, Some("fixture")),
+                blank,
+            ],
+            Platform::Windows,
+            None,
+        );
+        assert!(menu
+            .iter()
+            .any(|row| row.id == "claude:minimax" && row.unavailable_reason.is_none()));
         assert!(!menu.iter().any(|row| row.id == "claude:moonshot"));
         assert!(!menu.iter().any(|row| row.id == "claude:custom"));
     }
@@ -669,23 +931,38 @@ mod tests {
     #[test]
     fn routing_catalog_has_native_capabilities_and_explains_unverified_routes() {
         let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.provider_pairings.push(crate::preferences::ProviderPairing {
-            harness_id: "codex".into(), provider_id: "custom".into(),
-            surface: crate::preferences::ApiSurface::OpenAI,
-            base_url: Some("https://example.test/v1".into()),
-            model_tiers: crate::preferences::ModelTiers::default(),
-        });
+        prefs
+            .provider_pairings
+            .push(crate::preferences::ProviderPairing {
+                harness_id: "codex".into(),
+                provider_id: "custom".into(),
+                surface: crate::preferences::ApiSurface::OpenAI,
+                base_url: Some("https://example.test/v1".into()),
+                model_tiers: crate::preferences::ModelTiers::default(),
+            });
         let account = crate::preferences::ProviderAccount {
-            id: "custom".into(), name: "Custom".into(), enabled: true,
+            id: "custom".into(),
+            name: "Custom".into(),
+            enabled: true,
             billing_mode: crate::preferences::BillingMode::PayAsYouGo,
-            claude_compatible: true, api_key: Some("fixture".into()),
+            claude_compatible: true,
+            api_key: Some("fixture".into()),
         };
-        let menu = routing_options(&prefs, vec![profile("codex", "codex"), profile("terminal", "terminal")], vec![account], Platform::Windows, None);
+        let menu = routing_options(
+            &prefs,
+            vec![profile("codex", "codex"), profile("terminal", "terminal")],
+            vec![account],
+            Platform::Windows,
+            None,
+        );
         let native = menu.iter().find(|row| row.id == "codex").unwrap();
         assert!(native.unavailable_reason.is_none());
         assert!(native.capabilities.supports_resume);
         let route = menu.iter().find(|row| row.id == "codex:custom").unwrap();
-        assert_eq!(route.unavailable_reason.as_deref(), Some("Runtime verification pending; retry provider checks if needed"));
+        assert_eq!(
+            route.unavailable_reason.as_deref(),
+            Some("Runtime verification pending; retry provider checks if needed")
+        );
         assert!(menu.iter().any(|row| row.id == "terminal"));
     }
 
@@ -707,8 +984,8 @@ mod tests {
     /// claim (the two never contend for one cache entry).
     #[test]
     fn both_codex_runtime_discoveries_are_issued_concurrently() {
-        use std::sync::{Condvar, Mutex};
         use crate::agent::provider::adapters::codex::CodexInstall;
+        use std::sync::{Condvar, Mutex};
 
         /// Blocks until the sibling runtime has also entered, so both can only
         /// return if they really were in flight together.
@@ -827,6 +1104,8 @@ mod tests {
             supports_prefill: false,
             is_plain_terminal: false,
             effort_control: crate::agent::capabilities::EffortControlKind::None,
+            permission_modes: Vec::new(),
+            default_permission_mode: None,
             available_on: Vec::new(),
         }
     }
@@ -852,6 +1131,7 @@ mod tests {
             configurations: Vec::new(),
             configuration: None,
             unavailable_reason: None,
+            effective_permission: None,
         }
     }
 
@@ -859,46 +1139,84 @@ mod tests {
     fn launch_configurations_keep_harness_parents_for_spawn_submenus() {
         let prefs = crate::preferences::AppPreferences {
             spawn_configurations: vec![
-            crate::preferences::spawn_configurations::SpawnConfiguration {
-                id: "launch/codex-sol".into(), name: "Sol".into(),
-                spawn_option_id: "codex".into(), ..Default::default()
-            },
-            crate::preferences::spawn_configurations::SpawnConfiguration {
-                id: "launch/claude:minimax".into(), name: "MiniMax".into(),
-                spawn_option_id: "claude:minimax".into(), ..Default::default()
-            },
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/codex-sol".into(),
+                    name: "Sol".into(),
+                    spawn_option_id: "codex".into(),
+                    ..Default::default()
+                },
+                crate::preferences::spawn_configurations::SpawnConfiguration {
+                    id: "launch/claude:minimax".into(),
+                    name: "MiniMax".into(),
+                    spawn_option_id: "claude:minimax".into(),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         };
-        let menu = configuration_menu(vec![row_native("claude"), row_proxied("claude", "minimax"), row_native("codex")], &prefs, Platform::Windows);
+        let menu = configuration_menu(
+            vec![
+                row_native("claude"),
+                row_proxied("claude", "minimax"),
+                row_native("codex"),
+            ],
+            &prefs,
+            Platform::Windows,
+        );
         let ids: Vec<_> = menu.iter().map(|row| row.id.as_str()).collect();
-        assert!(ids.contains(&"claude"), "Claude Code must remain a submenu parent: {ids:?}");
-        assert!(ids.contains(&"codex"), "Codex must remain a submenu parent: {ids:?}");
+        assert!(
+            ids.contains(&"claude"),
+            "Claude Code must remain a submenu parent: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"codex"),
+            "Codex must remain a submenu parent: {ids:?}"
+        );
         assert!(ids.contains(&"launch/codex-sol"));
         assert!(ids.contains(&"launch/claude:minimax"));
 
         let unavailable = configuration_menu(Vec::new(), &prefs, Platform::Windows);
-        let codex = unavailable.iter().find(|row| row.id == "codex").expect("saved Codex recipe keeps an unavailable harness parent");
+        let codex = unavailable
+            .iter()
+            .find(|row| row.id == "codex")
+            .expect("saved Codex recipe keeps an unavailable harness parent");
         assert!(codex.unavailable_reason.is_some());
     }
 
     #[test]
     fn windows_spawn_menu_omits_saved_wsl_configuration_for_windows_harness() {
         let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.harness_profiles.push(crate::preferences::HarnessProfile {
-            id: "codex-wsl-test".into(), name: "Codex (WSL: Test)".into(), harness: "codex".into(),
-            runtime: Some(crate::models::EnvType::Wsl), wsl_distro: Some("Test".into()), executable: None,
-        });
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/codex-wsl-test".into(), name: "Codex (WSL: Test)".into(),
-            spawn_option_id: "codex-wsl-test".into(), ..Default::default()
-        });
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/claude-wsl-old".into(), name: "Claude Code (WSL: Old)".into(),
-            spawn_option_id: "claude-wsl-old".into(), ..Default::default()
-        });
+        prefs
+            .harness_profiles
+            .push(crate::preferences::HarnessProfile {
+                id: "codex-wsl-test".into(),
+                name: "Codex (WSL: Test)".into(),
+                harness: "codex".into(),
+                runtime: Some(crate::models::EnvType::Wsl),
+                wsl_distro: Some("Test".into()),
+                executable: None,
+            });
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/codex-wsl-test".into(),
+                name: "Codex (WSL: Test)".into(),
+                spawn_option_id: "codex-wsl-test".into(),
+                ..Default::default()
+            },
+        );
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude-wsl-old".into(),
+                name: "Claude Code (WSL: Old)".into(),
+                spawn_option_id: "claude-wsl-old".into(),
+                ..Default::default()
+            },
+        );
         let menu = configuration_menu(vec![row_native("codex")], &prefs, Platform::Windows);
-        assert_eq!(menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["codex"]);
+        assert_eq!(
+            menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["codex"]
+        );
     }
 
     #[test]
@@ -915,18 +1233,39 @@ mod tests {
         custom_route.harness_id = custom_wsl.id.clone();
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic"), wsl, custom_wsl],
-            vec![acct("minimax", true, Some("sk-mm"))], vec![route, old_route, custom_route], Platform::Windows, None, &[], &[],
+            vec![acct("minimax", true, Some("sk-mm"))],
+            vec![route, old_route, custom_route],
+            Platform::Windows,
+            None,
+            &[],
+            &[],
         );
-        assert!(!menu.iter().any(|row| row.harness_id.starts_with("claude-wsl-") || row.harness_id == "my-claude-guest"),
-            "hidden WSL routes must not leak into the backend menu: {menu:?}");
+        assert!(
+            !menu
+                .iter()
+                .any(|row| row.harness_id.starts_with("claude-wsl-")
+                    || row.harness_id == "my-claude-guest"),
+            "hidden WSL routes must not leak into the backend menu: {menu:?}"
+        );
     }
 
     #[test]
     fn windows_spawn_menu_omits_wsl_only_install_of_windows_capable_codex() {
         let mut wsl = profile("codex-wsl-test", "codex");
         wsl.runtime = Some(crate::models::EnvType::Wsl);
-        let menu = compose_provider_menu(vec![wsl], Vec::new(), Vec::new(), Platform::Windows, Some("Test"), &[], &[]);
-        assert!(menu.is_empty(), "Codex supports Windows, so its WSL install is not a spawn choice: {menu:?}");
+        let menu = compose_provider_menu(
+            vec![wsl],
+            Vec::new(),
+            Vec::new(),
+            Platform::Windows,
+            Some("Test"),
+            &[],
+            &[],
+        );
+        assert!(
+            menu.is_empty(),
+            "Codex supports Windows, so its WSL install is not a spawn choice: {menu:?}"
+        );
     }
 
     /// Issue #1864 follow-up — the Launch Configuration `reconcile` seeds for the
@@ -935,16 +1274,29 @@ mod tests {
     #[test]
     fn windows_spawn_menu_omits_saved_windows_mirror_configuration() {
         let mut prefs = crate::preferences::AppPreferences::default();
-        prefs.harness_profiles.push(crate::preferences::HarnessProfile {
-            id: "claude-windows".into(), name: "Claude Code (Windows)".into(), harness: "anthropic".into(),
-            runtime: Some(crate::models::EnvType::Windows), wsl_distro: None, executable: None,
-        });
-        prefs.spawn_configurations.push(crate::preferences::spawn_configurations::SpawnConfiguration {
-            id: "launch/claude-windows".into(), name: "Claude Code (Windows)".into(),
-            spawn_option_id: "claude-windows".into(), ..Default::default()
-        });
+        prefs
+            .harness_profiles
+            .push(crate::preferences::HarnessProfile {
+                id: "claude-windows".into(),
+                name: "Claude Code (Windows)".into(),
+                harness: "anthropic".into(),
+                runtime: Some(crate::models::EnvType::Windows),
+                wsl_distro: None,
+                executable: None,
+            });
+        prefs.spawn_configurations.push(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                id: "launch/claude-windows".into(),
+                name: "Claude Code (Windows)".into(),
+                spawn_option_id: "claude-windows".into(),
+                ..Default::default()
+            },
+        );
         let menu = configuration_menu(vec![row_native("claude")], &prefs, Platform::Windows);
-        assert_eq!(menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["claude"]);
+        assert_eq!(
+            menu.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["claude"]
+        );
     }
 
     /// The mirror's Provider Route leaks through the same door: once the
@@ -958,10 +1310,18 @@ mod tests {
         route.harness_id = mirror.id.clone();
         let menu = compose_provider_menu(
             vec![profile("claude", "anthropic"), mirror],
-            vec![acct("minimax", true, Some("sk-mm"))], vec![route], Platform::Windows, None, &[], &[],
+            vec![acct("minimax", true, Some("sk-mm"))],
+            vec![route],
+            Platform::Windows,
+            None,
+            &[],
+            &[],
         );
         assert_eq!(
-            menu.iter().map(|row| row.harness_id.as_str()).collect::<Vec<_>>(), ["claude"],
+            menu.iter()
+                .map(|row| row.harness_id.as_str())
+                .collect::<Vec<_>>(),
+            ["claude"],
             "the mirror's route must not create a second harness group: {menu:?}",
         );
     }
@@ -975,7 +1335,11 @@ mod tests {
         // With no stored order, the two real harnesses keep their input order
         // and Terminal sorts last.
         let ordered = order_providers(
-            vec![row_native("terminal"), row_native("claude"), row_native("codex")],
+            vec![
+                row_native("terminal"),
+                row_native("claude"),
+                row_native("codex"),
+            ],
             &[],
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -986,9 +1350,17 @@ mod tests {
     /// pinned last even if it appears mid-list in the stored order.
     #[test]
     fn order_providers_applies_stored_order() {
-        let order = vec!["codex".to_string(), "terminal".to_string(), "claude".to_string()];
+        let order = vec![
+            "codex".to_string(),
+            "terminal".to_string(),
+            "claude".to_string(),
+        ];
         let ordered = order_providers(
-            vec![row_native("claude"), row_native("terminal"), row_native("codex")],
+            vec![
+                row_native("claude"),
+                row_native("terminal"),
+                row_native("codex"),
+            ],
             &order,
         );
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
@@ -1099,13 +1471,18 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&claude, Platform::Windows)
             .expect("claude profile is available on Windows");
         assert_eq!(info.id, "claude");
         assert_eq!(info.harness_id, "claude");
-        assert!(info.provider_id.is_none(), "native row must have no provider_id");
+        assert!(
+            info.provider_id.is_none(),
+            "native row must have no provider_id"
+        );
         assert!(!info.is_proxied);
         assert_eq!(info.group_key, "claude");
     }
@@ -1120,7 +1497,9 @@ mod tests {
             id: "claude".to_string(),
             name: "Claude Code".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         }];
         let mm = crate::preferences::ProviderAccount {
             id: "minimax".to_string(),
@@ -1159,13 +1538,17 @@ mod tests {
                 id: "claude".to_string(),
                 name: "Claude Code".to_string(),
                 harness: "anthropic".to_string(),
-                runtime: None, wsl_distro: None, executable: None,
+                runtime: None,
+                wsl_distro: None,
+                executable: None,
             },
             crate::preferences::HarnessProfile {
                 id: "codex".to_string(),
                 name: "OpenAI Codex".to_string(),
                 harness: "codex".to_string(),
-                runtime: None, wsl_distro: None, executable: None,
+                runtime: None,
+                wsl_distro: None,
+                executable: None,
             },
         ];
         let mm = crate::preferences::ProviderAccount {
@@ -1242,6 +1625,7 @@ mod tests {
             configurations: Vec::new(),
             configuration: None,
             unavailable_reason: None,
+            effective_permission: None,
         }
     }
 
@@ -1321,7 +1705,15 @@ mod tests {
         let ordered = order_proxied_children(rows, &order);
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // Native header first, then children in stored order.
-        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:openrouter", "claude:minimax"]);
+        assert_eq!(
+            ids,
+            vec![
+                "claude",
+                "claude:kimi",
+                "claude:openrouter",
+                "claude:minimax"
+            ]
+        );
     }
 
     /// A stored order applies ONLY to the children of the named harness.
@@ -1377,7 +1769,10 @@ mod tests {
         let ordered = order_proxied_children(rows, &order);
         let ids: Vec<_> = ordered.iter().map(|p| p.id.as_str()).collect();
         // kimi first (listed), then minimax and deepseek in input order.
-        assert_eq!(ids, vec!["claude", "claude:kimi", "claude:minimax", "claude:deepseek"]);
+        assert_eq!(
+            ids,
+            vec!["claude", "claude:kimi", "claude:minimax", "claude:deepseek"]
+        );
     }
 
     /// Native harness rows are never reordered — they're not proxied
@@ -1412,7 +1807,10 @@ mod tests {
     #[test]
     fn compose_provider_menu_propagates_proxied_order() {
         let menu = compose_provider_menu(
-            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
+            vec![
+                profile("claude", "anthropic"),
+                profile("terminal", "terminal"),
+            ],
             vec![
                 acct("minimax", true, Some("sk-mm")),
                 // `"moonshot"` stands in for the (no-longer-first-class) Kimi
@@ -1556,7 +1954,9 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             harness: harness.to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         }
     }
 
@@ -1589,7 +1989,10 @@ mod tests {
         // ADR-0025: a keyed account surfaces as a Proxied Provider row only
         // when a stored pairing exists (no auto-derived default on key alone).
         let menu = compose_provider_menu(
-            vec![profile("claude", "anthropic"), profile("terminal", "terminal")],
+            vec![
+                profile("claude", "anthropic"),
+                profile("terminal", "terminal"),
+            ],
             vec![
                 acct("minimax", true, Some("sk-mm")),
                 acct("moonshot", true, Some("sk-moon")),
@@ -1709,7 +2112,9 @@ mod tests {
             id: "deepseek-via-claude".to_string(),
             name: "DeepSeek (via Claude)".to_string(),
             harness: "anthropic".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&deepseek, Platform::Windows)
             .expect("anthropic-backed profile is available on Windows");
@@ -1726,10 +2131,12 @@ mod tests {
             id: "cursor".to_string(),
             name: "Cursor Agent".to_string(),
             harness: "cursor".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
-        let info = provider_info_for(&cursor, Platform::Windows)
-            .expect("Cursor is available on Windows");
+        let info =
+            provider_info_for(&cursor, Platform::Windows).expect("Cursor is available on Windows");
         assert!(
             info.resumable,
             "Cursor's workspace JSONL transcript must enable archive resume"
@@ -1773,7 +2180,9 @@ mod tests {
             id: "custom-opencode-flavor".to_string(),
             name: "Custom OpenCode".to_string(),
             harness: "opencode".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&custom_opencode, Platform::Windows)
             .expect("OpenCode-backed profile is available on Windows");
@@ -1800,7 +2209,9 @@ mod tests {
             id: "terminal".to_string(),
             name: "Terminal".to_string(),
             harness: "terminal".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&terminal, Platform::Windows)
             .expect("Terminal is available on Windows");
@@ -1831,7 +2242,9 @@ mod tests {
             id: "minimax".to_string(),
             name: "Minimax".to_string(),
             harness: "minimax".to_string(),
-            runtime: None, wsl_distro: None, executable: None,
+            runtime: None,
+            wsl_distro: None,
+            executable: None,
         };
         let info = provider_info_for(&profile, Platform::Windows)
             .expect("minimax resolves to Anthropic and must be available on Windows");
@@ -1999,8 +2412,8 @@ mod tests {
             .parse::<u128>()
             .expect("codex_probe_duration_ms must be a millisecond count")
             + value("menu_compose_duration_ms")
-            .parse::<u128>()
-            .expect("menu_compose_duration_ms must be a millisecond count");
+                .parse::<u128>()
+                .expect("menu_compose_duration_ms must be a millisecond count");
         assert!(
             phase_total
                 <= value("total_duration_ms")

@@ -57,6 +57,9 @@ pub fn validate(mut value: SpawnConfiguration) -> Result<SpawnConfiguration, Str
         HarnessConfigValue {
             model: value.model,
             effort: value.effort,
+            // Saved recipes carry no permission slot (issue #2151 adds
+            // only the per-harness Settings default).
+            permission_mode: None,
         },
     )?;
     value.model = normalized.model;
@@ -356,12 +359,14 @@ mod tests {
         let valid = super::super::HarnessConfigValue {
             model: Some(" minimax/MiniMax-M3#variant ".into()),
             effort: None,
+            permission_mode: None,
         };
         super::super::upsert_harness_default(&mut prefs, "mcode", valid).unwrap();
         let saved = prefs.clone();
         let invalid = super::super::HarnessConfigValue {
             model: Some("minimax/%PATH%".into()),
             effort: None,
+            permission_mode: None,
         };
         assert!(
             super::super::upsert_harness_default(&mut prefs, "mcode", invalid)

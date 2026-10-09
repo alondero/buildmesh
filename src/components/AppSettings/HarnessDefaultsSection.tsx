@@ -44,7 +44,7 @@ interface HarnessDefaultsSectionProps {
   disabled?: boolean;
 }
 
-const EMPTY_DEFAULT: HarnessConfigValue = { model: null, effort: null };
+const EMPTY_DEFAULT: HarnessConfigValue = { model: null, effort: null, permission_mode: null };
 
 function effortAllowed(kind: EffortControlKind): string[] | null {
   switch (kind.kind) {
@@ -137,7 +137,8 @@ export function HarnessDefaultsSection({
       const draft = { ...current.draft, ...patch };
       const isDirty =
         (draft.model ?? null) !== (current.committed.model ?? null) ||
-        (draft.effort ?? null) !== (current.committed.effort ?? null);
+        (draft.effort ?? null) !== (current.committed.effort ?? null) ||
+        (draft.permission_mode ?? null) !== (current.committed.permission_mode ?? null);
       return { ...prev, [harnessId]: { ...current, draft, dirty: isDirty } };
     });
   }, []);
@@ -170,7 +171,7 @@ export function HarnessDefaultsSection({
       const current = drafts[harnessId];
       if (!current) return;
       const ok = await onReset(harnessId);
-      const cleared: HarnessConfigValue = { model: null, effort: null };
+      const cleared: HarnessConfigValue = { model: null, effort: null, permission_mode: null };
       if (ok) {
         setDrafts((prev) => ({
           ...prev,
@@ -231,9 +232,26 @@ function HarnessDefaultCard({
   const showModel = caps.supports_model_override;
   const allowed = effortAllowed(caps.effort_control);
   const showEffort = allowed !== null;
-  const hasAnyControl = showModel || showEffort;
-  const stored = draft.committed.model !== null || draft.committed.effort !== null;
+  // Issue #2151: per-harness permission mode. Two or more modes render a
+  // select; a single enforced mode (mcode's Full Access pin) renders as
+  // read-only text; no modes renders the "no such flag" line.
+  const modes = caps.permission_modes ?? [];
+  const showPermissionSelect = modes.length > 1;
+  const enforcedMode = modes.length === 1 ? modes[0] : null;
+  const hasModelOrEffort = showModel || showEffort;
+  const hasAnyControl = hasModelOrEffort || showPermissionSelect || enforcedMode !== null;
+  const stored =
+    draft.committed.model !== null ||
+    draft.committed.effort !== null ||
+    draft.committed.permission_mode !== null;
   const effortHelpId = allowed?.includes('max') ? `harness-default-effort-help-${provider.harness_id}` : undefined;
+  // Effective mode: the draft value when set, else the harness default.
+  // Matches what the next spawn uses (stored choice or the harness's
+  // unattended default), in the harness's own words.
+  const defaultMode = modes.find((m) => m.id === caps.default_permission_mode) ?? modes[0] ?? null;
+  const effectiveMode =
+    modes.find((m) => m.id === (draft.draft.permission_mode ?? '')) ?? defaultMode;
+  const effectiveIsDefault = (draft.draft.permission_mode ?? null) === null;
 
   return (
     <div className="space-y-1">
@@ -250,8 +268,8 @@ function HarnessDefaultCard({
             className="min-w-0 truncate text-sm italic text-text-muted"
             data-testid={`harness-default-empty-${provider.harness_id}`}
           >
-            {provider.label} does not accept model or effort overrides from Buildmesh — it uses its own
-            native configuration.
+            {provider.label} does not accept model, effort, or permission-mode overrides from Buildmesh
+            — it uses its own native configuration.
           </span>
         ) : (
           <div className="ml-auto flex items-center gap-2">
@@ -314,6 +332,56 @@ function HarnessDefaultCard({
           </div>
         )}
       </div>
+      {hasModelOrEffort && modes.length === 0 && (
+        <div
+          className="pl-12 text-sm italic text-text-muted"
+          data-testid={`harness-permission-noflag-${provider.harness_id}`}
+        >
+          This harness has no permission flag — Buildmesh launches it without approval arguments.
+        </div>
+      )}
+      {(showPermissionSelect || enforcedMode !== null) && effectiveMode && (
+        <div
+          className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-12 pr-4 text-sm"
+          data-testid={`harness-permission-${provider.harness_id}`}
+        >
+          <span className="text-text-muted">Permission mode:</span>
+          {showPermissionSelect ? (
+            <select
+              id={`harness-default-permission-${provider.harness_id}`}
+              value={draft.draft.permission_mode ?? ''}
+              onChange={(e) => onUpdate({ permission_mode: e.target.value || null })}
+              onBlur={() => void onCommit()}
+              disabled={disabled}
+              className="bg-bg-card border border-border-subtle rounded-md px-3 py-1 text-sm text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              aria-label={`${provider.label} permission mode`}
+              title={modes.find((m) => m.id === (draft.draft.permission_mode ?? ''))?.description ?? defaultMode?.description ?? ''}
+              data-testid={`harness-permission-select-${provider.harness_id}`}
+            >
+              <option value="">— harness default ({defaultMode?.label ?? ''}) —</option>
+              {modes.map((m) => (
+                <option key={m.id} value={m.id} title={m.description}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            enforcedMode && (
+              <span title={enforcedMode.description} data-testid={`harness-permission-fixed-${provider.harness_id}`}>
+                {enforcedMode.label}
+              </span>
+            )
+          )}
+          <span
+            className="text-text-muted"
+            title={effectiveMode.description}
+            data-testid={`harness-permission-effective-${provider.harness_id}`}
+          >
+            Effective: {effectiveMode.label}
+            {effectiveIsDefault ? ' (harness default)' : ''}
+          </span>
+        </div>
+      )}
       {allowed && effortHelpId && (
         <EffortGuidance id={effortHelpId} efforts={allowed} selectedEffort={draft.draft.effort} />
       )}

@@ -1,4 +1,6 @@
-use crate::agent::capabilities::EffortControlKind;
+use crate::agent::capabilities::{
+    EffortControlKind, PermissionModeOption, PERMISSION_MODE_UNATTENDED,
+};
 use crate::agent::provider::{
     AgentProvider, LaunchRuntime, Platform, SpawnRecipe, UiMeta, WindowsShell,
 };
@@ -21,7 +23,12 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("hooks.json");
-    let tmp = path.with_file_name(format!("{}.{}.{}.tmp", file_name, std::process::id(), counter));
+    let tmp = path.with_file_name(format!(
+        "{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        counter
+    ));
 
     {
         use std::io::Write;
@@ -32,7 +39,11 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 
     if let Err(e) = std::fs::rename(&tmp, path) {
         if let Err(rm_err) = std::fs::remove_file(&tmp) {
-            tracing::warn!("atomic_write: failed to clean up temp file {:?}: {}", tmp, rm_err);
+            tracing::warn!(
+                "atomic_write: failed to clean up temp file {:?}: {}",
+                tmp,
+                rm_err
+            );
         }
         return Err(e);
     }
@@ -49,7 +60,9 @@ fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
 /// rather than adding a second `cmd.exe /c` or `sh -c` wrapper.
 fn hook_command(platform: Platform) -> String {
     if platform == Platform::Windows {
-        if let Some(command) = crate::env::windows_attention_command(None) { return format!("{command} & echo {{\"decision\":\"allow\"}}"); }
+        if let Some(command) = crate::env::windows_attention_command(None) {
+            return format!("{command} & echo {{\"decision\":\"allow\"}}");
+        }
     }
     let command = match platform {
         Platform::Windows => {
@@ -61,7 +74,14 @@ fn hook_command(platform: Platform) -> String {
                 .to_string()
         }
     };
-    if cfg!(windows) { command } else { command.replace("$(command -v curl.exe || command -v curl)", crate::env::unix_attention_curl()) }
+    if cfg!(windows) {
+        command
+    } else {
+        command.replace(
+            "$(command -v curl.exe || command -v curl)",
+            crate::env::unix_attention_curl(),
+        )
+    }
 }
 
 /// Ensure `<project>/.agents/hooks.json` carries the Stop attention webhook
@@ -76,10 +96,18 @@ fn ensure_hooks_json(path: &Path, command: &str) -> Result<(), String> {
         Ok(content) => serde_json::from_str(&content)
             .map_err(|e| format!("invalid agy hooks.json at {}: {e}", path.display()))?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
-        Err(e) => return Err(format!("failed to read agy hooks.json at {}: {e}", path.display())),
+        Err(e) => {
+            return Err(format!(
+                "failed to read agy hooks.json at {}: {e}",
+                path.display()
+            ))
+        }
     };
     if !settings.is_object() {
-        return Err(format!("agy hooks.json at {} must be a JSON object", path.display()));
+        return Err(format!(
+            "agy hooks.json at {} must be a JSON object",
+            path.display()
+        ));
     }
 
     // Stop fires the moment a turn ends. The simple shape — AGY's harness
@@ -113,11 +141,37 @@ impl AgentProvider for AgyAdapter {
     }
 
     fn spawn_recipe(&self, _platform: Platform, _env_type: EnvType) -> SpawnRecipe {
+        // Issue #2151: bare — no approval flags. The effective permission
+        // mode contributes `--dangerously-skip-permissions` via
+        // `permission_args` in `default_prepare`.
         SpawnRecipe {
             binary: "agy",
-            base_args: vec!["--dangerously-skip-permissions".into()],
+            base_args: Vec::new(),
             trailing_args: Vec::new(),
             windows_shell: WindowsShell::Direct,
+        }
+    }
+
+    /// Issue #2151: Buildmesh passes Antigravity's own flag through.
+    /// Unattended keeps today's `--dangerously-skip-permissions`.
+    fn permission_modes(&self) -> Vec<PermissionModeOption> {
+        vec![
+            PermissionModeOption::unattended(
+                "--dangerously-skip-permissions",
+                "Prompts off — tools run without asking (today's behavior; required for unattended runs).",
+            ),
+            PermissionModeOption::prompt(
+                "Prompts on (no flag)",
+                "Antigravity asks for approval like a human-launched session.",
+            ),
+        ]
+    }
+
+    fn permission_args(&self, mode_id: &str) -> Vec<String> {
+        if mode_id == PERMISSION_MODE_UNATTENDED {
+            vec!["--dangerously-skip-permissions".into()]
+        } else {
+            Vec::new()
         }
     }
 
@@ -125,11 +179,30 @@ impl AgentProvider for AgyAdapter {
         true
     }
 
-    fn background_recipe(&self, platform: Platform) -> Option<crate::agent::background::BackgroundRecipe> {
-        use crate::agent::{background::BackgroundRecipe, capabilities::{BackgroundPromptInput, BackgroundResultOutput}};
+    fn background_recipe(
+        &self,
+        platform: Platform,
+    ) -> Option<crate::agent::background::BackgroundRecipe> {
+        use crate::agent::{
+            background::BackgroundRecipe,
+            capabilities::{BackgroundPromptInput, BackgroundResultOutput},
+        };
         let mut spawn = self.spawn_recipe(platform, EnvType::Windows);
-        spawn.base_args = ["--output-format", "text", "--disable-slash-commands", "--dangerously-skip-permissions"].map(str::to_owned).to_vec();
-        Some(BackgroundRecipe::new(spawn, BackgroundPromptInput::Argument { flag: "--print".into() }, BackgroundResultOutput::Stdout))
+        spawn.base_args = [
+            "--output-format",
+            "text",
+            "--disable-slash-commands",
+            "--dangerously-skip-permissions",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        Some(BackgroundRecipe::new(
+            spawn,
+            BackgroundPromptInput::Argument {
+                flag: "--print".into(),
+            },
+            BackgroundResultOutput::Stdout,
+        ))
     }
 
     fn produces_readable_transcript(&self) -> bool {
@@ -157,7 +230,10 @@ impl AgentProvider for AgyAdapter {
         use crate::agent::capabilities::{AttentionCapability, AttentionLaunchMode};
         use crate::agent::session_lifecycle::LifecycleKind;
         AttentionCapability::Hook {
-            events: vec![LifecycleKind::TurnCompleted, LifecycleKind::BackgroundRunning],
+            events: vec![
+                LifecycleKind::TurnCompleted,
+                LifecycleKind::BackgroundRunning,
+            ],
             launch_mode: AttentionLaunchMode::SkipPermissions,
             trust: Some("workspace trust".into()),
             min_version: Some("1.0.0".into()),
@@ -187,7 +263,13 @@ impl AgentProvider for AgyAdapter {
         std::fs::create_dir_all(&agents_dir)
             .map_err(|e| format!("failed to create .agents dir: {e}"))?;
         let hooks_path = agents_dir.join("hooks.json");
-        let platform = if resolved.env_type == EnvType::Wsl { Platform::Linux } else if resolved.env_type == EnvType::WindowsInterop { Platform::Windows } else { Platform::current() };
+        let platform = if resolved.env_type == EnvType::Wsl {
+            Platform::Linux
+        } else if resolved.env_type == EnvType::WindowsInterop {
+            Platform::Windows
+        } else {
+            Platform::current()
+        };
         ensure_hooks_json(&hooks_path, &hook_command(platform))
     }
 
@@ -246,7 +328,10 @@ impl AgentProvider for AgyAdapter {
         recorded_start: bool,
     ) -> Option<String> {
         crate::services::agy_session::find_historic_id_for_directory(
-            env_type, spawn_path, anchor_ms, recorded_start,
+            env_type,
+            spawn_path,
+            anchor_ms,
+            recorded_start,
         )
     }
 
@@ -313,8 +398,7 @@ mod tests {
             raw_path: path,
             env_type: EnvType::Windows,
         };
-        AGY
-            .provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
+        AGY.provision_attention_hooks(&resolved, &LaunchRuntime::default(), 0)
             .unwrap();
     }
 
@@ -359,6 +443,7 @@ mod tests {
             model: None,
             effort: Some("high".to_string()),
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,
@@ -393,12 +478,13 @@ mod tests {
             args.contains(&"--sandbox".to_string()),
             "agy recipe must carry --sandbox when mesh.sandbox=true; got args = {args:?}"
         );
-        // The flag must appear AFTER the base-recipe flags (`--dangerously-skip-permissions`)
-        // so it's grouped with the harness's own switches, not the binary.
+        // The flag must appear AFTER the permission-layer flags
+        // (`--dangerously-skip-permissions`, issue #2151) so it's grouped
+        // with the harness's own switches, not the binary.
         let skip_perm = args
             .iter()
             .position(|a| a == "--dangerously-skip-permissions")
-            .expect("base recipe carries --dangerously-skip-permissions");
+            .expect("unattended permission default carries --dangerously-skip-permissions");
         let sandbox_pos = args
             .iter()
             .position(|a| a == "--sandbox")
@@ -543,15 +629,40 @@ mod tests {
     #[test]
     fn hook_command_uses_platform_env_syntax() {
         let original = hook_command(Platform::Windows);
-        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
-        assert!(win.starts_with(if crate::env::is_wsl_host() { "$OutputEncoding" } else { "curl.exe " }), "win: {win}");
+        let win =
+            crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
+        assert!(
+            win.starts_with(if crate::env::is_wsl_host() {
+                "$OutputEncoding"
+            } else {
+                "curl.exe "
+            }),
+            "win: {win}"
+        );
         assert!(!win.contains("cmd.exe /c"), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_SESSION_ID" } else { "%BUILDMESH_SESSION_ID%" }), "win: {win}");
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_PORT"
+            } else {
+                "%BUILDMESH_PORT%"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_SESSION_ID"
+            } else {
+                "%BUILDMESH_SESSION_ID%"
+            }),
+            "win: {win}"
+        );
 
         for platform in [Platform::Macos, Platform::Linux] {
             let unix = hook_command(platform);
-            assert!(unix.starts_with(crate::env::unix_attention_curl()), "unix: {unix}");
+            assert!(
+                unix.starts_with(crate::env::unix_attention_curl()),
+                "unix: {unix}"
+            );
             assert!(!unix.contains("sh -c"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_PORT"), "unix: {unix}");
             assert!(unix.contains("$BUILDMESH_SESSION_ID"), "unix: {unix}");
@@ -566,12 +677,30 @@ mod tests {
     #[test]
     fn hook_command_is_bare_and_fail_open() {
         let original = hook_command(Platform::Windows);
-        let win = crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
+        let win =
+            crate::env::decode_powershell_command(&original).unwrap_or_else(|| original.clone());
         assert!(!win.starts_with("cmd.exe /c"), "win: {win}");
         assert!(!win.starts_with('"') && !win.ends_with('"'), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "--exec curl" } else { "curl.exe" }), "win: {win}");
-        assert!(win.contains(if crate::env::is_wsl_host() { "$env:BUILDMESH_PORT" } else { "%BUILDMESH_PORT%" }), "win: {win}");
-        assert!(original.contains("echo {\"decision\":\"allow\"}"), "win: {win}");
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "--exec curl"
+            } else {
+                "curl.exe"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            win.contains(if crate::env::is_wsl_host() {
+                "$env:BUILDMESH_PORT"
+            } else {
+                "%BUILDMESH_PORT%"
+            }),
+            "win: {win}"
+        );
+        assert!(
+            original.contains("echo {\"decision\":\"allow\"}"),
+            "win: {win}"
+        );
 
         let unix = hook_command(Platform::Linux);
         assert!(!unix.starts_with("sh -c"), "unix: {unix}");
@@ -606,7 +735,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(tmp_files.is_empty(), "found leftover tmp files: {tmp_files:?}");
+        assert!(
+            tmp_files.is_empty(),
+            "found leftover tmp files: {tmp_files:?}"
+        );
     }
 
     /// Issue #1367: Verify that user-defined sibling namespaces in

@@ -231,6 +231,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Windows,
@@ -254,6 +255,7 @@ mod tests {
             model: None,
             effort: None,
             extra_args: None,
+            permission_mode: None,
         };
         let input = HarnessLaunchInput {
             platform: Platform::Linux,

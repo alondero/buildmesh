@@ -43,9 +43,7 @@ mod tests {
             wire_api: crate::agent::provider::compatibility::WireApi::Responses,
             model_id: "MiniMax-M3".into(),
             capabilities: crate::agent::provider::compatibility::complete_agent_capabilities(),
-            auth_modes: vec![
-                crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv,
-            ],
+            auth_modes: vec![crate::agent::provider::compatibility::ProviderAuthMode::BearerEnv],
             context_window: None,
             reasoning_effort: None,
         };
@@ -99,9 +97,11 @@ mod tests {
 }"#,
         )
         .unwrap();
-        let executable = temp
-            .path()
-            .join(if cfg!(windows) { "fake-codex.exe" } else { "fake-codex" });
+        let executable = temp.path().join(if cfg!(windows) {
+            "fake-codex.exe"
+        } else {
+            "fake-codex"
+        });
         let status = std::process::Command::new("rustc")
             .args([
                 source.as_os_str(),
@@ -185,13 +185,19 @@ mod tests {
             "--cd".to_string(),
             SPAWN_PATH.to_string(),
             "--exec".to_string(),
-            "sh".to_string(), "-lc".to_string(),
+            "sh".to_string(),
+            "-lc".to_string(),
             "export PATH=\"$HOME/.local/bin:$HOME/.npm-global/bin:$PATH\"; exec \"$@\"".to_string(),
-            "buildmesh".to_string(), binary.to_string(),
+            "buildmesh".to_string(),
+            binary.to_string(),
         ];
         if cfg!(windows) {
-            if let Some(distro) = crate::env::get_default_wsl_distro() { v.splice(1..1, ["-d".into(), distro]); }
-        } else { v = vec![binary.to_string()]; }
+            if let Some(distro) = crate::env::get_default_wsl_distro() {
+                v.splice(1..1, ["-d".into(), distro]);
+            }
+        } else {
+            v = vec![binary.to_string()];
+        }
         v.extend(inner.iter().map(|s| s.to_string()));
         v
     }
@@ -231,11 +237,21 @@ mod tests {
                     mesh: None,
                     application: None,
                 },
+                permission_mode: crate::agent::capabilities::FieldInputs::default(),
             },
             None,
         );
-        build_spawn_command(resolved, provider, &[], mode, session_id, &config, prefill, sandbox)
-            .expect("command assembly")
+        build_spawn_command(
+            resolved,
+            provider,
+            &[],
+            mode,
+            session_id,
+            &config,
+            prefill,
+            sandbox,
+        )
+        .expect("command assembly")
     }
 
     /// Assigning a fresh session id appends `--session-id <uuid>` after the
@@ -301,7 +317,10 @@ mod tests {
         );
 
         let args = argv(&cmd);
-        assert_eq!(args, expected_wsl(binary, &[flag, "--resume", "uuid-resume"]));
+        assert_eq!(
+            args,
+            expected_wsl(binary, &[flag, "--resume", "uuid-resume"])
+        );
         assert!(
             !args.iter().any(|a| a == "--session-id"),
             "resume must not pass --session-id: {:?}",
@@ -316,8 +335,14 @@ mod tests {
     #[test]
     fn custom_profile_injects_backend_env() {
         let backend_env = vec![
-            ("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string()),
-            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-custom-123".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.minimax.io/anthropic".to_string(),
+            ),
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "sk-custom-123".to_string(),
+            ),
             ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
         ];
         let cmd = build_spawn_command(
@@ -335,7 +360,10 @@ mod tests {
         // Plain claude recipe — the backend is selected via env, not argv.
         assert_eq!(
             argv(&cmd),
-            expected_wsl("claude", &["--dangerously-skip-permissions", "--session-id", "mm-1"])
+            expected_wsl(
+                "claude",
+                &["--dangerously-skip-permissions", "--session-id", "mm-1"]
+            )
         );
         assert_eq!(
             env_of(&cmd, "ANTHROPIC_BASE_URL").as_deref(),
@@ -398,12 +426,19 @@ mod tests {
             let args = argv(&cmd);
             let mut expected = expected_wsl("/usr/bin/codex", &[]);
             if cfg!(windows) {
-                if expected.get(1).is_some_and(|arg| arg == "-d") { expected[2] = "Ubuntu".into(); }
-                else { expected.splice(1..1, ["-d".into(), "Ubuntu".into()]); }
+                if expected.get(1).is_some_and(|arg| arg == "-d") {
+                    expected[2] = "Ubuntu".into();
+                } else {
+                    expected.splice(1..1, ["-d".into(), "Ubuntu".into()]);
+                }
             }
             assert_eq!(&args[..expected.len()], expected.as_slice());
-            assert!(args.windows(2).any(|pair| pair == ["--profile", "buildmesh_1234"]));
-            assert!(args.windows(2).any(|pair| pair == ["--model", "MiniMax-M3"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--profile", "buildmesh_1234"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--model", "MiniMax-M3"]));
             assert_eq!(
                 env_of(&cmd, "BUILDMESH_CODEX_PROVIDER_KEY").as_deref(),
                 Some("sentinel-secret")
@@ -426,11 +461,17 @@ mod tests {
         for (config, expected_model) in [
             (ResolvedAgentConfig::default(), "MiniMax-M3"),
             (
-                ResolvedAgentConfig { model: Some("MiniMax-M3".into()), ..Default::default() },
+                ResolvedAgentConfig {
+                    model: Some("MiniMax-M3".into()),
+                    ..Default::default()
+                },
                 "MiniMax-M3",
             ),
             (
-                ResolvedAgentConfig { model: Some("route-override".into()), ..Default::default() },
+                ResolvedAgentConfig {
+                    model: Some("route-override".into()),
+                    ..Default::default()
+                },
                 "route-override",
             ),
         ] {
@@ -469,7 +510,8 @@ mod tests {
                 // The fold must not disturb the orchestrator's own
                 // contribution, in any cascade shape.
                 assert!(
-                    args.windows(2).any(|pair| pair == ["--profile", "buildmesh_1234"]),
+                    args.windows(2)
+                        .any(|pair| pair == ["--profile", "buildmesh_1234"]),
                     "the route profile must survive the model fold; got {args:?}"
                 );
             }
@@ -503,14 +545,29 @@ mod tests {
         }
         for mode in [SessionIdMode::None, SessionIdMode::Resume("session".into())] {
             for effort in ["none", "high"] {
-                let cmd = build_spawn_command_prepared(&wsl_resolved(), Provider::Codex, &routing, &mode,
-                    SESSION_ID, &crate::agent::capabilities::ResolvedAgentConfig {
-                        model: Some("MiniMax-M3".into()), effort: Some(effort.into()), extra_args: None,
-                    }, None, false)
-                    .expect("command assembly");
+                let cmd = build_spawn_command_prepared(
+                    &wsl_resolved(),
+                    Provider::Codex,
+                    &routing,
+                    &mode,
+                    SESSION_ID,
+                    &crate::agent::capabilities::ResolvedAgentConfig {
+                        model: Some("MiniMax-M3".into()),
+                        effort: Some(effort.into()),
+                        extra_args: None,
+                        permission_mode: None,
+                    },
+                    None,
+                    false,
+                )
+                .expect("command assembly");
                 let args = argv(&cmd);
-                assert!(args.windows(2).any(|pair| pair == ["-c", "model_supports_reasoning_summaries=true"]));
-                assert!(args.windows(2).any(|pair| pair == ["-c", "model_reasoning_summary=\"none\""]));
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["-c", "model_supports_reasoning_summaries=true"]));
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["-c", "model_reasoning_summary=\"none\""]));
                 assert!(args.contains(&format!("model_reasoning_effort=\"{effort}\"")));
             }
         }
@@ -549,9 +606,8 @@ mod tests {
         // directly as argv[0]. Both routes must replace the bare `cline` stem.
         if cfg!(windows) {
             assert!(
-                args.windows(2).any(|pair| {
-                    pair[0] == "/c" && pair[1] == fake_binary_str
-                }),
+                args.windows(2)
+                    .any(|pair| { pair[0] == "/c" && pair[1] == fake_binary_str }),
                 "the resolved absolute path must follow `/c`; got {:?}",
                 args
             );
@@ -729,7 +785,10 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("claude", &["--dangerously-skip-permissions", "--prefill", "hello world"])
+            expected_wsl(
+                "claude",
+                &["--dangerously-skip-permissions", "--prefill", "hello world"]
+            )
         );
     }
 
@@ -751,7 +810,11 @@ mod tests {
             argv(&cmd),
             expected_wsl(
                 "claude",
-                &["--dangerously-skip-permissions", "--prefill", "Title\n\nLine 1\nLine 2\nLine 3"]
+                &[
+                    "--dangerously-skip-permissions",
+                    "--prefill",
+                    "Title\n\nLine 1\nLine 2\nLine 3"
+                ]
             )
         );
     }
@@ -803,8 +866,12 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn anthropic_prefill_goes_argv_not_env() {
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("BUILDMESH_PREFILL");
+        }
 
         let cmd = cmd_for(
             &windows_resolved(),
@@ -818,7 +885,10 @@ mod tests {
         );
 
         let args = argv(&cmd);
-        let pos = args.iter().position(|a| a == "--prefill").expect("--prefill present in argv");
+        let pos = args
+            .iter()
+            .position(|a| a == "--prefill")
+            .expect("--prefill present in argv");
         // Issue #1773 review — `cmd.exe /c` requires newlines in the
         // prefill to be flattened to single spaces (the bare-newline
         // end-of-command trap). The empty middle segment from the
@@ -846,8 +916,14 @@ mod tests {
     #[test]
     fn custom_profile_injects_backend_env_on_windows_native() {
         let backend_env = vec![
-            ("ANTHROPIC_BASE_URL".to_string(), "https://api.minimax.io/anthropic".to_string()),
-            ("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-custom-123".to_string()),
+            (
+                "ANTHROPIC_BASE_URL".to_string(),
+                "https://api.minimax.io/anthropic".to_string(),
+            ),
+            (
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
+                "sk-custom-123".to_string(),
+            ),
             ("ANTHROPIC_MODEL".to_string(), "MiniMax-M3[1m]".to_string()),
         ];
         let cmd = build_spawn_command(
@@ -919,11 +995,15 @@ mod tests {
         // The process environment is shared state: every test that mutates it
         // holds the one crate-wide lock, so a parallel test cannot observe
         // this mutation (or restore the var while we still read it).
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // Simulate buildmesh launched from a shell that already exported a
         // provider override (e.g. a developer who ran `cwrap --minimax` in the
         // same terminal before starting the app).
-        unsafe { std::env::set_var("ANTHROPIC_BASE_URL", "https://leaked.example/anthropic"); }
+        unsafe {
+            std::env::set_var("ANTHROPIC_BASE_URL", "https://leaked.example/anthropic");
+        }
         let cmd = cmd_for(
             &windows_resolved(),
             Provider::Anthropic,
@@ -935,7 +1015,9 @@ mod tests {
             false,
         );
         let leaked = env_of(&cmd, "ANTHROPIC_BASE_URL");
-        unsafe { std::env::remove_var("ANTHROPIC_BASE_URL"); }
+        unsafe {
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+        }
         assert_eq!(
             leaked, None,
             "inherited ANTHROPIC_BASE_URL must be cleared for the Anthropic spawn (cwrap `unset` parity), not leaked: {:?}",
@@ -951,8 +1033,12 @@ mod tests {
     /// `custom_profile_injects_backend_env`.
     #[test]
     fn prefill_stays_argv_for_wsl() {
-        let _env = crate::env::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("BUILDMESH_PREFILL"); }
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("BUILDMESH_PREFILL");
+        }
 
         let cmd = cmd_for(
             &wsl_resolved(),
@@ -967,7 +1053,10 @@ mod tests {
 
         assert_eq!(
             argv(&cmd),
-            expected_wsl("claude", &["--dangerously-skip-permissions", "--prefill", "hello world"])
+            expected_wsl(
+                "claude",
+                &["--dangerously-skip-permissions", "--prefill", "hello world"]
+            )
         );
         assert!(
             env_of(&cmd, "BUILDMESH_PREFILL").is_none(),
@@ -989,7 +1078,10 @@ mod tests {
             false,
         );
 
-        assert_eq!(argv(&cmd), expected_wsl("claude", &["--dangerously-skip-permissions"]));
+        assert_eq!(
+            argv(&cmd),
+            expected_wsl("claude", &["--dangerously-skip-permissions"])
+        );
     }
 
     /// Agy applies model and prefill overrides when passed.
@@ -1050,7 +1142,10 @@ mod tests {
         );
 
         let args = argv(&cmd);
-        assert_eq!(args, expected_wsl("agy", &["--dangerously-skip-permissions"]));
+        assert_eq!(
+            args,
+            expected_wsl("agy", &["--dangerously-skip-permissions"])
+        );
         assert!(
             !args.iter().any(|a| a == "--session-id" || a == "ignored"),
             "agy self-assigns; Assign must not add --session-id: {:?}",
@@ -1208,7 +1303,12 @@ mod tests {
             "Codex PowerShell launcher must pass -NoProfile to skip the user profile: {:?}",
             args
         );
-        assert_eq!(args.len(), 5, "expected the Base64 payload as the 5th arg: {:?}", args);
+        assert_eq!(
+            args.len(),
+            5,
+            "expected the Base64 payload as the 5th arg: {:?}",
+            args
+        );
     }
 
     /// The wrapper sets the spawn cwd and the BUILDMESH_SESSION_ID / BUILDMESH_PORT
@@ -1228,7 +1328,11 @@ mod tests {
 
         assert_eq!(
             cmd.get_cwd().map(|c| c.to_string_lossy().into_owned()),
-            Some(if cfg!(windows) { crate::env::to_host_path(SPAWN_PATH) } else { SPAWN_PATH.to_string() })
+            Some(if cfg!(windows) {
+                crate::env::to_host_path(SPAWN_PATH)
+            } else {
+                SPAWN_PATH.to_string()
+            })
         );
         assert_eq!(
             cmd.get_env("BUILDMESH_SESSION_ID")
@@ -1267,7 +1371,9 @@ mod tests {
                 let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
                 for key in ["TERM", "COLORTERM", "FORCE_COLOR"] {
                     assert!(
-                        wslenv.split(':').any(|entry| entry.split('/').next() == Some(key)),
+                        wslenv
+                            .split(':')
+                            .any(|entry| entry.split('/').next() == Some(key)),
                         "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
                     );
                 }
@@ -1320,7 +1426,9 @@ mod tests {
         let wslenv = env_of(&cmd, "WSLENV").unwrap_or_default();
         for key in ["TERM_PROGRAM", "TERM", "COLORTERM", "FORCE_COLOR"] {
             assert!(
-                wslenv.split(':').any(|entry| entry.split('/').next() == Some(key)),
+                wslenv
+                    .split(':')
+                    .any(|entry| entry.split('/').next() == Some(key)),
                 "{key} must be on WSLENV so the guest sees it; got {wslenv:?}"
             );
         }
@@ -1433,7 +1541,10 @@ mod tests {
         .expect("fork PR with head_ref and full fork info must be accepted");
         assert_eq!(head_ref, "feat/x");
         assert_eq!(owner.as_deref(), Some("alice"));
-        assert_eq!(url.as_deref(), Some("https://github.com/alice/buildmesh.git"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/alice/buildmesh.git")
+        );
     }
 
     /// Fork-info completeness gate: only one of the two fields is an
