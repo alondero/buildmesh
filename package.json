@@ -33,7 +33,7 @@
     "check:versions": "node scripts/check-manifest-versions.mjs",
     "lint": "eslint . --max-warnings 0",
     "lint:fixtures": "node scripts/check-eslint-fixtures.mjs",
-    "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs tests/agent-infra/check-manifest-versions.test.mjs tests/agent-infra/codex-hook-relay.test.mjs tests/agent-infra/check-process-spawn-discipline.test.mjs tests/agent-infra/run-guarded.test.mjs tests/agent-infra/retry-failed-runs.test.mjs tests/agent-infra/changed-scope.test.mjs tests/agent-infra/harness.test.mjs tests/agent-infra/rust-shards.test.mjs tests/agent-infra/vitest-legs.test.mjs tests/agent-infra/quality-gate.test.mjs tests/agent-infra/rustfmt-touched.test.mjs tests/agent-infra/supply-chain-gates.test.mjs",
+    "test:agent": "node --test tests/agent-infra/check-agent-diff.test.mjs tests/agent-infra/check-manifest-versions.test.mjs tests/agent-infra/codex-hook-relay.test.mjs tests/agent-infra/check-process-spawn-discipline.test.mjs tests/agent-infra/run-guarded.test.mjs tests/agent-infra/retry-failed-runs.test.mjs tests/agent-infra/changed-scope.test.mjs tests/agent-infra/harness.test.mjs tests/agent-infra/rust-shards.test.mjs tests/agent-infra/rust-cache-key.test.mjs tests/agent-infra/vitest-legs.test.mjs tests/agent-infra/quality-gate.test.mjs tests/agent-infra/rustfmt-touched.test.mjs tests/agent-infra/supply-chain-gates.test.mjs",
     "test:readme": "node --test tests/agent-infra/check-readme-drift.test.mjs",
     "test:docs": "node --test tests/agent-infra/check-docs.test.mjs tests/agent-infra/guard-documentation.test.mjs tests/agent-infra/release-notes.test.mjs",
     "test:lint": "node --test tests/agent-infra/check-eslint-fixtures.test.mjs",
