@@ -370,7 +370,16 @@ fn run_cap(rt: &Runtime, input: &[u8], cap: usize) -> Run {
     let mut server = BufStream::new(server);
     rt.block_on(async {
         tokio::time::timeout(DRIVE_TIMEOUT, async {
-            let _ = client.write_all(input).await;
+            // A short write would silently narrow what this drive covers, so
+            // treat it as the harness bug it is instead of continuing with a
+            // truncated request.
+            if client.write_all(input).await.is_err() {
+                panic!(
+                    "the duplex refused {} bytes against a {DUPLEX_CAPACITY}-byte capacity; \
+                     MAX_INPUT_BYTES must stay below it",
+                    input.len()
+                );
+            }
             drop(client);
             let Some((request_line, headers, overflow)) = read_request_head(&mut server).await
             else {
@@ -406,8 +415,12 @@ fn run_cap(rt: &Runtime, input: &[u8], cap: usize) -> Run {
             let mut chunk = [0u8; 4096];
             loop {
                 match server.read(&mut chunk).await {
-                    Ok(0) | Err(_) => break,
+                    // An in-memory duplex cannot error, and counting fewer
+                    // bytes than are really there would misplace the body
+                    // check below rather than fail it.
+                    Ok(0) => break,
                     Ok(n) => leftover += n,
+                    Err(e) => panic!("draining the duplex failed after {leftover} bytes: {e}"),
                 }
             }
             Run {
