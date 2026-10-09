@@ -109,3 +109,13 @@ pub(crate) fn assert_jsonl_contract(
         Err(UnavailableReason::Unreadable)
     );
 }
+
+/// A real stability snapshot of a native-completion record on disk, for tests
+/// that cross the pull seam without locating a harness's data directory.
+pub(crate) fn native_snapshot(
+    path: &Path,
+    format: super::TranscriptFormat,
+) -> super::NativeTurnSnapshot {
+    super::native_completion::native_turn_snapshot_from_file(path, format)
+        .expect("fixture holds a stable native completion")
+}

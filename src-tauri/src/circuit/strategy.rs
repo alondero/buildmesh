@@ -328,7 +328,7 @@ pub(crate) fn provider_for_selection(
 
 /// A harness id or legacy alias (`claude_code`, `antigravity`, ...) → its
 /// adapter. Unknown ids stay unknown.
-fn provider_for_id(id: &str) -> Option<crate::models::Provider> {
+pub(crate) fn provider_for_id(id: &str) -> Option<crate::models::Provider> {
     crate::models::Provider::try_from_db_str(id).or_else(|| {
         super::compatibility::resolve_harness_adapter_id(id)
             .and_then(crate::models::Provider::try_from_db_str)
@@ -342,16 +342,56 @@ pub fn for_stored(stored: &str) -> ObservationStrategy {
     })
 }
 
-/// The strategy for one agent node. A resolved launch configuration names the
-/// harness that actually runs; otherwise the stored provider does.
-pub fn for_agent(agent: &crate::models::AgentNode) -> ObservationStrategy {
-    let stored = agent
+/// How to find the harness that runs one agent. A launch snapshot freezes the
+/// executor at launch, so it never consults today's preferences: remapping a
+/// profile afterwards cannot change which harness an existing node is read as.
+/// A node without a snapshot resolves its stored provider through the current
+/// profiles, which reads preferences and so must not run while a database
+/// connection is held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HarnessSelector {
+    /// The executor id frozen in the node's resolved launch plan.
+    Frozen(String),
+    /// The stored provider string: a harness id, profile id or `harness:account`.
+    Stored(String),
+}
+
+impl HarnessSelector {
+    pub fn provider(&self) -> Option<crate::models::Provider> {
+        match self {
+            HarnessSelector::Frozen(executor) => provider_for_id(executor),
+            HarnessSelector::Stored(stored) => provider_for_stored(stored),
+        }
+    }
+
+    pub fn strategy(&self) -> ObservationStrategy {
+        self.provider()
+            .map_or(ObservationStrategy::UNWIRED, |provider| {
+                provider.adapter().circuit_observation()
+            })
+    }
+}
+
+/// Pure over the agent row: safe to call while a database connection is held.
+pub fn selector_for_agent(agent: &crate::models::AgentNode) -> HarnessSelector {
+    match agent
         .launch_configuration
         .as_ref()
         .and_then(|configuration| configuration.resolved.as_ref())
-        .map(|plan| plan.harness.harness.as_str())
-        .unwrap_or(agent.provider.as_str());
-    for_stored(stored)
+    {
+        Some(plan) => HarnessSelector::Frozen(plan.harness.harness.clone()),
+        None => HarnessSelector::Stored(agent.provider.clone()),
+    }
+}
+
+/// The harness that runs this agent; `None` when it is unknown.
+pub fn provider_for_agent(agent: &crate::models::AgentNode) -> Option<crate::models::Provider> {
+    selector_for_agent(agent).provider()
+}
+
+/// The strategy for one agent node.
+pub fn for_agent(agent: &crate::models::AgentNode) -> ObservationStrategy {
+    selector_for_agent(agent).strategy()
 }
 
 /// The strategy that parsed a persisted hook, for replay. Receipts store the

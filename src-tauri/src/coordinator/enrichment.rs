@@ -28,17 +28,23 @@ fn transcript_dir(node: &AgentNode) -> String {
     env::node_working_path(node).spawn_path
 }
 
-pub(crate) fn native_turn_completion(
-    node: &AgentNode,
-) -> Option<transcript_reader::NativeTurnSnapshot> {
-    let adapter = crate::preferences::resolve_harness_provider(&node.provider).adapter();
+/// The transcript format a node's native completion is read with. A node with a
+/// launch snapshot is read as the harness it was launched with, whatever its
+/// profile maps to today; an unknown harness has no reader (fail closed).
+pub(crate) fn native_completion_format(node: &AgentNode) -> Option<TranscriptFormat> {
+    let adapter = crate::circuit::strategy::provider_for_agent(node)?.adapter();
     if !adapter.produces_readable_transcript() {
         return None;
     }
     // No reader wired (issue #1817) means no native completion to observe.
-    let format = TranscriptFormat::for_harness(adapter.id())?;
+    TranscriptFormat::for_harness(adapter.id())
+}
+
+pub(crate) fn native_turn_completion(
+    node: &AgentNode,
+) -> Option<transcript_reader::NativeTurnSnapshot> {
     transcript_reader::read_native_turn_completion(
-        format,
+        native_completion_format(node)?,
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
     )

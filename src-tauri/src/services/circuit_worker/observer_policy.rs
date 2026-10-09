@@ -7,7 +7,9 @@
 //! the machine-readable contract; the strings are display text derived from it,
 //! so a prose prefix never stands in for a capability.
 
-use crate::circuit::strategy::{ObservationCoverage, ObservationStrategy, OwnedWorkCoverage};
+use crate::circuit::strategy::{
+    HarnessSelector, ObservationCoverage, ObservationStrategy, OwnedWorkCoverage,
+};
 
 #[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
 #[ts(export, export_to = "CircuitObserverCapabilities.ts")]
@@ -23,22 +25,27 @@ pub struct CircuitObserverCapabilities {
 }
 
 pub(crate) fn for_agent(agent: &crate::models::AgentNode) -> CircuitObserverCapabilities {
-    let stored = agent
-        .launch_configuration
-        .as_ref()
-        .and_then(|configuration| configuration.resolved.as_ref())
-        .map(|plan| plan.harness.harness.as_str())
-        .unwrap_or(agent.provider.as_str());
-    for_provider(stored)
+    for_selector(&crate::circuit::strategy::selector_for_agent(agent))
 }
 
 /// Diagnostics for a stored provider string: a harness id, a custom harness
 /// profile, or a proxied `harness:account` option. Unknown harnesses render as
 /// unwired.
 pub(crate) fn for_provider(provider: &str) -> CircuitObserverCapabilities {
-    let id = crate::circuit::strategy::provider_for_stored(provider)
-        .map_or(provider, |resolved| resolved.adapter().id());
-    render(id, &crate::circuit::strategy::for_stored(provider))
+    for_selector(&HarnessSelector::Stored(provider.to_owned()))
+}
+
+/// Resolving a selector can read preferences, so callers holding a database
+/// connection take the selector (pure) first and resolve it after releasing.
+pub(crate) fn for_selector(selector: &HarnessSelector) -> CircuitObserverCapabilities {
+    let id = match selector {
+        HarnessSelector::Frozen(id) | HarnessSelector::Stored(id) => id.as_str(),
+    };
+    let provider = selector.provider();
+    render(
+        provider.map_or(id, |resolved| resolved.adapter().id()),
+        &selector.strategy(),
+    )
 }
 
 /// Diagnostics for a step whose agent record no longer exists.
@@ -185,6 +192,33 @@ mod tests {
                 "{stored} executes {harness}, which wires a Circuit hook strategy"
             );
         }
+    }
+
+    #[test]
+    fn a_launch_snapshot_decides_the_diagnosed_harness_over_the_current_profile() {
+        use crate::preferences::launch_configurations::{capture, LaunchOverrides};
+        // Launched as Codex, stored provider since remapped to Claude: the
+        // diagnostics must describe the harness that is actually running.
+        let mut node = node_for("claude");
+        node.launch_configuration = Some(
+            crate::preferences::spawn_configurations::SpawnConfiguration {
+                resolved: Some(
+                    capture(
+                        &crate::preferences::AppPreferences::default(),
+                        "codex",
+                        &LaunchOverrides::default(),
+                    )
+                    .unwrap(),
+                ),
+                ..Default::default()
+            },
+        );
+        let policy = for_agent(&node);
+        assert_eq!(policy.harness, "codex");
+        assert_eq!(
+            policy.coverage.pull,
+            crate::circuit::strategy::PullKind::NativeTurnCompletion
+        );
     }
 
     #[test]

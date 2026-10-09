@@ -181,9 +181,28 @@ pub struct CircuitStepObservationCoverage {
 pub fn history(run_id: i64) -> Result<CircuitEvidenceView, String> {
     let db = crate::db::read_conn();
     let tx = db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let view = evidence_view_inner(&tx, run_id)?;
+    let (mut view, pending) = evidence_view_unresolved(&tx, run_id)?;
     tx.commit().map_err(|e| e.to_string())?;
+    // Resolving a harness reads preferences (profiles, launch selections),
+    // which can cold-load `preferences.json`. Release the connection first so
+    // no filesystem I/O happens while it is checked out.
+    drop(db);
+    resolve_pending_capabilities(&mut view, pending);
     Ok(view)
+}
+
+/// The stored provider string each coverage row still has to resolve into
+/// diagnostics, aligned with `CircuitEvidenceView::coverage`. `None` marks a
+/// row whose agent record is gone.
+type PendingCapabilities = Vec<Option<crate::circuit::strategy::HarnessSelector>>;
+
+fn resolve_pending_capabilities(view: &mut CircuitEvidenceView, pending: PendingCapabilities) {
+    for (row, stored) in view.coverage.iter_mut().zip(pending) {
+        if let Some(selector) = stored {
+            row.capabilities =
+                crate::services::circuit_worker::observer_policy::for_selector(&selector);
+        }
+    }
 }
 
 pub(super) fn recovery_view(
@@ -292,7 +311,21 @@ fn checkpoint_actions(
     Ok(actions)
 }
 
+#[cfg(test)]
 fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceView, String> {
+    let (mut view, pending) = evidence_view_unresolved(db, run_id)?;
+    resolve_pending_capabilities(&mut view, pending);
+    Ok(view)
+}
+
+/// Build the evidence view from database rows only. Coverage rows carry a
+/// placeholder capability until `resolve_pending_capabilities` fills it in, so
+/// the caller can release its connection before any preference I/O happens.
+fn evidence_view_unresolved(
+    db: &Connection,
+    run_id: i64,
+) -> Result<(CircuitEvidenceView, PendingCapabilities), String> {
+    let mut pending = PendingCapabilities::new();
     let entries = history_inner(db, run_id).map_err(|e| e.to_string())?;
     let run = super::ledger::get_circuit_run_inner(db, run_id)
         .map_err(|e| e.to_string())?
@@ -313,16 +346,19 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
                 let agent = crate::db::agent_node::get_agent_node_by_id_inner(db, agent_id)
                     .optional()
                     .map_err(|e| e.to_string())?;
-                let (platform, capabilities) = match agent {
+                let (platform, capabilities, stored) = match agent {
                     Some(agent) => (
                         format!("{} host / {} launch", std::env::consts::OS, agent.env),
-                        crate::services::circuit_worker::observer_policy::for_agent(&agent),
+                        crate::services::circuit_worker::observer_policy::for_missing_agent(),
+                        Some(crate::circuit::strategy::selector_for_agent(&agent)),
                     ),
                     None => (
                         "Agent record unavailable".to_string(),
                         crate::services::circuit_worker::observer_policy::for_missing_agent(),
+                        None,
                     ),
                 };
+                pending.push(stored);
                 let deadline_ms = view.evidence_deadline_ms(&step.node_id);
                 coverage.push(CircuitStepObservationCoverage {
                     node_id: step.node_id.clone(),
@@ -371,11 +407,14 @@ fn evidence_view_inner(db: &Connection, run_id: i64) -> Result<CircuitEvidenceVi
             });
         }
     }
-    Ok(CircuitEvidenceView {
-        entries,
-        checkpoints,
-        coverage,
-    })
+    Ok((
+        CircuitEvidenceView {
+            entries,
+            checkpoints,
+            coverage,
+        },
+        pending,
+    ))
 }
 
 /// Everything the run card needs to tell a person what to do next, without the
@@ -2639,6 +2678,43 @@ mod tests {
             );
             assert!(view.coverage.iter().all(|item| item.deadline_ms.is_none()));
         }
+    }
+
+    #[test]
+    fn coverage_resolution_waits_until_the_connection_is_released() {
+        // Resolving a harness reads preferences, which can cold-load a file.
+        // The database pass must therefore only record which provider each row
+        // needs resolved; `history` resolves after releasing its connection.
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let db = Connection::open(file.path()).unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path,provider) VALUES (9,1,'owned','/repo','claude:minimax');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'spawn',1,'running',9);").unwrap();
+        db.execute(
+            "UPDATE autopilot_circuits SET graph_json=?1",
+            [
+                crate::circuit::model::CircuitGraph::walking_skeleton("work")
+                    .to_json()
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+        let (unresolved, pending) = evidence_view_unresolved(&db, 1).unwrap();
+        assert_eq!(
+            pending,
+            vec![Some(crate::circuit::strategy::HarnessSelector::Stored(
+                "claude:minimax".into()
+            ))]
+        );
+        assert_eq!(
+            unresolved.coverage[0].capabilities.harness, "missing-agent",
+            "the database pass must not resolve the harness"
+        );
+        let resolved = evidence_view_inner(&db, 1).unwrap();
+        assert_eq!(resolved.coverage[0].capabilities.harness, "anthropic");
     }
 
     #[test]

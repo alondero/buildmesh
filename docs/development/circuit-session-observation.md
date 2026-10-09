@@ -183,10 +183,14 @@ rollout pull, Command Code and Muse declare a passive watcher, and every other
 harness (including MiniMax Code, OpenCode, Grok and Cline) is unwired, so its
 missing evidence stays explicit and Circuit execution stays Unverified.
 
-The strategy is chosen from the node's own provider: a harness id, a custom
-harness profile, or a proxied `harness:account` option resolves to the harness
-that executes it, and an unknown harness stays unwired rather than falling back
-to Claude. A persisted receipt records the adapter that parsed it, so a replay
+The strategy is chosen from the node's own harness. A node with a launch
+snapshot is read as the executor frozen in that snapshot, so remapping a profile
+afterwards cannot make the pull read another harness's transcript; otherwise a
+harness id, custom harness profile or proxied `harness:account` option resolves
+to the harness that executes it. An unknown harness stays unwired rather than
+falling back to Claude. Resolving a stored provider reads preferences, so the
+evidence history records which provider each row needs and resolves it only
+after releasing its database connection. A persisted receipt records the adapter that parsed it, so a replay
 after restart reads it with that same declaration. The operator diagnostics
 (`observer_policy`) are rendered from the same declaration; its typed
 `coverage` is the contract and the prose fields are display text with the
