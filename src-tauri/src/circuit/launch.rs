@@ -115,11 +115,12 @@ pub(crate) fn normalize_for_match(s: &str) -> String {
 /// and leaves a staged prompt unsubmitted.
 ///
 /// `circuit::delivery` applies the same span to PTY pastes for the same reason
-/// (issue #2061/#2108). The two paths keep the constants shared rather than the
-/// policy: there, whether a long draft can be confirmed by text at all is
-/// adapter-declared, because a harness that collapses long drafts to its own
-/// paste marker can only be confirmed by that marker. The prefill path has no
-/// adapter-declared policy, so every prefill past the limit anchors on its tail.
+/// (issue #2061/#2108). The two paths share the constants, not the policy: the
+/// paste path gates on each adapter's declared policy, so this span is consulted
+/// only by an adapter declaring a rendered gate that takes a tail anchor, and an
+/// adapter on the generic echo/quiet path collects no text proof at all. The
+/// prefill path has no adapter-declared policy, so every prefill past the limit
+/// anchors on its tail.
 pub(crate) fn marker_hint_for_prefill(prefill: &str) -> String {
     let normalized = normalize_for_match(prefill);
     let chars = normalized.chars().count();
