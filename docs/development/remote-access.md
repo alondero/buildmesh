@@ -41,3 +41,26 @@ The embedded server binds **loopback only by default** (#496). An off-by-default
 - **`MaybeTls`** (`http::stream`) is the single concrete stream type (`Plain(TcpStream)` | `Tls(Box<TlsStream<TcpStream>>)`); WSS rides the same enum. The server owns the stream. Route handlers take `ParsedRequest` and return `Response` — they never touch `BufStream` / `MaybeTls`.
 - **Crypto provider is `ring`, selected explicitly** via `builder_with_provider` (no process-default; aws-lc-rs is not in the tree).
 
+## Fuzzing the request-read path
+
+The server reads hostile bytes twice — the request head
+(`http::server::read_request_head`, bounded by `REQUEST_HEAD_TIMEOUT` and
+`MAX_HEADER_BYTES`) and the body (`http::request::read_body_with_cap`, bounded
+by the route's `BodyPolicy` cap and `BODY_READ_TIMEOUT`) — and
+`src-tauri/src/http/fuzz.rs` fuzzes them as one path. The harness feeds raw
+client bytes into an in-memory duplex and calls those production functions; it
+never re-implements a parse, so a fix that closes a finding cannot leave the
+harness green.
+
+```text
+cd src-tauri && cargo test --lib http::fuzz
+cd src-tauri && BUILDMESH_FUZZ_CASES=500000 cargo test --release --lib http::fuzz -- --nocapture
+```
+
+- **Seeds:** `src-tauri/fuzz/corpus/http_request/*.bin` are raw request byte streams. The `SEEDS` table in the harness pins each one's outcome — including the four streams the `read_body_with_cap` unit tests send over loopback TCP — and a corpus file with no pinned outcome fails the run.
+- **Invariants:** no panic; never `TimedOut`, because the harness closes the client half before any read, so a read that still waits is itself a finding; a returned body is exactly `Content-Length` bytes, is the exact run of request bytes between the head and whatever the stream still has unread, and is no larger than the route cap; `TooLarge` only above the cap; a head past `MAX_HEADER_BYTES` always reports overflow. A violation panics with the input inline and writes it to `.tmp/fuzz-artifacts/` under a process-unique name.
+- **Knobs:** `BUILDMESH_FUZZ_CASES` (default 2048) and `BUILDMESH_FUZZ_SEED` (default `0x2156_0005`, printed by every run) make a campaign reproducible.
+- **Stable, not `cargo-fuzz`.** `cargo fuzz` needs nightly, and both the local toolchain set and `.github/workflows/verify.yml` pin stable, so such a target could not be built or run in either place. A coverage-guided target can replace the mutation loop without touching the reader — both would call the same three functions.
+- **CI:** the `commands-http` shard's `http::` filter already runs the four `http::fuzz` tests, and `rust-nonshard` runs the bounded smoke (`BUILDMESH_FUZZ_CASES=2000`, `--nocapture`) so the campaign settings stay on the record.
+- **Remaining surfaces (issue #2156):** the per-harness transcript readers (`services/transcript_reader/readers/`) and PTY input decoding (`agent/process.rs`). Each plugs into the same shape — seeds on disk, a pinned outcome table, invariants over the production parser — without changing this harness.
+
