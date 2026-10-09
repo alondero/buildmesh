@@ -171,6 +171,12 @@ jobs:
           cargo audit --version
 
       - name: Check every third-party action is SHA-pinned
+        # `gh api` refuses to run in a workflow without a token, so --verify
+        # fails on every reference until one is supplied. This is the job's own
+        # automatic token at `contents: read` (the top-level block), used only
+        # to read public repositories — not a repository secret.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node scripts/check-action-pins.mjs --verify
 
       - name: Check npm dependencies against the advisory policy

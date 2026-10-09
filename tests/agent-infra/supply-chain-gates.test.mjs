@@ -160,6 +160,28 @@ test('action pins: verifyShas reports an API failure without throwing', () => {
   });
 });
 
+test('action pins: an unauthenticated API call is reported as a wiring problem', async () => {
+  // `gh` refuses to call the API inside a workflow without a token, and the raw
+  // message is the same hint repeated once per reference. The gate collapsed it
+  // to one actionable line instead — this is the regression that took the CI
+  // job red on its first run.
+  const fetchJson = async () => {
+    throw new Error(
+      'gh: To use GitHub CLI in a GitHub Actions workflow, set the GH_TOKEN environment variable.\n  GH_TOKEN: ${{ github.token }}\n',
+    );
+  };
+  const problems = await verifyShas(
+    [
+      { owner: 'acme/action', sha: SHA },
+      { owner: 'acme/other', sha: 'f'.repeat(40) },
+    ],
+    { fetchJson },
+  );
+  assert.equal(problems.length, 1, 'many auth failures collapse into one problem');
+  assert.match(problems[0], /wiring problem, not an unpinned action/);
+  assert.match(problems[0], /GH_TOKEN/);
+});
+
 // ----------------------------------------------------------------- npm audit
 
 test('npm audit: severity ordering is the npm order, not alphabetical', () => {

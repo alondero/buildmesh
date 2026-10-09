@@ -179,10 +179,15 @@ function readAllowList(root) {
  * and is opt-in (`--verify`), which is what CI and `npm run check:actions` use.
  *
  * Resolution failures are reported but do not throw: a transient API failure
- * must not read as "the repository is unpinned".
+ * must not read as "the repository is unpinned". An *unauthenticated* failure
+ * is called out separately, because that is a wiring mistake rather than an
+ * upstream problem — `gh` refuses to call the API at all inside a workflow
+ * without a token, and the resulting message is otherwise a wall of the same
+ * auth hint repeated once per reference.
  */
 export async function verifyShas(references, { fetchJson } = {}) {
   const problems = [];
+  const authFailures = [];
   const byOwner = new Map();
   for (const { owner, sha } of references) {
     if (!byOwner.has(owner)) byOwner.set(owner, new Set());
@@ -196,9 +201,22 @@ export async function verifyShas(references, { fetchJson } = {}) {
           problems.push(`${owner}@${sha}: the API did not resolve this SHA to a commit.`);
         }
       } catch (error) {
-        problems.push(`${owner}@${sha}: could not verify (${error.message}).`);
+        const message = error.message ?? String(error);
+        if (/GH_TOKEN|authentication|not logged in|gh auth/i.test(message)) {
+          authFailures.push(`${owner}@${sha}: ${message.split('\n')[0]}`);
+        } else {
+          problems.push(`${owner}@${sha}: could not verify (${message}).`);
+        }
       }
     }
+  }
+  if (authFailures.length > 0) {
+    problems.push(
+      `GitHub API authentication failed for ${authFailures.length} reference(s) — this is a wiring problem, not an unpinned action.\n`
+      + `  First: ${authFailures[0]}\n`
+      + "  Set GH_TOKEN for this step (in a workflow, `env: GH_TOKEN: ${{ github.token }}`); "
+      + 'locally, run `gh auth login`. First error: ' + authFailures.slice(1, 3).join(' | '),
+    );
   }
   return problems;
 }
