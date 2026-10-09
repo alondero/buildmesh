@@ -1,15 +1,17 @@
 // Blocked worktree cleanup store (issue #2139).
 //
 // A node close defers its worktree removal to a durable queue; a removal that
-// cannot complete is persisted there as a *blocked cleanup*. This store is the
-// frontend half of that contract:
+// cannot complete is a *blocked cleanup*. This store is the frontend half of
+// that contract:
 //
 //   * `open()` refreshes the list from the backend and shows the dialog, so
 //     what the user acts on is exactly what the drain knows (no optimistic copy
 //     that can drift from the queue);
-//   * every action re-reads the affected row from the backend's own answer
-//     rather than patching local state, because the backend is the one that
-//     records the new attempt count, error and backoff;
+//   * every action follows the backend's own answer rather than patching local
+//     state, because the backend is the one that records the new attempt count,
+//     error and backoff, and the one that knows whether the worktree was
+//     actually removed, left alone because a live spawn claimed it, or never
+//     even attempted because the queue could not be read;
 //   * a dismissed ("keep worktree") or successfully removed entry leaves the
 //     list, and the dialog closes when nothing is left.
 //
@@ -22,6 +24,7 @@ import * as api from '../lib/tauri';
 import { addToast } from './toastStore';
 import type { PendingWorktreeRemoval } from '../types/generated/PendingWorktreeRemoval';
 import type { BlockingProcess } from '../types/generated/BlockingProcess';
+import type { WorktreeCleanupRetry } from '../types/generated/WorktreeCleanupRetry';
 
 interface BlockedCleanupState {
   entries: PendingWorktreeRemoval[];
@@ -35,15 +38,18 @@ interface BlockedCleanupState {
   blockers: Record<string, BlockingProcess[]>;
   /** path -> transient status line for the last action on it. */
   actionStatus: Record<string, string>;
+  /** The process the user is being asked to confirm ending, if any. */
+  pendingKill: { path: string; process: BlockingProcess } | null;
   /** Fetch the queue and open the dialog. */
   open: () => Promise<void>;
-  /** Re-read the queue without opening (used after each action). */
-  refresh: () => Promise<void>;
   close: () => void;
   retry: (path: string) => Promise<void>;
   dismiss: (path: string) => Promise<void>;
   diagnose: (path: string) => Promise<void>;
-  release: (path: string, pid: number) => Promise<void>;
+  /** Ask the user to confirm before ending a diagnosed process. */
+  requestRelease: (path: string, process: BlockingProcess) => void;
+  cancelRelease: () => void;
+  confirmRelease: () => Promise<void>;
 }
 
 export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => ({
@@ -52,6 +58,7 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
   loading: false,
   blockers: {},
   actionStatus: {},
+  pendingKill: null,
 
   open: async () => {
     set({ isOpen: true, loading: true });
@@ -65,63 +72,103 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
     }
   },
 
-  refresh: async () => {
-    try {
-      const entries = await api.listPendingWorktreeRemovals();
-      set({ entries });
-      // Nothing left to fix: the dialog's job is done.
-      if (entries.length === 0 && get().isOpen) set({ isOpen: false });
-    } catch {
-      // A failed refresh keeps the current list visible: hiding real blocked
-      // cleanups because a read timed out would be its own bug.
-    }
-  },
-
   close: () => set({ isOpen: false }),
 
   retry: async (path) => {
     set((state) => ({ actionStatus: { ...state.actionStatus, [path]: 'Retrying…' } }));
+    let result;
     try {
-      const record = await api.retryWorktreeCleanup(path);
-      // The backend returns `null` when the worktree is gone, and the updated
-      // row when it is still blocked — either answer is authoritative, so the
-      // local list follows it rather than being patched by hand.
-      if (record === null) {
-        const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
-        set((state) => ({
-          entries: remaining,
-          blockers: withoutKey(state.blockers, path),
-          actionStatus: { ...state.actionStatus, [path]: 'Removed.' },
-          isOpen: remaining.length > 0,
-        }));
-        addToast('Worktree', `Worktree removed: ${path}`, 'success');
-      } else {
-        set((state) => ({
-          entries: state.entries.map((entry) =>
-            entry.worktree_path === path ? record : entry,
-          ),
-          blockers: withoutKey(state.blockers, path),
-          actionStatus: { ...state.actionStatus, [path]: 'Still blocked.' },
-        }));
-      }
+      result = await api.retryWorktreeCleanup(path);
     } catch (error) {
-      set((state) => ({ actionStatus: { ...state.actionStatus, [path]: `Retry failed: ${String(error)}` } }));
+      set((state) => ({
+        actionStatus: { ...state.actionStatus, [path]: `Retry failed: ${String(error)}` },
+      }));
+      return;
     }
+    // The backend's status is the truth about what happened to the folder.
+    // Only `removed` justifies saying the worktree is gone (issue #2139 review
+    // round 1: the old UI collapsed every non-blocked outcome into "removed").
+    const status: WorktreeCleanupRetry = result.status;
+    if (status === 'removed') {
+      const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
+      set((state) => ({
+        entries: remaining,
+        blockers: withoutKey(state.blockers, path),
+        actionStatus: { ...state.actionStatus, [path]: 'Removed.' },
+        isOpen: remaining.length > 0,
+      }));
+      addToast('Worktree', `Worktree removed: ${path}`, 'success');
+      return;
+    }
+    if (status === 'still-blocked' && result.record) {
+      const record = result.record;
+      set((state) => ({
+        entries: state.entries.map((entry) => (entry.worktree_path === path ? record : entry)),
+        blockers: withoutKey(state.blockers, path),
+        actionStatus: { ...state.actionStatus, [path]: 'Still blocked.' },
+      }));
+      return;
+    }
+    if (status === 'gone') {
+      const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
+      set((state) => ({
+        entries: remaining,
+        blockers: withoutKey(state.blockers, path),
+        actionStatus: { ...state.actionStatus, [path]: 'Already gone.' },
+        isOpen: remaining.length > 0,
+      }));
+      addToast('Worktree', `Nothing left to retry at ${path} — it was already cleaned.`, 'info');
+      return;
+    }
+    if (status === 'claimed') {
+      // A live agent now owns this directory (issue #653): the tombstone was
+      // dequeued and the directory deliberately left alone.
+      const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
+      set((state) => ({
+        entries: remaining,
+        blockers: withoutKey(state.blockers, path),
+        actionStatus: {
+          ...state.actionStatus,
+          [path]: 'Left alone: a live agent now owns this worktree.',
+        },
+        isOpen: remaining.length > 0,
+      }));
+      addToast('Worktree', `Worktree left alone: a live agent now owns ${path}`, 'info');
+      return;
+    }
+    // queue-read-failed: the row is untouched, so it stays visible and the
+    // user is told nothing was retried.
+    set((state) => ({
+      actionStatus: {
+        ...state.actionStatus,
+        [path]: "Couldn't read the cleanup queue; nothing was retried.",
+      },
+    }));
+    addToast(
+      'Worktree',
+      `Couldn't read the cleanup queue for ${path}; nothing was retried.`,
+      'error',
+    );
   },
 
   dismiss: async (path) => {
     try {
-      await api.dismissWorktreeCleanup(path);
+      // The backend reports what it actually did to the disk, because a removal
+      // may already have moved the worktree aside.
+      const message = await api.dismissWorktreeCleanup(path);
       const remaining = get().entries.filter((entry) => entry.worktree_path !== path);
       set((state) => ({
         entries: remaining,
         blockers: withoutKey(state.blockers, path),
         isOpen: remaining.length > 0,
       }));
-      addToast('Worktree', `Worktree kept in place: ${path}`, 'info');
+      addToast('Worktree', message, 'info');
     } catch (error) {
       set((state) => ({
-        actionStatus: { ...state.actionStatus, [path]: `Couldn't keep the worktree: ${String(error)}` },
+        actionStatus: {
+          ...state.actionStatus,
+          [path]: `Couldn't keep the worktree: ${String(error)}`,
+        },
       }));
     }
   },
@@ -146,17 +193,27 @@ export const useBlockedCleanupStore = create<BlockedCleanupState>((set, get) => 
     }
   },
 
-  release: async (path, pid) => {
-    set((state) => ({ actionStatus: { ...state.actionStatus, [path]: `Ending process ${pid}…` } }));
+  requestRelease: (path, process) => set({ pendingKill: { path, process } }),
+  cancelRelease: () => set({ pendingKill: null }),
+
+  confirmRelease: async () => {
+    const pending = get().pendingKill;
+    if (!pending) return;
+    const { path, process } = pending;
+    set({ pendingKill: null });
+    set((state) => ({ actionStatus: { ...state.actionStatus, [path]: `Ending process ${process.pid}…` } }));
     try {
-      await api.releaseWorktreeCleanupBlocker(pid);
-      // The blocker is gone, so the previous diagnosis is stale: drop it, then
-      // retry the cleanup the user asked to unblock.
+      // The backend re-diagnoses and refuses a pid that is not a current
+      // blocker of this worktree, which is the defence against id reuse.
+      await api.releaseWorktreeCleanupBlocker(path, process.pid);
       set((state) => ({ blockers: withoutKey(state.blockers, path) }));
       await get().retry(path);
     } catch (error) {
       set((state) => ({
-        actionStatus: { ...state.actionStatus, [path]: `Couldn't end process ${pid}: ${String(error)}` },
+        actionStatus: {
+          ...state.actionStatus,
+          [path]: `Couldn't end process ${process.pid}: ${String(error)}`,
+        },
       }));
     }
   },

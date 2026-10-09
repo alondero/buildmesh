@@ -91,30 +91,77 @@ describe('blocked cleanup store (#2139)', () => {
 
   it('replaces the entry with the backend row when a retry is still blocked', async () => {
     const updated = { ...BLOCKED, attempt_count: 3 };
-    mocked.retryWorktreeCleanup.mockResolvedValue(updated);
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'still-blocked', record: updated });
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
     await useBlockedCleanupStore.getState().retry(BLOCKED.worktree_path);
 
     const state = useBlockedCleanupStore.getState();
     expect(state.entries).toEqual([updated]);
-    expect(state.isOpen).toBe(true, 'the dialog stays open while something is still blocked');
+    expect(state.isOpen, 'the dialog stays open while something is still blocked').toBe(true);
     expect(state.actionStatus[BLOCKED.worktree_path]).toMatch(/still blocked/i);
   });
 
-  it('drops the entry when the backend reports the worktree is gone (null)', async () => {
-    mocked.retryWorktreeCleanup.mockResolvedValue(null);
+  it('drops the entry when the backend reports the worktree is removed', async () => {
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'removed', record: null });
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
     await useBlockedCleanupStore.getState().retry(BLOCKED.worktree_path);
 
     const state = useBlockedCleanupStore.getState();
     expect(state.entries).toEqual([]);
-    expect(state.isOpen).toBe(false, 'nothing left to act on');
+    expect(state.isOpen, 'nothing left to act on').toBe(false);
+    expect(
+      useToastStore.getState().toasts.some((toast) => toast.message.includes('Worktree removed')),
+    ).toBe(true);
   });
 
-  it('keeps the worktree in place on "keep worktree" and closes when empty', async () => {
-    mocked.dismissWorktreeCleanup.mockResolvedValue(undefined);
+  it('drops the entry without claiming a removal when the backend says it is already gone', async () => {
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'gone', record: null });
+    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
+
+    await useBlockedCleanupStore.getState().retry(BLOCKED.worktree_path);
+
+    const state = useBlockedCleanupStore.getState();
+    expect(state.entries).toEqual([]);
+    expect(state.isOpen).toBe(false);
+    const toasts = useToastStore.getState().toasts;
+    expect(toasts.some((toast) => /already cleaned/i.test(toast.message))).toBe(true);
+    expect(toasts.some((toast) => /Worktree removed/.test(toast.message))).toBe(
+      false,
+      'a gone entry is not a removal',
+    );
+  });
+
+  it('drops the entry and says a live agent owns it when the claim guard fires', async () => {
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'claimed', record: null });
+    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
+
+    await useBlockedCleanupStore.getState().retry(BLOCKED.worktree_path);
+
+    const state = useBlockedCleanupStore.getState();
+    expect(state.entries).toEqual([]);
+    expect(
+      useToastStore.getState().toasts.some((toast) => /live agent/i.test(toast.message)),
+    ).toBe(true);
+  });
+
+  it('keeps the entry when the queue could not be read, and says nothing was retried', async () => {
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'queue-read-failed', record: null });
+    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
+
+    await useBlockedCleanupStore.getState().retry(BLOCKED.worktree_path);
+
+    const state = useBlockedCleanupStore.getState();
+    expect(state.entries).toEqual([BLOCKED], 'the row is untouched, so it stays visible');
+    expect(state.isOpen).toBe(true);
+    expect(
+      useToastStore.getState().toasts.some((toast) => /nothing was retried/i.test(toast.message)),
+    ).toBe(true);
+  });
+
+  it('keeps the worktree in place on "keep worktree" and repeats the backend message', async () => {
+    mocked.dismissWorktreeCleanup.mockResolvedValue(`Worktree kept in place: ${BLOCKED.worktree_path}`);
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
     await useBlockedCleanupStore.getState().dismiss(BLOCKED.worktree_path);
@@ -123,13 +170,16 @@ describe('blocked cleanup store (#2139)', () => {
     const state = useBlockedCleanupStore.getState();
     expect(state.entries).toEqual([]);
     expect(state.isOpen).toBe(false);
-    // Nothing on disk was asked to change — the toast says what happened.
-    expect(useToastStore.getState().toasts.some((t) => t.message.includes('kept in place'))).toBe(true);
+    // The message is the backend's, because only it knows what happened to the
+    // disk (a removal may already have moved the folder aside).
+    expect(
+      useToastStore.getState().toasts.some((toast) => toast.message === `Worktree kept in place: ${BLOCKED.worktree_path}`),
+    ).toBe(true);
   });
 
   it('records the diagnosis per path and clears it before a retry', async () => {
     mocked.diagnoseWorktreeCleanupBlockers.mockResolvedValue([HOLDER]);
-    mocked.retryWorktreeCleanup.mockResolvedValue(BLOCKED);
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'still-blocked', record: BLOCKED });
     useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true });
 
     await useBlockedCleanupStore.getState().diagnose(BLOCKED.worktree_path);
@@ -143,27 +193,51 @@ describe('blocked cleanup store (#2139)', () => {
   it('releasing a blocker ends that one process and then retries the cleanup', async () => {
     mocked.releaseWorktreeCleanupBlocker.mockResolvedValue(undefined);
     mocked.diagnoseWorktreeCleanupBlockers.mockResolvedValue([HOLDER]);
-    mocked.retryWorktreeCleanup.mockResolvedValue(null);
-    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true, blockers: { [BLOCKED.worktree_path]: [HOLDER] } });
+    mocked.retryWorktreeCleanup.mockResolvedValue({ status: 'removed', record: null });
+    useBlockedCleanupStore.setState({
+      entries: [BLOCKED],
+      isOpen: true,
+      blockers: { [BLOCKED.worktree_path]: [HOLDER] },
+    });
+    useBlockedCleanupStore.getState().requestRelease(BLOCKED.worktree_path, HOLDER);
 
-    await useBlockedCleanupStore.getState().release(BLOCKED.worktree_path, 5212);
+    await useBlockedCleanupStore.getState().confirmRelease();
 
-    expect(mocked.releaseWorktreeCleanupBlocker).toHaveBeenCalledWith(5212);
+    expect(mocked.releaseWorktreeCleanupBlocker).toHaveBeenCalledWith(
+      BLOCKED.worktree_path,
+      5212,
+    );
     const state = useBlockedCleanupStore.getState();
+    expect(state.pendingKill).toBeNull();
     expect(state.blockers[BLOCKED.worktree_path]).toBeUndefined();
     expect(state.entries).toEqual([]);
     expect(state.isOpen).toBe(false);
   });
 
-  it('surfaces a failed release without dropping the blocked entry', async () => {
-    mocked.releaseWorktreeCleanupBlocker.mockRejectedValue(new Error('access denied'));
-    useBlockedCleanupStore.setState({ entries: [BLOCKED], isOpen: true, blockers: { [BLOCKED.worktree_path]: [HOLDER] } });
+  it('does nothing when a release is confirmed with nothing pending', async () => {
+    useBlockedCleanupStore.getState().cancelRelease();
+    await useBlockedCleanupStore.getState().confirmRelease();
+    expect(mocked.releaseWorktreeCleanupBlocker).not.toHaveBeenCalled();
+  });
 
-    await useBlockedCleanupStore.getState().release(BLOCKED.worktree_path, 5212);
+  it('surfaces a refused release without dropping the blocked entry', async () => {
+    // The backend refuses a pid that is no longer holding the worktree, which
+    // is what an id-reuse accident looks like (issue #2139 review round 1).
+    mocked.releaseWorktreeCleanupBlocker.mockRejectedValue(
+      new Error('process 5212 is no longer holding'),
+    );
+    useBlockedCleanupStore.setState({
+      entries: [BLOCKED],
+      isOpen: true,
+      blockers: { [BLOCKED.worktree_path]: [HOLDER] },
+    });
+    useBlockedCleanupStore.getState().requestRelease(BLOCKED.worktree_path, HOLDER);
+
+    await useBlockedCleanupStore.getState().confirmRelease();
 
     const state = useBlockedCleanupStore.getState();
     expect(state.entries).toEqual([BLOCKED], 'the blocked cleanup stays until it is resolved');
-    expect(state.actionStatus[BLOCKED.worktree_path]).toMatch(/access denied/);
+    expect(state.actionStatus[BLOCKED.worktree_path]).toMatch(/no longer holding/);
     expect(mocked.retryWorktreeCleanup).not.toHaveBeenCalled();
   });
 

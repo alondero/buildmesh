@@ -6,21 +6,25 @@
 //
 // Each blocked entry shows the node's identity, the full worktree path, which
 // removal step failed and the OS error, how many attempts have been made and
-// when the next automatic retry may run. The actions are the four recoveries the
+// when the next automatic retry may run. The actions are the recoveries the
 // issue asks for:
 //
 //   * Copy path — the on-disk folder, for Explorer / a terminal.
 //   * Copy diagnostics — the whole evidence block, for a bug report.
 //   * What is holding it? — a read-only process diagnosis (never automatic).
 //   * Retry — attempt the removal now, ignoring the backoff.
-//   * Keep worktree — cancel the cleanup intent (nothing on disk changes).
-//   * End process — on a diagnosed blocker only, after the user picks it.
+//   * Keep worktree — cancel the cleanup intent (the backend reports what that
+//     did to the disk, because a removal may already have moved it aside).
+//   * End process — on a diagnosed blocker only, and only after a confirmation
+//     that names the process and the tree kill it implies.
 //
-// The app never closes an application by itself: killing is reachable only from
-// a row the diagnosis returned, and the button says which process it would end.
+// The app never closes an application by itself: the only path to a kill is a
+// user action on a diagnosed row, the backend re-checks that the process is
+// still holding that worktree before ending it, and pid reuse is refused.
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Modal } from '../shared/Modal';
+import { ConfirmDialog } from '../ConfirmDialog/ConfirmDialog';
 import { useBlockedCleanupStore } from '../../stores/blockedCleanupStore';
 import { formatError } from '../../lib/errorUtils';
 import {
@@ -30,6 +34,10 @@ import {
   operationLabel,
 } from '../../lib/worktreeCleanupDiagnostics';
 import { addToast } from '../../stores/toastStore';
+
+/** How often the relative time labels refresh while the dialog is open. One
+ *  second keeps the backoff countdown honest without a render storm. */
+const CLOCK_TICK_MS = 1000;
 
 export function BlockedCleanupDialog() {
   const entries = useBlockedCleanupStore((s) => s.entries);
@@ -41,8 +49,11 @@ export function BlockedCleanupDialog() {
   const retry = useBlockedCleanupStore((s) => s.retry);
   const dismiss = useBlockedCleanupStore((s) => s.dismiss);
   const diagnose = useBlockedCleanupStore((s) => s.diagnose);
-  const release = useBlockedCleanupStore((s) => s.release);
-  const [nowMs] = useState(() => Date.now());
+  const pendingKill = useBlockedCleanupStore((s) => s.pendingKill);
+  const requestRelease = useBlockedCleanupStore((s) => s.requestRelease);
+  const cancelRelease = useBlockedCleanupStore((s) => s.cancelRelease);
+  const confirmRelease = useBlockedCleanupStore((s) => s.confirmRelease);
+  const nowMs = useNow(isOpen);
 
   if (!isOpen) return null;
 
@@ -56,6 +67,7 @@ export function BlockedCleanupDialog() {
   };
 
   return (
+    <>
     <Modal onClose={close} labelledBy="blocked-cleanup-title" maxWidth="max-w-lg">
       <h2 id="blocked-cleanup-title" className="text-sm font-semibold text-text-primary mb-2">
         Worktree cleanup blocked ({entries.length})
@@ -110,10 +122,12 @@ export function BlockedCleanupDialog() {
                         {process.reason.replace(/-/g, ' ')}
                       </span>
                       {/* Targeted intervention, one process at a time, and only
-                          for a row the diagnosis produced. Never automatic. */}
+                          for a row the diagnosis produced. Never automatic — the
+                          button asks first (issue #2139 review round 1: ending
+                          Explorer's folder handle takes down the desktop). */}
                       <button
                         type="button"
-                        onClick={() => void release(entry.worktree_path, process.pid)}
+                        onClick={() => requestRelease(entry.worktree_path, process)}
                         className="shrink-0 px-2 py-1 text-2xs text-text-secondary hover:text-text-primary border border-border-subtle rounded-md transition-colors"
                       >
                         End process
@@ -177,5 +191,44 @@ export function BlockedCleanupDialog() {
         </button>
       </div>
     </Modal>
+
+    {/* Ending a process is destructive and reaches its children through
+        `taskkill /T`, so it names the process and says so before it happens.
+        The backend re-checks that this pid is still a blocker of this
+        worktree, so a reused id is refused even after the user confirms.
+        Rendered as a sibling, not nested: two `Modal`s share an Escape
+        listener, and the inner confirmation must not close the outer list. */}
+    {pendingKill && (
+      <ConfirmDialog
+        title={`End ${pendingKill.process.name ?? 'process'} (pid ${pendingKill.process.pid})?`}
+        message={
+          'Buildmesh will force this process to end, along with every process it started. ' +
+          `It was found holding ${pendingKill.path}. Anything unsaved in it will be lost, and ` +
+          'the process may already have exited — in which case nothing is ended.'
+        }
+        confirmLabel="End process"
+        onConfirm={() => void confirmRelease()}
+        onCancel={cancelRelease}
+      />
+    )}
+    </>
   );
+}
+
+/** The current time in epoch milliseconds, refreshed while `active` is true.
+ *
+ * Read on open and on a tick: the dialog mounts when the app does, so a value
+ * captured once at mount would be hours stale by the time a user looks at "Last
+ * try" (issue #2139 review round 1). Ticking only while the dialog is open keeps
+ * an idle app from re-rendering every second.
+ */
+function useNow(active: boolean): number {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNowMs(Date.now());
+    const interval = setInterval(() => setNowMs(Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(interval);
+  }, [active]);
+  return nowMs;
 }

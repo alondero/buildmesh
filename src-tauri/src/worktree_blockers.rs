@@ -91,9 +91,27 @@ pub fn diagnose_blocking_processes(path: &str) -> Vec<BlockingProcess> {
     }
 }
 
-/// Explicitly terminate a process. Reached only from a user acting on one
-/// diagnosed blocker — never called by the removal path (issue #2139: the app
-/// must not close applications on its own).
+/// Explicitly terminate a process that the diagnosis named, re-checked here.
+///
+/// Never called automatically: the only caller is a user acting on one diagnosed
+/// blocker. The pid is re-checked against a *fresh* diagnosis of the same
+/// worktree before anything is terminated, because process IDs are reused on
+/// Windows — the pid a user saw a minute ago may now belong to an unrelated
+/// program, and the kill reaches its children too (issue #2139 review round 1).
+pub fn release_blocker(worktree_path: &str, pid: u32) -> Result<(), String> {
+    let blockers = diagnose_blocking_processes(worktree_path);
+    if !blockers.iter().any(|blocker| blocker.pid == pid) {
+        return Err(format!(
+            "process {pid} is no longer holding {worktree_path} — refusing to end it \
+             (its id may have been reused)"
+        ));
+    }
+    terminate_process(pid)
+}
+
+/// Terminate a process outright. Reachable only through [`release_blocker`],
+/// which exists to prove the process is still holding the worktree first — the
+/// app never closes an application by itself (issue #2139).
 pub fn terminate_process(pid: u32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -184,6 +202,9 @@ mod windows {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const PROCESS_VM_READ: u32 = 0x0010;
     const PROCESS_BASIC_INFORMATION: u32 = 0;
+    /// `ProcessWow64Information` — for a WOW64 process this is *its* 32-bit PEB
+    /// address, which is what the 32-bit layout has to be read from.
+    const PROCESS_WOW64_INFORMATION: u32 = 26;
     /// `PROCESS_NAME_WIN32` — the path in `C:\…` form rather than the raw
     /// `\Device\HarddiskVolumeN\…` device path.
     const PROCESS_NAME_WIN32: u32 = 0;
@@ -342,12 +363,16 @@ mod windows {
     /// Read the process's current directory out of its process environment
     /// block: `PEB.ProcessParameters.CurrentDirectory.DosPath`.
     ///
-    /// The structure offsets differ between the 64-bit and 32-bit layouts, and
-    /// a 64-bit process reading a 32-bit one would otherwise interpret garbage
-    /// as a pointer — so the target's bitness is checked first (through WOW64)
-    /// and the matching offsets and pointer widths are used. Returns `None`
-    /// for anything that can't be read (a different user's elevated process, a
-    /// just-exited one), which is why the diagnosis is best-effort.
+    /// The layouts differ between a 64-bit and a 32-bit target, and a 64-bit
+    /// reader that assumes the 64-bit layout on a 32-bit process reads garbage:
+    /// `ProcessBasicInformation.PebBaseAddress` is the *64-bit* PEB even for a
+    /// WOW64 process, and the 32-bit `UNICODE_STRING.Buffer` pointer sits at a
+    /// different offset. So a 32-bit target is re-queried with
+    /// [`PROCESS_WOW64_INFORMATION`] (class 26), which returns its own 32-bit
+    /// PEB, and the whole walk then uses 32-bit offsets and a 4-byte pointer
+    /// width (issue #2139 review round 1). Returns `None` for anything that
+    /// can't be read (a different user's elevated process, a just-exited one),
+    /// which is why the diagnosis is best-effort.
     fn read_working_directory(process: Handle) -> Option<String> {
         let mut info: ProcessBasicInformation = unsafe { std::mem::zeroed() };
         let status = unsafe {
@@ -359,12 +384,35 @@ mod windows {
                 std::ptr::null_mut(),
             )
         };
-        if status != STATUS_SUCCESS || info.peb_base_address == 0 {
+        if status != STATUS_SUCCESS {
             return None;
         }
 
         let mut wow64: i32 = 0;
         let target_is_32bit = unsafe { IsWow64Process(process, &mut wow64) } != 0 && wow64 != 0;
+        // For a 32-bit target, the *own* PEB address (the 32-bit one) comes from
+        // the Wow64 information class, not from the basic information above.
+        let peb_base_address = if target_is_32bit {
+            let mut wow64_peb: usize = 0;
+            let status = unsafe {
+                NtQueryInformationProcess(
+                    process,
+                    PROCESS_WOW64_INFORMATION,
+                    std::ptr::addr_of_mut!(wow64_peb).cast(),
+                    std::mem::size_of::<usize>() as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if status != STATUS_SUCCESS || wow64_peb == 0 {
+                return None;
+            }
+            wow64_peb
+        } else if info.peb_base_address == 0 {
+            return None;
+        } else {
+            info.peb_base_address
+        };
+
         let (peb_params_offset, cwd_offset, pointer_width) = if target_is_32bit {
             (0x10usize, 0x24usize, 4usize)
         } else {
@@ -375,7 +423,7 @@ mod windows {
         let mut process_parameters: usize = 0;
         read_memory(
             process,
-            (info.peb_base_address + peb_params_offset) as *const std::ffi::c_void,
+            (peb_base_address + peb_params_offset) as *const std::ffi::c_void,
             std::ptr::addr_of_mut!(process_parameters).cast(),
             pointer_width,
         )?;
@@ -385,7 +433,12 @@ mod windows {
 
         // `CurrentDirectory` is a `CURDIR`: a UNICODE_STRING (length, capacity,
         // pointer) then a handle pointer. Read the raw bytes and interpret them
-        // with the target's pointer width.
+        // with the target's pointer width. The pointer's offset differs: the
+        // 64-bit layout pads the two `u16` fields out to eight bytes, so
+        // `Buffer` sits at offset 8; the 32-bit layout has no padding, so it
+        // sits at offset 4 — reading offset 8 there yields the `Handle` field
+        // instead, which is why 32-bit holders used to be missed (issue #2139
+        // review round 1).
         let mut raw = [0u8; 24];
         read_memory(
             process,
@@ -397,10 +450,24 @@ mod windows {
         if length < 2 {
             return None;
         }
-        let buffer_address = if target_is_32bit {
-            u32::from_ne_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize
+        let (buffer_offset, buffer_width) = if target_is_32bit {
+            (4usize, 4usize)
         } else {
-            u64::from_ne_bytes(raw[8..16].try_into().ok()?) as usize
+            (8usize, 8usize)
+        };
+        let buffer_address = if target_is_32bit {
+            u32::from_ne_bytes([
+                raw[buffer_offset],
+                raw[buffer_offset + 1],
+                raw[buffer_offset + 2],
+                raw[buffer_offset + 3],
+            ]) as usize
+        } else {
+            u64::from_ne_bytes(
+                raw[buffer_offset..buffer_offset + buffer_width]
+                    .try_into()
+                    .ok()?,
+            ) as usize
         };
         if buffer_address == 0 {
             return None;
@@ -644,6 +711,58 @@ mod tests {
         );
     }
 
+    /// A 32-bit process holds its folder too. Windows runs 32-bit processes
+    /// under WOW64, whose process environment block has different offsets and a
+    /// different PEB address than the 64-bit one the basic information class
+    /// reports — the pre-#2139-fix code read the 64-bit block with 32-bit
+    /// offsets and found nothing (issue #2139 review round 1). Skipped where
+    /// SysWOW64 does not exist (32-bit Windows), since there is no 32-bit
+    /// process to spawn.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn diagnosis_finds_a_32_bit_process_working_inside_the_tree() {
+        use crate::env::test_helpers::ScopedChild;
+        let syswow = std::path::Path::new(r"C:\Windows\SysWOW64\cmd.exe");
+        if !syswow.exists() {
+            eprintln!("SKIP: no SysWOW64 on this Windows install");
+            return;
+        }
+        let td = crate::env::test_helpers::TestDir::new("blockers_wow64");
+        let held = td.path().join("wow64").join("held");
+        std::fs::create_dir_all(&held).unwrap();
+
+        let mut command = crate::process_util::command_no_window(syswow);
+        command
+            .args(["/c", "ping -n 30 127.0.0.1"])
+            .current_dir(&held)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = ScopedChild::spawn(command);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let root = normalize(&td.path().to_string_lossy()).unwrap();
+        let found = diagnose_blocking_processes(&root);
+
+        let process = found.iter().find(|process| process.pid == child.id());
+        let Some(process) = process else {
+            let _ = &child;
+            panic!("the 32-bit child parked in {held:?} must be diagnosed (found {found:?})");
+        };
+        assert_eq!(
+            process.reason, "working-directory",
+            "the matched signal is the pinned working directory"
+        );
+        assert!(
+            process
+                .detail
+                .to_lowercase()
+                .replace('\\', "/")
+                .contains("held"),
+            "the reported path is the directory actually held, got {}",
+            process.detail
+        );
+    }
+
     /// A directory nothing references yields an empty answer rather than an
     /// error.
     #[test]
@@ -671,6 +790,41 @@ mod tests {
                 && process.describe().contains("working-directory"),
             "got: {}",
             process.describe()
+        );
+    }
+
+    /// Ending a process is only allowed for a pid that *currently* holds the
+    /// worktree. A pid that never held it — the shape an id-reuse accident takes
+    /// — must be refused rather than terminated (issue #2139 review round 1).
+    #[test]
+    fn terminating_a_process_that_is_not_a_blocker_is_refused() {
+        let td = crate::env::test_helpers::TestDir::new("blockers_refuse");
+        let _held = td.path().join("refuse");
+        std::fs::create_dir_all(&_held).unwrap();
+        let root = td.path().to_string_lossy().to_string();
+
+        // This process holds nothing inside that tree, and the pid certainly
+        // exists — so the only thing that can save the test runner is the check.
+        let our_pid = current_pid();
+        let result = release_blocker(&root, our_pid);
+        assert!(
+            result.is_err(),
+            "a pid the diagnosis does not name must not be terminated"
+        );
+        assert!(
+            result.unwrap_err().contains("is no longer holding"),
+            "the refusal says why"
+        );
+        assert!(
+            !diagnose_blocking_processes(&root)
+                .iter()
+                .any(|process| process.pid == our_pid),
+            "the pid really is not a blocker of this tree"
+        );
+        assert_eq!(
+            std::process::id(),
+            our_pid,
+            "the test process is still alive"
         );
     }
 }

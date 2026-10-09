@@ -196,20 +196,64 @@ pub async fn list_pending_worktree_removals() -> Result<Vec<PendingWorktreeRemov
     .await
 }
 
+/// What a user-initiated worktree-cleanup retry actually did. `Removed` is the
+/// only outcome that means the worktree was deleted; `Gone`, `Claimed`,
+/// `QueueReadFailed` all mean it was not, and the frontend must not tell the
+/// user it was (issue #2139 review round 1).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "WorktreeCleanupRetry.ts")]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreeCleanupRetry {
+    /// The directory and its git bookkeeping are gone; the queue entry is
+    /// dequeued.
+    Removed,
+    /// Still blocked. `record` carries the updated evidence row.
+    StillBlocked,
+    /// The queue entry is no longer there — already cleaned or dismissed.
+    Gone,
+    /// The warm pool has adopted the path for a live spawn, so it was left
+    /// alone and the tombstone was dequeued.
+    Claimed,
+    /// The queue row or the claim guard could not be read. Nothing was
+    /// attempted; the row is untouched.
+    QueueReadFailed,
+}
+
+/// The reply to `retry_worktree_cleanup`: what happened, plus the updated row
+/// when the cleanup is still blocked.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export, export_to = "WorktreeCleanupRetryResult.ts")]
+pub struct WorktreeCleanupRetryResult {
+    pub status: WorktreeCleanupRetry,
+    /// Present only for `StillBlocked`.
+    pub record: Option<PendingWorktreeRemoval>,
+}
+
 /// Retry one blocked worktree cleanup immediately, ignoring its backoff.
-/// Returns the post-attempt row so the UI can refresh in place:
-/// `Some(record)` = still blocked (with new evidence), `None` = removed.
 #[command]
 pub async fn retry_worktree_cleanup(
     worktree_path: String,
-) -> Result<Option<PendingWorktreeRemoval>, String> {
+) -> Result<WorktreeCleanupRetryResult, String> {
     crate::commands::run_blocking("retry_worktree_cleanup", move || {
-        Ok(
+        let (status, record) =
             match services::agent_node::retry_pending_worktree_removal(&worktree_path) {
-                services::agent_node::CleanupRetryOutcome::StillBlocked(record) => Some(record),
-                _ => None,
-            },
-        )
+                services::agent_node::CleanupRetryOutcome::Removed => {
+                    (WorktreeCleanupRetry::Removed, None)
+                }
+                services::agent_node::CleanupRetryOutcome::StillBlocked(record) => {
+                    (WorktreeCleanupRetry::StillBlocked, Some(record))
+                }
+                services::agent_node::CleanupRetryOutcome::Gone => {
+                    (WorktreeCleanupRetry::Gone, None)
+                }
+                services::agent_node::CleanupRetryOutcome::ClaimedByLiveSpawn => {
+                    (WorktreeCleanupRetry::Claimed, None)
+                }
+                services::agent_node::CleanupRetryOutcome::QueueReadFailed => {
+                    (WorktreeCleanupRetry::QueueReadFailed, None)
+                }
+            };
+        Ok(WorktreeCleanupRetryResult { status, record })
     })
     .await
 }
@@ -235,25 +279,37 @@ pub async fn diagnose_worktree_cleanup_blockers(
 
 /// Explicitly terminate one process that the diagnosis named.
 ///
-/// Only ever reached from a user action on a diagnosed blocker: Buildmesh never
-/// closes an application by itself, and the caller cannot pass an arbitrary pid
-/// without having been shown the row by
-/// `diagnose_worktree_cleanup_blockers` first (issue #2139).
+/// Never reached automatically: the only caller is a user clicking "End process"
+/// on a row the diagnosis produced. The pid is re-checked here, against a fresh
+/// diagnosis of the same worktree, before anything is terminated — process IDs
+/// are reused on Windows, so the pid a user saw a minute ago may now belong to
+/// an unrelated program. Ending that one, and (through `taskkill /T`) its child
+/// processes, would be silent data loss. Passing the worktree path rather than
+/// the pid alone is what makes that check possible (issue #2139 review round 1).
 #[command]
-pub async fn release_worktree_cleanup_blocker(pid: u32) -> Result<(), String> {
+pub async fn release_worktree_cleanup_blocker(
+    worktree_path: String,
+    pid: u32,
+) -> Result<(), String> {
     crate::commands::run_blocking("release_worktree_cleanup_blocker", move || {
-        crate::worktree_blockers::terminate_process(pid)
+        // Re-diagnoses internally and refuses a pid that is not a current
+        // blocker of this worktree, so a reused id cannot be terminated.
+        crate::worktree_blockers::release_blocker(&worktree_path, pid)
     })
     .await
 }
 
-/// "Keep worktree" — cancel the cleanup intent for one path. Nothing on disk
-/// changes; Buildmesh stops retrying and stops warning about it.
+/// "Keep worktree" — cancel the cleanup intent for one path, and report what
+/// was actually done to the disk (issue #2139 review round 1): cancelling the
+/// intent is safe, but a removal may already have moved the worktree aside, so
+/// the reply carries the message the user should be told.
 #[command]
-pub async fn dismiss_worktree_cleanup(worktree_path: String) -> Result<(), String> {
+pub async fn dismiss_worktree_cleanup(worktree_path: String) -> Result<String, String> {
     crate::commands::run_blocking("dismiss_worktree_cleanup", move || {
-        services::agent_node::dismiss_pending_worktree_removal(&worktree_path)
-            .map_err(|e| e.to_string())
+        let (outcome, result) =
+            services::agent_node::dismiss_pending_worktree_removal(&worktree_path);
+        result.map_err(|e| e.to_string())?;
+        Ok(outcome.message(&worktree_path))
     })
     .await
 }

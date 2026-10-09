@@ -40,7 +40,8 @@ describe('blocked worktree cleanup alerts (#2139)', () => {
 
     expect(message).toContain('agent-node');
     expect(message).toContain('C:/repo/.claude/worktrees/agent-node');
-    expect(message).toContain('rename worktree to staging failed');
+    // The step is the human-readable label, not the raw id the backend sends.
+    expect(message).toContain('Moving the folder aside to remove it failed');
     expect(message).toContain('os error 32');
   });
 

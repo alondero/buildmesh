@@ -8,24 +8,30 @@
 //   2. the blocked-cleanup dialog, which is the actionable surface (copy path,
 //      copy diagnostics, diagnose, retry, keep worktree).
 //
-// The store is imported dynamically. This module is reached from the
-// `worktree-cleanup-failed` listener installed at boot, so a static import would
-// put the whole blocked-cleanup state (and its API helpers) into the initial
-// bundle every boot pays for — and the #1568 bundle budget fails on far less.
-// The store is only loaded once a cleanup actually blocks.
+// This whole module is imported dynamically by the `worktree-cleanup-failed`
+// listener, so a boot with nothing blocked loads neither the diagnostics
+// formatters it uses for the toast wording nor the store it opens the dialog
+// through — the #1568 bundle budget fails on far less than that (issue #2139
+// review round 1).
 
 import type { WorktreeCleanupFailedPayload } from '../types/generated/WorktreeCleanupFailedPayload';
+import { operationLabel } from './worktreeCleanupDiagnostics';
 import { addToast } from '../stores/toastStore';
+
+/** The toast text for one blocked cleanup. The single source for the wording,
+ *  so the test pins what production actually shows rather than a parallel
+ *  helper nothing calls (issue #2139 review round 1). */
+export function blockedCleanupToastMessage(payload: WorktreeCleanupFailedPayload): string {
+  return (
+    `Couldn't remove the worktree for ${payload.node_name} (${payload.worktree_path}) — ` +
+    `${operationLabel(payload.operation)} failed: ${payload.error}`
+  );
+}
 
 export async function reportBlockedWorktreeCleanup(
   payload: WorktreeCleanupFailedPayload,
 ): Promise<void> {
-  addToast(
-    'Worktree',
-    `Couldn't remove the worktree for ${payload.node_name} (${payload.worktree_path}) — ` +
-      `${payload.operation.replace(/-/g, ' ')} failed: ${payload.error}`,
-    'warning',
-  );
+  addToast('Worktree', blockedCleanupToastMessage(payload), 'warning');
   try {
     const { openBlockedCleanups } = await import('../stores/blockedCleanupStore');
     openBlockedCleanups();
@@ -38,13 +44,4 @@ export async function reportBlockedWorktreeCleanup(
       'error',
     );
   }
-}
-
-/** The toast text for one blocked cleanup, split out so the wording is pinned
- *  by a test rather than living inside an event handler. */
-export function blockedCleanupToastMessage(payload: WorktreeCleanupFailedPayload): string {
-  return (
-    `Couldn't remove the worktree for ${payload.node_name} (${payload.worktree_path}) — ` +
-    `${payload.operation.replace(/-/g, ' ')} failed: ${payload.error}`
-  );
 }

@@ -882,7 +882,7 @@ fn remove_worktrees_cannot_remove_main() {
     assert!(dir.path().exists(), "main worktree must survive");
 }
 
-/// Closing a node removes the worktree *and* its branch ??? the leftover branches
+/// Closing a node removes the worktree *and* its branch — the leftover branches
 /// were the thing piling up. `remove_one_worktree_and_branch_detailed` is what
 /// the close drain calls (issue #2139: the structured failure is what makes a
 /// blocked cleanup diagnosable, so the drain-facing entry point is the one

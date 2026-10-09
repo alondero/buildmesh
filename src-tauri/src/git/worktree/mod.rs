@@ -1137,19 +1137,42 @@ fn remove_worktree_dir_with_retry(path: &str) -> Result<(), WorktreeRemovalFailu
 /// never ran keeps a dead entry in `.git/worktrees/` forever: `git worktree
 /// list` reports a phantom, and a later spawn reusing the name finds the name
 /// taken (issue #2139).
+///
+/// A failure to look is a failure, not a success: returning `Ok(())` here would
+/// dequeue a tombstone whose git half is unfinished, which is the leak this
+/// function exists to prevent. The one legitimate `Ok` without a prune is
+/// "there is no repository above this path" — a path that was never a worktree
+/// of any repo we can find (a #1080-style derived path, a mesh root that was
+/// deleted) — so that case is the only one that reports nothing.
 fn prune_orphaned_worktree_entry(host_path: &str) -> Result<(), WorktreeRemovalFailure> {
     let target = std::path::Path::new(host_path);
     let Some(parent) = target.parent() else {
         return Ok(());
     };
     // The working directory is gone, so open the repository from above: it is
-    // the one that holds the (still present) admin metadata.
-    let Ok(repo) = Repository::discover(parent) else {
-        return Ok(());
+    // the one that holds the (still present) admin metadata. No repository
+    // above the path means there is no metadata to reconcile — that is a
+    // definite "nothing to prune", not a failed read.
+    let repo = match Repository::discover(parent) {
+        Ok(repo) => repo,
+        Err(e) => {
+            tracing::debug!(
+                "prune_orphaned_worktree_entry: no repository above {} ({}); nothing to \
+                 reconcile",
+                parent.display(),
+                e
+            );
+            return Ok(());
+        }
     };
-    let Ok(names) = repo.worktrees() else {
-        return Ok(());
-    };
+    // Everything below here *is* a repository we found, so a failure means we
+    // could not finish the git half and the caller must keep the tombstone.
+    let names = repo.worktrees().map_err(|e| {
+        WorktreeRemovalFailure::new(
+            OP_PRUNE_ADMIN_ENTRY,
+            format!("could not list git worktrees for {host_path}: {e}"),
+        )
+    })?;
     for i in 0..names.len() {
         let Some(name) = names.get(i) else { continue };
         let Ok(worktree) = repo.find_worktree(name) else {
@@ -1217,13 +1240,27 @@ fn normalize_parent(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Identity comparison that survives a component being a symlink or junction
-/// (Windows dev machines have both under `.claude/worktrees/…`). False on any
-/// error, so a missing candidate simply loses the comparison.
-fn inode_same(a: &std::path::Path, b: &std::path::Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(left), Ok(right)) => left == right,
-        _ => false,
-    }
+/// (Windows dev machines have both, and `mklink /J` is the documented way to
+/// keep a worktree off the SSD).
+///
+/// `target` is the worktree path, which is *absent* by the time this runs, so
+/// it cannot be canonicalised itself: canonicalise the parent that does exist
+/// and join the final component. A path whose parent is missing simply loses
+/// the comparison rather than matching by accident.
+fn inode_same(a: &std::path::Path, target: &std::path::Path) -> bool {
+    let Some(name) = target.file_name() else {
+        return false;
+    };
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    let Ok(parent) = std::fs::canonicalize(parent) else {
+        return false;
+    };
+    let Ok(candidate) = std::fs::canonicalize(a) else {
+        return false;
+    };
+    candidate == parent.join(name)
 }
 
 /// Path equality that tolerates the Windows verbatim/UNC and separator

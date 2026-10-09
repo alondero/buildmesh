@@ -11,15 +11,6 @@ import { TitleBar } from './components/TitleBar/TitleBar';
 import { AgentNodeView } from './components/AgentNodeView/AgentNodeView';
 import { ProbePanel } from './components/Probe/ProbePanel';
 import { WorktreeCloseDialog } from './components/WorktreeCloseDialog/WorktreeCloseDialog';
-// Issue #1568 / #2139: the blocked-cleanup dialog is only ever opened by a
-// `worktree-cleanup-failed` event, so its chunk must not ship in the initial
-// bundle the user pays for on every boot (the budget gate failed before this
-// lazy split). Module scope keeps the lazy reference stable across renders.
-const BlockedCleanupDialog = lazy(() =>
-  import('./components/BlockedCleanupDialog/BlockedCleanupDialog').then((m) => ({
-    default: m.BlockedCleanupDialog,
-  })),
-);
 import { WindowCloseGuard } from './components/WindowCloseGuard/WindowCloseGuard';
 import { CanvasSpawnMenu } from './components/AgentNodeView/CanvasSpawnMenu';
 import { MeshCreateModal } from './components/Mesh/MeshCreateModal';
@@ -48,9 +39,20 @@ import { useFileDropToTerminal } from './hooks/useFileDropToTerminal';
 import { useNamingBackendFailureToast } from './hooks/useNamingBackendFailureToast';
 import * as api from './lib/tauri';
 import { addToast, dismissToast, useToastStore } from './stores/toastStore';
-import { reportBlockedWorktreeCleanup } from './lib/worktreeCleanupAlerts';
 import type { CircuitNotificationPayload } from './types/generated/CircuitEvents';
 import './App.css';
+
+// Issue #1568 / #2139: the blocked-cleanup dialog is only ever opened by a
+// `worktree-cleanup-failed` event, so nothing about it may ship in the initial
+// bundle the user pays for on every boot. The listener sets this flag, which
+// renders the lazy component; the listener also loads the alerts module
+// dynamically, which loads the store. Defined at module scope so the lazy
+// reference is stable.
+const BlockedCleanupDialog = lazy(() =>
+  import('./components/BlockedCleanupDialog/BlockedCleanupDialog').then((m) => ({
+    default: m.BlockedCleanupDialog,
+  })),
+);
 
 const createNodeGuard = createShortcutGuard(300);
 // Cooldown for the Alt+G / Cmd+G grid-toggle (issue #668). Same 300ms budget
@@ -121,6 +123,15 @@ function App() {
   const createMeshOpen = useUIStore((s) => s.createMeshOpen);
   const closeCreateMesh = useUIStore((s) => s.closeCreateMesh);
   const canvasSpawnMenuMeshId = useUIStore((s) => s.canvasSpawnMenuMeshId);
+  // Issue #2139 (review round 1): whether a worktree cleanup has ever blocked in
+  // this session. The blocked-cleanup dialog is a lazy chunk, and React.lazy
+  // fetches on first render — rendering it unconditionally would download it at
+  // every boot, which the #1568 bundle budget exists to prevent. This flag is
+  // set by the `worktree-cleanup-failed` listener below, so the chunk is fetched
+  // only when a cleanup actually blocks. The component itself reads the store's
+  // `isOpen`, which the store sets once the queue is read, so the two agree:
+  // the flag loads the surface, the store decides whether it shows.
+  const [blockedCleanupMounted, setBlockedCleanupMounted] = useState(false);
 
   // Paste absolute file paths into the hovered agent terminal on OS file drop.
   useFileDropToTerminal();
@@ -551,8 +562,12 @@ function App() {
   // #2139). The payload carries the evidence — node identity, full path, the
   // removal step that failed and the OS error — and the dialog is where Copy
   // path / Copy diagnostics / What is holding it? / Retry / Keep worktree live.
-  // The load of that surface is deferred (see worktreeCleanupAlerts), so a boot
-  // with nothing blocked pays nothing extra for it.
+  //
+  // Both the mount flag and the module load are on demand: React.lazy fetches
+  // its chunk on first render, and the alerts module (toast wording, the store,
+  // the diagnostics formatters) is imported dynamically here. A boot with
+  // nothing blocked therefore downloads nothing extra for this feature — which
+  // is what the #1568 bundle budget requires (review round 1).
   //
   // The backend emits at most once per unchanged blocker, so the dialog opens
   // when a *new* block appears; the queue (list_pending_worktree_removals) is
@@ -561,7 +576,10 @@ function App() {
     const unlisten = listen<WorktreeCleanupFailedPayload>(
       'worktree-cleanup-failed',
       (event) => {
-        void reportBlockedWorktreeCleanup(event.payload);
+        setBlockedCleanupMounted(true);
+        void import('./lib/worktreeCleanupAlerts').then((module) =>
+          module.reportBlockedWorktreeCleanup(event.payload),
+        );
       },
     );
     return () => { unlisten.then((fn) => fn()); };
@@ -693,14 +711,17 @@ function App() {
       </div>
 
       <WorktreeCloseDialog />
-      {/* Blocked worktree cleanup (issue #2139). Mounted unconditionally like
-          WorktreeCloseDialog so its Modal — and therefore the Escape/backdrop
-          listeners — only exist while a blocked cleanup actually needs it. The
-          component itself is a lazy chunk: nothing is fetched until an event
-          opens it. */}
-      <Suspense fallback={null}>
-        <BlockedCleanupDialog />
-      </Suspense>
+      {/* Blocked worktree cleanup (issue #2139, review round 1): rendered only
+          once a cleanup has actually blocked, because React.lazy fetches its
+          chunk on first render — mounting it unconditionally would download the
+          dialog at every boot. The store's `isOpen` inside the component still
+          decides whether the modal shows, so Escape/backdrop listeners exist
+          only while it does. */}
+      {blockedCleanupMounted && (
+        <Suspense fallback={null}>
+          <BlockedCleanupDialog />
+        </Suspense>
+      )}
       {/* Issue #1536 — the canvas empty state needs to summon this
           modal from outside the Sidebar's render tree. Both call sites
           (Sidebar's "+ New mesh" buttons + the canvas empty state's

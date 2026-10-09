@@ -7,7 +7,7 @@
  * labels that make a persisted queue row readable at a glance.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   formatCleanupDiagnostics,
   lastAttemptLabel,
@@ -92,21 +92,5 @@ describe('worktree cleanup diagnostics (#2139)', () => {
     const text = formatCleanupDiagnostics(BLOCKED, []);
     expect(text).toMatch(/not diagnosed yet/i);
     expect(text).not.toMatch(/\(0\)/);
-  });
-
-  it('clips the clipboard write to a single call with the formatted block', async () => {
-    const writeText = vi.fn(() => Promise.resolve());
-    // The jsdom-ish test harness has no real clipboard; install the stub the
-    // dialog/App code calls.
-    (navigator as unknown as { clipboard: { writeText: typeof writeText } }).clipboard = {
-      writeText,
-    };
-
-    await navigator.clipboard.writeText(formatCleanupDiagnostics(BLOCKED));
-
-    expect(writeText).toHaveBeenCalledTimes(1);
-    expect(writeText.mock.calls[0][0]).toContain(
-      'Worktree path: C:/repo/.claude/worktrees/agent-node',
-    );
   });
 });

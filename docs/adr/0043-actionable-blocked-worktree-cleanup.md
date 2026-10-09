@@ -67,9 +67,11 @@ both done.
 **4. The drain backs off and de-duplicates.** `process_pending_removals` skips a
 row inside its `retry_not_before` window (5 s doubling to 5 min), records each
 failure, and asks for an event only when the blocker's signature
-(`operation: error`) differs from the one already reported in `notified_error`.
-An unchanged blocker therefore warns once, not once per drain — while the queue
-keeps the evidence for whenever the user looks.
+(`operation: error`, with `RE_NOTIFY_BLOCKER_MS` = one hour) is new — a blocker
+the user was told about less than an hour ago is not news again, and one they
+were told about longer ago becomes a reminder. So an unchanged block never warns
+on every drain: it warns once, and then at most once an hour while it persists,
+while the queue keeps the evidence for whenever the user looks.
 
 **5. The failure surface is a dialog, not a sentence.** The
 `worktree-cleanup-failed` event carries node identity, full path, failed
@@ -86,14 +88,18 @@ follow-up if dismissing it turns out to be too easy.
 **6. Process diagnosis is explicit, read-only and approximate.**
 `worktree_blockers::diagnose_blocking_processes` reports processes whose
 executable or working directory lies inside the tree — on Windows the toolhelp
-snapshot plus the target's process environment block (WOW64 bitness handled), on
-Unix `/proc/<pid>/{cwd,exe}`. It names *candidates*; the OS error says which
+snapshot plus the target's process environment block (WOW64 bitness handled:
+class 26 for the 32-bit PEB, and `Buffer` at offset 4 rather than 8), on Unix
+`/proc/<pid>/{cwd,exe}`. It names *candidates*; the OS error says which
 permission failed. Sysinternals `handle.exe` would name the holder of a specific
 handle, but it cannot be assumed installed.
 
-**7. Nothing is terminated automatically.** `release_worktree_cleanup_blocker`
-is reachable only from a user clicking "End process" on a diagnosed row, one pid
-at a time. The removal path never kills anything.
+**7. Nothing is terminated without being asked twice.**
+`release_blocker` re-runs the diagnosis for that worktree and refuses any pid it
+does not find — Windows reuses process IDs, so the pid a user saw may now belong
+to an unrelated program, and the kill reaches the process's children too. The UI
+adds a confirmation naming the process and that tree kill. The removal path
+never kills anything.
 
 ## Alternatives considered
 
@@ -125,9 +131,20 @@ at a time. The removal path never kills anything.
   properly.** Interrupted removals no longer leak `.removing` staging siblings or
   orphaned admin entries, and a tombstone is only retired when both halves are
   done.
-- **A blocked cleanup can be abandoned.** "Keep worktree" dequeues the intent;
-  nothing on disk changes, and the directory stays visible to the user.
-- **The schema grows six columns** (v47, additive with defaults). Pre-v47 rows
+- **A blocked cleanup can be abandoned — honestly.** "Keep worktree" dequeues the
+  intent. It is not a no-op on disk: a removal that had already renamed the
+  worktree to its `<path>.removing` staging name leaves the worktree at a path
+  the user never chose, so dismiss moves the staged copy back and tells the user
+  whether the restore was complete (a partially deleted one is reported as
+  incomplete, never as intact). The reply text comes from the backend rather than
+  being assumed by the UI — the session end-to-end requirement.
+- **A manual retry is as careful as the drain.** It honours the warm-pool claim
+  guard, so a path a live spawn has adopted is left alone (and its tombstone
+  dequeued), and a queue that cannot be read is reported as such instead of
+  being collapsed into "removed".
+- **The schema grows seven columns** (v47, additive with defaults):
+  `attempt_count`, `last_attempt_at`, `last_operation`, `last_error`,
+  `retry_not_before`, `notified_error` and `notified_at`. Pre-v47 rows
   read as "never attempted, nothing failed, not notified".
 - **Test-suite discipline.** The pinning fixtures used by the Windows removal
   tests now own their children through a `ScopedChild` guard that kills *and
@@ -137,9 +154,14 @@ at a time. The removal path never kills anything.
 
 ## Verification
 
-See `docs/development/agent-nodes.md` (*Close/removal*) for the runtime narrative.
-Backend: `git/worktree` staging-recovery and failure-operation tests; `db/tests`
-failure-bookkeeping and notification-signature tests; `services::agent_node`
-backoff, suppression and retry tests; `worktree_blockers` path-membership and
-live-process diagnosis tests. Frontend: `tests/unit/worktree-cleanup-diagnostics`,
-`tests/unit/blocked-cleanup-store`, `tests/unit/blocked-cleanup-dialog`.
+See `docs/development/agent-nodes.md` (*Blocked cleanup*) for the runtime
+narrative. Backend: `git/worktree` staging-recovery, failure-operation and
+orphaned-admin-entry tests; `db/tests` failure-bookkeeping and
+notification-signature tests; `services::agent_node` backoff, suppression,
+real-second-drain, claimed-path retry and staging-restore tests;
+`worktree_blockers` path-membership, live 64-bit and 32-bit diagnosis, and
+refusing-to-kill-a-non-blocker tests. Frontend:
+`tests/unit/worktree-cleanup-diagnostics`, `worktree-cleanup-alerts`,
+`blocked-cleanup-store`, `blocked-cleanup-dialog` (including the clock
+regression: a dialog mounted hours before the failure must not report "just
+now").
