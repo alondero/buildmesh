@@ -622,6 +622,30 @@ fn pr_reviewer_node_name_differs_from_implementation_name() {
     assert_ne!(pr_reviewer_node_name(123, title), pr_node_name(123, title));
 }
 
+// --- issue_reviewer_node_name + agent_reviewer_node_name ---
+
+#[test]
+fn issue_reviewer_node_name_marks_review_and_prefixes_issue_number() {
+    assert_eq!(
+        issue_reviewer_node_name(123, "fix it"),
+        "gh123-review-fix-it"
+    );
+}
+
+#[test]
+fn agent_reviewer_node_name_prefixes_review_to_the_source_name() {
+    assert_eq!(
+        agent_reviewer_node_name("gh5-add-chip"),
+        "review-gh5-add-chip"
+    );
+}
+
+#[test]
+fn issue_and_agent_reviewer_node_names_are_not_default_names() {
+    assert!(!is_default_name(&issue_reviewer_node_name(123, "fix it")));
+    assert!(!is_default_name(&agent_reviewer_node_name("gh5-add-chip")));
+}
+
 #[test]
 fn disambiguate_node_name_returns_base_when_free() {
     assert_eq!(

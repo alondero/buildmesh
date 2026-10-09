@@ -94,4 +94,37 @@ describe('lifecycleNodePatch', () => {
     expect(getNodeStatusConfig({ ...stuck, ...patch }).title).toContain('Status reporting is not confirmed yet');
     expect(getNodeStatusConfig({ ...stuck, ...patch }).title).toContain('Last observed');
   });
+
+  // Issue #2137 — the backend erases `cli_session_id` when a `--resume` finds
+  // no persisted transcript, and it announces that on the lifecycle event.
+  // The client's own copy of the column drives `resolveSpawnAgentIntent`, so a
+  // stale copy keeps requesting the id the backend just discarded.
+  it('drops the identity from the client copy when the backend cleared it', () => {
+    const cleared = {
+      ...promotion,
+      kind: 'session_exited' as const,
+      status: 'idle' as const,
+      message: 'agent process exited cleanly',
+      cleared_session_id: 'fb718014-0440-4b74-99e2-6ee5e2fafb57',
+    };
+    const patch = lifecycleNodePatch(cleared);
+    expect(patch.cli_session_id).toBeNull();
+    expect(patch.status).toBe('idle');
+  });
+
+  it('leaves the identity untouched when no identity was cleared', () => {
+    const exited = { ...promotion, kind: 'session_exited' as const, status: 'idle' as const };
+    const patch = lifecycleNodePatch(exited);
+    expect(patch).not.toHaveProperty('cli_session_id');
+  });
+
+  it('carries the cleared identity through the signal_health-only branch too', () => {
+    const degraded = {
+      ...promotion,
+      kind: 'signal_unavailable' as const,
+      signal_health: 'unverified' as const,
+      cleared_session_id: 'stale-id',
+    };
+    expect(lifecycleNodePatch(degraded).cli_session_id).toBeNull();
+  });
 });

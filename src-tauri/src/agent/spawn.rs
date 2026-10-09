@@ -25,6 +25,7 @@ mod preflight;
 mod prepare;
 mod provision;
 mod reader;
+pub(crate) mod resume_guard;
 mod streams;
 mod wire;
 
