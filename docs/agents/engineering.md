@@ -11,6 +11,12 @@ records current-tree evidence; `finish` requires current gate, acceptance and
 independent review evidence. Missing prerequisites and timeouts remain distinct
 from code failure and cannot mark a task complete.
 
+For independent review and subsequent repairs, follow the harness's
+[review and repair policy](development-harness.md#review-and-repair) and the
+[review skill](../../.claude/skills/review/SKILL.md). Batch findings and use
+fast plus focused checks during repair; completion still requires verification
+and independent approval of the final tree.
+
 Confirm `git rev-parse --show-toplevel`, branch, and `git status --short`. Record the requested behavior and the base commit used for comparisons. Read the originating issue and available review findings when the task references them. Translate acceptance criteria into observable outcomes and identify the production boundary each test will exercise. A review finding is closed by code and evidence, not by rewriting the description.
 
 ## Design for evidence
