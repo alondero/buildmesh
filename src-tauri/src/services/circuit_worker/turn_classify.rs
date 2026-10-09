@@ -547,9 +547,20 @@ pub(super) fn has_unconsumed_classifier_evidence(view: &RunView, node_id: &str) 
     view.classifier_evidence(node_id).is_some_and(|evidence| {
         evidence.report.is_some()
             && evidence.identity.as_ref().is_some_and(|owner| {
+                let encoded = serde_json::to_string(owner).ok();
+                // Issue #2138: a refused classification records the owner it
+                // observed in `evaluated_evidence_owner`. That report has been
+                // judged and rejected, so treating it as unconsumed made an
+                // unchanged parked report re-classify on every observation tick.
+                // A different owner — a new native turn or agent — still counts
+                // as unconsumed evidence.
                 view.context
                     .get(&format!("node.{node_id}.classified_evidence_owner"))
-                    != serde_json::to_string(owner).ok().as_deref()
+                    != encoded.as_deref()
+                    && view
+                        .context
+                        .get(&format!("node.{node_id}.evaluated_evidence_owner"))
+                        != encoded.as_deref()
             })
     })
 }

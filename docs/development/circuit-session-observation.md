@@ -124,6 +124,29 @@ Codex, Muse and Command Code report snapshots can carry that native completion
 fact; other adapters retain their supported observation paths. No generic
 terminal silence rule invents completion or background ownership.
 
+### Parked gates are re-judged on new evidence, not on every tick
+
+A classification that cannot be bound — a known blocker, a report that fails the
+binding fence — parks the step Unverified. Such a classification still observed a
+specific report and evidence owner, so the stepper records that identity
+(`evaluated_report_revision` and `evaluated_evidence_owner`) even though no
+verdict was bound. `evaluated_evidence_owner` is deliberately distinct from
+`classified_evidence_owner`, which means only "a verdict was bound to this owner".
+
+Without those stamps the worker reads an unchanged parked report as never judged
+and re-classifies it on every observation tick, appending an identical
+`classification` row plus a fresh `step_transition: unverified` and
+`checkpoint_reason` each pass, so the ledger grows without bound while nothing
+changes. Re-judging is admitted only for new evidence: a changed report revision,
+a new native turn or agent owner, an input or lifecycle change, or an operator
+recheck.
+
+`unverify_step` enforces the same invariant in the state transition itself: a
+step already Unverified for the same reason and outcome writes nothing. Every
+emitted `StepWrite` becomes a `step_transition` row, and an `unverified` one also
+a `checkpoint_reason` row, so an unchanged observation must not append identical
+ledger rows.
+
 ## Scheduling contract
 
 Classifier and verification work use a bounded FIFO job service: four active

@@ -2019,6 +2019,27 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     }
                     run.context
                         .set(&format!("node.{node_id}.observation_blocker"), "");
+                } else if let Some(binding) = binding {
+                    // Issue #2138: a refused classification still observed a
+                    // specific report and evidence owner. Without recording that
+                    // identity the gate parks Unverified with nothing stamped,
+                    // which `should_classify_report` reads as "never judged" — so
+                    // it re-classified the same report every observation tick,
+                    // appending an identical classification, `step_transition` and
+                    // `checkpoint_reason` each time. Record what was observed
+                    // (not accepted) so an unchanged report is not re-judged,
+                    // while a new revision or a new native turn still reaches the
+                    // classifier. `classified_evidence_owner` keeps its narrower
+                    // meaning — a verdict bound to this owner — so a refused
+                    // binding is tracked separately.
+                    run.context.set(
+                        &format!("node.{node_id}.evaluated_report_revision"),
+                        &binding.report_revision,
+                    );
+                    run.context.set(
+                        &format!("node.{node_id}.evaluated_evidence_owner"),
+                        serde_json::to_string(&binding.owner).expect("serializable identity"),
+                    );
                 }
                 if let Some(out) = output {
                     run.context
@@ -2498,11 +2519,22 @@ fn record_classifier_failure(
 }
 
 /// Preserve the attempt and owned work while evidence is unresolved.
+///
+/// Idempotent: re-parking a step that is already Unverified for the same reason
+/// writes nothing. Every emitted `StepWrite` becomes a `step_transition` row and,
+/// for `unverified`, a `checkpoint_reason` row (`db::circuit::ledger`), so an
+/// unchanged observation must not append identical ledger rows on every tick.
 fn unverify_step(run: &mut RunView, t: &mut Transition, node_id: &str, reason: String) {
     let Some(step) = run.step_mut(node_id) else {
         return;
     };
     if step.status.is_terminal() {
+        return;
+    }
+    if step.status == StepStatus::Unverified
+        && step.outcome.is_none()
+        && step.error.as_deref() == Some(reason.as_str())
+    {
         return;
     }
     step.status = StepStatus::Unverified;

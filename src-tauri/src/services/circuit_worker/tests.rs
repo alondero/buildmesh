@@ -2791,6 +2791,240 @@ fn circuit_classifier_failure_retries_silent_turn_and_persists_reason() {
     ));
 }
 
+/// A gate whose lineage agent still owns unfinished work cannot bind a report:
+/// `report_blocker` reports `KnownWorkOutstanding`, so a valid-looking
+/// classification is refused and the gate parks Unverified. This is the
+/// production shape behind issue #2138.
+fn view_with_outstanding_lineage_work() -> RunView {
+    use crate::circuit::observation::WorkEvidence;
+    let mut view = report_gate_view();
+    // Agent 900 is the implementer `finish_classifier` borrows its evidence
+    // from, so its unfinished owned work blocks this gate's report binding.
+    let evidence = WorkEvidence {
+        children: [("child-1".to_string(), false)].into_iter().collect(),
+        ..Default::default()
+    };
+    view.context.set(
+        "node.implementer.evidence.1",
+        serde_json::to_string(&evidence).unwrap(),
+    );
+    view
+}
+
+/// Issue #2138: a gate parked Unverified on an unbindable report recorded an
+/// identical classification on every ~10s observation tick, because neither
+/// `evaluated_report_revision` nor `classified_evidence_owner` was stamped when
+/// the classification was refused. `should_classify_report` therefore read the
+/// unchanged report as never judged and re-classified forever.
+#[test]
+fn parked_unverified_gate_is_not_reclassified_on_an_unchanged_report() {
+    let mut view = view_with_outstanding_lineage_work();
+    let report = "Published the PR but the push could not complete.";
+    let parked = advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified,
+        "an unbindable classification parks the gate: {:?}",
+        parked.step_writes
+    );
+    assert_eq!(parked.classifications.len(), 1);
+    for _ in 0..5 {
+        assert!(
+            !should_classify_report(
+                &view,
+                "finish_classifier",
+                SessionStatus::AwaitingInput,
+                report,
+                None
+            ),
+            "an unchanged report bound to a parked gate must not be judged again"
+        );
+    }
+}
+
+/// The suppression is scoped to the *unchanged* report: fresh evidence — a new
+/// revision, or the same text from a new native turn — still re-classifies.
+#[test]
+fn parked_unverified_gate_reclassifies_when_the_report_or_turn_changes() {
+    let mut view = view_with_outstanding_lineage_work();
+    let report = "Published the PR but the push could not complete.";
+    advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified
+    );
+    assert!(
+        should_classify_report(
+            &view,
+            "finish_classifier",
+            SessionStatus::AwaitingInput,
+            "A different report with new findings.",
+            None
+        ),
+        "a new report revision must still reach the classifier"
+    );
+    crate::circuit::test_support::record_report_evidence_for_turn(
+        &mut view,
+        "finish_classifier",
+        report,
+        "a-later-native-turn",
+    );
+    assert!(
+        should_classify_report(
+            &view,
+            "finish_classifier",
+            SessionStatus::AwaitingInput,
+            report,
+            None
+        ),
+        "the same text from a new native turn is new evidence"
+    );
+}
+
+/// Issue #2138, acceptance criterion 3: re-observing a parked Unverified gate
+/// on an unchanged report appends no ledger rows. The stable hub's ledger grew
+/// by hundreds of identical `classification` rows per parked gate, each with a
+/// fresh `step_transition: unverified` and `checkpoint_reason`.
+///
+/// This drives the real per-tick path — `should_classify_report` decides whether
+/// the tick interprets the report at all, and the stepper's `advance` is only
+/// invoked when it does. Asserting on the stepper alone would miss the defect,
+/// because `advance` faithfully records whatever it is handed; the unbounded
+/// growth came from the gate re-admitting an unchanged report every tick.
+#[test]
+fn repeated_ticks_on_a_parked_gate_append_no_ledger_rows() {
+    let mut view = view_with_outstanding_lineage_work();
+    let report = "Published the PR but the push could not complete.";
+    let mut db = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&db).unwrap();
+    let run_id = view.run_id;
+    db.execute_batch(&format!(
+        "INSERT INTO meshes(id,name,path) VALUES(1,'test','/repo');
+         INSERT INTO agent_nodes(id,mesh_id,name,path,status) VALUES(900,1,'agent','/repo','running');
+         INSERT INTO autopilot_circuits(id,mesh_id,name) VALUES(1,1,'test');
+         INSERT INTO autopilot_circuit_runs(id,circuit_id,mesh_id,state) VALUES({},1,1,'running');
+         INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+             VALUES({},'finish_classifier',1,'running',NULL);
+         INSERT INTO autopilot_circuit_run_steps(run_id,node_id,attempt,status,agent_node_id)
+             VALUES({},'implementer',1,'completed',900);",
+        run_id, run_id, run_id
+    ))
+    .unwrap();
+    let commit = |db: &mut Connection, view: &RunView, transition: &Transition| {
+        let ops: Vec<crate::db::circuit::CircuitStepOp> = transition
+            .step_writes
+            .iter()
+            .map(|write| crate::db::circuit::CircuitStepOp {
+                node_id: write.node_id.clone(),
+                status: write.status.as_db_str().into(),
+                attempt: write.attempt,
+                outcome: write
+                    .outcome
+                    .map(|value| value.map(|outcome| outcome.as_db_str().into())),
+                error: write.error.clone(),
+                agent_node_id: None,
+                fresh_attempt: false,
+            })
+            .collect();
+        crate::db::circuit::evidence::commit_transition_locked(
+            db,
+            view.run_id,
+            None,
+            &view.context.to_json().unwrap(),
+            &ops,
+            crate::db::circuit::evidence::EvidenceWrite {
+                classifications: &transition.classifications,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    };
+    let kind_count = |db: &Connection, kind: &str| -> i64 {
+        db.query_row(
+            "SELECT COUNT(*) FROM circuit_run_history WHERE run_id=?1 AND kind=?2",
+            rusqlite::params![run_id, kind],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    let rows = |db: &Connection| -> Vec<(String, String)> {
+        let mut stmt = db
+            .prepare("SELECT kind,detail FROM circuit_run_history WHERE run_id=?1 ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([run_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows
+    };
+    // The first tick judges the report and parks the gate.
+    assert!(should_classify_report(
+        &view,
+        "finish_classifier",
+        SessionStatus::AwaitingInput,
+        report,
+        None
+    ));
+    let first = advance_with_report_evidence(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: None,
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified
+    );
+    assert_eq!(first.classifications.len(), 1);
+    // Five more observation ticks of the same unchanged report.
+    for tick in 0..5 {
+        assert!(
+            !should_classify_report(
+                &view,
+                "finish_classifier",
+                SessionStatus::AwaitingInput,
+                report,
+                None
+            ),
+            "tick {tick} re-admitted an unchanged parked report"
+        );
+        // The gate refuses it, so the tick publishes no classification event and
+        // therefore no step write and nothing further to commit.
+        assert_eq!(
+            view.step("finish_classifier").unwrap().status,
+            StepStatus::Unverified
+        );
+    }
+    commit(&mut db, &view, &first);
+    // The single committed interpretation is recorded exactly once, and the
+    // unverified park contributes one transition and one checkpoint reason.
+    assert_eq!(kind_count(&db, "classification"), 1, "{:?}", rows(&db));
+    assert_eq!(kind_count(&db, "step_transition"), 1, "{:?}", rows(&db));
+    assert_eq!(kind_count(&db, "checkpoint_reason"), 1, "{:?}", rows(&db));
+}
+
 #[test]
 fn circuit_report_selection_rejects_pre_prompt_transcript_and_resume_redraw() {
     use crate::circuit::evaluator;
