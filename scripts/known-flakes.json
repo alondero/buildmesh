@@ -1,3 +1,7 @@
 {
-  "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833
+  "tests/unit/omnibar-fuzzy-search.test.ts > performance budget (issue #1410 §3) searches 500+ items in under 5ms per query": 1833,
+  "agent::provider::adapters::codex::tests::windows_attention_hook_posts_stdin_through_powershell_and_cmd": 2173,
+  "services::circuit_worker::jobs::tests::real_verification_process_stops_on_cancellation": 2173,
+  "git::ai_context_runtime::tests::windows_tests::concurrent_launches_are_serialized_and_idempotent": 2173,
+  "commands::prune::prune_tests::remove_worktree_succeeds_after_killing_process_tree": 2173
 }
