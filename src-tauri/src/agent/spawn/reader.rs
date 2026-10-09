@@ -127,17 +127,24 @@ pub(super) fn should_count_resume_failure(
 /// the single writer for `agent_nodes.status`. Shared by the plain and the
 /// identity-dropping paths so clearing an unusable session id (issue #2137)
 /// cannot quietly change what the user is told.
+///
+/// `cleared_session_id` is the id the caller just erased, announced on the
+/// `Idle` transition so clients drop their own copy of it.
 fn apply_status_verdict(
     sink: &session_lifecycle::AppSessionLifecycleSink<'_>,
     session_id: i64,
     action: PostExitAction,
     elapsed: std::time::Duration,
+    cleared_session_id: Option<&str>,
 ) {
     match action {
         // `LeaveStatusAlone` is filtered out by `classify_post_exit` before we
         // get here; treating it as `Idle` keeps this total.
         PostExitAction::LeaveStatusAlone | PostExitAction::MarkIdle => {
-            let _ = session_lifecycle::on_pty_eof(sink, session_id);
+            let _ = match cleared_session_id {
+                Some(id) => session_lifecycle::on_pty_eof_clearing_session(sink, session_id, id),
+                None => session_lifecycle::on_pty_eof(sink, session_id),
+            };
         }
         PostExitAction::MarkErrorResumeFailed => {
             tracing::warn!(
@@ -148,6 +155,13 @@ fn apply_status_verdict(
             // The `unless_in(Error, Archived)` guard (#654) lives inside
             // `on_resume_failed`, and `resume-failed` is emitted from exactly
             // one place (the lifecycle sink).
+            //
+            // This path writes no `agent-lifecycle` event, so a client that was
+            // told the id is gone does not learn it here. It does not loop
+            // either: `Error` is not the `idle` the frontend's auto-spawn keys
+            // on. A later explicit Retry Resume that still holds the stale id
+            // falls back to a fresh launch in `spawn_with_intent` instead of
+            // erroring.
             let _ = session_lifecycle::on_resume_failed(
                 sink,
                 session_id,
@@ -471,6 +485,16 @@ pub(super) fn start_reader(
         // [`classify_post_exit`].
         let verdict = should_count_resume_failure(action, resume_attempt, elapsed)
             .then(|| super::resume_guard::note_unusable_resume(session_id));
+        if verdict.is_none() {
+            // This exit was not judged unusable, so earlier strikes no longer
+            // describe the node — and a deliberate kill means the user is
+            // replacing the process outright. The budget resets *here* rather
+            // than on the `Spawning → Running` promotion: that fires at
+            // EARLY_EXIT_WINDOW (3s), well inside UNUSABLE_RESUME_WINDOW, so a
+            // resume that dies at 5s would have its strike wiped before the
+            // reader could count it and the loop would never reach the bound.
+            super::resume_guard::reset(session_id);
+        }
         match classify_post_exit(action, verdict) {
             EpilogueOutcome::LeaveStatusAlone => {
                 // kill_session initiated this exit; the kill initiator
@@ -501,12 +525,20 @@ pub(super) fn start_reader(
                 // verdict below is deliberately unchanged: #1306's
                 // `resume-failed` toast and `Error` recovery state must not
                 // depend on whether the guard also had something to clear.
+                //
+                // Read the id before clearing it: the clients keep their own
+                // copy of this column, so the transition has to tell them
+                // which id to drop.
+                let cleared = crate::db::get_agent_node_by_id(session_id)
+                    .ok()
+                    .and_then(|node| node.cli_session_id);
                 tracing::warn!(
-                    "Node {} exited {:.1?}s after a --resume launch — the session was never \
+                    "Node {} exited {:.1?}s after a --resume launch of session {} — it was never \
                      persisted; clearing the session identity so the next spawn starts fresh \
                      (issue #2137)",
                     session_id,
-                    elapsed
+                    elapsed,
+                    cleared.as_deref().unwrap_or("<unknown>"),
                 );
                 if let Err(error) = crate::db::clear_cli_session_id(session_id) {
                     tracing::warn!(
@@ -516,11 +548,11 @@ pub(super) fn start_reader(
                     );
                 }
                 let sink = session_lifecycle::AppSessionLifecycleSink { app: &app_clone };
-                apply_status_verdict(&sink, session_id, action, elapsed);
+                apply_status_verdict(&sink, session_id, action, elapsed, cleared.as_deref());
             }
             EpilogueOutcome::MarkIdle | EpilogueOutcome::MarkErrorResumeFailed => {
                 let sink = session_lifecycle::AppSessionLifecycleSink { app: &app_clone };
-                apply_status_verdict(&sink, session_id, action, elapsed);
+                apply_status_verdict(&sink, session_id, action, elapsed, None);
             }
         }
 

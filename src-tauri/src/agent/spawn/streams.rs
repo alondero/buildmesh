@@ -169,22 +169,19 @@ pub(super) async fn start_streams(
         let promotion_sink = session_lifecycle::AppSessionLifecycleSink {
             app: &app_for_promotion,
         };
-        match session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
-            // Only a *successful* promotion means this spawn outlived the
-            // window in which its session id could have been unusable, so only
-            // then does the strike budget reset. `Ok(false)` means the reader
-            // already wrote this spawn's verdict (it exited early), and
-            // resetting there would wipe the very strike the guard just
-            // recorded — leaving the loop unbounded (issue #2137).
-            Ok(true) => super::resume_guard::reset(session_id),
-            Ok(false) => {}
-            Err(e) => {
-                tracing::warn!(
-                    "start_streams: conditional Running promotion failed for session {}: {}",
-                    session_id,
-                    e
-                );
-            }
+        // Issue #2137: this thread must NOT touch the resume strike budget.
+        // It fires at EARLY_EXIT_WINDOW (3s), which is well inside
+        // `resume_guard::UNUSABLE_RESUME_WINDOW` (30s), so a `--resume` that
+        // dies at 5s — inside the window that marks its session id unusable —
+        // would have its strike wiped here before the reader counted it, and
+        // the bound would never be reached. The budget resets in the reader
+        // epilogue instead, on an exit the guard judged sound.
+        if let Err(e) = session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
+            tracing::warn!(
+                "start_streams: conditional Running promotion failed for session {}: {}",
+                session_id,
+                e
+            );
         }
     });
 

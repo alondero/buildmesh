@@ -415,6 +415,15 @@ pub struct LifecycleChangedPayload {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub request: Option<InputRequest>,
+    /// The session identity this transition invalidated, when it also cleared
+    /// one (issue #2137). A `--resume` against an id with no persisted
+    /// transcript erases `agent_nodes.cli_session_id`, and clients keep their
+    /// own copy of that column — without this field a stale store would ask to
+    /// resume the very id the backend just discarded. Present means "drop
+    /// this id from your copy"; absent means the identity is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub cleared_session_id: Option<String>,
 }
 
 impl LifecycleChangedPayload {
@@ -442,6 +451,7 @@ impl LifecycleChangedPayload {
             signal_health: detail.signal_health,
             semantic_turn: detail.semantic_turn.clone(),
             request: detail.request.clone(),
+            cleared_session_id: None,
         }
     }
 }
@@ -819,6 +829,32 @@ pub fn on_pty_eof_with_detail(
     Ok(())
 }
 
+/// [`on_pty_eof`] for the issue #2137 path: this clean exit also proved the
+/// node's stored session identity resolves to nothing, so the caller has
+/// cleared it. The id rides the transition because clients keep their own copy
+/// of `cli_session_id` and would otherwise keep asking to resume the id the
+/// backend just discarded — turning the cleared row into a
+/// "no CLI session ID is stored" error and, with the frontend's idle-keyed
+/// auto-spawn and status rollback, a tight relaunch loop with no delay.
+pub fn on_pty_eof_clearing_session(
+    sink: &dyn SessionLifecycleSink,
+    node_id: i64,
+    cleared_session_id: &str,
+) -> Result<(), String> {
+    let mut payload = LifecycleChangedPayload::new(
+        node_id,
+        LifecycleKind::SessionExited,
+        SessionStatus::Idle,
+        &HookSignalDetail::default(),
+        "agent process exited cleanly",
+    );
+    payload.cleared_session_id = Some(cleared_session_id.to_string());
+    if sink.commit_lifecycle(&mut payload, &[])? {
+        sink.emit_lifecycle_changed(payload);
+    }
+    Ok(())
+}
+
 /// A resume attempt failed — write `Error` (unless already terminal)
 /// and emit `resume-failed`. Covers both detection paths:
 /// the PTY reader thread's early-exit heuristic (process died inside
@@ -865,8 +901,12 @@ pub fn on_resume_exhausted(
     );
     if sink.commit_lifecycle(&mut payload, &[SessionStatus::Archived])? {
         sink.emit_lifecycle_changed(payload);
+        // Announced only when the write landed. `resume-failed` tells the user
+        // this node was given up on, so firing it for a node whose status did
+        // not change (already archived) would be reporting a transition that
+        // never happened.
+        sink.emit_resume_failed(node_id, reason);
     }
-    sink.emit_resume_failed(node_id, reason);
     Ok(())
 }
 
@@ -1695,6 +1735,36 @@ mod tests {
             sink.lifecycle_changed().is_empty(),
             "a rejected write must not broadcast a status change that did not happen"
         );
+        assert!(
+            sink.resume_failed().is_empty(),
+            "the toast would claim this node was given up on when its status never changed"
+        );
+    }
+
+    /// Issue #2137 — the `Idle` transition has to carry the identity it
+    /// cleared, or the client's own copy of `cli_session_id` stays stale and
+    /// keeps asking the backend to resume the id that was just discarded.
+    #[test]
+    fn on_pty_eof_clearing_session_announces_the_dropped_identity() {
+        let sink = RecordingSink::new();
+        on_pty_eof_clearing_session(&sink, 7, "fb718014-0440-4b74-99e2-6ee5e2fafb57").unwrap();
+        assert_eq!(*sink.writes(), vec![(7, SessionStatus::Idle)]);
+        let events = sink.lifecycle_changed();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].cleared_session_id.as_deref(),
+            Some("fb718014-0440-4b74-99e2-6ee5e2fafb57"),
+            "the client must learn which id to drop from its store copy"
+        );
+    }
+
+    /// The ordinary clean EOF must leave identity claims out of the wire, so
+    /// a client can tell "unchanged" from "cleared".
+    #[test]
+    fn a_plain_pty_eof_does_not_claim_an_identity_was_cleared() {
+        let sink = RecordingSink::new();
+        on_pty_eof(&sink, 7).unwrap();
+        assert_eq!(sink.lifecycle_changed()[0].cleared_session_id, None);
     }
 
     #[test]

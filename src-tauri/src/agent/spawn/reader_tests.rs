@@ -267,6 +267,54 @@ fn only_resume_failures_are_charged_against_the_budget() {
         ),
         "a resume that ran long enough to be worked in is not a missing transcript"
     );
+    // The regression for the promotion race: the `Spawning → Running`
+    // promotion fires at EARLY_EXIT_WINDOW, so a resume that dies at 5s must
+    // still be charged even though the node was legitimately promoted first.
+    // Resetting the budget on that promotion wiped every such strike and left
+    // the loop unbounded.
+    assert!(
+        should_count_resume_failure(
+            PostExitAction::MarkIdle,
+            true,
+            std::time::Duration::from_secs(5)
+        ),
+        "an exit past the 3s promotion but inside the unusable window is still a strike"
+    );
+}
+
+/// The unusable window has to stay wider than the promotion window, or the
+/// promotion would erase each strike before the reader counted it.
+#[test]
+fn the_unusable_window_outlives_the_promotion_window() {
+    assert!(
+        resume_guard::UNUSABLE_RESUME_WINDOW > EARLY_EXIT_WINDOW,
+        "the Spawning → Running promotion fires at EARLY_EXIT_WINDOW; a strike must survive past it"
+    );
+}
+
+/// The budget resets on an exit the guard judged sound, so a node that recovers
+/// does not carry its old strikes into the next failure. This mirrors the
+/// reader epilogue, which resets whenever no verdict was produced.
+#[test]
+fn a_sound_exit_starts_the_next_failure_over() {
+    let node = 98_213_779;
+    assert_eq!(
+        resume_guard::note_unusable_resume(node),
+        UnusableResumeVerdict::DropIdentity
+    );
+    // A fresh spawn (not a `--resume`) produces no verdict, so the epilogue resets.
+    assert!(!should_count_resume_failure(
+        PostExitAction::MarkIdle,
+        false,
+        std::time::Duration::from_millis(100)
+    ));
+    resume_guard::reset(node);
+    assert_eq!(
+        resume_guard::note_unusable_resume(node),
+        UnusableResumeVerdict::DropIdentity,
+        "one strike after a sound spawn, not two"
+    );
+    resume_guard::reset(node);
 }
 
 /// A fresh spawn's pre-assigned UUID is not evidence of a missing
