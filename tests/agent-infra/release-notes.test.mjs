@@ -191,7 +191,54 @@ test('base resolution falls back when no release commit carries the tag', () => 
   assert.equal(highest.ref, 'v1.3.0');
 });
 
-test('the real repository resolves its own base to the v1.3.0 boundary', () => {
+// How many times the largest range a previous release actually shipped may the
+// current range grow before the gate fails. A release cadence, not a fixed
+// number: the old hard-coded `< 200` counted down the whole repository and
+// failed a PR purely for the number of commits on its branch, which is the
+// wrong signal (issue #2168).
+const RELEASE_RANGE_GROWTH = 3;
+
+// The share of everything reachable from the oldest tag that one release range
+// may occupy, used until there are two release boundaries to measure a cadence
+// from. Deliberately well under 1: a base that regressed to tag reachability
+// makes the range and the reachability count equal, so any fraction below 1
+// catches that, and the bound still grows as the repository does.
+const RELEASE_RANGE_REACHABILITY_FRACTION = 0.5;
+
+// Warn once the current range passes this fraction of the allowed maximum, so a
+// long-running branch hears about it well before the gate turns red.
+const RELEASE_RANGE_WARN_FRACTION = 0.75;
+
+/**
+ * The release ranges this repository has actually shipped, oldest first.
+ *
+ * Measured between consecutive `chore(release): vX.Y.Z` boundaries on the
+ * first-parent history — the same boundaries `resolveBase` resolves against, so
+ * the cadence is measured on the history the base is chosen from. Returns an
+ * empty list when there is not enough history to measure, which the caller must
+ * handle rather than treat as "no limit".
+ */
+function shippedReleaseRanges(repoRoot) {
+  const log = execFileSync('git', ['log', '--first-parent', '--format=%H%x1f%s', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' });
+  const boundaries = log.split('\n').map((line) => {
+    const [hash, subject] = line.split('\x1f');
+    return hash && /^chore\(release\): v\d+\.\d+\.\d+/.test(subject ?? '') ? hash : null;
+  }).filter(Boolean);
+  // `boundaries` is newest-first; each shipped release is the range ending at
+  // one boundary and starting at the previous one.
+  const ranges = [];
+  for (let index = 0; index + 1 < boundaries.length; index += 1) {
+    const count = Number(execFileSync(
+      'git',
+      ['rev-list', '--no-merges', '--count', `${boundaries[index + 1]}..${boundaries[index]}`],
+      { cwd: repoRoot, encoding: 'utf8' },
+    ).trim());
+    ranges.push(count);
+  }
+  return ranges;
+}
+
+test('the real repository resolves its own base to the v1.3.0 boundary', (t) => {
   // Guards the actual bug: if this ever regresses to reachability, the draft
   // silently includes hundreds of already-shipped commits.
   // fileURLToPath, not a manual leading-slash strip: that would turn
@@ -213,8 +260,43 @@ test('the real repository resolves its own base to the v1.3.0 boundary', () => {
   assert.ok(expected, 'expected a chore(release): v1.3.0 commit on the first-parent history');
   assert.equal(resolved.ref, expected.commit, 'base must be the v1.3.0 release commit, not v1.0.0');
   assert.notEqual(resolved.ref, 'v1.0.0', 'must not fall back to the only reachable tag');
+
   const count = Number(execFileSync('git', ['rev-list', '--no-merges', '--count', `${resolved.ref}..HEAD`], { cwd: repoRoot, encoding: 'utf8' }).trim());
   const reachabilityCount = Number(execFileSync('git', ['rev-list', '--no-merges', '--count', 'v1.0.0..HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim());
   assert.ok(count < reachabilityCount, `range ${count} should be far smaller than reachability ${reachabilityCount}`);
-  assert.ok(count > 0 && count < 200, `expected a release-sized range, got ${count}`);
+  assert.ok(count > 0, 'the release range must not be empty');
+
+  // The bound below is derived, never a fixed literal. The old `count < 200`
+  // counted down the whole repository and failed a pull request for having
+  // grown past a number while the code was fine — conflating "how long since
+  // the last release" with "how many commits are on this branch" (issue
+  // #2168). Both sources below grow with the repository, so neither can become
+  // a countdown that trips an unrelated PR.
+  const shipped = shippedReleaseRanges(repoRoot);
+  let allowed;
+  let because;
+  if (shipped.length > 0) {
+    // Prefer the cadence this repository has actually shipped: the largest
+    // range between two consecutive release boundaries, times a growth factor.
+    const largestShipped = Math.max(...shipped);
+    allowed = largestShipped * RELEASE_RANGE_GROWTH;
+    because = `largest shipped range ${largestShipped} x ${RELEASE_RANGE_GROWTH}`;
+  } else {
+    // Not enough release history on the first-parent line to measure a cadence
+    // (today: one boundary, so no completed range between two of them). Fall
+    // back to the reachability relationship, which is self-scaling: the range
+    // must stay a small fraction of everything reachable from the oldest tag.
+    // This still catches the base-resolution bug it was written for — a
+    // reachability base makes the two counts equal — while scaling with the
+    // repository instead of counting down to a fixed ceiling.
+    allowed = Math.floor(reachabilityCount * RELEASE_RANGE_REACHABILITY_FRACTION);
+    because = `reachability ${reachabilityCount} / ${1 / RELEASE_RANGE_REACHABILITY_FRACTION}`;
+    t.diagnostic(`no completed release range to derive a cadence from yet; using the reachability bound (${allowed})`);
+  }
+  if (count >= allowed * RELEASE_RANGE_WARN_FRACTION) {
+    // Warn well before failing, so a long-running branch hears about it early
+    // instead of discovering it as a red gate at merge time.
+    t.diagnostic(`release range ${count} is approaching its ceiling of ${allowed} (${because}) — cut a release to reset it`);
+  }
+  assert.ok(count < allowed, `release range ${count} exceeds ${allowed} (${because}); the next release is overdue`);
 });

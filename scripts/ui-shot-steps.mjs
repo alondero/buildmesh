@@ -23,8 +23,12 @@ import { withDeadline } from './ui-shot-deadline.mjs';
  * it. They are separate because they are separate phases priced separately, and
  * because only `--mock` runs are supervised: a real-app caller passes null for
  * both and keeps both unbounded.
+ *
+ * `onPhase` is called as each phase is entered, so a supervising wrapper can
+ * name the phase it killed the child in (issue #2168). It is optional because
+ * the two load/run phases are separately testable without one.
  */
-export async function runSteps(stepsFile, deps, { timeoutMs = STEP_SCRIPT_TIMEOUT_MS, moduleLoadTimeoutMs = null } = {}) {
+export async function runSteps(stepsFile, deps, { timeoutMs = STEP_SCRIPT_TIMEOUT_MS, moduleLoadTimeoutMs = null, onPhase } = {}) {
   // A dynamic import of a caller-supplied absolute path, deliberately opaque to
   // bundler/test-runner transforms (`@vite-ignore`): the steps file lives outside
   // the module graph, so a transformed import specifier would fail to resolve it
@@ -32,8 +36,9 @@ export async function runSteps(stepsFile, deps, { timeoutMs = STEP_SCRIPT_TIMEOU
   // never a build-time dependency of this module.
   //
   // The import is bounded by `moduleLoadTimeoutMs` alone. Deriving it from
-  // `timeoutMs` would hand the step budget's 120s to the load phase, and
-  // defaulting it would cap the real-app modes that deliberately pass null.
+  // `timeoutMs` would hand the step budget to the load phase, and defaulting it
+  // would cap the real-app modes that deliberately pass null.
+  onPhase?.('step module load');
   const mod = await withDeadline(
     import(/* @vite-ignore */ pathToFileURL(resolve(stepsFile)).href),
     moduleLoadTimeoutMs,
@@ -41,5 +46,6 @@ export async function runSteps(stepsFile, deps, { timeoutMs = STEP_SCRIPT_TIMEOU
   );
   if (typeof mod.default !== 'function') throw new Error(`${stepsFile} must default-export an async function`);
 
+  onPhase?.('step script');
   return withDeadline(mod.default(deps), timeoutMs, `Steps in ${stepsFile} (step script phase)`);
 }

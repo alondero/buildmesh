@@ -63,6 +63,17 @@ output.)
    internal work, and add the Highlights and Upgrade notes a reader needs. The
    release workflow checks that this exact file exists and uses it as the GitHub
    Release body.
+
+   A long gap between releases is expected on an active branch and is not a
+   gate: `tests/agent-infra/release-notes.test.mjs` derives its ceiling from the
+   ranges this repository has actually shipped, or from the reachability count
+   until there are two release boundaries to measure, and warns through the test
+   output once the range passes three quarters of the ceiling. It used to assert
+   a fixed `< 200` commits, which counted down the whole repository and failed
+   pull requests for their own size rather than for a wrong range (issue
+   #2168). The base-resolution assertions — that the base is the
+   `chore(release): vX.Y.Z` commit and not tag reachability — are unchanged and
+   remain the guard against a draft that would include already-shipped commits.
 3. Commit the version bump and the generated release note, then merge to `main`.
 4. **Push a matching tag** — this is the only trigger for the release build:
    ```
