@@ -28,6 +28,11 @@
 Each owner doc below was split out of this primer (issue #2045) and is now the
 place to add or change that area's durable architecture.
 
+For "which file do I open, and which boundary do I not cross", see the
+[Rust module map](development/module-map.md) — a short map of the seams a new
+reader should trust (commands are thin, git access lives in `git/`, the stepper
+is pure, the worker is not).
+
 | Area | Owner doc | Owning code |
 |---|---|---|
 | Model providers, usage meters, credentials, spawn recipes | [providers.md](development/providers.md) | `src-tauri/src/preferences/`, `src-tauri/src/services/usage.rs`, `src-tauri/src/services/windows_cred.rs`, `src-tauri/src/agent/provider/` |
