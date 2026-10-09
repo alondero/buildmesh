@@ -262,7 +262,12 @@ pub(super) fn classify_step_turn(
             missing_result: Some(missing_result),
         });
     }
-    let since_evaluation_ms = evaluator::millis_since_last_evaluation(agent_node_id);
+    let since_evaluation_ms = classifier_retry_elapsed_ms(
+        view,
+        node_id,
+        evaluator::millis_since_last_evaluation(agent_node_id),
+        chrono::Utc::now().timestamp_millis(),
+    );
     let changed_revision = view
         .context
         .get(&format!("node.{node_id}.evaluated_report_revision"))
@@ -633,6 +638,29 @@ pub(super) fn classifier_retry_wait_ms(view: &RunView, node_id: &str) -> u128 {
     crate::circuit::stepper::classifier_retry_cooldown_ms(failures, last_error)
 }
 
+/// Time since the gate's classifier last ran, for the retry cooldown. The live
+/// evaluation clock is in memory only, so after a restart it is `None`; fall
+/// back to the persisted failure time rather than treating that as "retry now"
+/// (which would spend a failure from the budget inside a long cooldown). A
+/// clock set back reads as zero elapsed, never as an instant retry.
+pub(super) fn classifier_retry_elapsed_ms(
+    view: &RunView,
+    node_id: &str,
+    in_memory_ms: Option<u128>,
+    now_ms: i64,
+) -> Option<u128> {
+    if in_memory_ms.is_some() {
+        return in_memory_ms;
+    }
+    let attempt = view.step(node_id)?.attempt;
+    let failed_at_ms = view
+        .context
+        .get(&format!("node.{node_id}.classifier_failed_at_ms.{attempt}"))?
+        .parse::<i64>()
+        .ok()?;
+    Some(now_ms.saturating_sub(failed_at_ms).max(0) as u128)
+}
+
 /// The lost-turn watchdog's gate on re-running inference for `node_id`: at
 /// least a quiet window, longer while the gate's classifier keeps timing out.
 pub(super) fn quiet_evaluation_is_due(
@@ -912,7 +940,12 @@ pub(super) fn lost_turn_watchdog_pass(app: &AppHandle) -> Vec<QuietClassifierFai
             if !quiet_evaluation_is_due(
                 &view,
                 &step.node_id,
-                evaluator::millis_since_last_evaluation(agent_node_id),
+                classifier_retry_elapsed_ms(
+                    &view,
+                    &step.node_id,
+                    evaluator::millis_since_last_evaluation(agent_node_id),
+                    chrono::Utc::now().timestamp_millis(),
+                ),
             ) {
                 continue;
             }

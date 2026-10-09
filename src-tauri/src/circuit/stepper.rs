@@ -73,6 +73,11 @@ use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
 
+/// Wall-clock milliseconds the worker stamps into the context just before it
+/// applies a classifier-failure event. The stepper has no clock of its own; it
+/// copies this into the gate's persisted failure time.
+pub(crate) const CLASSIFIER_CLOCK_KEY: &str = "clock.now_ms";
+
 /// Wait between classifier attempts for any failure that carries a diagnostic
 /// (bad login, missing binary, unrecognised verdict): the person can act on it,
 /// so it surfaces quickly.
@@ -93,8 +98,9 @@ pub(crate) fn classifier_retry_cooldown_ms(failures: u32, last_error: Option<&st
     if !last_error.is_some_and(crate::circuit::evaluator::is_classifier_timeout) {
         return CLASSIFIER_RETRY_COOLDOWN_MS;
     }
-    let step = (failures.max(1) as usize - 1).min(CLASSIFIER_TIMEOUT_COOLDOWNS_MS.len() - 1);
-    CLASSIFIER_TIMEOUT_COOLDOWNS_MS[step]
+    let cooldown_index =
+        (failures.max(1) as usize - 1).min(CLASSIFIER_TIMEOUT_COOLDOWNS_MS.len() - 1);
+    CLASSIFIER_TIMEOUT_COOLDOWNS_MS[cooldown_index]
 }
 
 // ---------------------------------------------------------------------------
@@ -2501,6 +2507,14 @@ fn record_classifier_failure(
     }
     let failures = previous + 1;
     run.context.set(&key, failures.to_string());
+    // The retry clock is otherwise in memory only; persisting when this failure
+    // happened lets a restart keep honouring a long timeout cooldown.
+    if let Some(now_ms) = run.context.get(CLASSIFIER_CLOCK_KEY).map(str::to_owned) {
+        run.context.set(
+            &format!("node.{node_id}.classifier_failed_at_ms.{attempt}"),
+            now_ms,
+        );
+    }
     t.context_changed = true;
     let last_error = run
         .context

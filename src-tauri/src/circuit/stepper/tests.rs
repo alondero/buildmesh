@@ -3329,6 +3329,46 @@ fn the_checkpoint_states_the_real_wait_before_the_next_classifier_attempt() {
     );
 }
 
+/// Review of PR 2178: the retry clock lived only in memory, so a restart
+/// during a 10-minute cooldown retried at once. The failure time is persisted
+/// per gate attempt, from the clock the worker stamps before applying the event.
+#[test]
+fn a_classifier_failure_records_when_it_happened() {
+    let mut run = gate_run(
+        "classify",
+        CircuitNodeKind::LlmTurnClassifier {
+            target_node_id: None,
+        },
+        &[],
+    );
+    fire_to_gate(&mut run, "classify");
+    let failed_at = |run: &RunView| {
+        run.context
+            .get("node.classify.classifier_failed_at_ms.1")
+            .map(str::to_owned)
+    };
+    let outage = CircuitEvent::ClassifierUnavailable {
+        node_id: "classify".into(),
+        attempt: 1,
+        error: classifier_timeout_error(),
+    };
+
+    advance(&mut run, &outage);
+    assert_eq!(failed_at(&run), None, "no clock, nothing to invent");
+
+    run.context.set(CLASSIFIER_CLOCK_KEY, "1000000");
+    advance(&mut run, &outage);
+    assert_eq!(failed_at(&run).as_deref(), Some("1000000"));
+
+    run.context.set(CLASSIFIER_CLOCK_KEY, "1180000");
+    advance_with_report_evidence(&mut run, &classified("classify", None));
+    assert_eq!(
+        failed_at(&run).as_deref(),
+        Some("1180000"),
+        "an unavailable verdict on the report path is a failure too"
+    );
+}
+
 /// Drive a gate_run from Pending up to the gate step existing. The
 /// gate's exact status depends on its kind (classifier/verification
 /// park Running; AutoRun completes instantly) — callers assert that.

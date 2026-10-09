@@ -1975,6 +1975,84 @@ fn the_quiet_turn_watchdog_honours_the_same_timeout_back_off() {
     ));
 }
 
+/// Review of PR 2178: after a restart the in-memory evaluation clock is gone
+/// and `None` meant "retry now", so a restart inside a 10-minute cooldown
+/// spent another failure from the budget during the same outage.
+#[test]
+fn a_restart_does_not_forget_a_timeout_cooldown() {
+    let now_ms: i64 = 10_000_000;
+    let mut view = classifier_outage_view(3, &mcode_timeout());
+    view.context.set(
+        "node.finish_classifier.classifier_failed_at_ms.1",
+        (now_ms - 300_000).to_string(),
+    );
+    let elapsed = classifier_retry_elapsed_ms(&view, "finish_classifier", None, now_ms);
+    assert_eq!(elapsed, Some(300_000));
+    assert!(!should_classify_report(
+        &view,
+        "finish_classifier",
+        SessionStatus::AwaitingInput,
+        "Finished.",
+        elapsed
+    ));
+    assert!(!quiet_evaluation_is_due(
+        &view,
+        "finish_classifier",
+        elapsed
+    ));
+
+    let later = classifier_retry_elapsed_ms(&view, "finish_classifier", None, now_ms + 300_000);
+    assert!(should_classify_report(
+        &view,
+        "finish_classifier",
+        SessionStatus::AwaitingInput,
+        "Finished.",
+        later
+    ));
+    assert!(quiet_evaluation_is_due(&view, "finish_classifier", later));
+
+    // A live in-memory clock is more recent than the persisted one.
+    assert_eq!(
+        classifier_retry_elapsed_ms(&view, "finish_classifier", Some(42), now_ms),
+        Some(42)
+    );
+    // A clock set back never turns a cooldown into an instant retry.
+    assert_eq!(
+        classifier_retry_elapsed_ms(&view, "finish_classifier", None, now_ms - 400_000),
+        Some(0)
+    );
+    // Contexts saved before the failure time existed keep today's behaviour.
+    let legacy = classifier_outage_view(3, &mcode_timeout());
+    assert_eq!(
+        classifier_retry_elapsed_ms(&legacy, "finish_classifier", None, now_ms),
+        None
+    );
+}
+
+#[test]
+fn applying_a_classifier_failure_stamps_the_wall_clock_into_the_run() {
+    let mut view = report_gate_view();
+    let before = chrono::Utc::now().timestamp_millis();
+    advance_and_persist_observed_event(
+        &mut view,
+        &CircuitEvent::ClassifierUnavailable {
+            node_id: "finish_classifier".into(),
+            attempt: 1,
+            error: mcode_timeout(),
+        },
+        |_, _| Ok(false),
+    )
+    .unwrap();
+    let after = chrono::Utc::now().timestamp_millis();
+    let failed_at: i64 = view
+        .context
+        .get("node.finish_classifier.classifier_failed_at_ms.1")
+        .expect("the failure time is persisted with the failure")
+        .parse()
+        .unwrap();
+    assert!((before..=after).contains(&failed_at), "{failed_at}");
+}
+
 #[test]
 fn circuit_classifier_exhaustion_survives_restart_and_new_reports() {
     let mut view = report_gate_view();
