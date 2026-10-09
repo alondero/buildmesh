@@ -126,7 +126,12 @@ test('the aggregate job checks out the guard it runs', () => {
   // did not, once: `node scripts/ci/quality-gate.mjs` failed with
   // MODULE_NOT_FOUND and took the required check — and `Rust tests + TS
   // bindings`, which depends on it — red on run 37494657044.
-  assert.match(jobBlock('quality'), /uses: actions\/checkout@v7/);
+  //
+  // The ref is matched loosely: whether it is a tag or a pinned SHA is the
+  // supply-chain gate's business
+  // (`tests/agent-infra/supply-chain-gates.test.mjs`), and pinning this
+  // assertion to a tag string would fail every time that gate re-pins a SHA.
+  assert.match(jobBlock('quality'), /uses: actions\/checkout@\S+/);
 });
 
 test('the Rust aggregate still demands a real success from this one', () => {
