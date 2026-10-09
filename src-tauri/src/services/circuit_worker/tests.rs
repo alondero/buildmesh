@@ -2811,6 +2811,71 @@ fn view_with_outstanding_lineage_work() -> RunView {
     view
 }
 
+/// The refusal half of the key that does not come from `report_blocker`. A
+/// classification can be refused with **no** blocker at all — the report simply
+/// fails the binding fence — and this round's code stamps an *empty* blocker
+/// key for that case and suppresses re-judgement on it. Without this, the
+/// no-blocker refusal would fall through `has_unconsumed_classifier_evidence`
+/// and be re-classified on every observation tick, which is the original #2138
+/// defect.
+#[test]
+fn a_no_blocker_refusal_is_not_reclassified_on_an_unchanged_report() {
+    use crate::circuit::stepper::ClassificationBinding;
+    let mut view = report_gate_view();
+    let report = "Published the PR but the push could not complete.";
+    // No outstanding work, no lifecycle blocker, no conflict: whatever refuses
+    // this classification is the binding fence itself.
+    assert!(
+        view.report_blocker("finish_classifier").is_none(),
+        "this fixture exercises the no-blocker refusal path"
+    );
+    // A real binding whose report revision does not match the recorded report
+    // is refused by `accepts_report_binding` without any blocker involved.
+    let mut bound = crate::circuit::test_support::record_report_evidence(
+        &mut view,
+        "finish_classifier",
+        report,
+    );
+    bound.report_revision = "a-stale-revision".into();
+    let parked = advance(
+        &mut view,
+        &CircuitEvent::TurnClassified {
+            binding: Some(ClassificationBinding {
+                report_revision: bound.report_revision.clone(),
+                ..bound
+            }),
+            node_id: "finish_classifier".into(),
+            classification: Some(crate::circuit::evaluator::Classification::Blocked),
+            output: Some(report.into()),
+        },
+    );
+    assert_eq!(
+        view.step("finish_classifier").unwrap().status,
+        StepStatus::Unverified,
+        "a report the fence refuses parks the gate: {:?}",
+        parked.step_writes
+    );
+    assert_eq!(
+        view.context
+            .get("node.finish_classifier.evaluated_evidence_blocker")
+            .map(str::to_owned),
+        Some(String::new()),
+        "the no-blocker refusal stamps an empty blocker key"
+    );
+    for tick in 0..5 {
+        assert!(
+            !should_classify_report(
+                &view,
+                "finish_classifier",
+                SessionStatus::AwaitingInput,
+                report,
+                None
+            ),
+            "tick {tick} re-admitted an unchanged no-blocker refusal"
+        );
+    }
+}
+
 /// Regression guard (PR review of #2138): a gate parked because owned work was
 /// open must recover when that work finishes, even though the report text and
 /// the evidence owner are unchanged. The refusal depends on `report_blocker`
