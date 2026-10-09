@@ -161,6 +161,44 @@ compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
 dev-profile evidence from [verify-ui](../../.claude/skills/verify-ui/SKILL.md).
 
+The `ui-shot` mock renders charge their time to named phases in
+`scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,
+reading the mock fixtures, navigation, mount, the step script, importing the
+steps module, the selector wait, the screenshot, the browser close, and the
+dev-server stop. The launch is charged twice because a failed launch retries
+against a system Chromium; page setup is charged twice because there are two
+calls, `browser.newPage` and `page.addInitScript`. Reading the fixtures file and
+importing a steps module are separate phases too, since both are awaited before
+the phase they feed.
+`tests/integration/ui-shot.test.ts` prices its supervising wrapper above their
+sum and audits `scripts/ui-shot.mjs` against it, so a listed phase that stops
+passing its budget is caught rather than silently reverting to Playwright's own
+default — which is how this sum first came to sit below the child's real worst
+case (issue #2063). Raise a phase there and the wrapper widens with it.
+
+Phases Playwright cannot bound itself are bounded in `scripts/ui-shot-deadline.mjs`:
+the step script, importing the steps module, reading the mock fixtures, both
+`browser.close()` call sites, and page setup (`browser.newPage` and
+`page.addInitScript`) — none of which accept a timeout argument. A hanging step
+script is reported as the step script phase with the offending steps file named.
+The step budgets and the teardown deadlines apply to `--mock` only. `--url` and
+CDP-attach drive a real app with no supervising wrapper and no priced budget, so
+their step phases and teardown stay unbounded rather than being cut off by a
+number nothing accounts for. Their navigation is bounded, but by Playwright's own
+default rather than by a priced budget.
+
+`startDevServer` decides whether the URL is already served with a TCP connect, not
+an HTTP request, and waits for readiness afterwards. A live dev server whose first
+response is slow would otherwise look dead to a probe and be duplicated on a port
+already taken. The trade-off: something that holds the port but never answers HTTP
+now fails after the startup budget instead of being treated as absent and spawned
+over.
+
+The audit is deliberately a source check rather than a runtime one: the budgets
+are minutes long by design, so waiting them out would test patience, not wiring.
+It asserts the budget on each call site individually, since a file-wide search
+lets one site lose its budget while another's text still satisfies it.
+
 There is no established frontend formatter, so this harness uses ESLint and
 Git whitespace checks rather than imposing a new formatting policy. Clippy's
 existing warning backlog remains visible as `warningCount`; any warning in a
