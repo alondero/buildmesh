@@ -154,13 +154,26 @@ export function getStatusConfig(status: string | undefined | null) {
  * adopt that status and snapshot. They do not copy its signal health onto
  * the node: the snapshot reports the row's current health, and writing that
  * back would turn an unknown column into the unverified tooltip.
+ *
+ * `cleared_session_id` (issue #2137) drops the identity from the client copy.
+ * `resolveSpawnAgentIntent` turns any non-empty `cli_session_id` into a
+ * `--resume <id>` request, so a stale copy would keep asking the backend to
+ * resume an id it has just discarded. The backend answers that with a fresh
+ * launch rather than an error, but the client would still be unable to resume
+ * its real session until the next refetch.
  */
 export function lifecycleNodePatch(
   payload: LifecycleChangedPayload,
-): Partial<Pick<AgentNode, 'status' | 'lifecycle' | 'signal_health'>> {
-  if (payload.kind === 'process_running') return { status: payload.status, lifecycle: payload };
-  if (payload.kind === 'signal_unavailable') return { signal_health: payload.signal_health };
+): Partial<Pick<AgentNode, 'status' | 'lifecycle' | 'signal_health' | 'cli_session_id'>> {
+  const identity = payload.cleared_session_id ? { cli_session_id: null } : {};
+  if (payload.kind === 'process_running') {
+    return { ...identity, status: payload.status, lifecycle: payload };
+  }
+  if (payload.kind === 'signal_unavailable') {
+    return { ...identity, signal_health: payload.signal_health };
+  }
   return {
+    ...identity,
     status: payload.status,
     lifecycle: payload,
     ...(payload.signal_health ? { signal_health: payload.signal_health } : {}),

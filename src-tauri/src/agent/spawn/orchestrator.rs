@@ -39,7 +39,8 @@ impl DurableAgentSpawnLease {
 
 impl Drop for DurableAgentSpawnLease {
     fn drop(&mut self) {
-        if let Err(error) = db::release_agent_spawn(self.node_id, &self.generation, self.succeeded) {
+        if let Err(error) = db::release_agent_spawn(self.node_id, &self.generation, self.succeeded)
+        {
             tracing::warn!(
                 "spawn_with_intent: could not release durable node spawn lease for node {}: {}",
                 self.node_id,
@@ -152,29 +153,50 @@ pub(crate) async fn spawn_with_intent(
     };
     let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
     if db::legacy_retirement::pending(node_id).map_err(|error| error.to_string())? {
-        return Err("Legacy retirement is still stopping this node. Retry after cleanup finishes.".into());
+        return Err(
+            "Legacy retirement is still stopping this node. Retry after cleanup finishes.".into(),
+        );
     }
     let mut durable_claim = if lifecycle_lease {
-        let claim = db::claim_agent_spawn(node_id).map_err(|e| e.to_string())?
-            .map(|generation| DurableAgentSpawnLease { node_id, generation, succeeded: false });
+        let claim = db::claim_agent_spawn(node_id)
+            .map_err(|e| e.to_string())?
+            .map(|generation| DurableAgentSpawnLease {
+                node_id,
+                generation,
+                succeeded: false,
+            });
         if claim.is_none()
-            && db::agent_cleanup_claim(node_id).map_err(|e| e.to_string())?.is_some()
+            && db::agent_cleanup_claim(node_id)
+                .map_err(|e| e.to_string())?
+                .is_some()
         {
-            tracing::info!("spawn_with_intent: cleanup generation owns node {}, deferring resume", node_id);
+            tracing::info!(
+                "spawn_with_intent: cleanup generation owns node {}, deferring resume",
+                node_id
+            );
             return Ok(SpawnOutcome::Skipped(node));
         }
         claim
     } else {
         None
     };
-    if matches!(intent, SpawnIntent::Resume { cause: ResumeCause::Startup })
-        && node.status != crate::models::SessionStatus::Suspended
+    if matches!(
+        intent,
+        SpawnIntent::Resume {
+            cause: ResumeCause::Startup
+        }
+    ) && node.status != crate::models::SessionStatus::Suspended
     {
         return Ok(SpawnOutcome::Skipped(node));
     }
-    let provider = node.launch_configuration.as_ref().and_then(|c| c.resolved.as_ref())
-        .map_or_else(|| crate::preferences::resolve_harness_provider(&node.provider),
-            |plan| crate::models::Provider::from_db_str(&plan.harness.harness));
+    let provider = node
+        .launch_configuration
+        .as_ref()
+        .and_then(|c| c.resolved.as_ref())
+        .map_or_else(
+            || crate::preferences::resolve_harness_provider(&node.provider),
+            |plan| crate::models::Provider::from_db_str(&plan.harness.harness),
+        );
     let adapter = provider.adapter();
     let is_resume_intent = matches!(intent, SpawnIntent::Resume { .. });
 
@@ -213,10 +235,23 @@ pub(crate) async fn spawn_with_intent(
                     return Ok(SpawnOutcome::Skipped(node));
                 }
                 ResumeSkipDecision::NoSessionId => {
-                    return Err(format!(
-                        "cannot resume node {}: no CLI session ID is stored",
+                    // There is nothing to resume, so launching fresh is the
+                    // only meaningful action. This used to be an error, which
+                    // was wrong twice over: it surfaced a toast on a node the
+                    // user could act on only by guessing, and it became a
+                    // tight relaunch loop once a client asked to resume an id
+                    // the backend had just discarded (issue #2137) — the
+                    // frontend's status rollback put the node straight back
+                    // to `idle` and the idle-keyed auto-spawn re-fired with no
+                    // delay. Reaching here now means the caller's intent is
+                    // satisfied by a fresh conversation, so fall through with
+                    // `resume = None` rather than failing.
+                    tracing::info!(
+                        "spawn_with_intent: node {} was asked to resume but has no stored session \
+                         id; starting a fresh conversation instead",
                         node.id
-                    ));
+                    );
+                    None
                 }
                 // Adapter cannot honour a resume arg (OpenCode,
                 // Terminal -- no --resume flag) under an Explicit
@@ -260,17 +295,28 @@ pub(crate) async fn spawn_with_intent(
         return Ok(SpawnOutcome::AlreadyActive(node));
     }
 
-    if let Some(plan) = node.launch_configuration.as_ref().and_then(|c| c.resolved.as_ref()) {
+    if let Some(plan) = node
+        .launch_configuration
+        .as_ref()
+        .and_then(|c| c.resolved.as_ref())
+    {
         let plan = plan.clone();
         let overrides = crate::preferences::launch_configurations::LaunchOverrides {
-                model: explicit.model.clone(), effort: explicit.effort.clone(), extra_args: explicit.extra_args.clone(),
-            };
+            model: explicit.model.clone(),
+            effort: explicit.effort.clone(),
+            extra_args: explicit.extra_args.clone(),
+        };
         // Explicit user overrides become the next saved launch; absent overrides
         // preserve the snapshot without consulting today's defaults or routes.
         crate::commands::run_blocking("resolve_launch_snapshot", move || {
-            let resolved = crate::preferences::launch_configurations::resolve_snapshot(&plan, &overrides)?;
-            crate::db::set_node_launch_snapshot(node_id, &crate::preferences::launch_configurations::snapshot(resolved))
-        }).await?;
+            let resolved =
+                crate::preferences::launch_configurations::resolve_snapshot(&plan, &overrides)?;
+            crate::db::set_node_launch_snapshot(
+                node_id,
+                &crate::preferences::launch_configurations::snapshot(resolved),
+            )
+        })
+        .await?;
     }
 
     if intent_replaces_conversation(&intent) {
