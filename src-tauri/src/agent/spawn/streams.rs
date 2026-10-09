@@ -103,6 +103,11 @@ pub(super) async fn start_streams(
     // unsynchronised; only one path must own the column for any given spawn.
     let needs_session_capture =
         reader_should_capture_session_id(&session_id_mode, adapter.captures_session_id_from_pty());
+    // Issue #2137 — only a `--resume` launch can invalidate the stored
+    // session identity. A fresh spawn's pre-assigned UUID is not evidence
+    // that the conversation it names is missing, so the reader's resume
+    // guard must not fire for `Assign`/`None`.
+    let resume_attempt = matches!(session_id_mode, SessionIdMode::Resume(_));
     let reader_handle = start_reader(
         app.clone(),
         session_id,
@@ -115,6 +120,7 @@ pub(super) async fn start_streams(
         mesh_id,
         deliberate_kill,
         generation,
+        resume_attempt,
     );
 
     // Natural-exit watcher (issue #287). On Windows ConPTY
@@ -163,12 +169,22 @@ pub(super) async fn start_streams(
         let promotion_sink = session_lifecycle::AppSessionLifecycleSink {
             app: &app_for_promotion,
         };
-        if let Err(e) = session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
-            tracing::warn!(
-                "start_streams: conditional Running promotion failed for session {}: {}",
-                session_id,
-                e
-            );
+        match session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
+            // Only a *successful* promotion means this spawn outlived the
+            // window in which its session id could have been unusable, so only
+            // then does the strike budget reset. `Ok(false)` means the reader
+            // already wrote this spawn's verdict (it exited early), and
+            // resetting there would wipe the very strike the guard just
+            // recorded — leaving the loop unbounded (issue #2137).
+            Ok(true) => super::resume_guard::reset(session_id),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "start_streams: conditional Running promotion failed for session {}: {}",
+                    session_id,
+                    e
+                );
+            }
         }
     });
 
