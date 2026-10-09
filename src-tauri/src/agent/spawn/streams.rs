@@ -103,6 +103,11 @@ pub(super) async fn start_streams(
     // unsynchronised; only one path must own the column for any given spawn.
     let needs_session_capture =
         reader_should_capture_session_id(&session_id_mode, adapter.captures_session_id_from_pty());
+    // Issue #2137 — only a `--resume` launch can invalidate the stored
+    // session identity. A fresh spawn's pre-assigned UUID is not evidence
+    // that the conversation it names is missing, so the reader's resume
+    // guard must not fire for `Assign`/`None`.
+    let resume_attempt = matches!(session_id_mode, SessionIdMode::Resume(_));
     let reader_handle = start_reader(
         app.clone(),
         session_id,
@@ -115,6 +120,7 @@ pub(super) async fn start_streams(
         mesh_id,
         deliberate_kill,
         generation,
+        resume_attempt,
     );
 
     // Natural-exit watcher (issue #287). On Windows ConPTY
@@ -163,6 +169,13 @@ pub(super) async fn start_streams(
         let promotion_sink = session_lifecycle::AppSessionLifecycleSink {
             app: &app_for_promotion,
         };
+        // Issue #2137: this thread must NOT touch the resume strike budget.
+        // It fires at EARLY_EXIT_WINDOW (3s), which is well inside
+        // `resume_guard::UNUSABLE_RESUME_WINDOW` (30s), so a `--resume` that
+        // dies at 5s — inside the window that marks its session id unusable —
+        // would have its strike wiped here before the reader counted it, and
+        // the bound would never be reached. The budget resets in the reader
+        // epilogue instead, on an exit the guard judged sound.
         if let Err(e) = session_lifecycle::on_spawn_complete(&promotion_sink, session_id) {
             tracing::warn!(
                 "start_streams: conditional Running promotion failed for session {}: {}",

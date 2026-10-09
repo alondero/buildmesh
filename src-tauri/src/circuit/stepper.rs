@@ -73,6 +73,31 @@ use crate::circuit::evaluator::Classification;
 
 pub(crate) const MAX_CLASSIFIER_FAILURES: u32 = 5;
 
+/// Wait between classifier attempts for any failure that carries a diagnostic
+/// (bad login, missing binary, unrecognised verdict): the person can act on it,
+/// so it surfaces quickly.
+const CLASSIFIER_RETRY_COOLDOWN_MS: u128 = 60_000;
+
+/// Wait after the 1st, 2nd, 3rd... consecutive *timeout*. A timeout means the
+/// classifier CLI wedged, not that it refused. Run 399: every `mcode exec`
+/// hung in start-up for 28 minutes, then recovered by itself, but five
+/// minute-spaced attempts had already parked the gate. These waits total
+/// 34 minutes across the four gaps a 5-attempt budget has.
+const CLASSIFIER_TIMEOUT_COOLDOWNS_MS: [u128; 4] = [60_000, 180_000, 600_000, 1_200_000];
+
+/// How long to wait before the next classifier attempt, given how many have
+/// failed in a row and the last error. The failure budget itself
+/// ([`MAX_CLASSIFIER_FAILURES`]) and the explicit recheck after exhausting it
+/// are unchanged: this only spaces the attempts.
+pub(crate) fn classifier_retry_cooldown_ms(failures: u32, last_error: Option<&str>) -> u128 {
+    if !last_error.is_some_and(crate::circuit::evaluator::is_classifier_timeout) {
+        return CLASSIFIER_RETRY_COOLDOWN_MS;
+    }
+    let cooldown_index =
+        (failures.max(1) as usize - 1).min(CLASSIFIER_TIMEOUT_COOLDOWNS_MS.len() - 1);
+    CLASSIFIER_TIMEOUT_COOLDOWNS_MS[cooldown_index]
+}
+
 // ---------------------------------------------------------------------------
 // State model — the pure mirror of the three ledger tables.
 //
@@ -849,12 +874,17 @@ pub enum CircuitEvent {
         node_id: String,
         attempt: i32,
         error: String,
+        /// When the seam saw the failure. Persisted per gate attempt so the
+        /// retry cooldown survives a restart; the stepper has no clock.
+        observed_at_ms: i64,
     },
     /// Readiness inference failed without establishing a report or turn verdict.
     ClassifierUnavailable {
         node_id: String,
         attempt: i32,
         error: String,
+        /// When the seam saw the failure (see `ClassifierErrorObserved`).
+        observed_at_ms: i64,
     },
     /// The seam observed the piloted agent's latest report for this gate and
     /// deliberately did not classify it: the agent is still working, so the
@@ -1896,6 +1926,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             node_id,
             attempt,
             error,
+            observed_at_ms,
         } => {
             if run.state == RunState::Running
                 && run.step(node_id).is_some_and(|step| {
@@ -1903,6 +1934,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                         && matches!(step.status, StepStatus::Running | StepStatus::Unverified)
                 })
             {
+                record_classifier_failure_time(run, node_id, *attempt, *observed_at_ms);
                 record_classifier_failure(run, &mut t, node_id, *attempt, Some(error.as_str()));
             }
         }
@@ -1910,6 +1942,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             node_id,
             attempt,
             error,
+            observed_at_ms,
         } => {
             if run.state == RunState::Running
                 && run.step(node_id).is_some_and(|step| {
@@ -1919,6 +1952,7 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
             {
                 run.context
                     .set(&format!("node.{node_id}.classifier_error.{attempt}"), error);
+                record_classifier_failure_time(run, node_id, *attempt, *observed_at_ms);
                 t.context_changed = true;
             }
         }
@@ -2455,6 +2489,23 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
     t
 }
 
+/// Persist when the seam saw a classifier failure for this gate attempt. The
+/// in-memory evaluation clock does not survive a restart, and without this a
+/// restart inside a long timeout cooldown would retry at once and spend a
+/// failure from the budget. The time arrives in the event: the stepper has no
+/// clock.
+fn record_classifier_failure_time(
+    run: &mut RunView,
+    node_id: &str,
+    attempt: i32,
+    observed_at_ms: i64,
+) {
+    run.context.set(
+        &format!("node.{node_id}.classifier_failed_at_ms.{attempt}"),
+        observed_at_ms.to_string(),
+    );
+}
+
 fn record_classifier_failure(
     run: &mut RunView,
     t: &mut Transition,
@@ -2478,16 +2529,23 @@ fn record_classifier_failure(
     let failures = previous + 1;
     run.context.set(&key, failures.to_string());
     t.context_changed = true;
-    let diagnostic = run
+    let last_error = run
         .context
         .get(&format!("node.{node_id}.classifier_error.{attempt}"))
         .filter(|error| !error.is_empty())
+        .map(str::to_owned);
+    let diagnostic = last_error
+        .as_deref()
         .map(|error| format!(" Last failure: {error}"))
         .unwrap_or_default();
     if failures >= MAX_CLASSIFIER_FAILURES {
         unverify_step(run, t, node_id, format!("Classifier unavailable after {MAX_CLASSIFIER_FAILURES} attempts. Restore the configured classifier and recheck evidence.{diagnostic}"));
     } else {
-        let error = format!("Classifier unavailable; retrying after 60 seconds. Check the Circuit classifier provider in app settings if this persists.{diagnostic}");
+        let wait = describe_window(
+            classifier_retry_cooldown_ms(failures, last_error.as_deref()).min(i64::MAX as u128)
+                as i64,
+        );
+        let error = format!("Classifier unavailable; retrying after {wait}. Check the Circuit classifier provider in app settings if this persists.{diagnostic}");
         if let Some(step) = run.step_mut(node_id) {
             step.error = Some(error.clone());
         }

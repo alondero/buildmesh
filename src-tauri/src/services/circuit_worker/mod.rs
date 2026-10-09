@@ -2444,6 +2444,7 @@ fn apply_quiet_classifier_failures(app: &AppHandle, failures: Vec<QuietClassifie
                 node_id: failure.step,
                 attempt: failure.attempt,
                 error: failure.error,
+                observed_at_ms: chrono::Utc::now().timestamp_millis(),
             };
             match advance_and_persist_observed_event(&mut view, &event, |view, transition| {
                 persist_transition_checked(run.id, view, transition)
