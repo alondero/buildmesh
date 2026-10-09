@@ -21,11 +21,12 @@ pub mod agy;
 pub mod anthropic;
 pub mod cline;
 pub mod codex;
-pub mod cursor;
 pub mod commandcode;
+pub mod cursor;
 pub mod dsh;
 pub mod freebuff;
 pub mod grok;
+mod hook_contract;
 pub mod kimi;
 pub mod mcode;
 pub mod muse;
@@ -46,5 +47,3 @@ pub use mcode::MCODE;
 pub use muse::MUSE;
 pub use opencode::OPENCODE;
 pub use terminal::TERMINAL;
-
-

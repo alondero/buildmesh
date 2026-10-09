@@ -18,7 +18,8 @@ observations (issue #1898).
 Sources: the official [hooks reference](https://code.claude.com/docs/en/hooks)
 for the native payload contract, the installed CLI version recorded below for
 the runtime inventory, and the owning modules
-(`services/circuit_worker/native_hooks.rs`,
+(`agent/provider/adapters/anthropic.rs` and `hook_contract.rs`,
+`services/circuit_worker/native_hooks.rs`,
 `db/circuit/evidence.rs`, `http/routes/attention.rs`).
 
 ## Status

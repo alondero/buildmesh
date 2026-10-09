@@ -67,7 +67,7 @@ impl Observations for Script {
             events,
         );
     }
-    fn codex(
+    fn pull(
         &mut self,
         _: &RunView,
         _: &StepView,

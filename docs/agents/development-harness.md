@@ -59,6 +59,54 @@ requires recording them again.
 }
 ```
 
+## Review and repair
+
+This workflow adopts batched findings (option B) and fast repair checks
+(option D) from #2122. During an independent review's repair loop, use fast checks
+plus focused behavioral regressions; run scope-complete verification when the
+candidate is stable and before successful handoff. Final completion continues
+to require current verification, acceptance evidence and independent APPROVE
+for the same tree.
+
+Use the [review skill](../../.claude/skills/review/SKILL.md) with the task's
+immutable base, complete change, acceptance criteria, existing findings and
+available evidence. The first pass checks the whole change against the spec
+and engineering contract, reporting all substantiated findings together and
+separating required corrections from optional suggestions. Exhaustive means
+a complete best-effort pass; repairs can still introduce new defects.
+
+After REQUEST_CHANGES:
+
+1. Record the verdict and findings with `harness update`, and keep the task
+   active while repairing the batch. Review updates do not require a fresh
+   full verification receipt.
+2. Run fast checks and the regression tests that exercise each affected
+   production boundary. Claude's advisory `.harness/fast.json` covers agent
+   rules, changed-file lint and TypeScript checking; it runs no behavioral or
+   Rust tests. Other harnesses use the focused commands in the
+   [engineering contract](engineering.md#choose-checks-by-scope).
+3. Broaden checks during repair when changes affect shared contracts,
+   migrations, security, lifecycle ownership, dependencies or platform/build
+   behavior. A failed full check remains unresolved until the failing check
+   and affected checks pass; a passing subset supplies diagnostic evidence.
+4. Give the reviewer the repair diff, previous findings and executed checks.
+   Follow-up review checks every finding's resolution, new defects and the
+   repair's interactions with the whole change. A reviewer without that
+   history, or a change that expands scope, needs a complete pass.
+
+Once the reviewer has no outstanding corrections, run `npm run verify` for
+all applicable gates, reusing PASS results only while their declared inputs
+match. Record acceptance evidence and independent approval of the complete
+final revision. A follow-up approval may reuse earlier inspection, but it
+must explicitly cover the current whole change. Source edits during or after
+this final verification require refreshed verification, acceptance and review
+evidence before completion. Fast results never replace the final receipt.
+
+Continue the repair loop within the active task; use progress updates for
+intermediate status. `finish` and the Stop hook still reject incomplete or
+stale evidence. CI and release checks remain independent safeguards; mock
+browser checks do not replace required real-runtime acceptance evidence.
+
 ## Verify and finish
 
 Run `npm run verify` in the foreground when it fits. The frontend and Rust
