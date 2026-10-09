@@ -302,8 +302,10 @@ if its interactive help has no `--model`, update that installation with
 `mcode update`. Windows and WSL installations can have different versions.
 Use mcode's `/model` picker to find a model available to your account and enter
 its full `provider/model` reference, optionally with `#variant`. Clearing the
-configuration's Model field restores the Mesh/application/native default
-cascade. See the [MiniMax CLI docs](https://agent.minimax.io/docs/cli/features#model-references).
+configuration's Model field restores the application default from
+**Settings → Launch Configurations**, in the **Agent Harness defaults** section,
+then mcode's own default. See the
+[MiniMax CLI docs](https://agent.minimax.io/docs/cli/features#model-references).
 
 ## My standalone `mcode` sessions now run in Full Access
 

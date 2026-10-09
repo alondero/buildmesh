@@ -629,7 +629,12 @@ For **MiniMax Code**, enter the model reference from mcode's `/model` picker
 as `provider/model` (or `provider/model#variant`) in the configuration's
 **Model** field. The selected model applies to fresh and resumed sessions
 without changing mcode's global model default. Leave the field blank to inherit
-Mesh/application defaults, then mcode's own default. This was verified with
+the application default from **Settings → Launch Configurations**, in the
+**Agent Harness defaults** section, then mcode's own default.
+Set MiniMax Code's **Model** under **Settings → Launch Configurations**, in the
+**Agent Harness defaults** section, to apply it to launches without an explicit
+model. Previously stored MiniMax Code
+model defaults now take effect too. This was verified with
 `mcode 0.6.5`; older installations may need an update. MiniMax Code has no
 configurable effort control. See the [MiniMax CLI model reference docs](https://agent.minimax.io/docs/cli/features#model-references).
 
