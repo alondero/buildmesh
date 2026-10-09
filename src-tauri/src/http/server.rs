@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use tauri::{Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
@@ -424,19 +424,29 @@ pub(crate) async fn handle_connection(stream: MaybeTls, addr: SocketAddr) {
     handle_admitted_connection(stream, addr, None).await;
 }
 
-async fn handle_admitted_connection(
-    stream: MaybeTls,
-    addr: SocketAddr,
-    mut admission: Option<(
-        tokio::sync::OwnedSemaphorePermit,
-        std::sync::Arc<tokio::sync::Semaphore>,
-    )>,
-) {
-    let secure = stream.is_tls();
-    let mut lines = tokio::io::BufStream::new(stream);
-
-    let head = match tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
-        let mut head_reader = (&mut lines).take((MAX_HEADER_BYTES + 1) as u64);
+/// Read the request line + header block, bounded by [`REQUEST_HEAD_TIMEOUT`]
+/// and [`MAX_HEADER_BYTES`].
+///
+/// Returns `(request_line, headers, header_overflow)`, or `None` when the
+/// connection is dead before a usable head arrives (EOF, read error, a head
+/// that is not valid UTF-8, or no bytes within the deadline) — every caller
+/// drops the connection in that case.
+///
+/// Generic over the reader so the fuzz harness (`crate::http::fuzz`, issue
+/// #2156) drives this exact parse from an in-memory duplex instead of
+/// re-implementing it; production passes [`MaybeTls`]. `AsyncWrite` is in the
+/// bound only because `BufStream` implements neither `AsyncRead` nor
+/// `AsyncWrite` unless its inner stream is both. The body read that follows on
+/// the same stream is bounded the same way in
+/// [`crate::http::request::read_body_with_cap`].
+pub(crate) async fn read_request_head<R>(
+    lines: &mut tokio::io::BufStream<R>,
+) -> Option<(String, String, bool)>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(REQUEST_HEAD_TIMEOUT, async {
+        let mut head_reader = (&mut *lines).take((MAX_HEADER_BYTES + 1) as u64);
         let mut request_line = String::new();
         match head_reader.read_line(&mut request_line).await {
             Ok(0) | Err(_) => return None,
@@ -462,10 +472,25 @@ async fn handle_admitted_connection(
     })
     .await
     {
-        Ok(Some(head)) => head,
-        Ok(None) | Err(_) => return,
+        Ok(Some(head)) => Some(head),
+        Ok(None) | Err(_) => None,
+    }
+}
+
+async fn handle_admitted_connection(
+    stream: MaybeTls,
+    addr: SocketAddr,
+    mut admission: Option<(
+        tokio::sync::OwnedSemaphorePermit,
+        std::sync::Arc<tokio::sync::Semaphore>,
+    )>,
+) {
+    let secure = stream.is_tls();
+    let mut lines = tokio::io::BufStream::new(stream);
+
+    let Some((request_line, headers, header_overflow)) = read_request_head(&mut lines).await else {
+        return;
     };
-    let (request_line, headers, header_overflow) = head;
 
     if header_overflow {
         let _ = request::write_status_only(&mut lines, "431 Request Header Fields Too Large").await;
@@ -542,7 +567,8 @@ async fn handle_admitted_connection(
                         return;
                     }
                     Err(()) => {
-                        let _ = request::write_status_only(&mut lines, "503 Service Unavailable").await;
+                        let _ =
+                            request::write_status_only(&mut lines, "503 Service Unavailable").await;
                         return;
                     }
                 }

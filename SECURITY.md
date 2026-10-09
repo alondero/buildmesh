@@ -88,6 +88,16 @@ Out of scope:
   in a spawned agent.
 - Issues only reproducible against an already-compromised host.
 
+### Fuzzing the parsers
+
+The embedded server's request-read path (request head, `Content-Length`, body
+read) has a checked-in fuzz target you can run locally — `cargo test --lib
+http::fuzz` in `src-tauri/`, seeds in `src-tauri/fuzz/corpus/http_request/`,
+campaign knobs and invariants in
+[`docs/development/remote-access.md`](docs/development/remote-access.md#fuzzing-the-request-read-path).
+A crash, hang, or invariant violation it reports is a bug worth filing; what it
+finds is in scope, and fixing it is a separate issue from the harness.
+
 ## Where credentials are stored
 
 On Windows, provider API keys (MiniMax, Kimi, OpenRouter, custom endpoints)
