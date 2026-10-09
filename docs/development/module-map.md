@@ -51,6 +51,13 @@ same sense:
 | `http/` | Loopback/LAN server: `server.rs`, `router.rs`, `auth.rs`, `tls/`, `ws.rs`, and `routes/` per resource. Routes are the second command boundary. |
 | `env/` | Windows vs WSL detection, host-path conversion (`host_path.rs`), mesh row reads. |
 | `preferences/` | Persisted user settings, loaded off the async pool. |
+| `models/` | The shared DTOs. Split by domain (`mesh.rs`, `agent.rs`, `circuit.rs`, `git.rs`); `mod.rs` re-exports every type so `crate::models::…` paths stay stable. Wire types derive `TS` here and are generated, never hand-edited. |
+| `sandbox/` | OS process confinement for agent PTY nodes — `restricted_token.rs`, `appcontainer.rs`, `acl.rs`, `conpty.rs`, and its own `spawn.rs`. |
+| `session_naming/` | Backend-only node auto-naming from agent output (`engine.rs` observes output/turn boundaries, `words.rs`/`slug.rs` build the name, `repository.rs` persists it). PTY-side `session-id` capture does not belong here or in a caller. |
+| `coordinator/` | The agent-agnostic control-API read model (`node_digest.rs`, `enrichment.rs`, `drive.rs`) behind `http/routes/coordinator.rs`. |
+| `diagnostics/` | Always-on resource diagnostics — the writer, the watchdog, and startup-failure capture. |
+| `startup/` | Early-boot diagnostics for the failures that stop Buildmesh opening — an unwritable app-data directory, corrupt SQLite, a failed migration — captured before any logger exists. |
+| `windowing/` | Native Windows caption-button affordances for the bespoke title bar (`snap_overlay.rs`). |
 
 The `circuit/` and `services/circuit_worker/` pair is the reference example of
 the pure/impure split: one domain, one pure decision module, one worker that

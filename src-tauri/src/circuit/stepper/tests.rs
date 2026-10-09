@@ -1505,15 +1505,14 @@ fn an_unmerged_pr_is_a_routed_outcome_that_does_not_fail_the_run() {
         run.context.get("merge.unconfirmed_reason"),
         Some("PR #314 is still open and has not been merged")
     );
-    let message =
-        answered
-            .effects
-            .iter()
-            .chain(&settled.effects)
-            .find_map(|effect| match effect {
-                Effect::Notify { message } => Some(message.clone()),
-                _ => None,
-            });
+    let message = answered
+        .effects
+        .iter()
+        .chain(&settled.effects)
+        .find_map(|effect| match effect {
+            Effect::Notify { message } => Some(message.clone()),
+            _ => None,
+        });
     assert!(
         message.is_some_and(|m| m.contains("still open")),
         "the person is told why: {:?} / {:?}",
@@ -3498,13 +3497,11 @@ fn circuit_classifier_cannot_route_without_bound_native_report_and_lifecycle() {
                     match corruption {
                         "report" => *output = Some("An unrelated approval".into()),
                         "session" => {
-                            binding.as_mut().unwrap().owner.session_id =
-                                Some("old-session".into())
+                            binding.as_mut().unwrap().owner.session_id = Some("old-session".into())
                         }
                         "attempt" => binding.as_mut().unwrap().owner.attempt += 1,
                         "input" => {
-                            binding.as_mut().unwrap().input_guard.input_stamp =
-                                "new-input".into()
+                            binding.as_mut().unwrap().input_guard.input_stamp = "new-input".into()
                         }
                         _ => unreachable!(),
                     }
@@ -5503,9 +5500,10 @@ fn issue_review_legacy_completed_classifier_cannot_become_approval_after_upgrade
     assert!(run.step("merge").is_none());
     assert!(run.step("complete").is_none());
     assert_eq!(run.state, RunState::Failed);
-    assert!(!t.effects.iter().any(
-        |e| matches!(e, Effect::Notify { message } if message.contains("Review approved"))
-    ));
+    assert!(!t
+        .effects
+        .iter()
+        .any(|e| matches!(e, Effect::Notify { message } if message.contains("Review approved"))));
 }
 //
 // The contract pins these paths in `blueprint_contract.rs`; the
@@ -5863,9 +5861,10 @@ fn issue_review_wrapup_retry_exhaustion_terminates_without_reviewer() {
     for _attempt in 0..3 {
         let retry = advance(&mut run, &tick(8));
         assert!(
-            !retry.effects.iter().any(
-                |e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")
-            ),
+            !retry
+                .effects
+                .iter()
+                .any(|e| matches!(e, Effect::SpawnAgentNode { node_id } if node_id == "reviewer")),
             "reviewer MUST NOT spawn while OpenPr is failing (contract acceptance)"
         );
         let _ = advance(
