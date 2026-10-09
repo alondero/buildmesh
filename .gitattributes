@@ -8,3 +8,10 @@
 # (the harness whitespace gate) skips trailing-space errors for these files.
 src/types/generated/*.ts text eol=lf whitespace=-trailing-space
 src/types/generated/*.json text eol=lf
+# Fuzz corpus seeds are exact byte streams: CRLF line endings, NUL bytes,
+# invalid UTF-8, and at least one header value whose trailing space is the
+# thing under test. `binary` is `-diff -merge -text`: it keeps any checkout
+# from rewriting line endings (the pinned outcomes would then fail for a
+# reason that has nothing to do with the reader) and stops `git diff --check`
+# from reading that space as whitespace damage.
+src-tauri/fuzz/corpus/** binary

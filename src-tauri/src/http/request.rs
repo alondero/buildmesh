@@ -3,7 +3,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufStream};
 
 use crate::http::MaybeTls;
 
@@ -40,11 +40,21 @@ pub enum ReadBodyError {
 /// for the full upload window — the same DoS class `handle_connection`'s head
 /// read closes for the request line + headers. Both halves live behind this
 /// helper so every body-reading route carries the same guard.
-pub async fn read_body_with_cap(
-    lines: &mut BufStream<MaybeTls>,
+///
+/// Generic over the reader (production passes [`MaybeTls`]) so the fuzz
+/// harness in `crate::http::fuzz` can drive the real read from an in-memory
+/// duplex — issue #2156. `AsyncWrite` is in the bound only because
+/// `BufStream` implements neither trait unless its inner stream is both.
+/// `max_bytes` bounds the allocation made *before* any byte arrives, which is
+/// the invariant that harness asserts.
+pub async fn read_body_with_cap<R>(
+    lines: &mut BufStream<R>,
     content_length: usize,
     max_bytes: usize,
-) -> Result<Vec<u8>, ReadBodyError> {
+) -> Result<Vec<u8>, ReadBodyError>
+where
+    R: AsyncRead + AsyncWrite + Unpin,
+{
     if content_length > max_bytes {
         return Err(ReadBodyError::TooLarge);
     }

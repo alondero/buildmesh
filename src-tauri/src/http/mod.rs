@@ -12,6 +12,10 @@
 pub mod assets;
 pub mod auth;
 pub mod events;
+// Fuzz harness for the request-read path (issue #2156). Test-only: it runs
+// under `cargo test --lib http::fuzz`, never in the shipped binary.
+#[cfg(test)]
+mod fuzz;
 pub mod interface_rank;
 pub mod interface_watcher;
 pub mod pairing;
