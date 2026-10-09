@@ -105,11 +105,13 @@ impl readiness::Candidate {
         }
     }
 
+    /// `Ok(None)` retries an unstable publication on a later observation, before
+    /// interpretation or either bounded repair lifecycle can consume it.
     pub(crate) fn with_result_file(
         mut self,
         path: &std::path::Path,
         gate: &StepView,
-    ) -> Result<(Self, bool), crate::circuit::observation::CircuitObservationBlocker> {
+    ) -> Result<Option<(Self, bool)>, crate::circuit::observation::CircuitObservationBlocker> {
         use crate::services::transcript_reader::report_snapshot::ReportSnapshot;
         match ReportSnapshot::read_result_file(
             path,
@@ -127,12 +129,13 @@ impl readiness::Candidate {
                 self.binding.owner.step_id = gate.node_id.clone();
                 self.binding.owner.attempt = gate.attempt;
                 self.binding.input_guard.report_guard = Some(report);
-                Ok((self, false))
+                Ok(Some((self, false)))
             }
-            Ok(None) => Ok((self, true)),
+            Ok(None) => Ok(Some((self, true))),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             // Invalid bytes are an agent output-format error, not transient I/O.
             // Reuse the bounded missing/blank-result repair lifecycle.
-            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok((self, true)),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(Some((self, true))),
             Err(error) => {
                 tracing::warn!(
                     "circuits: could not bind result file {}: {error}",
@@ -205,7 +208,8 @@ pub(super) fn classify_step_turn(
         crate::circuit::handoff::expected_result(active.run.id, agent_node_id)
     {
         let (candidate, missing) = match candidate.with_result_file(&path, step) {
-            Ok(result) => result,
+            Ok(Some(result)) => result,
+            Ok(None) => return None,
             Err(blocker) => return Some(ClassifiedTurn::deferred(agent_node_id, blocker)),
         };
         (candidate, missing.then_some(path))
@@ -1236,6 +1240,7 @@ mod result_continuation_tests {
                 .unwrap()
                 .unwrap()
                 .with_result_file(&result, run.step("step").unwrap())
+                .unwrap()
                 .unwrap()
             };
             let (bound, missing) = prepare();

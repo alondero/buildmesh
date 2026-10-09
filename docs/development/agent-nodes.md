@@ -62,6 +62,19 @@ The `branch` field on `AgentNode` (see Rust doc comment at `src-tauri/src/models
 
 ## Agent Process Architecture
 
+### Provider-binary preflight (issue #823)
+`agent::spawn::preflight::ensure_spawn_binary` runs at the top of the launch phase, **before** the PTY opens, and resolves the executable the spawn is about to dispatch. A miss becomes a structured `provider-error` toast naming the harness and the remediation; the terminal is never opened, so a missing CLI no longer surfaces as `'claude' is not recognized` scrolled inside PTY output the user has to read to diagnose.
+
+It checks exactly what `spawn_environment::wrap` will invoke, in the order that function prefers it: the routing's `executable_override` (an absolute path detection already resolved — probed with `is_file`, since `wrap` dispatches that path rather than re-resolving), else the adapter's recipe stem re-resolved through `detection::resolve_spawn_binary`. Because the enriched search (`PATH` + npm prefix bins + user bin dirs + NVM shims) is a **superset** of the GUI process `PATH` a shell lookup would use, a miss means the shell could not have found it either — the preflight never rejects a spawn that would have worked. Keep new harnesses on `resolve_spawn_binary` rather than a bare `which`, or the preflight stops matching what the spawn does.
+
+Two exemptions are load-bearing, both cases where host-side probing would be wrong rather than merely redundant:
+- **`Provider::Terminal`** — its binary is the user's shell, which is never missing and never something the user installs; a miss message would be unactionable.
+- **Guest-side runtimes** (`EnvType::Wsl`, `EnvType::WindowsInterop`) — the stem resolves *inside* the guest login shell, or on the Windows side of an interop spawn. Probing a `/home/...` guest path against a Windows host reports a false miss and would block a working spawn. This mirrors `launch_routing::spawn_time_executable`, which drops its host override for the same runtimes.
+
+`PreparedLaunchRouting::pinned_runtime()` is how the check learns the runtime when the routing pins one itself: `CodexProxy` selects its npm-shim install during prepare, so its binary must be checked on *that* runtime rather than the one the mesh path implies. `Native` / `Environment` return `None` and inherit the mesh path's runtime — they must not pin one, or a WSL mesh would silently exempt every harness. When adding a routing variant that resolves its own runtime, return it here or the preflight will check the wrong filesystem.
+
+The stem comes from `recipe_binary_for(provider, env_type)` using the **resolved** runtime, never a hardcoded `EnvType` variant: that function maps a runtime onto a `Platform`, and the mapping is platform-dependent (Claude Code's recipe binary is `claude.exe` on Windows and `claude` on macOS/Linux). `ensure_spawn_binary_with` takes the resolver as an argument so tests can force the bare-stem branch without depending on which CLIs the runner has — a test that hardcoded `claude.exe` failed the Linux and macOS CI runners on the first draft of this change (#2160 review). Keep preflight tests off literal stem tables; derive the expectation from `recipe_binary_for` and assert the platform variance separately with `cfg!`.
+
 ### ProcessRegistry — Runtime State
 Agent state lives in a **static** `ProcessRegistry`: `HashMap<i64, Arc<AgentProcess>>` using `once_cell::sync::Lazy`. The DB is **not** the source of truth for running agents — it's only used for `cli_session_id` persistence across restarts.
 

@@ -5,6 +5,7 @@
 //! Registry insert and the reader thread belong to `streams`.
 
 use super::command::{build_spawn_command_prepared, resolve_spawn_config};
+use super::preflight::{ensure_spawn_binary, Preflight};
 use super::process::{sandbox_spawn, spawn_child};
 use super::provision::ProvisionedWorkspace;
 use super::reader::{open_pty_pair, SessionIdMode, SpawnTimer};
@@ -112,6 +113,16 @@ pub(super) async fn launch_process(
     }
     if sandbox && cfg!(windows) && resolved.env_type == crate::models::EnvType::Wsl {
         return Err("The Windows process sandbox cannot contain a WSL harness. Turn off the mesh sandbox to launch this harness in WSL.".into());
+    }
+
+    // Issue #823: a missing agent CLI used to fail as a red toast or as
+    // `'claude' is not recognized` inside the opened terminal. Resolve the
+    // executable first so the miss is a structured provider-error the user
+    // can act on, and the PTY never opens for a spawn that cannot start.
+    if let Preflight::Missing(error) = ensure_spawn_binary(provider, resolved.env_type, &routing) {
+        adapter.on_process_terminated(session_id);
+        emit_provider_error(app, session_id, provider, &error);
+        return Err(error);
     }
 
     // Resolve configuration values through the per-field cascade (issue

@@ -154,14 +154,50 @@ The Rust test gate compiles once, then runs the CI shards, integration
 binaries and doctests up to four processes at a time; each process runs its
 own tests multi-threaded, which is safe because every DB-backed test installs
 a private database for its own thread (issue #2048). The concurrency suites
-assert a mechanism instead of a wall-clock budget (#2049); subprocess suites
-still use bounds tied to real budgets and can fail under CPU contention, so
-set `BUILDMESH_RUST_TEST_JOBS=1` to run one process at a time before
-attributing such a failure.
+assert a mechanism instead of a wall-clock budget (#2049). Verification
+reruns failing tests alone as described below.
 Rust tests compile the desktop target as well as executing tests; this is a
 compile smoke, not a packaged Tauri or real-window smoke. Playwright smoke uses
 mock IPC. Visible UI or backend acceptance still requires the relevant real
 dev-profile evidence from [verify-ui](../../.claude/skills/verify-ui/SKILL.md).
+
+The `ui-shot` mock renders charge their time to named phases in
+`scripts/ui-shot-budgets.mjs`: dev-server startup, browser launch, page setup,
+reading the mock fixtures, navigation, mount, the step script, importing the
+steps module, the selector wait, the screenshot, the browser close, and the
+dev-server stop. The launch is charged twice because a failed launch retries
+against a system Chromium; page setup is charged twice because there are two
+calls, `browser.newPage` and `page.addInitScript`. Reading the fixtures file and
+importing a steps module are separate phases too, since both are awaited before
+the phase they feed.
+`tests/integration/ui-shot.test.ts` prices its supervising wrapper above their
+sum and audits `scripts/ui-shot.mjs` against it, so a listed phase that stops
+passing its budget is caught rather than silently reverting to Playwright's own
+default — which is how this sum first came to sit below the child's real worst
+case (issue #2063). Raise a phase there and the wrapper widens with it.
+
+Phases Playwright cannot bound itself are bounded in `scripts/ui-shot-deadline.mjs`:
+the step script, importing the steps module, reading the mock fixtures, both
+`browser.close()` call sites, and page setup (`browser.newPage` and
+`page.addInitScript`) — none of which accept a timeout argument. A hanging step
+script is reported as the step script phase with the offending steps file named.
+The step budgets and the teardown deadlines apply to `--mock` only. `--url` and
+CDP-attach drive a real app with no supervising wrapper and no priced budget, so
+their step phases and teardown stay unbounded rather than being cut off by a
+number nothing accounts for. Their navigation is bounded, but by Playwright's own
+default rather than by a priced budget.
+
+`startDevServer` decides whether the URL is already served with a TCP connect, not
+an HTTP request, and waits for readiness afterwards. A live dev server whose first
+response is slow would otherwise look dead to a probe and be duplicated on a port
+already taken. The trade-off: something that holds the port but never answers HTTP
+now fails after the startup budget instead of being treated as absent and spawned
+over.
+
+The audit is deliberately a source check rather than a runtime one: the budgets
+are minutes long by design, so waiting them out would test patience, not wiring.
+It asserts the budget on each call site individually, since a file-wide search
+lets one site lose its budget while another's text still satisfies it.
 
 There is no established frontend formatter, so this harness uses ESLint and
 Git whitespace checks rather than imposing a new formatting policy. Clippy's
@@ -195,6 +231,7 @@ the production bundle budget check the wrong artifact.
 |---|---|---|
 | PASS | Every required gate passed, including executed tests | 0 |
 | FAIL | Compiler, assertion, lint, drift or source-change failure; inspect the log and repair | 1 |
+| FLAKY | Failed in the suite, passed alone; unlisted tests block completion | 1 |
 | BLOCKED | A known prerequisite or command is unavailable; repair the environment or hand off with the reason | 2 |
 | TIMEOUT | Deadline exceeded; inspect for code hangs and resource contention before retrying | 124 |
 
@@ -209,6 +246,55 @@ the result. Passing gates are reused across runs until the inputs they read chan
 keyed on each gate's input set, environment identity, and task ID. Gates with no
 explicit ignores read the whole tree. Completion continues to require that every planned
 gate has a PASS record in the receipt for the current tree.
+
+### Named test failures and isolation
+
+Frontend tests use Vitest JSON; Rust shards record cargo/libtest failure ids and
+their library, binary, integration or doctest target. Verify and `harness wait`
+print up to ten names; the receipt retains every failure and the original log.
+Once both lanes have drained, verify reruns each failed test once, sequentially:
+one Vitest file with an escaped, anchored test-name pattern and one worker (the
+Node API constrains discovery because CLI file filters match substrings), or the exact
+Cargo library, binary or integration test in its original target with
+`--test-threads=1`. Doctest failures remain named and FAIL with an explicit
+"Doctest isolation unavailable" reason: rustdoc does not reliably select one
+exact doctest on Windows. Each attempted rerun stores its command, log, executed
+count, exit code and duration. Reruns have a five-minute individual limit and
+a shared ten-minute deadline starting at the first diagnosis. Each rerun is
+limited to the remaining budget; after exhaustion, remaining tests are TIMEOUT
+and explicitly reported as not isolated. Neither the full
+suite nor other gates run again to diagnose a failure.
+
+A repeat failure stays FAIL. An isolated pass is FLAKY. Missing executables and
+deadlines stay BLOCKED and TIMEOUT; zero executed tests, unreadable reports,
+ambiguous duplicate names, file setup failures and unhandled runtime errors
+cannot produce an accepted flake. Collection/setup failures still name the
+failed file. Git is checked
+before product test gates. On Windows, Rust compilation checks network access
+to the pinned ConPTY package when its archive is absent from the worktree cache;
+an unavailable download is BLOCKED before Cargo builds. Cached archives do not
+require network access. The Windows Rust runner checks
+the staged ConPTY runtime after compilation, before starting test processes.
+The [ConPTY unit test](../../tests/unit/conpty-runtime.test.ts) builds its own
+fixture. The separate [app-version test](../../tests/unit/app-version.test.ts)
+compares app manifests with local Git tags. Neither requires a blanket network
+or installed-runtime exemption.
+
+[`scripts/known-flakes.json`](../../scripts/known-flakes.json) maps exact ids to
+open issue numbers. Vitest ids are `relative/file > full test name`; Rust library
+ids are fully qualified names, and other targets use `kind:target > test name`.
+The known-flakes gate and agent-infra tests validate that linked issues are open
+GitHub issues. Every verify, including docs-only plans, performs this fresh
+check before product gates; the result is never cached. Set `GH_TOKEN` or
+`GITHUB_TOKEN` to authenticate and avoid the lower unauthenticated API limit.
+Offline access or API rate limiting makes the check BLOCKED and stops the
+entire verification plan. A closed issue fails validation and names the issue
+in the gate reason. Only listed tests that actually pass alone allow subsequent
+gates and `finish` to proceed. The gate row remains FLAKY with the issue link, while
+the overall receipt is PASS if every gate is acceptable. These rows are never
+cached. Persistent failures remain blocking even when listed. For an unlisted
+flake, file an issue with both logs and add its exact id rather than retrying the
+whole suite or changing an unrelated test.
 
 `finish` launches no tests. It requires all planned gates, current source,
 one current evidence entry per criterion, a current independent review entry,

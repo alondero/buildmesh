@@ -81,7 +81,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
@@ -114,10 +114,94 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Check every manifest agrees on one version
         run: node scripts/check-manifest-versions.mjs
+
+  # The dependency and workflow supply-chain gate (issue #1541).
+  #
+  # Deliberately NOT on the `changes` fan-out and deliberately NOT inside
+  # `quality-gates`: this job has to run on *every* event, including a pull
+  # request that touched nothing but a workflow. A supply-chain gate that only
+  # runs when Rust moved is a gate that misses exactly the diff it exists to
+  # catch — an unpinned action, or a lockfile bump that pulls in a vulnerable
+  # package, changes no Rust source file. It also starts at t=0 (only a checkout
+  # precedes it).
+  #
+  # Step order is part of the contract, not an accident: the two dependency-free
+  # checks run first and finish in seconds, so an unpinned action or a vulnerable
+  # npm package is reported in seconds. Only then does the job pay for building
+  # `cargo-audit`, which is cached after the first run.
+  #
+  # The three checks are separate steps rather than one "audit" step, because
+  # they fail for different reasons and are fixed by different people:
+  #
+  #   * action pins — every third-party `uses:` must be a full commit SHA. This
+  #     is the check with teeth against the release job: it holds `contents:
+  #     write` and the updater signing keys, so a mutable tag there is remote code
+  #     execution with signing authority.
+  #   * npm audit — production dependencies are held to a stricter threshold than
+  #     dev dependencies, because production packages ship inside the artifact
+  #     and dev packages do not.
+  #   * cargo audit — vulnerabilities always fail; maintenance warnings need a
+  #     recorded owner, rationale and review date in
+  #     .github/rustsec-exceptions.json, and an expired review fails too.
+  #
+  # `--verify` on the pin gate resolves each pinned SHA against the GitHub API,
+  # so a typo or a truncated SHA fails here instead of at run time. It runs on a
+  # pull request with the default `GITHUB_TOKEN`, which can read public
+  # repositories, and it reads no secrets.
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # The two dependency-free checks come first, before anything that compiles.
+      # They need no install and finish in seconds, so an unpinned action or a
+      # vulnerable npm package is reported in seconds rather than after the
+      # cargo-audit build below — which is what the job header claims this job
+      # costs, and until this ordering was fixed it did not.
+      - name: Check every third-party action is SHA-pinned
+        # `gh api` refuses to run in a workflow without a token, so --verify
+        # fails on every reference until one is supplied. This is the job's own
+        # automatic token at `contents: read` (the top-level block), used only
+        # to read public repositories — not a repository secret.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-action-pins.mjs --verify
+
+      - name: Check npm dependencies against the advisory policy
+        run: node scripts/check-npm-audit.mjs
+
+      # `cargo audit` is NOT preinstalled on ubuntu-latest, and building it from
+      # source costs ~2m45s. The binary is cached on this file's own hash: the
+      # first run on a given key pays the compile, later runs restore it in a
+      # second or two, and editing this workflow is what deliberately invalidates
+      # the entry.
+      - name: Cache cargo-audit
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ hashFiles('.github/workflows/verify.yml') }}
+
+      # Install only when the cache did not provide it, so a runner image that
+      # starts shipping cargo-audit costs nothing, and fail loudly rather than
+      # skipping the check: a supply-chain gate that silently degrades to "no Rust
+      # check" is worse than no gate, because it reads as green.
+      - name: Ensure cargo-audit is available
+        run: |
+          if ! cargo audit --version; then
+            cargo install cargo-audit --locked
+          fi
+          cargo audit --version
+
+      - name: Check Rust dependencies against the RustSec policy
+        run: node scripts/check-rust-advisories.mjs
 
   # The fast, frontend-only gate — the first result a PR hears back from. It
   # deliberately no longer compiles Rust: that moved to `rust-build`, so the
@@ -162,7 +246,7 @@ jobs:
       # even though it runs nothing else. (`npm ci` is not needed: the guard has
       # no dependencies, and skipping it is the point of the job being seconds.)
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Refuse to pass unless the frontend branch is fully green
         run: node scripts/ci/quality-gate.mjs
@@ -194,12 +278,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
@@ -362,12 +446,12 @@ jobs:
       # A default shallow checkout has no tags, and that test fails with
       # "fatal: No names found" — which is exactly how the split was caught.
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
@@ -383,7 +467,7 @@ jobs:
       # "true"` pay even the cache restore.
       - name: Cache the Playwright browser build
         if: ${{ matrix.leg.browser == 'true' }}
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -451,7 +535,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Tauri 2 on Linux links against webkit2gtk-4.1, librsvg2, libayatana-
       # appindicator3, libxdo, OpenSSL, and (for RUSTFLAGS above) lld even when
@@ -460,7 +544,7 @@ jobs:
       - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
@@ -469,7 +553,7 @@ jobs:
         run: npm ci
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       # Cache the expensive Linux test build once. The shards and the bindings
       # job restore this instead of rebuilding; the platform smoke jobs
@@ -484,7 +568,7 @@ jobs:
       # this job's compile 54s instead of minutes (issue #2046). One key means
       # one entry: the first job to finish saves it and the rest no-op.
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: "src-tauri -> target"
           shared-key: linux-rust-target
@@ -514,7 +598,7 @@ jobs:
 
       - name: Upload the runner budget report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-build-runner-budget
           path: runner-budget.txt
@@ -543,7 +627,7 @@ jobs:
       # it over as an artifact is much cheaper than a per-shard `npm ci` plus
       # mobile build, and it is already built here.
       - name: Upload the built mobile assets for the Rust shards
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mobile-dist
           path: dist/mobile
@@ -646,25 +730,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       # Warm cache from `rust-build`, which compiled the same targets. The
       # shared key is `rust-build`'s: one entry for the whole Rust branch, so
       # seven shards do not each keep a private copy of the same artifacts
       # (issue #2046).
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
           shared-key: linux-rust-target
 
       - name: Restore the built mobile assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: mobile-dist
           path: dist/mobile
@@ -702,7 +786,7 @@ jobs:
 
       - name: Upload the shard log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-shard-log-${{ matrix.shard.label }}
           path: src-tauri/cargo-${{ matrix.shard.label }}.log
@@ -735,21 +819,21 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - uses: ./.github/actions/install-linux-build-deps
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri -> target
           shared-key: linux-rust-target
 
       - name: Restore the built mobile assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: mobile-dist
           path: dist/mobile
@@ -796,7 +880,7 @@ jobs:
       # reason (issue #1961).
       - name: Upload the non-shard test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-nonshard-tests-log
           path: src-tauri/cargo-nonshard-tests.log
@@ -891,10 +975,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
@@ -909,7 +993,7 @@ jobs:
       # re-validates the revision and re-downloads if it does not match, so a
       # stale entry costs a download, not a broken test run.
       - name: Cache the Playwright browser build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
@@ -935,7 +1019,7 @@ jobs:
       # red CI run leaves zero visibility into the spec failure.
       - name: Upload Playwright report / trace
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: playwright-verify-smoke-report
           path: test-results/
@@ -971,16 +1055,16 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       # Keep the Cargo download cache; persist target directories on Windows only
       # (issue #2046). This was the slowest job in the repository — 573s on a
@@ -997,7 +1081,7 @@ jobs:
       # budget is better spent on the leg that was 535s. The `false` is
       # deliberate rather than an oversight.
       - name: Cache Cargo registry (and the Windows target)
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: "src-tauri -> target"
           cache-targets: ${{ matrix.os == 'windows-latest' }}

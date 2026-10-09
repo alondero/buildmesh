@@ -626,6 +626,7 @@ fn unreadable_result_defers_without_reminding_then_recovers_from_the_written_rep
     std::fs::write(&path, report).unwrap();
     let (candidate, missing) = prepare(&run)
         .with_result_file(&path, run.step("step").unwrap())
+        .unwrap()
         .unwrap();
     assert!(!missing);
     advance(

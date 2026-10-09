@@ -97,6 +97,25 @@ delete it (a fresh start) or replace its contents with
 `preferences.json.bak` from the same folder. Start Buildmesh again; the log
 line above disappears once the file parses.
 
+## A provider account says its key is in `preferences.json`
+
+Buildmesh keeps provider API keys in the **Windows Credential Manager**, not
+in `preferences.json`. When the credential store cannot be used - typically
+because Windows has no logon session for the process, or Credential Manager is
+unreachable - the key is left in `preferences.json` rather than dropped. The
+affected account's card in **Settings → Accounts** says so, because a key
+sitting in plain text in your app data folder is worth knowing about.
+
+Nothing is broken and no action is urgent. To clear it:
+
+1. Sign in to Windows (or otherwise make Credential Manager reachable).
+2. Open **Settings → Accounts**, expand **Edit credentials** on that account,
+   re-enter the key, and save.
+
+The next write moves the key into the credential store, and the notice
+disappears. On macOS and Linux there is no credential store, so keys stay in
+`preferences.json` by design and this notice is always shown.
+
 ## Command Code does not accept typing
 
 Command Code 1.56 and later can draw the prompt and then ignore keys on

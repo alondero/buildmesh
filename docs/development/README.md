@@ -154,6 +154,7 @@ owner document per subsystem, reachable from the
 | [remote-access.md](remote-access.md) | Coordinator API, LAN/VPN exposure |
 | [state-recovery.md](state-recovery.md) | Snapshot, export, integrity check, restore |
 | [rust-conventions.md](rust-conventions.md) | DB, threading, caches, pattern guards, wire types |
+| [supply-chain.md](supply-chain.md) | Dependency and workflow supply-chain controls: action pinning, advisory policy |
 | [mobile.md](mobile.md) | Mobile client |
 
 Add new architecture to the owning document rather than growing the primer; the

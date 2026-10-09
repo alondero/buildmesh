@@ -9,6 +9,36 @@ use std::{
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
 };
 
+#[cfg(test)]
+pub(crate) mod result_read_test_support {
+    use std::{cell::RefCell, path::Path};
+
+    type ReadHook = Box<dyn FnOnce(&Path)>;
+    thread_local! {
+        pub(super) static AFTER_READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) };
+    }
+
+    /// Change the publication inside the real read, without racing a timer or
+    /// sharing injection state with other test threads.
+    pub(crate) fn with_after_read<T>(
+        hook: impl FnOnce(&Path) + 'static,
+        observe: impl FnOnce() -> T,
+    ) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                AFTER_READ.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        AFTER_READ.with(|slot| {
+            assert!(slot.borrow().is_none());
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        let _reset = Reset;
+        observe()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum ReportSource {
     File {
@@ -55,7 +85,14 @@ impl ReportSnapshot {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
         };
-        let Some(text) = crate::circuit::handoff::read_result(path)? else {
+        let result = crate::circuit::handoff::read_result(path);
+        #[cfg(test)]
+        if let Some(hook) =
+            result_read_test_support::AFTER_READ.with(|slot| slot.borrow_mut().take())
+        {
+            hook(path);
+        }
+        let Some(text) = result? else {
             return Ok(None);
         };
         let snapshot = Self {
@@ -665,6 +702,7 @@ mod tests {
             }
             let (candidate, missing) = prepare()
                 .with_result_file(&result, run.step("await_source").unwrap())
+                .unwrap()
                 .unwrap();
             assert!(missing);
             assert_eq!(candidate.output, snapshot.text);
@@ -684,6 +722,7 @@ mod tests {
         let candidate = prepare();
         let (candidate, missing) = candidate
             .with_result_file(&result, run.step("await_source").unwrap())
+            .unwrap()
             .unwrap();
         assert!(!missing);
         let transition = advance(
@@ -726,6 +765,77 @@ mod tests {
         assert!(error
             .to_string()
             .contains("Agent report changed before evidence commit"));
+    }
+
+    #[test]
+    fn circuit_result_file_changes_during_read_retry_with_the_transcript_guard() {
+        use crate::models::{AgentNode, SessionStatus};
+        use crate::services::circuit_worker::readiness;
+
+        for change_transcript in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let transcript = dir.path().join("report.jsonl");
+            fs::write(
+                &transcript,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "assistant", "timestamp": "2026-10-08T12:25:20Z",
+                        "message": {"id": "publish", "role": "assistant", "content": [{
+                            "type": "text", "text": "Published and verified."
+                        }]}
+                    })
+                ),
+            )
+            .unwrap();
+            let snapshot = read_file(&transcript, TranscriptFormat::ClaudeCode).unwrap();
+            let (run, _) = classified_run(snapshot.clone());
+            let agent = AgentNode {
+                id: 900,
+                status: SessionStatus::Ready,
+                cli_session_id: Some("session".into()),
+                ..Default::default()
+            };
+            let candidate = readiness::prepare(
+                &run,
+                "await_source",
+                &agent,
+                Some("100:ready"),
+                Ok("1:0".into()),
+                Ok(snapshot.clone()),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(candidate
+                .binding
+                .input_guard
+                .report_guard
+                .as_ref()
+                .unwrap()
+                .is_current());
+            let result = dir.path().join("publish.result.md");
+            fs::write(&result, "Published result\nBUILDMESH_HANDOFF_V1: READY\n").unwrap();
+            let bound = result_read_test_support::with_after_read(
+                move |path| {
+                    if change_transcript {
+                        fs::write(&transcript, "Newer transcript activity\n").unwrap();
+                    } else {
+                        fs::write(path, "Changed result publication\n").unwrap();
+                    }
+                },
+                || candidate.with_result_file(&result, run.step("await_source").unwrap()),
+            )
+            .unwrap();
+            assert!(
+                bound.is_none(),
+                "a superseded read must retry without a missing result"
+            );
+            assert_eq!(
+                snapshot.is_current(),
+                !change_transcript,
+                "result-only changes leave the original transcript guard current"
+            );
+        }
     }
 
     #[test]
@@ -897,6 +1007,7 @@ mod tests {
             fs::write(&result, report).unwrap();
             let (candidate, missing) = candidate
                 .with_result_file(&result, run.step("await_source").unwrap())
+                .unwrap()
                 .unwrap();
             assert!(!missing);
             let transition = advance(

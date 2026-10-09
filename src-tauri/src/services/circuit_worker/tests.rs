@@ -3218,6 +3218,129 @@ impl Drop for ResultReadFixture {
 }
 
 #[test]
+fn result_unstable_publication_retries_without_reminders_or_attention() {
+    use crate::services::transcript_reader::report_snapshot::result_read_test_support;
+
+    let mut fixture = ResultReadFixture::new();
+    // Start with a spent reminder: instability must neither spend nor reset it.
+    fixture
+        .view
+        .context
+        .set("node.implementation_classifier.result_reminders.1", "1");
+    let before = fixture.view.context.to_json().unwrap();
+    for probe in 1..=6 {
+        std::fs::write(&fixture.result, "Publishing result\n").unwrap();
+        let expected_path = fixture.result.clone();
+        let (events, effects, attention) = result_read_test_support::with_after_read(
+            move |path| {
+                assert_eq!(path, expected_path);
+                std::fs::write(
+                    path,
+                    format!("Changed publication {probe}\nBUILDMESH_HANDOFF_V1: READY\n"),
+                )
+                .unwrap();
+            },
+            || fixture.probe(),
+        );
+        assert!(
+            events.is_empty(),
+            "unstable reads must publish no events: {events:?}"
+        );
+        assert!(
+            effects.is_empty(),
+            "unstable reads must deliver no reminder"
+        );
+        assert_eq!(attention, 0, "unstable reads must never raise needs-input");
+        assert_eq!(fixture.view.steps[1].status, StepStatus::Running);
+        assert_eq!(fixture.view.context.to_json().unwrap(), before);
+        assert_eq!(
+            evaluator::millis_since_last_evaluation(fixture.agent_id),
+            None,
+            "retry must return before classification or reminder evaluation"
+        );
+    }
+    let report = "Stable completed result\nBUILDMESH_HANDOFF_V1: READY\n";
+    std::fs::write(&fixture.result, report).unwrap();
+    let (events, effects, attention) = fixture.probe();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, CircuitEvent::TurnClassified {
+        classification: Some(evaluator::Classification::Completed), output: Some(output), ..
+    } if output == report)));
+    assert!(effects.iter().all(|effect| !matches!(
+        effect,
+        crate::circuit::stepper::Effect::ContinueAgentTurn { .. }
+    )));
+    assert_eq!(attention, 0);
+    assert_eq!(fixture.view.steps[1].status, StepStatus::Completed);
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.result_reminders.1"),
+        Some("1")
+    );
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get("node.implementation_classifier.result_read_failures.1"),
+        None
+    );
+}
+
+#[test]
+fn result_missing_and_blank_keep_bounded_reminders_through_production_classifier() {
+    for content in [None, Some(" \n\t")] {
+        let mut fixture = ResultReadFixture::new();
+        if let Some(content) = content {
+            std::fs::write(&fixture.result, content).unwrap();
+        }
+        for turn in 1..=3 {
+            if turn > 1 {
+                advance(
+                    &mut fixture.view,
+                    &CircuitEvent::ContinuationDelivered {
+                        node_id: "implementation_classifier".into(),
+                        attempt: 1,
+                    },
+                );
+                db::write_conn()
+                    .execute(
+                        "UPDATE agent_nodes SET status_changed_at=?2 WHERE id=?1",
+                        rusqlite::params![fixture.agent_id, format!("turn-{turn}")],
+                    )
+                    .unwrap();
+            }
+            let (events, effects, attention) = fixture.probe();
+            assert!(matches!(
+                events.as_slice(),
+                [CircuitEvent::ResultFileMissing { .. }]
+            ));
+            assert_eq!(effects.len(), usize::from(turn <= 2));
+            if turn <= 2 {
+                assert!(matches!(
+                    effects[0],
+                    crate::circuit::stepper::Effect::ContinueAgentTurn { .. }
+                ));
+            }
+            assert_eq!(attention, usize::from(turn == 3));
+        }
+        assert_eq!(
+            fixture
+                .view
+                .context
+                .get("node.implementation_classifier.result_reminders.1"),
+            Some("2")
+        );
+        assert_eq!(fixture.view.steps[1].status, StepStatus::Unverified);
+        let (_, effects, attention) = fixture.probe();
+        assert!(effects.is_empty());
+        assert_eq!(attention, 0);
+    }
+}
+
+#[test]
 fn result_invalid_encoding_requests_agent_repair_through_production_classifier() {
     for bytes in [
         vec![0xff, 0xfe, b'O', 0, b'K', 0], // Windows PowerShell Out-File / >

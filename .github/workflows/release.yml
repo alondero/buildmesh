@@ -25,6 +25,17 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Least privilege (issue #1541). This workflow holds the updater signing keys,
+# so its default token must be read-only rather than inheriting a read-write
+# repository default. Only the `release` job below needs `contents: write`, and
+# it declares that itself — job-level permissions replace this block rather than
+# adding to it, so the `verify` job cannot escalate through it.
+#
+# This workflow runs only on a `v*` tag, never on a pull request, which is what
+# keeps untrusted pull-request code away from the signing keys entirely.
+permissions:
+  contents: read
+
 jobs:
   # Issue #1520 — a tag is only a release candidate after the *same* jobs that
   # gate a merge have passed on the tagged SHA. `release` needs this job, so
@@ -51,25 +62,25 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # Full history so the release-lineage guard below can prove the tag
           # is reachable from main.
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
           cache: "npm"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
 
       # This is the only persistent Windows target cache: PR smoke builds keep
       # only Cargo downloads, so three large per-OS target caches do not grow.
       - name: Cache Rust release build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: "src-tauri -> target"
 
@@ -129,7 +140,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Build + publish signed release
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Updater signing (minisign) — see docs/development/releasing.md for
