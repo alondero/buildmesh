@@ -224,7 +224,17 @@ Buildmesh's Codex attention hook sends lifecycle updates to the local app. The
 hook is best-effort, so an unavailable app or an already archived node should
 not stop Codex. Restart the node from Buildmesh to refresh its project hook
 configuration. If Buildmesh is closed, Codex can continue, but its lifecycle
-state cannot be updated until a later callback succeeds. If the error persists,
+state cannot be updated until a later callback succeeds.
+
+`hook exited with code 1` on every new session in a project means a
+`.codex/hooks.json` written by an older Buildmesh still holds a callback that
+Codex's PowerShell cannot parse. Codex reads the main checkout's file from a
+git worktree, so a stale file at the mesh root affects every worktree under it.
+Buildmesh now delivers its Codex hooks as launch arguments and removes its own
+entries from `.codex/hooks.json` (in the node's directory and the main
+checkout) each time it starts a Codex node, so starting a Codex node in that
+mesh clears the error. You can also delete the Buildmesh entries (or the whole
+file when it holds nothing else) by hand. If the error persists,
 use [What to include in a report](#what-to-include-in-a-report) and include the
 Codex version, node status, and relevant redacted log lines.
 
