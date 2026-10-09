@@ -30,7 +30,10 @@ pub(super) fn observe(
     step: &StepView,
     node: &crate::models::AgentNode,
 ) -> Option<CircuitEvent> {
-    let strategy = crate::circuit::strategy::for_agent(node);
+    // Resolve the harness once: the pull and the reader that serves it must
+    // describe the same harness even if a profile is remapped mid-read.
+    let provider = crate::circuit::strategy::provider_for_agent(node)?;
+    let strategy = crate::circuit::strategy::strategy_of(Some(provider));
     let pull = strategy.native_pull()?;
     observe_with(
         view,
@@ -40,7 +43,9 @@ pub(super) fn observe(
         PullInputs {
             input_stamp: &mut || crate::agent::process::PROCESS_REGISTRY.input_stamp(node.id),
             turn_stamp: &mut || crate::db::agent_turn_stamp(node.id).ok().flatten(),
-            completion: &mut || crate::coordinator::enrichment::native_turn_completion(node),
+            completion: &mut || {
+                crate::coordinator::enrichment::native_turn_completion_for(node, provider)
+            },
         },
     )
 }
@@ -752,6 +757,35 @@ mod tests {
         );
         assert!(event.is_none());
         assert_eq!(reads, 0, "a step the pull does not apply to reads nothing");
+    }
+
+    #[test]
+    fn a_declared_pull_is_always_served_by_the_reader_of_the_same_harness() {
+        // `observe` resolves the harness once and hands that value to both the
+        // strategy and the reader, so the pairing is fixed by the declaration:
+        // every harness that declares a pull has a reader, and it is its own.
+        use crate::services::transcript_reader::TranscriptFormat;
+        for provider in crate::models::Provider::all() {
+            let strategy = crate::circuit::strategy::strategy_of(Some(*provider));
+            let format = crate::coordinator::enrichment::native_completion_format_for(*provider);
+            if strategy.native_pull().is_some() {
+                assert_eq!(
+                    format,
+                    TranscriptFormat::for_harness(provider.adapter().id()),
+                    "{}: a pull is read with its own harness's format",
+                    provider.adapter().id()
+                );
+                assert!(format.is_some(), "{}", provider.adapter().id());
+            }
+        }
+        // The reader is chosen by the resolved harness alone, never by the
+        // node's stored provider.
+        assert_eq!(
+            crate::coordinator::enrichment::native_completion_format_for(
+                crate::models::Provider::Codex
+            ),
+            Some(TranscriptFormat::Codex)
+        );
     }
 
     #[test]

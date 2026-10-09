@@ -365,11 +365,17 @@ impl HarnessSelector {
     }
 
     pub fn strategy(&self) -> ObservationStrategy {
-        self.provider()
-            .map_or(ObservationStrategy::UNWIRED, |provider| {
-                provider.adapter().circuit_observation()
-            })
+        strategy_of(self.provider())
     }
+}
+
+/// The strategy of an already-resolved harness; unknown is unwired. Callers
+/// that need both the harness and its strategy resolve once and use this, so
+/// a profile remapped mid-read cannot pair one harness with another's data.
+pub fn strategy_of(provider: Option<crate::models::Provider>) -> ObservationStrategy {
+    provider.map_or(ObservationStrategy::UNWIRED, |provider| {
+        provider.adapter().circuit_observation()
+    })
 }
 
 /// Pure over the agent row: safe to call while a database connection is held.

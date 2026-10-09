@@ -41,10 +41,11 @@ pub(crate) fn for_selector(selector: &HarnessSelector) -> CircuitObserverCapabil
     let id = match selector {
         HarnessSelector::Frozen(id) | HarnessSelector::Stored(id) => id.as_str(),
     };
+    // Resolve once: the label and the strategy must describe the same harness.
     let provider = selector.provider();
     render(
         provider.map_or(id, |resolved| resolved.adapter().id()),
-        &selector.strategy(),
+        &crate::circuit::strategy::strategy_of(provider),
     )
 }
 

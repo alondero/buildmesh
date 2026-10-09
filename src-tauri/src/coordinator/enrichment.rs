@@ -32,7 +32,14 @@ fn transcript_dir(node: &AgentNode) -> String {
 /// launch snapshot is read as the harness it was launched with, whatever its
 /// profile maps to today; an unknown harness has no reader (fail closed).
 pub(crate) fn native_completion_format(node: &AgentNode) -> Option<TranscriptFormat> {
-    let adapter = crate::circuit::strategy::provider_for_agent(node)?.adapter();
+    native_completion_format_for(crate::circuit::strategy::provider_for_agent(node)?)
+}
+
+/// As [`native_completion_format`] for a harness the caller already resolved.
+pub(crate) fn native_completion_format_for(
+    provider: crate::models::Provider,
+) -> Option<TranscriptFormat> {
+    let adapter = provider.adapter();
     if !adapter.produces_readable_transcript() {
         return None;
     }
@@ -43,8 +50,18 @@ pub(crate) fn native_completion_format(node: &AgentNode) -> Option<TranscriptFor
 pub(crate) fn native_turn_completion(
     node: &AgentNode,
 ) -> Option<transcript_reader::NativeTurnSnapshot> {
+    native_turn_completion_for(node, crate::circuit::strategy::provider_for_agent(node)?)
+}
+
+/// Read the completion record with the reader of a harness the caller already
+/// resolved, so the strategy that chose the read and the reader that serves it
+/// can never come from two separate resolutions.
+pub(crate) fn native_turn_completion_for(
+    node: &AgentNode,
+    provider: crate::models::Provider,
+) -> Option<transcript_reader::NativeTurnSnapshot> {
     transcript_reader::read_native_turn_completion(
-        native_completion_format(node)?,
+        native_completion_format_for(provider)?,
         node.cli_session_id.as_deref(),
         &transcript_dir(node),
     )
