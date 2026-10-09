@@ -214,19 +214,28 @@ pub(super) fn is_review_spawn_step(view: &RunView, node_id: &str) -> bool {
         })
 }
 
-/// The initial name for a Circuit step's new agent node. `None` lets
-/// `create_pending` pick a random name, which keeps manual circuits on today's
-/// behaviour (including the LLM rename). A name built from the issue or PR
+/// The initial name for a Circuit step's new agent node. An authored step
+/// name wins, except on the built-in review preset. `None` lets
+/// `create_pending` pick a random name, which the LLM later renames from the
+/// node's first turns. A name built from the issue or PR
 /// shows what the node is for from the moment it appears, and a non-default
 /// name skips the LLM rename. The name is also the worktree directory and
 /// branch, so `taken` disambiguates against sibling nodes in the same mesh,
-/// such as a Probe-spawned `gh{N}` node.
+/// such as a Probe-spawned `gh{N}` node. A respawn of a dead step agent is
+/// disambiguated against its predecessor too: two rows must never share one
+/// worktree directory.
 pub(super) fn circuit_step_node_name(
     view: &RunView,
     node_id: &str,
     authored: Option<&str>,
     taken: &HashSet<String>,
 ) -> Option<String> {
+    // The built-in review preset's graph row is shared and its reviewer name
+    // is a role label ("Code reviewer"), not author intent for this run — the
+    // same reason `resolve_review_spawn_inputs` ignores its stored provider.
+    let preset_reviewer = view.context.get("source.review_preset") == Some("1")
+        && is_review_spawn_step(view, node_id);
+    let authored = authored.filter(|_| !preset_reviewer);
     let base = if let Some(name) = authored.and_then(non_empty_trim) {
         name.to_string()
     } else if is_review_spawn_step(view, node_id) {

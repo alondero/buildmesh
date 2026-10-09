@@ -6285,8 +6285,14 @@ fn circuit_step_node_name_names_an_agent_review_reviewer_from_its_source() {
             ("source.name", "gh7-add-chip"),
         ],
     );
+    // The preset graph authors a role label on its reviewer step; it must not
+    // become the node (and worktree directory) name.
+    let authored = resolve_circuit_spawn_inputs(&view.graph.node("reviewer").unwrap().kind)
+        .unwrap()
+        .name;
+    assert_eq!(authored.as_deref(), Some("Code reviewer"));
     assert_eq!(
-        circuit_step_node_name(&view, "reviewer", None, &HashSet::new()),
+        circuit_step_node_name(&view, "reviewer", authored.as_deref(), &HashSet::new()),
         Some("review-gh7-add-chip".to_string())
     );
 }
@@ -6313,6 +6319,18 @@ fn circuit_step_node_name_keeps_an_authored_name_over_issue_context() {
     assert_eq!(
         circuit_step_node_name(&view, "implementer", Some("my-step"), &HashSet::new()),
         Some("my-step".to_string())
+    );
+}
+
+#[test]
+fn circuit_step_node_name_keeps_an_authored_reviewer_name_outside_the_review_preset() {
+    let view = naming_view(
+        CircuitGraph::issue_driven_autopilot_review("autopilot"),
+        &[("issue.number", "123"), ("pr.number", "456")],
+    );
+    assert_eq!(
+        circuit_step_node_name(&view, "reviewer", Some("my-reviewer"), &HashSet::new()),
+        Some("my-reviewer".to_string())
     );
 }
 
