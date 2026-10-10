@@ -82,17 +82,32 @@ the finished composer and what was submitted.
 
 The fix is the adapter capability `paste_requires_cr_newlines`
 (`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
-Circuit prompt dispatches (turns, continuations, and nudges) and terminal handovers
-go through this preparation. The coordinator's `AgentDriver::send_prompt` is single-line
-by contract and bypasses staged delivery. Other harnesses keep their line endings
+On Windows (and Windows-hosted WSL instances), ConPTY key-event translation causes
+LF to drop newlines and CRLF to submit prematurely; across all platforms (Windows,
+macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR by default, so
+delivering CR mirrors xterm.js's standard paste behavior and matches Grok's terminal
+composer expectations uniformly. Circuit prompt dispatches (turns, continuations, and nudges)
+and terminal handovers go through this preparation. The coordinator's `AgentDriver::send_prompt`
+is single-line by contract and bypasses staged delivery. Other harnesses keep their line endings
 as given (though any prompt containing CR or LF is treated as multiline, bracketed
 by `injection_payload`, and subject to non-Generic paste gates).
 
-### Codex 0.162.1, same probe
+### Codex 0.162.1, same probe (tracked in #2199)
+
+Running the same scratch ConPTY probe (140-by-35, flags `0x2 | 0x4`, bundled 1.24.260710001
+runtime writing a 12-line bracketed paste inside `\x1b[200~ … \x1b[201~`) to Codex 0.162.1:
+
+| Line endings in the paste | Result in Codex composer |
+| --- | --- |
+| LF | Every line lands in the composer, newlines dropped (lines glued together). |
+| CRLF | Composer draft preserves multiline layout across all lines. |
+| CR | Composer draft preserves multiline layout across all lines. |
 
 Nothing was submitted in any run. LF dropped the newlines (lines glued together);
 CRLF and CR both kept the lines. A Windows handover into Codex is CRLF and
 therefore already correct. A programmatic LF prompt to Codex can lose its
 newlines. That path is guarded by a rendered-paste check that ignores whitespace,
 so it would not notice. Codex was left unchanged because its gate counts burst
-boundaries and has not been re-verified against CR payloads.
+boundaries and has not been re-verified against CR payloads. Follow-up is tracked
+in #2199 to investigate opting Codex into `paste_requires_cr_newlines` or enforcing
+CRLF staging without breaking split-marker burst boundaries.

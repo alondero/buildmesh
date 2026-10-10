@@ -105,7 +105,8 @@ pub(crate) fn paste_text_for(adapter: &dyn AgentProvider, text: &str) -> String 
 /// evidence ledger (`submission_digest`) and the bytes staged into the PTY
 /// (`injection_payload`) operate on the exact same transformed text. Specialized
 /// harnesses with custom composer sanitation (such as Codex's split-marker handling)
-/// sanitize terminal escapes for the PTY independently.
+/// transform text independently for the PTY by normalizing CRLF/CR to LF, stripping
+/// terminal CSI escape sequences, and dropping non-tab/non-newline control characters.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PreparedPrompt {
     node_id: i64,
@@ -130,8 +131,9 @@ impl PreparedPrompt {
     /// to CR for harnesses like Grok).
     ///
     /// If the target is circuit-piloted, database lookup failure fails loudly;
-    /// otherwise, an unpersisted non-circuit node logs a warning and keeps the text
-    /// as given.
+    /// otherwise, for any non-circuit node whose lookup fails (whether an unpersisted
+    /// standalone node or a transient database read error), a warning is logged and
+    /// the text is kept as given to preserve delivery best-effort.
     pub(crate) fn prepare(node_id: i64, text: &str) -> Result<Self, String> {
         let text = match crate::db::get_agent_node_by_id(node_id) {
             Ok(node) => {
@@ -1226,15 +1228,30 @@ mod tests {
             crate::agent::process::testing::capturing_registry(cont_id);
         evaluator::register(cont_id);
 
+        let run_id = 42;
+        crate::circuit::handoff::set_agent_turn(
+            run_id,
+            cont_id,
+            Some(&crate::circuit::handoff::HandoffTurn {
+                node_id: "step-1".to_string(),
+                attempt: 1,
+            }),
+        );
+
         let raw_continuation = "first line\nsecond line\r\nthird line";
         let cont_prompt = crate::circuit::handoff::prepare_continuation(
-            42,
+            run_id,
             cont_id,
             cont_node.env,
             raw_continuation,
         );
         let prepared_cont = PreparedPrompt::prepare(cont_id, &cont_prompt).unwrap();
-        assert!(prepared_cont.text().contains('\r'));
+        assert!(prepared_cont
+            .text()
+            .starts_with("first line\rsecond line\rthird line\r\r"));
+        assert!(prepared_cont
+            .text()
+            .contains("When, and only when, you have completely finished this task"));
         assert!(!prepared_cont.text().contains('\n'));
 
         let expected_cont = registry_cont.input_stamp(cont_id).unwrap();
@@ -1246,6 +1263,7 @@ mod tests {
         let expected_payload = injection_payload(prepared_cont.text()).into_bytes();
         assert_eq!(written_cont, expected_payload);
 
+        crate::circuit::handoff::set_agent_turn(run_id, cont_id, None);
         evaluator::unregister(cont_id);
         registry_cont.kill_session(cont_id);
 
