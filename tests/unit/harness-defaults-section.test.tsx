@@ -3,15 +3,15 @@
  * effort + permission-mode defaults per Agent Harness (issue #1150 /
  * #1148, permission in #2151). Pinned contract:
  *
- *   * Capability gating — a harness with `supports_model_override = false`
- *     AND `EffortControlKind::None` renders the no-configurable-defaults
- *     state (no input, no select).
- *   * Effort choices and guidance match each harness's declared vocabulary.
+ *   * Capability gating — a harness with nothing to configure (no model
+ *     override, no effort, no permission modes — Terminal) gets no card.
+ *   * Effort choices match each harness's declared vocabulary; no
+ *     boilerplate guidance sits under the select.
  *   * Permission select offers the harness's own modes in its own words
- *     and commits via `set_harness_default` on blur; the effective line
- *     names the mode the next spawn uses. A single enforced mode renders
- *     as read-only text; a harness with no flag renders the written
- *     "no such flag" line instead of a control.
+ *     and commits via `set_harness_default` on blur; its first option names
+ *     the harness default the next spawn uses. A single enforced mode renders
+ *     as read-only text; a harness with no flag renders no control and no
+ *     explanation.
  *   * Save commits via `set_harness_default` on blur (mirrors the existing
  *     autopilot-pool commit pattern); a failed save rolls the draft back
  *     to the last confirmed value so the visible card never lies about
@@ -248,13 +248,13 @@ describe('Settings — Agent Harness defaults', () => {
     const claudeSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-claude');
     const claudeOptions = Array.from(claudeSelect.querySelectorAll('option')).map((o) => o.value);
     expect(claudeOptions).toEqual(['', 'low', 'medium', 'high', 'xhigh', 'max']);
-    const claudeHelpId = claudeSelect.getAttribute('aria-describedby');
-    expect(claudeHelpId).toBe('harness-default-effort-help-claude');
-    expect(document.getElementById(claudeHelpId!)?.textContent).toBe('Availability depends on the selected model.');
+    // No boilerplate under the select: which efforts a model supports is
+    // not something this row can usefully say, and picking 'max' adds nothing.
+    expect(claudeSelect.getAttribute('aria-describedby')).toBeNull();
     const user = userEvent.setup();
     await user.selectOptions(claudeSelect, 'max');
-    await waitFor(() => expect(document.getElementById(claudeHelpId!)?.textContent)
-      .toBe('Availability depends on the selected model. Max applies to the launched session.'));
+    expect(screen.queryByText(/availability depends on the selected model/i)).toBeNull();
+    expect(screen.queryByText(/max applies to the launched session/i)).toBeNull();
 
     const codexSelect = await screen.findByTestId<HTMLSelectElement>('harness-default-effort-select-codex');
     const codexOptions = Array.from(codexSelect.querySelectorAll('option')).map((o) => o.value);
@@ -345,11 +345,13 @@ describe('Settings — Agent Harness defaults', () => {
     );
   });
 
-  it('Terminal renders the no-configurable-defaults state', async () => {
-    mockBackend({ providers: [TERMINAL_ROW] });
+  it('omits harnesses with nothing to configure, so Terminal gets no card', async () => {
+    mockBackend({ providers: [CLAUDE_ROW, TERMINAL_ROW] });
     render(<AppSettingsModal onClose={() => {}} />);
-    const empty = await screen.findByTestId('harness-default-empty-terminal');
-    expect(empty.textContent).toMatch(/does not accept model, effort, or permission-mode overrides/i);
+    await screen.findByTestId('harness-default-claude');
+    expect(screen.queryByTestId('harness-default-terminal')).toBeNull();
+    expect(screen.queryByTestId('harness-default-empty-terminal')).toBeNull();
+    expect(screen.queryByText(/does not accept model, effort, or permission-mode overrides/i)).toBeNull();
   });
 
   it('permission select offers the harness modes in its own words and commits on blur', async () => {
@@ -363,9 +365,12 @@ describe('Settings — Agent Harness defaults', () => {
     // The harness-words label is the visible text of the default option.
     expect(select.querySelector('option[value="unattended"]')?.textContent)
       .toBe('--dangerously-skip-permissions');
-    // No stored value: the effective line names the harness default.
-    const effective = await screen.findByTestId('harness-permission-effective-claude');
-    expect(effective.textContent).toMatch(/Effective: --dangerously-skip-permissions \(harness default\)/);
+    // No stored value: the select itself names the harness default, so there
+    // is no separate "Effective:" line.
+    expect(select.value).toBe('');
+    expect(select.querySelector('option[value=""]')?.textContent)
+      .toBe('— harness default (--dangerously-skip-permissions) —');
+    expect(screen.queryByTestId('harness-permission-effective-claude')).toBeNull();
 
     await user.selectOptions(select, 'prompt');
     select.blur();
@@ -376,9 +381,8 @@ describe('Settings — Agent Harness defaults', () => {
       profileId: 'claude',
       value: { model: null, effort: null, permission_mode: 'prompt' },
     });
-    // After commit the effective line follows the stored choice.
-    await waitFor(() => expect(screen.getByTestId('harness-permission-effective-claude').textContent)
-      .toMatch(/Effective: Prompts on \(no flag\)/));
+    // After commit the select keeps showing the stored choice.
+    await waitFor(() => expect(select.value).toBe('prompt'));
   });
 
   it('hydrated permission default preselects the stored mode as custom', async () => {
@@ -390,10 +394,7 @@ describe('Settings — Agent Harness defaults', () => {
 
     const select = await screen.findByTestId<HTMLSelectElement>('harness-permission-select-codex');
     await waitFor(() => expect(select.value).toBe('prompt'));
-    const effective = await screen.findByTestId('harness-permission-effective-codex');
-    // A stored choice renders without the "(harness default)" marker.
-    expect(effective.textContent).toMatch(/Effective: Prompts on \(no flag\)/);
-    expect(effective.textContent).not.toMatch(/harness default/);
+    expect(screen.queryByTestId('harness-permission-effective-codex')).toBeNull();
   });
 
   it('single enforced mode renders as read-only text, not a select', async () => {
@@ -403,11 +404,10 @@ describe('Settings — Agent Harness defaults', () => {
     const fixed = await screen.findByTestId('harness-permission-fixed-mcode');
     expect(fixed.textContent).toBe('Full Access (permissionMode: bypassPermissions)');
     expect(screen.queryByTestId('harness-permission-select-mcode')).toBeNull();
-    // No second "Effective:" line — the fixed label already names the mode.
     expect(screen.queryByTestId('harness-permission-effective-mcode')).toBeNull();
   });
 
-  it('harness with model control but no flag renders the no-such-flag line', async () => {
+  it('harness with model control but no flag renders no permission control or explanation', async () => {
     // Kimi Code genuinely ships no permission flag (unlike Agy/OpenCode,
     // which both offer unattended + prompt).
     mockBackend({ providers: [KIMI_ROW] });
@@ -415,9 +415,9 @@ describe('Settings — Agent Harness defaults', () => {
 
     // Kimi keeps its model input (unchanged behavior) …
     await screen.findByTestId('harness-default-model-input-kimi');
-    // … and gains the written "no such flag" line instead of a control.
-    const line = await screen.findByTestId('harness-permission-noflag-kimi');
-    expect(line.textContent).toMatch(/has no permission flag/i);
+    // … and shows nothing about permissions: a missing control needs no apology.
+    expect(screen.queryByTestId('harness-permission-noflag-kimi')).toBeNull();
+    expect(screen.queryByText(/has no permission flag/i)).toBeNull();
     expect(screen.queryByTestId('harness-permission-select-kimi')).toBeNull();
   });
 });

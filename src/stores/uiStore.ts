@@ -12,7 +12,7 @@ import { pushProbeWorkingSet, EMPTY_PROBE_WORKING_SET, type ProbeWorkingSet } fr
 // the ownership lenses) so pure domain modules never import from `stores/`;
 // re-exported here because every store consumer addresses it as a Probe
 // Panel concern.
-export type AppSettingsTab = 'general' | 'providers' | 'harnesses' | 'remote';
+export type AppSettingsTab = 'general' | 'providers' | 'harnesses' | 'autopilot' | 'prompts' | 'remote';
 
 export type { ProbeTab };
 

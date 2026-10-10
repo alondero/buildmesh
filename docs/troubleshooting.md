@@ -103,13 +103,14 @@ Buildmesh keeps provider API keys in the **Windows Credential Manager**, not
 in `preferences.json`. When the credential store cannot be used - typically
 because Windows has no logon session for the process, or Credential Manager is
 unreachable - the key is left in `preferences.json` rather than dropped. The
-affected account's card in **Settings → Accounts** says so, because a key
+affected account's row in **Settings → Providers** shows a warning icon beside
+its name (hover it for the explanation), because a key
 sitting in plain text in your app data folder is worth knowing about.
 
 Nothing is broken and no action is urgent. To clear it:
 
 1. Sign in to Windows (or otherwise make Credential Manager reachable).
-2. Open **Settings → Accounts**, expand **Edit credentials** on that account,
+2. Open **Settings → Providers**, expand that account's row,
    re-enter the key, and save.
 
 The next write moves the key into the credential store, and the notice

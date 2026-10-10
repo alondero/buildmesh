@@ -17,6 +17,7 @@ import { useNodeActivityStore } from '../../src/stores/nodeActivityStore';
 import { __resetProviderCachesForTests } from '../../src/lib/tauri';
 import { __resetSharedProviderListForTests } from '../../src/hooks/useProviderList';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+import { showLaunchConfigurations } from '../utils/settings-panes';
 import type { ProviderInfo } from '../../src/types/generated/ProviderInfo';
 import type { LaunchTarget } from '../../src/types/generated/LaunchTarget';
 import type { SpawnConfiguration } from '../../src/types/generated/SpawnConfiguration';
@@ -138,6 +139,7 @@ describe('October desktop audit follow-up', () => {
     });
     render(<AppSettingsModal onClose={vi.fn()} />);
     fireEvent.click(screen.getByRole('tab', { name: 'Launch Configurations' }));
+    await showLaunchConfigurations();
     await waitFor(() => expect((screen.getByRole('button', { name: 'New Launch Configuration' }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole('button', { name: 'New Launch Configuration' }));
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Audit recipe' } });

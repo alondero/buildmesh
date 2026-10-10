@@ -400,9 +400,9 @@ export function DataRecoverySection() {
         )}
       </section>
 
-      {/* --- Where the data lives --------------------------------------- */}
+      {/* --- Data folder location --------------------------------------- */}
       <section className="space-y-2" data-testid="settings-data-recovery-location">
-        <h4 className="text-base font-medium text-text-primary">Where this data lives</h4>
+        <h4 className="text-base font-medium text-text-primary">Data folder location</h4>
         <p className="text-sm text-text-muted break-all">{info?.app_data_dir ?? '…'}</p>
         <button
           type="button"

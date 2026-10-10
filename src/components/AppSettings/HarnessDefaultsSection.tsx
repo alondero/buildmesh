@@ -3,7 +3,6 @@ import type { ProviderInfo } from '../../lib/tauri';
 import type { HarnessConfigValue } from '../../types/generated/HarnessConfigValue';
 import type { EffortControlKind } from '../../types/generated/EffortControlKind';
 import { ProviderIcon } from '../Providers/ProviderIcon';
-import { EffortGuidance } from '../shared/EffortGuidance';
 import { SettingsSection } from './SettingsRow';
 
 /** A single harness's draft state. `committed` is the last value the
@@ -62,18 +61,29 @@ function effortKey(kind: EffortControlKind): string | null {
   return kind.kind === 'inline_config' ? kind.key : null;
 }
 
+/** Whether Buildmesh can set anything for this harness: a model override, an
+ *  effort, or a permission mode (a single enforced mode is shown read-only). */
+function hasConfigurableDefaults(provider: ProviderInfo): boolean {
+  const caps = provider.capabilities;
+  return (
+    caps.supports_model_override ||
+    effortAllowed(caps.effort_control) !== null ||
+    (caps.permission_modes ?? []).length > 0
+  );
+}
+
 /** Stable merge: providers → unique native harness ids (preserve the
  *  Spawn-Menu's harness-order, drop proxied rows that share a harness id
- *  with a native row). Terminal still renders so the user sees the
- *  "no-configurable-defaults" state for it; otherwise the missing form
- *  would feel like a bug. */
+ *  with a native row). A harness with nothing to configure — Terminal, a CLI
+ *  that takes no overrides — gets no card: a row that only says "nothing to
+ *  set here" is clutter, not a signal. */
 function uniqueNativeHarnesses(providers: ProviderInfo[]): ProviderInfo[] {
   const seen = new Set<string>();
   const out: ProviderInfo[] = [];
   for (const p of providers) {
     if (seen.has(p.harness_id)) continue;
     seen.add(p.harness_id);
-    out.push(p);
+    if (hasConfigurableDefaults(p)) out.push(p);
   }
   return out;
 }
@@ -234,128 +244,102 @@ function HarnessDefaultCard({
   const showEffort = allowed !== null;
   // Issue #2151: per-harness permission mode. Two or more modes render a
   // select; a single enforced mode (mcode's Full Access pin) renders as
-  // read-only text; no modes renders the "no such flag" line.
+  // read-only text. A harness with no permission flag renders nothing — a
+  // missing control needs no apology.
   const modes = caps.permission_modes ?? [];
   const showPermissionSelect = modes.length > 1;
   const enforcedMode = modes.length === 1 ? modes[0] : null;
-  const hasModelOrEffort = showModel || showEffort;
-  const hasAnyControl = hasModelOrEffort || showPermissionSelect || enforcedMode !== null;
   const stored =
     draft.committed.model !== null ||
     draft.committed.effort !== null ||
     draft.committed.permission_mode !== null;
-  const effortHelpId = allowed?.includes('max') ? `harness-default-effort-help-${provider.harness_id}` : undefined;
-  // Effective mode: the draft value when set, else the harness default.
-  // Matches what the next spawn uses (stored choice or the harness's
-  // unattended default), in the harness's own words.
   const defaultMode = modes.find((m) => m.id === caps.default_permission_mode) ?? modes[0] ?? null;
-  const effectiveMode =
-    modes.find((m) => m.id === (draft.draft.permission_mode ?? '')) ?? defaultMode;
-  const effectiveIsDefault = (draft.draft.permission_mode ?? null) === null;
+  const selectedMode = modes.find((m) => m.id === (draft.draft.permission_mode ?? '')) ?? defaultMode;
 
   return (
-    <div className="space-y-1">
-      <div
-        className="flex items-center gap-3 border border-border-subtle rounded-lg px-4 py-2.5"
-        data-testid={`harness-default-${provider.harness_id}`}
-        data-has-stored-default={stored ? 'true' : 'false'}
-      >
+    <div
+      className="border border-border-subtle rounded-lg px-4 py-2.5"
+      data-testid={`harness-default-${provider.harness_id}`}
+      data-has-stored-default={stored ? 'true' : 'false'}
+    >
+      <div className="flex items-center gap-3">
         <ProviderIcon providerId={provider.harness_id} className="h-5 w-5 shrink-0" />
         <span className="shrink-0 text-base font-medium text-text-primary">{provider.label}</span>
 
-        {!hasAnyControl ? (
-          <span
-            className="min-w-0 truncate text-sm italic text-text-muted"
-            data-testid={`harness-default-empty-${provider.harness_id}`}
-          >
-            {provider.label} does not accept model, effort, or permission-mode overrides from Buildmesh
-            — it uses its own native configuration.
-          </span>
-        ) : (
-          <div className="ml-auto flex items-center gap-2">
-            {showModel && (
-              <input
-                id={`harness-default-model-${provider.harness_id}`}
-                type="text"
-                value={draft.draft.model ?? ''}
-                placeholder="model id"
-                onChange={(e) => onUpdate({ model: e.target.value || null })}
-                onBlur={() => void onCommit()}
-                disabled={disabled}
-                className="w-44 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${provider.label} default model`}
-                data-testid={`harness-default-model-input-${provider.harness_id}`}
-              />
-            )}
-            {showEffort && allowed && (
-              <select
-                id={`harness-default-effort-${provider.harness_id}`}
-                value={draft.draft.effort ?? ''}
-                onChange={(e) => onUpdate({ effort: e.target.value || null })}
-                onBlur={() => void onCommit()}
-                disabled={disabled}
-                className="w-32 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${provider.label} ${
-                  effortKey(caps.effort_control) === 'model_reasoning_effort' ? 'reasoning effort' : 'effort'
-                }`}
-                aria-describedby={effortHelpId}
-                data-testid={`harness-default-effort-select-${provider.harness_id}`}
-              >
-                <option value="">— none —</option>
-                {allowed.map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </select>
-            )}
-            {draft.dirty && (
-              <span
-                className="whitespace-nowrap text-sm text-status-warning"
-                data-testid={`harness-default-dirty-${provider.harness_id}`}
-              >
-                Saves on blur
-              </span>
-            )}
-            {stored && (
-              <button
-                type="button"
-                onClick={() => void onReset()}
-                disabled={disabled}
-                className="shrink-0 px-3 py-1.5 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
-                aria-label={`Reset ${provider.label} defaults`}
-                data-testid={`harness-default-reset-${provider.harness_id}`}
-              >
-                Reset
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-      {hasModelOrEffort && modes.length === 0 && (
-        <div
-          className="pl-12 text-sm italic text-text-muted"
-          data-testid={`harness-permission-noflag-${provider.harness_id}`}
-        >
-          This harness has no permission flag — Buildmesh launches it without approval arguments.
+        <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
+          {showModel && (
+            <input
+              id={`harness-default-model-${provider.harness_id}`}
+              type="text"
+              value={draft.draft.model ?? ''}
+              placeholder="model id"
+              onChange={(e) => onUpdate({ model: e.target.value || null })}
+              onBlur={() => void onCommit()}
+              disabled={disabled}
+              className="w-44 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              aria-label={`${provider.label} default model`}
+              data-testid={`harness-default-model-input-${provider.harness_id}`}
+            />
+          )}
+          {showEffort && allowed && (
+            <select
+              id={`harness-default-effort-${provider.harness_id}`}
+              value={draft.draft.effort ?? ''}
+              onChange={(e) => onUpdate({ effort: e.target.value || null })}
+              onBlur={() => void onCommit()}
+              disabled={disabled}
+              className="w-32 bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              aria-label={`${provider.label} ${
+                effortKey(caps.effort_control) === 'model_reasoning_effort' ? 'reasoning effort' : 'effort'
+              }`}
+              data-testid={`harness-default-effort-select-${provider.harness_id}`}
+            >
+              <option value="">— none —</option>
+              {allowed.map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </select>
+          )}
+          {draft.dirty && (
+            <span
+              className="whitespace-nowrap text-sm text-status-warning"
+              data-testid={`harness-default-dirty-${provider.harness_id}`}
+            >
+              Saves on blur
+            </span>
+          )}
+          {stored && (
+            <button
+              type="button"
+              onClick={() => void onReset()}
+              disabled={disabled}
+              className="shrink-0 px-3 py-1.5 bg-status-error/15 text-status-error text-sm rounded-md hover:bg-status-error/25 disabled:opacity-50"
+              aria-label={`Reset ${provider.label} defaults`}
+              data-testid={`harness-default-reset-${provider.harness_id}`}
+            >
+              Reset
+            </button>
+          )}
         </div>
-      )}
-      {(showPermissionSelect || enforcedMode !== null) && effectiveMode && (
-        <div
-          className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-12 pr-4 text-sm"
-          data-testid={`harness-permission-${provider.harness_id}`}
-        >
-          <span className="text-text-muted">Permission mode:</span>
-          {showPermissionSelect ? (
+      </div>
+
+      {/* The permission mode gets its own full-width line: the select shows the
+          harness's own flag text, which is too long to share a row with the
+          model and effort inputs without being truncated. */}
+      {(showPermissionSelect || enforcedMode) && (
+        <div className="mt-2 pl-8">
+          {showPermissionSelect && (
             <select
               id={`harness-default-permission-${provider.harness_id}`}
               value={draft.draft.permission_mode ?? ''}
               onChange={(e) => onUpdate({ permission_mode: e.target.value || null })}
               onBlur={() => void onCommit()}
               disabled={disabled}
-              className="bg-bg-card border border-border-subtle rounded-md px-3 py-1 text-sm text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+              className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
               aria-label={`${provider.label} permission mode`}
-              title={modes.find((m) => m.id === (draft.draft.permission_mode ?? ''))?.description ?? defaultMode?.description ?? ''}
+              title={selectedMode?.description ?? ''}
               data-testid={`harness-permission-select-${provider.harness_id}`}
             >
               <option value="">— harness default ({defaultMode?.label ?? ''}) —</option>
@@ -365,27 +349,17 @@ function HarnessDefaultCard({
                 </option>
               ))}
             </select>
-          ) : (
-            enforcedMode && (
-              <span title={enforcedMode.description} data-testid={`harness-permission-fixed-${provider.harness_id}`}>
-                {enforcedMode.label}
-              </span>
-            )
           )}
-          {showPermissionSelect && (
+          {enforcedMode && (
             <span
-              className="text-text-muted"
-              title={effectiveMode.description}
-              data-testid={`harness-permission-effective-${provider.harness_id}`}
+              className="text-sm text-text-muted"
+              title={enforcedMode.description}
+              data-testid={`harness-permission-fixed-${provider.harness_id}`}
             >
-              Effective: {effectiveMode.label}
-              {effectiveIsDefault ? ' (harness default)' : ''}
+              {enforcedMode.label}
             </span>
           )}
         </div>
-      )}
-      {allowed && effortHelpId && (
-        <EffortGuidance id={effortHelpId} efforts={allowed} selectedEffort={draft.draft.effort} />
       )}
     </div>
   );

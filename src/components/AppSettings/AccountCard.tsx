@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatError } from '../../lib/errorUtils';
 import { ProviderIcon } from '../Providers/ProviderIcon';
+import { InfoTip } from '../shared/InfoTip';
 import { isSelfAuthId, isFirstClassId } from '../../lib/providerClassification';
 import { normalizeApiKey } from './settingsUtils';
 import { isWindows } from '../../lib/platform';
@@ -74,7 +75,7 @@ export function AccountCard({
   // override if present, otherwise `account.*` directly. The toggle does
   // not touch overrides, so it cannot erase typed edits (Finding 1).
   const [overrides, setOverrides] = useState<EditOverrides>({});
-  const [showCreds, setShowCreds] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   // Issue #1523: folding the parent's `disabled` into `busy` keeps every
   // existing per-control `disabled={busy}` correct without adding a prop to
   // each of them — a locked card simply has no live control.
@@ -233,11 +234,70 @@ export function AccountCard({
     }
   };
 
+  const expandable = showApiKey || showBilling;
+  const keyStorageTip = isWindows
+    ? `This ${account.name} API key is saved in plain text in preferences.json because Buildmesh couldn't reach the Windows Credential Manager. Save the key again to retry moving it there.`
+    : `This ${account.name} API key is saved in plain text in preferences.json; this platform has no OS credential store.`;
+
   return (
-    <div className="border border-border-subtle rounded-lg p-5">
-      <div className="flex items-center gap-3 mb-3">
-        <ProviderIcon providerId={account.id} className="h-6 w-6" />
-        <span className="text-lg font-medium text-text-primary">{account.name}</span>
+    <div className="border border-border-subtle rounded-lg">
+      <div className="flex items-center gap-3 px-4 py-2.5">
+        {/* The header is the expander: name + chevron are one button so the
+            whole label is the click target. The Enabled toggle and Remove sit
+            beside it, never inside it (nested interactive controls). */}
+        {expandable ? (
+          <button
+            type="button"
+            onClick={() => setExpanded(v => !v)}
+            aria-expanded={expanded}
+            className="flex min-w-0 items-center gap-2.5 rounded-md text-left hover:text-accent-cyan focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent-cyan"
+          >
+            <svg
+              viewBox="0 0 16 16"
+              className={`h-3.5 w-3.5 shrink-0 text-text-muted transition-transform ${expanded ? 'rotate-90' : ''}`}
+              fill="none"
+              aria-hidden="true"
+            >
+              <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {/* Decorative: an inline brand icon carries its own <title>, which
+                would otherwise be read as part of the button's name. */}
+            <span aria-hidden="true" className="inline-flex shrink-0">
+              <ProviderIcon providerId={account.id} className="h-5 w-5" />
+            </span>
+            <span className="truncate text-base font-medium text-text-primary">{account.name}</span>
+          </button>
+        ) : (
+          <div className="flex min-w-0 items-center gap-2.5 pl-6">
+            <ProviderIcon providerId={account.id} className="h-5 w-5 shrink-0" />
+            <span className="truncate text-base font-medium text-text-primary">{account.name}</span>
+          </div>
+        )}
+
+        {/* Issue #2154 — where this account's key actually lives. Beside the
+            name rather than behind the expander, because the person who needs
+            this is the one who has NOT opened the credential editor, and the
+            fallback used to be invisible. The detail is on hover: it is a
+            standing condition about storage, not a failure that just happened. */}
+        {keyInPreferences && (
+          <InfoTip
+            label={`${account.name} API key storage`}
+            variant="warning"
+            triggerLabel={`${account.name} key is stored in preferences.json`}
+            triggerTestId={`account-key-in-preferences-${account.id}`}
+          >
+            {keyStorageTip}
+          </InfoTip>
+        )}
+
+        {isDirty && !expanded && (
+          <span
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-warning"
+            title="Unsaved changes"
+            data-testid={`account-unsaved-${account.id}`}
+          />
+        )}
+
         <div className="ml-auto flex items-center gap-3">
           <label className="flex items-center gap-2 text-base text-text-secondary cursor-pointer">
             <input
@@ -284,74 +344,44 @@ export function AccountCard({
         </div>
       </div>
 
-      {/* Issue #2154 — where this account's key actually lives. Sits outside
-          the "Edit credentials" disclosure on purpose: the person who needs
-          this is the one who has NOT opened the credential editor, and the
-          whole point of the issue is that the fallback used to be invisible.
-          Polite rather than assertive — it is a standing condition about
-          storage, not a failure that just happened. */}
-      {keyInPreferences && (
-        <div
-          role="status"
-          aria-live="polite"
-          data-testid={`account-key-in-preferences-${account.id}`}
-          className="mt-3 flex items-start gap-2 rounded-md border border-status-warning/40 bg-status-warning/10 px-3 py-2 text-sm text-text-secondary"
-        >
-          <span className="text-status-warning" aria-hidden="true">⚠</span>
-          <span>
-            <span className="font-medium text-text-primary">
-              This {account.name} API key is stored in the preferences.json file.
-            </span>{' '}
-            {isWindows
-              ? 'Buildmesh keeps provider keys in the Windows Credential Manager, but it could not reach it, so this key stayed on disk in your app data folder in plain text. Sign in to Windows and save the key again to move it into the credential store.'
-              : 'Buildmesh keeps provider keys in the OS credential store, which this platform does not provide, so this key stays in your app data folder in plain text.'}
-          </span>
-        </div>
-      )}
-
-      {(showApiKey || showBilling) && (
-        <button
-          onClick={() => setShowCreds(v => !v)}
-          className="mt-3 text-sm text-text-secondary hover:text-text-primary"
-        >
-          {showCreds ? 'Hide settings' : (showApiKey ? 'Edit credentials' : 'Edit billing')}
-        </button>
-      )}
-
-      {showCreds && (showApiKey || showBilling) && (
-        <div className="mt-3 space-y-3">
-          {showApiKey && (
-            <div>
-              <label className="block text-sm text-text-muted mb-1">API key</label>
-              <input
-                type="password"
-                value={apiKeyDisplay ?? ''}
-                disabled={busy}
-                onChange={e => editApiKey(e.target.value)}
-                placeholder="Enter API key..."
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${account.name} API key`}
-              />
-              <p className="mt-1 text-sm text-text-muted">
-                Base URL and model names are set when you attach this provider under Harnesses.
-              </p>
-            </div>
-          )}
-          {showBilling && (
-            <div>
-              <label className="block text-sm text-text-muted mb-1">Billing</label>
-              <select
-                value={billingDisplay}
-                disabled={busy}
-                onChange={e => editBillingMode(e.target.value as ProviderAccount['billing_mode'])}
-                className="w-full bg-bg-card border border-border-subtle rounded-md px-4 py-2 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
-                aria-label={`${account.name} billing mode`}
-              >
-                <option value="plan">Plan / subscription (percentage)</option>
-                <option value="pay_as_you_go">Pay-as-you-go (balance)</option>
-              </select>
-            </div>
-          )}
+      {expanded && expandable && (
+        <div className="space-y-3 border-t border-border-subtle px-4 pb-4 pt-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {showApiKey && (
+              <div>
+                <div className="mb-1 flex items-center gap-1.5">
+                  <span className="text-sm text-text-muted">API key</span>
+                  <InfoTip label="API key">
+                    Base URL and model names are set when you attach this provider under Harnesses.
+                  </InfoTip>
+                </div>
+                <input
+                  type="password"
+                  value={apiKeyDisplay ?? ''}
+                  disabled={busy}
+                  onChange={e => editApiKey(e.target.value)}
+                  placeholder="Enter API key..."
+                  className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+                  aria-label={`${account.name} API key`}
+                />
+              </div>
+            )}
+            {showBilling && (
+              <div>
+                <span className="mb-1 block text-sm text-text-muted">Billing</span>
+                <select
+                  value={billingDisplay}
+                  disabled={busy}
+                  onChange={e => editBillingMode(e.target.value as ProviderAccount['billing_mode'])}
+                  className="w-full bg-bg-card border border-border-subtle rounded-md px-3 py-1.5 text-base text-text-primary focus:outline-none focus:border-accent-cyan disabled:opacity-50"
+                  aria-label={`${account.name} billing mode`}
+                >
+                  <option value="plan">Plan / subscription (percentage)</option>
+                  <option value="pay_as_you_go">Pay-as-you-go (balance)</option>
+                </select>
+              </div>
+            )}
+          </div>
           <div className="flex gap-3 items-center">
             <button
               onClick={saveDraft}

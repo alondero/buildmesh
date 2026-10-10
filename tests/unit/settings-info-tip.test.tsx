@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppSettingsModal } from '../../src/components/AppSettings/AppSettingsModal';
+import { openSettingsPane } from '../utils/settings-panes';
 
 function mockBackend() {
   vi.mocked(invoke).mockImplementation((cmd: string) => {
@@ -47,6 +48,7 @@ describe('Settings — InfoTip help affordance', () => {
   it('hides the explanation until the ⓘ is activated, then Escape dismisses just the tip', async () => {
     mockBackend();
     render(<AppSettingsModal onClose={() => {}} />);
+    await openSettingsPane('Autopilot');
 
     const trigger = await screen.findByRole('button', { name: 'About Circuit agent pool size' });
     // Closed by default — the long paragraph is not rendered at all.

@@ -269,9 +269,10 @@ describe('AppSettingsModal — corrupt preferences.json (#1523)', () => {
       screen.getAllByRole('button', { name: /^remove /i })[0].hasAttribute('disabled'),
     ).toBe(true);
 
-    // The credential editor is behind a disclosure; the disclosure itself is
-    // a local view toggle, so it stays usable — the *write* must not.
-    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    // The credential editor is behind the account row's expander; the
+    // expander itself is a local view toggle, so it stays usable — the
+    // *write* must not.
+    await user.click(screen.getByRole('button', { name: 'MiniMax', expanded: false }));
     expect((await screen.findByLabelText('MiniMax API key')).hasAttribute('disabled')).toBe(true);
     expect(screen.getByLabelText('MiniMax billing mode').hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
@@ -279,6 +280,9 @@ describe('AppSettingsModal — corrupt preferences.json (#1523)', () => {
     // Launch Configurations tab — reordering persists `harness_order`, and
     // attaching / detaching persists `provider_pairings`.
     await user.click(screen.getByRole('tab', { name: /launch configurations/i }));
+    // The configuration list is collapsed by default; the toggle is a view
+    // control and stays usable.
+    await user.click(screen.getByRole('button', { name: /^show launch configurations$/i }));
     const reorderHandles = await screen.findAllByRole('button', { name: /^reorder /i });
     expect(reorderHandles.length).toBeGreaterThan(1);
     for (const handle of reorderHandles) {

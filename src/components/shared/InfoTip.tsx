@@ -8,6 +8,13 @@ interface InfoTipProps {
   /** Full explanation, revealed in the popover. */
   children: ReactNode;
   testId?: string;
+  /** `warning` swaps the ⓘ for an amber ! and reads as an alert on the trigger,
+   *  for a standing condition worth noticing without spending a line of text. */
+  variant?: 'info' | 'warning';
+  /** Overrides the trigger's accessible name (default "About {label}"). */
+  triggerLabel?: string;
+  /** Test id on the trigger button (`testId` is on the popover). */
+  triggerTestId?: string;
 }
 
 /**
@@ -18,7 +25,7 @@ interface InfoTipProps {
  * or an outside mousedown. Escape returns focus to the trigger, matching the
  * disclosure contract in `TitleBar/ZoomControl.tsx`.
  */
-export function InfoTip({ label, children, testId }: InfoTipProps) {
+export function InfoTip({ label, children, testId, variant = 'info', triggerLabel, triggerTestId }: InfoTipProps) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -49,16 +56,30 @@ export function InfoTip({ label, children, testId }: InfoTipProps) {
       <button
         ref={triggerRef}
         type="button"
-        aria-label={`About ${label}`}
+        aria-label={triggerLabel ?? `About ${label}`}
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
+        data-testid={triggerTestId}
         onClick={() => setOpen((value) => !value)}
-        className="flex h-4 w-4 items-center justify-center rounded-full text-text-muted transition-colors hover:text-accent-cyan focus:outline-none focus-visible:text-accent-cyan"
+        className={`flex h-4 w-4 items-center justify-center rounded-full transition-colors focus:outline-none ${
+          variant === 'warning'
+            ? 'text-status-warning hover:text-text-primary focus-visible:text-text-primary'
+            : 'text-text-muted hover:text-accent-cyan focus-visible:text-accent-cyan'
+        }`}
       >
         <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" aria-hidden="true">
           <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M8 7.25v3.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          <circle cx="8" cy="4.75" r="0.9" fill="currentColor" />
+          {variant === 'warning' ? (
+            <>
+              <path d="M8 4.5v4.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <circle cx="8" cy="11.25" r="0.9" fill="currentColor" />
+            </>
+          ) : (
+            <>
+              <path d="M8 7.25v3.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <circle cx="8" cy="4.75" r="0.9" fill="currentColor" />
+            </>
+          )}
         </svg>
       </button>
       {open && (

@@ -14,11 +14,13 @@ import type { ResourceKey } from './useSettingsResources';
 export const NO_OVERRIDE = '__no_override__';
 
 /** The Settings sub-panes. Each pane groups settings by concern and owns the
- *  settings that belong to it: General = app behaviour + appearance + runtime
- *  defaults; Providers = provider routing defaults + credentials; Harnesses =
- *  spawn-menu composition + per-harness defaults; Remote Access = network
- *  reachability; Data & Diagnostics = the profile's durable state (snapshot,
- *  integrity check, export, restore — issue #1537). All panes stay MOUNTED
+ *  settings that belong to it: General = app behaviour + appearance + worktree
+ *  default; Providers = provider routing defaults + credentials; Harnesses
+ *  (shown as Launch Configurations) = spawn-menu composition + per-harness
+ *  defaults; Autopilot = Circuit agent limits; Prompts = the probe spawn
+ *  prompt templates; Remote Access = network reachability; Data & Diagnostics
+ *  = the profile's durable state (snapshot, integrity check, export, restore —
+ *  issue #1537). Ordered by how often people reach for them. All panes stay MOUNTED
  *  (inactive ones get the `hidden` attribute) — the modal's dirty tracking
  *  (issue #730) lives in child component state, so unmounting a pane on
  *  tab-switch would destroy half-typed credentials while the modal still
@@ -27,6 +29,8 @@ export const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
   { id: 'providers', label: 'Providers' },
   { id: 'harnesses', label: 'Launch Configurations' },
+  { id: 'autopilot', label: 'Autopilot' },
+  { id: 'prompts', label: 'Prompts' },
   { id: 'remote', label: 'Remote Access' },
   { id: 'data', label: 'Data & Diagnostics' },
 ] as const;
@@ -34,13 +38,16 @@ export const SETTINGS_TABS = [
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]['id'];
 
 /** Which pane a dirty site belongs to, so its nav item can show the
- *  unsaved-changes dot. Site keys: `circuit-agent-pool` + `worktree-dir` +
- *  `probe-prompts` (General), `harness-defaults` and the prefixed
- *  `harness-*` sites wired by HarnessConfigList (Harnesses), and
- *  `account-*` / `add-custom-form` (Providers). The default-provider /
- *  reviewer / auto-naming selects save immediately and are never dirty. */
+ *  unsaved-changes dot. Site keys: `worktree-dir` (General),
+ *  `circuit-agent-pool` (Autopilot), `probe-prompts` (Prompts),
+ *  `harness-defaults` and the prefixed `harness-*` sites wired by
+ *  HarnessConfigList (Harnesses), and `account-*` / `add-custom-form`
+ *  (Providers). The default-provider / reviewer / auto-naming selects save
+ *  immediately and are never dirty. */
 export function paneForDirtySite(site: string): SettingsTabId {
-  if (site === 'circuit-agent-pool' || site === 'worktree-dir' || site === 'probe-prompts') return 'general';
+  if (site === 'circuit-agent-pool') return 'autopilot';
+  if (site === 'probe-prompts') return 'prompts';
+  if (site === 'worktree-dir') return 'general';
   if (site.startsWith('harness-')) return 'harnesses';
   return 'providers';
 }

@@ -43,6 +43,9 @@ vi.mock('../../src/lib/tauri', async () => {
   };
 });
 
+/** The collapsed row's header: the account name, with `aria-expanded` state. */
+const expander = (name: string) => screen.getByRole('button', { name, expanded: false });
+
 function account(over: Partial<ProviderAccount> = {}): ProviderAccount {
   const id = over.id ?? 'anthropic';
   return {
@@ -91,19 +94,110 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
     expect(screen.queryByRole('button', { name: /remove/i })).toBeNull();
   });
 
-  it('shows no credential editor for a self-authenticating harness (#568a)', () => {
+  it('shows no credential editor for a self-authenticating harness (#568a)', async () => {
+    const user = userEvent.setup();
     render(<AccountCard account={account({ id: 'anthropic' })} onSave={vi.fn()} />);
     // Anthropic/Codex/Antigravity authenticate via their own CLI — no key fields.
-    // Billing is still editable ("Edit billing"), but not credentials.
-    expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
-    expect(screen.getByRole('button', { name: /edit billing/i })).toBeTruthy();
+    // Billing is still editable behind the row's expander, but not credentials.
+    await user.click(expander('Anthropic / Claude'));
+    expect(screen.getByLabelText(/anthropic \/ claude billing mode/i)).toBeTruthy();
+    expect(screen.queryByLabelText(/api key/i)).toBeNull();
   });
 
-  it('uses Muse account quota without a manual plan or API key editor', () => {
+  it('uses Muse account quota without a manual plan or API key editor', async () => {
+    const user = userEvent.setup();
     render(<AccountCard account={account({ id: 'muse-code', name: 'Meta Muse Code' })} onSave={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: /edit credentials/i })).toBeNull();
+    await user.click(expander('Meta Muse Code'));
+    expect(screen.queryByLabelText(/api key/i)).toBeNull();
     expect(screen.queryByRole('combobox', { name: /muse code subscription plan/i })).toBeNull();
     expect(screen.queryByText(/counts requests locally/i)).toBeNull();
+  });
+
+  it('renders an account with nothing to edit as a plain label, not an expander', () => {
+    // A custom provider that is neither Claude-compatible nor first-class has
+    // neither a key nor a billing mode, so a chevron would open an empty row.
+    render(
+      <AccountCard
+        account={account({ id: 'unkeyed-custom', name: 'Unkeyed Custom', claude_compatible: false })}
+        onSave={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('Unkeyed Custom')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Unkeyed Custom' })).toBeNull();
+  });
+
+  describe('compact expander row', () => {
+    it('starts collapsed: neither the API key nor the billing select is rendered', () => {
+      render(
+        <AccountCard
+          account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
+          onSave={vi.fn()}
+        />,
+      );
+      const header = screen.getByRole('button', { name: 'MiniMax', expanded: false });
+      expect(header.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByLabelText(/minimax api key/i)).toBeNull();
+      expect(screen.queryByLabelText(/minimax billing mode/i)).toBeNull();
+      expect(screen.queryByRole('button', { name: /^save$/i })).toBeNull();
+    });
+
+    it('expands on click to reveal billing and key together, and collapses again', async () => {
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
+          onSave={vi.fn()}
+        />,
+      );
+      await user.click(expander('MiniMax'));
+      expect(screen.getByLabelText(/minimax api key/i)).toBeTruthy();
+      expect(screen.getByLabelText(/minimax billing mode/i)).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: 'MiniMax', expanded: true }));
+      expect(screen.queryByLabelText(/minimax api key/i)).toBeNull();
+    });
+
+    it('keeps the Enabled toggle and Remove on the collapsed row', () => {
+      render(
+        <AccountCard
+          account={account({ id: 'minimax', name: 'MiniMax', billing_mode: 'pay_as_you_go' })}
+          onSave={vi.fn()}
+          onRemove={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole('checkbox', { name: /enable minimax/i })).toBeTruthy();
+      expect(screen.getByRole('button', { name: /^remove minimax$/i })).toBeTruthy();
+    });
+
+    it('keeps a typed key when the row is collapsed and re-opened', async () => {
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
+          onSave={vi.fn()}
+        />,
+      );
+      await user.click(expander('Kimi'));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-keep');
+      await user.click(screen.getByRole('button', { name: 'Kimi', expanded: true }));
+      await user.click(expander('Kimi'));
+      expect((screen.getByLabelText(/kimi api key/i) as HTMLInputElement).value).toBe('sk-keep');
+    });
+
+    it('marks a collapsed row that holds unsaved edits', async () => {
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={account({ id: 'kimi', name: 'Kimi', billing_mode: 'pay_as_you_go' })}
+          onSave={vi.fn()}
+        />,
+      );
+      expect(screen.queryByTestId('account-unsaved-kimi')).toBeNull();
+      await user.click(expander('Kimi'));
+      await user.type(screen.getByLabelText(/kimi api key/i), 'sk-x');
+      await user.click(screen.getByRole('button', { name: 'Kimi', expanded: true }));
+      expect(screen.getByTestId('account-unsaved-kimi')).toBeTruthy();
+    });
   });
 
   it('shows API key (not model tiers) for a Claude-compatible account', async () => {
@@ -114,12 +208,15 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         onSave={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    await user.click(expander('Kimi'));
     expect(screen.getByLabelText(/kimi api key/i)).toBeTruthy();
     // Model tiers moved to Harnesses attach (ADR-0025).
     expect(screen.queryByLabelText(/fable model/i)).toBeNull();
     expect(screen.queryByLabelText(/opus model/i)).toBeNull();
-    expect(screen.getByText(/base url and model names are set when you attach/i)).toBeTruthy();
+    // The reminder lives behind an info tip so the expanded row stays short.
+    expect(screen.queryByText(/base url and model names are set when you attach/i)).toBeNull();
+    await user.hover(screen.getByRole('button', { name: /about api key/i }));
+    expect(await screen.findByText(/base url and model names are set when you attach/i)).toBeTruthy();
   });
 
   it('passes an edited API key through onSave', async () => {
@@ -131,7 +228,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         onSave={onSave}
       />,
     );
-    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    await user.click(expander('Kimi'));
     await user.type(screen.getByLabelText(/kimi api key/i), 'sk-kimi');
     await user.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
@@ -147,7 +244,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         onSave={onSave}
       />,
     );
-    await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+    await user.click(expander('MiniMax'));
     await user.selectOptions(screen.getByLabelText(/minimax billing mode/i), 'plan');
     await user.click(screen.getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalled());
@@ -332,7 +429,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       );
 
       // User types an api_key → dirty = true fires once.
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-x');
       expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
@@ -366,7 +463,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       );
 
       // User edits only api_key.
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-new');
       await user.click(screen.getByRole('button', { name: /^save$/i }));
 
@@ -398,7 +495,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       }) as ProviderAccount;
       Object.assign(emptyKey, { api_key: '' });
       render(<AccountCard account={emptyKey} onSave={vi.fn().mockResolvedValue(true)} />);
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
 
       // The baseline '' is normalised to null internally, so the input
       // starts empty (not stuck on the empty-string from the prop).
@@ -423,7 +520,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         />,
       );
 
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
 
       // Type and revert — each keystroke after the first is a non-baseline
       // value, but the FINAL state (empty input) IS the baseline, so the
@@ -476,7 +573,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         />,
       );
 
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-typed');
       // Toggle Enabled off — must NOT commit the typed api_key.
       await user.click(screen.getByRole('checkbox', { name: /enable kimi/i }));
@@ -522,7 +619,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         />,
       );
 
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-precious');
 
       // First Save returns false.
@@ -556,7 +653,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
           onSave={onSave}
         />,
       );
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi'));
       await user.type(screen.getByLabelText(/kimi api key/i), 'sk-precious');
       await user.click(screen.getByRole('button', { name: /^save$/i }));
       const alert = await screen.findByRole('alert');
@@ -590,7 +687,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       expect(screen.getByText('Kimi (renamed)')).toBeTruthy();
 
       // User types a new api_key (different from server).
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('Kimi (renamed)'));
       await user.type(screen.getByLabelText(/kimi \(renamed\) api key/i), 'sk-new');
       await user.click(screen.getByRole('button', { name: /^save$/i }));
 
@@ -612,7 +709,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         />,
       );
 
-      await userEvent.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await userEvent.click(expander('Kimi'));
       const pristineInput = screen.getByLabelText(/kimi api key/i) as HTMLInputElement;
       expect(pristineInput.value).toBe('');
 
@@ -675,8 +772,14 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       });
     }
 
-    it('warns on the account whose key is persisted in preferences.json', () => {
-      mockIsWindows = true;
+    /** The warning is an icon beside the name; the message appears on hover. */
+    async function hoverWarning(user: ReturnType<typeof userEvent.setup>) {
+      const icon = screen.getByTestId('account-key-in-preferences-minimax');
+      await user.hover(icon);
+      return screen.findByRole('tooltip');
+    }
+
+    it('shows only an icon beside the name until hovered', () => {
       render(
         <AccountCard
           account={keyedAccount()}
@@ -684,21 +787,15 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
           keyInPreferences
         />,
       );
-
-      const notice = screen.getByTestId('account-key-in-preferences-minimax');
-      // It must say which account, that the key is on disk in plain text,
-      // why, and what to do — the issue's "and what to do about it".
-      expect(notice.textContent).toMatch(
-        /MiniMax API key is stored in the preferences\.json file/,
-      );
-      expect(notice.textContent).toMatch(/could not reach it/i);
-      expect(notice.textContent).toMatch(/save the key again/i);
+      const icon = screen.getByTestId('account-key-in-preferences-minimax');
+      expect(icon.textContent?.trim()).toBe('');
+      expect(screen.queryByRole('tooltip')).toBeNull();
+      expect(screen.queryByText(/preferences\.json/i)).toBeNull();
     });
 
-    it('does not blame an unreachable store where none exists', () => {
-      // macOS/Linux have no credential store by design, so keys stay in the
-      // file legitimately; saying "it could not reach it" would be false.
-      mockIsWindows = false;
+    it('explains on hover which key is on disk, why, and the one thing to do', async () => {
+      mockIsWindows = true;
+      const user = userEvent.setup();
       render(
         <AccountCard
           account={keyedAccount()}
@@ -707,13 +804,32 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
         />,
       );
 
-      const notice = screen.getByTestId('account-key-in-preferences-minimax');
-      expect(notice.textContent).toMatch(
-        /MiniMax API key is stored in the preferences\.json file/,
+      const tip = await hoverWarning(user);
+      expect(tip.textContent).toMatch(/MiniMax API key is saved in plain text in preferences\.json/);
+      expect(tip.textContent).toMatch(/couldn.t reach the Windows Credential Manager/i);
+      expect(tip.textContent).toMatch(/save the key again/i);
+      // "Sign in to Windows" was advice the user had already followed.
+      expect(tip.textContent).not.toMatch(/sign in to windows/i);
+    });
+
+    it('does not blame an unreachable store where none exists', async () => {
+      // macOS/Linux have no credential store by design, so keys stay in the
+      // file legitimately; saying "it couldn't reach it" would be false.
+      mockIsWindows = false;
+      const user = userEvent.setup();
+      render(
+        <AccountCard
+          account={keyedAccount()}
+          onSave={vi.fn().mockResolvedValue(true)}
+          keyInPreferences
+        />,
       );
-      expect(notice.textContent).toMatch(/this platform does not provide/i);
-      expect(notice.textContent).not.toMatch(/could not reach it/i);
-      expect(notice.textContent).not.toMatch(/sign in to windows/i);
+
+      const tip = await hoverWarning(user);
+      expect(tip.textContent).toMatch(/MiniMax API key is saved in plain text in preferences\.json/);
+      expect(tip.textContent).toMatch(/no OS credential store/i);
+      expect(tip.textContent).not.toMatch(/couldn.t reach/i);
+      expect(tip.textContent).not.toMatch(/save the key again/i);
     });
 
     it('shows nothing when the key is only in the credential store', () => {
@@ -751,7 +867,7 @@ describe('AccountCard (issue #537, settings-side credential/editor)', () => {
       expect(screen.queryByLabelText(/minimax api key/i)).toBeNull();
       expect(screen.getByTestId('account-key-in-preferences-minimax')).toBeTruthy();
 
-      await user.click(screen.getByRole('button', { name: /edit credentials/i }));
+      await user.click(expander('MiniMax'));
       // Still shown alongside the editor, not replaced by it.
       expect(screen.getByTestId('account-key-in-preferences-minimax')).toBeTruthy();
     });

@@ -11,8 +11,8 @@
  * roving tabindex, Escape + arrow-key nav, focus-move-in on mount).
  * The backend `compose_provider_menu` test (in `commands/agent.rs`)
  * pins the data derivation; this file is the pure-render counterpart.
- * Issue #2151 adds the effective-permission line on native rows (the
- * harness's own words; custom choices marked, proxied children silent).
+ * The menu deliberately shows no permission-mode line; that choice lives in
+ * Settings → Launch Configurations → Agent Harness defaults.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
@@ -337,36 +337,26 @@ describe('GroupedProviderMenu — single-caret highlight (issue #1720 follow-up)
     expect(screen.queryByText('Alt-click spawns in mesh root')).toBeNull();
   });
 
-  it('shows the effective permission mode on the native row only, in the harness words (issue #2151)', () => {
+  it('keeps permission-mode flags out of the spawn menu; they are chosen in Settings', () => {
+    // Even when the backend stamps an effective permission on the row, the
+    // menu stays a plain list of harness names. The mode is edited under
+    // Settings → Launch Configurations → Agent Harness defaults.
     const claudePerm = {
       mode_id: 'unattended',
       label: '--dangerously-skip-permissions',
       description: 'Prompts off.',
       is_default: true,
     };
-    const codexPerm = {
-      mode_id: 'prompt',
-      label: 'Prompts on (no flag)',
-      description: 'Codex asks.',
-      is_default: false,
-    };
     const providers = [
       { ...native('claude'), effective_permission: claudePerm },
-      { ...proxied('claude', 'minimax'), effective_permission: claudePerm },
-      { ...native('codex'), effective_permission: codexPerm },
-      native('terminal'),
+      { ...native('codex'), effective_permission: { ...claudePerm, label: 'Prompts on (no flag)', is_default: false } },
     ];
     render(<GroupedProviderMenu providers={providers} onSelect={() => {}} />);
 
-    const line = screen.getByTestId('spawn-permission-claude');
-    expect(line.textContent).toBe('--dangerously-skip-permissions');
-    expect(line.getAttribute('title')).toBe('Prompts off.');
-    // One line only: the proxied child shares the harness default but
-    // does not repeat it, and the modeless terminal row shows nothing.
-    expect(screen.getAllByTestId('spawn-permission-claude')).toHaveLength(1);
-    expect(screen.queryByTestId('spawn-permission-terminal')).toBeNull();
-    // A stored (non-default) choice is marked custom.
-    expect(screen.getByTestId('spawn-permission-codex').textContent)
-      .toBe('Prompts on (no flag) (custom)');
+    expect(screen.getByRole('menuitem', { name: 'claude' })).toBeTruthy();
+    expect(screen.queryByTestId('spawn-permission-claude')).toBeNull();
+    expect(screen.queryByTestId('spawn-permission-codex')).toBeNull();
+    expect(screen.queryByText(/dangerously-skip-permissions/i)).toBeNull();
+    expect(screen.queryByText(/\(custom\)/i)).toBeNull();
   });
 });

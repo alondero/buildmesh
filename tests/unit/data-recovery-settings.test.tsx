@@ -310,6 +310,14 @@ describe('Settings > Data & Diagnostics (issue #1537)', () => {
     expect(error.textContent).toMatch(/backend exploded/);
   });
 
+  it('names the folder section "Data folder location"', async () => {
+    mockBackend();
+    const pane = await openPane();
+    const section = within(pane).getByTestId('settings-data-recovery-location');
+    expect(within(section).getByRole('heading', { name: 'Data folder location' })).toBeTruthy();
+    expect(within(pane).queryByText(/where this data lives/i)).toBeNull();
+  });
+
   it('opens the data folder through the shared OS-open seam', async () => {
     const calls = mockBackend();
     const pane = await openPane();

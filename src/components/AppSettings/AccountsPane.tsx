@@ -175,7 +175,7 @@ export function AccountsPane() {
           onRetry={() => retryResource('accounts')}
         />
       ) : (
-        <div className="space-y-4">
+        <div className="space-y-2">
           {accounts.map(account => (
             <AccountCard
               key={account.id}
