@@ -3876,6 +3876,101 @@ impl Drop for ResultReadFixture {
 }
 
 #[test]
+fn a_wake_up_stranded_by_a_crash_is_settled_without_a_stall_being_observed() {
+    // Round-2 finding: recovery used to hang off `NudgeDecision::Abandon`,
+    // reachable only when a task stall was also observed — so a stranded claim
+    // left the step Running until the wait budget expired. Recovery is now
+    // driven by the claim alone, with no transcript fact required.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    let attempt = fixture.view.steps[1].attempt;
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), attempt.to_string());
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::NudgeUncertain { .. })),
+        "a claim stranded at `claimed` must be settled by observation alone: {events:?}"
+    );
+    assert_eq!(
+        fixture
+            .view
+            .context
+            .get(&format!("node.{node}.nudge.delivery")),
+        Some("uncertain"),
+        "the claim is settled rather than left waiting forever"
+    );
+    assert!(
+        fixture.view.steps[1]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("will not be replayed")),
+        "the operator is told the wake-up may or may not have landed"
+    );
+}
+
+#[test]
+fn a_wake_up_in_flight_stops_the_turn_being_classified() {
+    // Round-2 finding: continuations halt classification while their delivery
+    // is claimed; the nudge did not, so a turn could be judged before its
+    // wake-up had landed.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    let attempt = fixture.view.steps[1].attempt;
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), attempt.to_string());
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            CircuitEvent::TurnClassified { .. }
+                | CircuitEvent::ClassifierErrorObserved { .. }
+                | CircuitEvent::ClassifierUnavailable { .. }
+        )),
+        "a turn must not be classified while a wake-up is in flight: {events:?}"
+    );
+}
+
+#[test]
+fn a_claimed_wake_up_for_another_attempt_does_not_block_classification() {
+    // The guard is attempt-scoped: a claim left over from a previous attempt
+    // must not wedge the current one.
+    let mut fixture = ResultReadFixture::new();
+    let node = fixture.view.steps[1].node_id.clone();
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.delivery"), "claimed");
+    fixture
+        .view
+        .context
+        .set(&format!("node.{node}.nudge.attempt"), "99");
+
+    let (events, _, _) = fixture.probe();
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, CircuitEvent::NudgeUncertain { .. })),
+        "a stale claim from another attempt is not this step's problem: {events:?}"
+    );
+}
+
+#[test]
 fn result_unstable_publication_retries_without_reminders_or_attention() {
     use crate::services::transcript_reader::report_snapshot::result_read_test_support;
 

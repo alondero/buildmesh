@@ -1103,6 +1103,27 @@ pub(super) fn observe_gates_with(
                 | CircuitNodeKind::ReviewVerdict { .. }
                 | CircuitNodeKind::SpawnAgentNode { .. },
             ) => {
+                // A wake-up claimed for this attempt has not settled. Settling
+                // it here — rather than where a task stall is detected — is
+                // deliberate: crash recovery for a stranded prompt must not
+                // depend on a transcript fact being observable right now. The
+                // `continue` also stops the turn being classified while the
+                // wake-up is in flight, exactly as it does for a continuation.
+                let nudge_delivery = view
+                    .context
+                    .get(&format!("node.{}.nudge.delivery", step.node_id));
+                let nudge_attempt = view
+                    .context
+                    .get(&format!("node.{}.nudge.attempt", step.node_id))
+                    .and_then(|s| s.parse::<i32>().ok());
+                if nudge_delivery == Some("claimed") && nudge_attempt == Some(step.attempt) {
+                    events.push(CircuitEvent::NudgeUncertain {
+                        node_id: step.node_id.clone(),
+                        attempt: step.attempt,
+                        error: "Wake-up delivery was interrupted after claiming input and will not be replayed. Inspect the agent: it may or may not have received the wake-up.".into(),
+                    });
+                    continue;
+                }
                 let continuation_delivery = view
                     .context
                     .get(&format!("node.{}.continuation.delivery", step.node_id));

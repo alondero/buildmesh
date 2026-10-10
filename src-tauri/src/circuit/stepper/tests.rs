@@ -2667,13 +2667,13 @@ fn a_stalled_idle_session_is_woken_once_and_never_replayed() {
     );
 }
 
-/// A nudge for another attempt is ignored outright, so a stale observation
-/// cannot wake a session the current attempt already moved past.
 #[test]
-fn a_wake_up_claimed_by_a_crashed_worker_is_surfaced_and_never_replayed() {
-    // `execute_effects` settles a claim in the cycle that claims it, so a claim
-    // still reading `claimed` on a later observation means that cycle died
-    // mid-delivery. Re-sending could put a second prompt in a live terminal.
+fn a_wake_up_claimed_for_the_current_attempt_is_never_decided_twice() {
+    // While a claim is in flight the stepper must not decide the nudge again:
+    // `nudge.delivery` still reads `claimed` for the whole delivery. Answering
+    // `Nudge` would double-send; anything else would leave the in-flight case
+    // unhandled. The observation pass owns settling it (see
+    // `observe_gates_with`, which is where the stranded case is recovered).
     let mut run = gate_run(
         "classify",
         CircuitNodeKind::LlmTurnClassifier {
@@ -2691,25 +2691,19 @@ fn a_wake_up_claimed_by_a_crashed_worker_is_surfaced_and_never_replayed() {
         Some("claimed")
     );
 
-    // The worker dies here: nothing settles the claim.
-    let next = advance(
-        &mut run,
-        &stalled_session("classify", 1, "report-1", "100:ready"),
-    );
     assert!(
-        next.effects.is_empty(),
-        "a stranded wake-up must never be re-sent"
+        advance(
+            &mut run,
+            &stalled_session("classify", 1, "report-1", "100:ready")
+        )
+        .effects
+        .is_empty(),
+        "a claim in flight must never be re-sent"
     );
     assert_eq!(
         run.context.get("node.classify.nudge.delivery"),
-        Some("uncertain"),
-        "a stranded claim is settled rather than left waiting forever"
-    );
-    assert_eq!(status_of(&run, "classify"), StepStatus::Unverified);
-    let error = run.step("classify").unwrap().error.clone().unwrap();
-    assert!(
-        error.contains("will not be replayed"),
-        "the operator is told the wake-up may or may not have landed: {error}"
+        Some("claimed"),
+        "the stepper alone leaves settlement to the observation pass"
     );
 }
 

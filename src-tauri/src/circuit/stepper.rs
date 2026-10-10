@@ -518,13 +518,14 @@ impl RunView {
         if self.state != RunState::Running {
             return NudgeDecision::Ignore;
         }
-        // Crash recovery. `execute_effects` settles a claim in the same cycle it
-        // claims it, so a claim still reading `claimed` on a later observation
-        // means that cycle died mid-delivery. Re-sending would risk a duplicate
-        // prompt in a live terminal, so the claim is abandoned and surfaced
-        // instead — the same conservative choice continuations make.
+        // A wake-up claimed for this attempt is settled by the
+        // observation pass, which emits `NudgeUncertain` and stops the
+        // turn being classified. It must not be re-decided here: the
+        // delivery key still reads `claimed` while the claim is in
+        // flight, so answering `Nudge` would double-send and answering
+        // anything else would leave the in-flight case unhandled.
         if self.context.get(&format!("node.{node_id}.nudge.delivery")) == Some("claimed") {
-            return NudgeDecision::Abandon;
+            return NudgeDecision::Ignore;
         }
         if !self.step(node_id).is_some_and(|step| {
             step.attempt == attempt
@@ -1059,10 +1060,6 @@ pub enum NudgeDecision {
     Exhausted,
     /// The agent is borrowed from the source, so it may not be woken.
     NotOwned,
-    /// A wake-up was claimed but never settled: the process died between the
-    /// claim and its delivery. The prompt may already have reached the
-    /// terminal, so it is never re-sent — the step is surfaced instead.
-    Abandon,
 }
 
 /// An explicit action the impure seam executes after committing the
@@ -1634,21 +1631,6 @@ fn advance_inner(run: &mut RunView, event: &CircuitEvent) -> Transition {
                     t.context_changed = true;
                     t.effects
                         .push(nudge_effect(node_id, target_agent_id, task_id));
-                }
-                // A wake-up was claimed but its delivery never settled: the
-                // worker died mid-flight. Settle it as uncertain and surface the
-                // step rather than re-sending a prompt that may already have
-                // reached the terminal.
-                NudgeDecision::Abandon => {
-                    run.context
-                        .set(&format!("node.{node_id}.nudge.delivery"), "uncertain");
-                    t.context_changed = true;
-                    unverify_step(
-                        run,
-                        &mut t,
-                        node_id,
-                        "Wake-up delivery did not complete and will not be replayed. Inspect the agent: it may or may not have received the wake-up.".to_string(),
-                    );
                 }
                 // The wake-up is spent or the agent is not ours to wake: leave
                 // the step alone and let the normal wait budget decide, rather
