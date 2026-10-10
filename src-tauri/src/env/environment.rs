@@ -17,14 +17,14 @@
 //! there are no `to_host_path`-shaped functions here, only detection results.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::env;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 
-use crate::process_util::command_no_window;
 use crate::models::EnvType;
+use crate::process_util::command_no_window;
 
 // ── WSL distro lookup ──────────────────────────────────────────────────────
 
@@ -50,10 +50,19 @@ const WSL_DISTRO_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 pub(crate) fn detect_default_wsl_distro() -> Option<String> {
     let mut command = command_no_window("wsl.exe");
     command.args(["-l", "-v"]);
-    let output =
-        crate::process_util::run_command_with_timeout(command, "WSL distro detection", WSL_DISTRO_PROBE_TIMEOUT)
-            .ok()?;
-    let stdout = if output.stdout.iter().skip(1).step_by(2).any(|byte| *byte == 0) {
+    let output = crate::process_util::run_command_with_timeout(
+        command,
+        "WSL distro detection",
+        WSL_DISTRO_PROBE_TIMEOUT,
+    )
+    .ok()?;
+    let stdout = if output
+        .stdout
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .any(|byte| *byte == 0)
+    {
         let units = output
             .stdout
             .chunks_exact(2)
@@ -280,11 +289,14 @@ pub fn current_env() -> Environment {
 /// Guest home is a property of the installed distribution, never the Windows
 /// account name or the repository's directory (which can be a mounted drive).
 pub(crate) fn wsl_home() -> Option<PathBuf> {
-    if !cfg!(windows) { return env::var_os("HOME").map(PathBuf::from); }
+    if !cfg!(windows) {
+        return env::var_os("HOME").map(PathBuf::from);
+    }
     // A memoized miss from distro detection cannot become Some later.
     // Entering the retry loop would only sleep 500ms to re-read None.
     get_default_wsl_distro()?;
-    static GUEST_HOME: Lazy<Option<PathBuf>> = Lazy::new(|| probe_until_some(3, probe_wsl_home_once));
+    static GUEST_HOME: Lazy<Option<PathBuf>> =
+        Lazy::new(|| probe_until_some(3, probe_wsl_home_once));
     GUEST_HOME.clone()
 }
 
@@ -424,11 +436,19 @@ fn wsl_muse_auth_path() -> Option<PathBuf> {
         "if [ -n \"${META_API_KEY:-}\" ]; then exit 1; fi; printf '__BUILDMESH_MUSE_AUTH__%s\\n' \"${MUSE_AUTH_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/muse/auth.json}\"",
     ]);
     let output = crate::process_util::run_command_with_timeout(
-        command, "WSL Muse credential location", std::time::Duration::from_secs(10),
-    ).ok()?;
-    if !output.status.success() { return None; }
+        command,
+        "WSL Muse credential location",
+        std::time::Duration::from_secs(10),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
     let guest = parse_marked_wsl_path(&output.stdout, "__BUILDMESH_MUSE_AUTH__")?;
-    Some(PathBuf::from(super::to_host_path_for_runtime(&guest.to_string_lossy(), EnvType::Wsl)))
+    Some(PathBuf::from(super::to_host_path_for_runtime(
+        &guest.to_string_lossy(),
+        EnvType::Wsl,
+    )))
 }
 
 /// The native Muse credential path from process variables, mirroring the
@@ -446,7 +466,9 @@ fn wsl_muse_auth_path() -> Option<PathBuf> {
 /// no subscription (the WSL probe applies the same veto to the guest
 /// environment).
 fn muse_auth_path_from_vars(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
-    if get("META_API_KEY").is_some_and(|value| !value.is_empty()) { return None; }
+    if get("META_API_KEY").is_some_and(|value| !value.is_empty()) {
+        return None;
+    }
     if let Some(path) = get("MUSE_AUTH_PATH").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(path));
     }
@@ -480,26 +502,41 @@ mod muse_path_tests {
         let xdg = "C:\\opt\\config";
         #[cfg(not(windows))]
         let xdg = "/opt/config";
-        let resolve = |auth: &str| muse_auth_path_from_vars(|name| match name {
-            "MUSE_AUTH_PATH" => Some(auth.into()),
-            "XDG_CONFIG_HOME" => Some(xdg.into()),
-            "HOME" => Some("/home/test".into()),
-            _ => None,
-        }).unwrap();
-        assert_eq!(resolve("/var/lib/muse/auth.json"), PathBuf::from("/var/lib/muse/auth.json"));
+        let resolve = |auth: &str| {
+            muse_auth_path_from_vars(|name| match name {
+                "MUSE_AUTH_PATH" => Some(auth.into()),
+                "XDG_CONFIG_HOME" => Some(xdg.into()),
+                "HOME" => Some("/home/test".into()),
+                _ => None,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            resolve("/var/lib/muse/auth.json"),
+            PathBuf::from("/var/lib/muse/auth.json")
+        );
         assert_eq!(resolve(""), PathBuf::from(xdg).join("muse/auth.json"));
-        let resolve_home = |auth: &str| muse_auth_path_from_vars(|name| match name {
-            "MUSE_AUTH_PATH" => Some(auth.into()),
-            "HOME" => Some("/home/test".into()),
-            _ => None,
-        }).unwrap();
-        assert_eq!(resolve_home(""), PathBuf::from("/home/test/.config/muse/auth.json"));
+        let resolve_home = |auth: &str| {
+            muse_auth_path_from_vars(|name| match name {
+                "MUSE_AUTH_PATH" => Some(auth.into()),
+                "HOME" => Some("/home/test".into()),
+                _ => None,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            resolve_home(""),
+            PathBuf::from("/home/test/.config/muse/auth.json")
+        );
         assert_eq!(muse_auth_path_from_vars(|_| None), None);
-        assert_eq!(muse_auth_path_from_vars(|name| match name {
-            "META_API_KEY" => Some("test-api-key".into()),
-            "MUSE_AUTH_PATH" => Some("/home/test/stale-oauth.json".into()),
-            _ => None,
-        }), None);
+        assert_eq!(
+            muse_auth_path_from_vars(|name| match name {
+                "META_API_KEY" => Some("test-api-key".into()),
+                "MUSE_AUTH_PATH" => Some("/home/test/stale-oauth.json".into()),
+                _ => None,
+            }),
+            None
+        );
     }
 
     /// Native Windows muse.exe (1.3.0) stores OAuth at
@@ -540,10 +577,7 @@ mod muse_path_tests {
             _ => None,
         })
         .unwrap();
-        assert_eq!(
-            resolved,
-            PathBuf::from("/home/test/.config/muse/auth.json")
-        );
+        assert_eq!(resolved, PathBuf::from("/home/test/.config/muse/auth.json"));
     }
 
     /// The guest candidate only exists on Windows: elsewhere the probe is
@@ -559,7 +593,9 @@ mod muse_path_tests {
         // of WSL), guest second.
         assert_eq!(
             resolve_muse_auth_candidates(
-                || Some(PathBuf::from("\\\\wsl$\\Ubuntu\\home\\test\\.config\\muse\\auth.json")),
+                || Some(PathBuf::from(
+                    "\\\\wsl$\\Ubuntu\\home\\test\\.config\\muse\\auth.json"
+                )),
                 vars,
             ),
             vec![
@@ -596,8 +632,19 @@ mod muse_path_tests {
     #[test]
     fn muse_guest_output_requires_marker_and_absolute_path() {
         let marker = "__BUILDMESH_MUSE_AUTH__";
-        assert_eq!(parse_marked_wsl_path(b"login banner\n__BUILDMESH_MUSE_AUTH__/opt/config/muse/auth.json\n", marker), Some(PathBuf::from("/opt/config/muse/auth.json")));
-        for output in [b"".as_slice(), b"/home/test/.config/muse/auth.json", b"__BUILDMESH_MUSE_AUTH__relative/path", b"__BUILDMESH_MUSE_AUTH__\xff"] {
+        assert_eq!(
+            parse_marked_wsl_path(
+                b"login banner\n__BUILDMESH_MUSE_AUTH__/opt/config/muse/auth.json\n",
+                marker
+            ),
+            Some(PathBuf::from("/opt/config/muse/auth.json"))
+        );
+        for output in [
+            b"".as_slice(),
+            b"/home/test/.config/muse/auth.json",
+            b"__BUILDMESH_MUSE_AUTH__relative/path",
+            b"__BUILDMESH_MUSE_AUTH__\xff",
+        ] {
             assert_eq!(parse_marked_wsl_path(output, marker), None);
         }
     }
@@ -639,7 +686,9 @@ pub(crate) fn wsl_codex_home() -> Option<PathBuf> {
 /// Runtime paths are already translated for the process. A UNC spawn path
 /// belongs to a Windows process; a POSIX spawn path belongs to a guest.
 pub(crate) fn runtime_for_spawn_path(path: &str) -> EnvType {
-    if super::is_wsl_host() && super::is_windows_path(path) { return EnvType::WindowsInterop; }
+    if super::is_wsl_host() && super::is_windows_path(path) {
+        return EnvType::WindowsInterop;
+    }
     if cfg!(windows) && path.starts_with('/') && !path.starts_with("//") {
         EnvType::Wsl
     } else {
@@ -734,17 +783,41 @@ fn kimi_home_probe(runtime: EnvType, distro: Option<&str>) -> Option<PathBuf> {
     let path = if runtime == EnvType::Wsl {
         let distro = distro.map(str::to_string).or_else(get_default_wsl_distro)?;
         let mut command = command_no_window("wsl.exe");
-        command.args(["-d", &distro, "--cd", "~", "--exec", "sh", "-lc",
-            "printf '__BUILDMESH_KIMI_HOME__%s\\n' \"${KIMI_CODE_HOME:-$HOME/.kimi-code}\""]);
-        let output = crate::process_util::run_command_with_timeout(command, "WSL Kimi home", std::time::Duration::from_secs(10)).ok()?;
-        if !output.status.success() { return None; }
+        command.args([
+            "-d",
+            &distro,
+            "--cd",
+            "~",
+            "--exec",
+            "sh",
+            "-lc",
+            "printf '__BUILDMESH_KIMI_HOME__%s\\n' \"${KIMI_CODE_HOME:-$HOME/.kimi-code}\"",
+        ]);
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "WSL Kimi home",
+            std::time::Duration::from_secs(10),
+        )
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
         parse_marked_wsl_path(&output.stdout, "__BUILDMESH_KIMI_HOME__")?
     } else if runtime == EnvType::WindowsInterop {
         let command = super::powershell_command("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $path = if ([string]::IsNullOrWhiteSpace($env:KIMI_CODE_HOME)) { Join-Path $env:USERPROFILE '.kimi-code' } else { $env:KIMI_CODE_HOME }; [Console]::Write($path)");
-        let output = crate::process_util::run_command_with_timeout(command, "Windows Kimi home", std::time::Duration::from_secs(10)).ok()?;
-        if !output.status.success() { return None; }
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "Windows Kimi home",
+            std::time::Duration::from_secs(10),
+        )
+        .ok()?;
+        if !output.status.success() {
+            return None;
+        }
         let path = String::from_utf8(output.stdout).ok()?;
-        if !super::is_windows_path(path.trim()) { return None; }
+        if !super::is_windows_path(path.trim()) {
+            return None;
+        }
         PathBuf::from(path.trim())
     } else {
         kimi_home_from_vars(cfg!(windows), |key| env::var(key).ok())?
@@ -756,7 +829,11 @@ fn kimi_home_from_vars(windows: bool, get: impl Fn(&str) -> Option<String>) -> O
     if let Some(path) = get("KIMI_CODE_HOME").filter(|path| !path.trim().is_empty()) {
         return Some(PathBuf::from(path));
     }
-    let home = if windows { get("USERPROFILE").or_else(|| get("HOME")) } else { get("HOME") }?;
+    let home = if windows {
+        get("USERPROFILE").or_else(|| get("HOME"))
+    } else {
+        get("HOME")
+    }?;
     Some(PathBuf::from(home).join(".kimi-code"))
 }
 
@@ -771,11 +848,30 @@ mod kimi_tests {
             "HOME" => Some("/home/linux".into()),
             _ => None,
         };
-        assert_eq!(kimi_home_from_vars(true, vars), Some(PathBuf::from("C:/Users/windows/.kimi-code")));
-        assert_eq!(kimi_home_from_vars(false, vars), Some(PathBuf::from("/home/linux/.kimi-code")));
-        assert_eq!(kimi_home_from_vars(false, |key| if key == "KIMI_CODE_HOME" { Some("/custom/kimi".into()) } else { vars(key) }), Some(PathBuf::from("/custom/kimi")));
+        assert_eq!(
+            kimi_home_from_vars(true, vars),
+            Some(PathBuf::from("C:/Users/windows/.kimi-code"))
+        );
+        assert_eq!(
+            kimi_home_from_vars(false, vars),
+            Some(PathBuf::from("/home/linux/.kimi-code"))
+        );
+        assert_eq!(
+            kimi_home_from_vars(false, |key| if key == "KIMI_CODE_HOME" {
+                Some("/custom/kimi".into())
+            } else {
+                vars(key)
+            }),
+            Some(PathBuf::from("/custom/kimi"))
+        );
         assert_eq!(kimi_home_from_vars(false, |_| None), None);
-        assert_eq!(parse_marked_wsl_path(b"banner\n__BUILDMESH_KIMI_HOME__/custom/kimi\n", "__BUILDMESH_KIMI_HOME__"), Some(PathBuf::from("/custom/kimi")));
+        assert_eq!(
+            parse_marked_wsl_path(
+                b"banner\n__BUILDMESH_KIMI_HOME__/custom/kimi\n",
+                "__BUILDMESH_KIMI_HOME__"
+            ),
+            Some(PathBuf::from("/custom/kimi"))
+        );
     }
 
     /// Issue #1752: the spawn-env probe must run **once per fingerprint**, not
@@ -803,7 +899,11 @@ mod kimi_tests {
             Some(PathBuf::from("/home/u/.kimi-code")),
             "a repeated fingerprint must return the cached value, not re-probe"
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call must hit the memo");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call must hit the memo"
+        );
 
         // A different distro is a different fingerprint → re-probe.
         let debian = spawn_env_memo_key(EnvType::Wsl, Some("Debian"));
@@ -811,7 +911,11 @@ mod kimi_tests {
             memoized_spawn_env(debian, || probe("/home/u/.kimi-code")),
             Some(PathBuf::from("/home/u/.kimi-code"))
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "a changed distro must re-probe");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a changed distro must re-probe"
+        );
 
         // A failed probe (`None`) must NOT be latched: a transient failure (WSL
         // not up yet during startup, a flaky subprocess) has to be retryable on
@@ -843,8 +947,14 @@ mod kimi_tests {
     }
 }
 
-pub(crate) fn cli_dir_for_spawn(native: PathBuf, guest_relative: &str, spawn_path: &str) -> Option<PathBuf> {
-    if runtime_for_spawn_path(spawn_path) == EnvType::WindowsInterop { return super::windows_cli_home(guest_relative); }
+pub(crate) fn cli_dir_for_spawn(
+    native: PathBuf,
+    guest_relative: &str,
+    spawn_path: &str,
+) -> Option<PathBuf> {
+    if runtime_for_spawn_path(spawn_path) == EnvType::WindowsInterop {
+        return super::windows_cli_home(guest_relative);
+    }
     if runtime_for_spawn_path(spawn_path) == EnvType::Wsl {
         let guest = wsl_home()?.join(guest_relative);
         Some(PathBuf::from(super::to_host_path(&guest.to_string_lossy())))
@@ -982,22 +1092,16 @@ pub fn agy_dir() -> PathBuf {
     match current_env() {
         Environment::Wsl => {
             if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else {
                 PathBuf::from("/root/.gemini/antigravity-cli")
             }
         }
         Environment::Windows => {
             if let Ok(home) = env::var("USERPROFILE") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else if let Ok(home) = env::var("HOME") {
-                PathBuf::from(home)
-                    .join(".gemini")
-                    .join("antigravity-cli")
+                PathBuf::from(home).join(".gemini").join("antigravity-cli")
             } else {
                 let user = env::var("USERNAME").unwrap_or_else(|_| "Public".to_string());
                 PathBuf::from(format!("C:\\Users\\{user}\\.gemini\\antigravity-cli"))
@@ -1194,9 +1298,7 @@ fn cline_data_dir_override_for_env<F: Fn(&str) -> Option<std::ffi::OsString>>(
 /// `var_os`, but the override returns `None` here, so the bare-home
 /// path picks the `data/db/sessions.db` suffix (the bug the empty-string
 /// guard prevents).
-pub(crate) fn cline_db_path_with_resolver<
-    F: Fn(&str) -> Option<std::ffi::OsString>,
->(
+pub(crate) fn cline_db_path_with_resolver<F: Fn(&str) -> Option<std::ffi::OsString>>(
     env_type: EnvType,
     spawn_path: &str,
     get: F,
@@ -1284,8 +1386,7 @@ pub(crate) fn cline_db_path_for_host_with<
     let db_path = cline_db_path_with_seams(env_type, spawn_path, get, guest_home)?;
     let db_str = db_path.to_string_lossy();
     Some(PathBuf::from(super::to_host_path_with_distro(
-        &db_str,
-        distro,
+        &db_str, distro,
     )))
 }
 

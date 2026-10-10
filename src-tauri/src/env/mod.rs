@@ -823,12 +823,9 @@ mod tests {
 
         // Windows / WindowsInterop stay on the host, so the host helper
         // equals the raw helper.
-        let raw_windows = cline_db_path_with_seams(
-            EnvType::Windows,
-            "",
-            injected_env,
-            || None::<std::path::PathBuf>,
-        )
+        let raw_windows = cline_db_path_with_seams(EnvType::Windows, "", injected_env, || {
+            None::<std::path::PathBuf>
+        })
         .expect("windows home must resolve");
         let host_windows = cline_db_path_for_host_with(
             EnvType::Windows,
