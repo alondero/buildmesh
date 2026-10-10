@@ -7,7 +7,7 @@ description: Add or change a Tauri command or the mobile HTTP route that shares 
 
 Follow this in order. The rules it protects are in `CLAUDE.md` and `docs/development/rust-conventions.md`. A command validates input, calls one service or `db::` function, and maps the error to `String`.
 
-Do not copy `src-tauri/src/commands/git.rs`, `src-tauri/src/commands/diff.rs`, `src-tauri/src/commands/pr.rs`, `src-tauri/src/commands/prune.rs`, `src-tauri/src/commands/ai_context.rs`, or `src-tauri/src/commands/build_run.rs`. They still open `git2` repositories. That debt is pinned by `tests/unit/git2-ownership.test.ts`.
+Do not copy a file listed under `docs/development/module-map.md#seam-debt`. Those files still open `git2` repositories. `tests/agent-infra/git2-ownership.test.mjs` pins that list.
 
 1. Put the command in `src-tauri/src/commands/`. Blocking work (SQLite, `std::fs`, `preferences::load`, `preferences::save`, git, network) is a plain sync `*_blocking` core plus a `#[command]` `async fn` that calls `run_blocking` from `src-tauri/src/blocking.rs`. A fast in-memory command may stay a sync `#[command] fn`.
 2. Register it in `tauri::generate_handler!` in `src-tauri/src/lib.rs`. A missing entry fails at runtime with "command not found".
@@ -16,6 +16,7 @@ Do not copy `src-tauri/src/commands/git.rs`, `src-tauri/src/commands/diff.rs`, `
 5. Put the desktop wrapper on the facet that already owns the area: `src/lib/tauri/provider.ts`, `src/lib/tauri/circuitBlueprint.ts`, `src/lib/tauri/circuitEvidence.ts`, `src/lib/tauri/history.ts`, or `src/lib/tauri/stateRecovery.ts`. Otherwise add it to `src/lib/tauri.ts`. Every wrapper calls `_invoke` from `src/lib/tauri/_invoke.ts`. Do not call `invoke` anywhere else.
 6. A mobile route under `src-tauri/src/http/routes` awaits the async command wrapper, or calls `run_blocking` itself. It must not call the `*_blocking` core on the async worker.
 7. Cover malformed input, a missing dependency, and acknowledged success at that command or route. The guards are `tests/unit/ipc-contract.test.ts`, `tests/unit/tauri-ipc-seam.test.ts`, and `tests/unit/async-command-blocking.test.ts`.
+8. Document the user-visible behavior or the developer/API contract. A security or lifecycle decision goes in `docs/adr/`.
 
 From the worktree root, with `NODE_ENV=test`:
 

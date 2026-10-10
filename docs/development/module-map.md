@@ -39,7 +39,7 @@ same sense:
 ## Seam debt
 
 The rules above are the standard. These production files still open a `git2`
-repository themselves. `tests/unit/git2-ownership.test.ts` fails if a new file
+repository themselves. `tests/agent-infra/git2-ownership.test.mjs` fails if a new file
 joins this list, and it fails if one of these files stops using `git2` until
 the path is removed here in the same change. Test-only use (a `#[cfg(test)]`
 item, or a `*_tests.rs` / `tests.rs` file) is not debt.

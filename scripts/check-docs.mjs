@@ -258,8 +258,10 @@ export function collectSkillFiles(root = repoRoot) {
 }
 
 // Task-recipe skills name the files an agent must open. A backticked path
-// that does not exist sends that agent to a guess. Templates (`<area>`, `*`)
-// are skipped. Fenced examples are skipped with the rest of the docs gate.
+// that does not exist sends that agent to a guess. This check proves the
+// path exists. It does not prove the path is the right file for the step.
+// Templates (`<area>`, `*`) are skipped. Fenced examples are skipped with
+// the rest of the docs gate.
 export function checkSkillPaths({ root = repoRoot, files = collectSkillFiles(root) } = {}) {
   const failures = [];
   for (const source of files) {
