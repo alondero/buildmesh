@@ -150,6 +150,58 @@ pub fn run_command_with_timeout(
         .map_err(|e| format!("{op_name} wait_with_output failed: {e}"))
 }
 
+/// The process-group id `kill(2)` should receive for `pid`, or `None` when
+/// that call would not mean "this group".
+///
+/// `0` signals the caller's own group. `-1` signals every process the caller
+/// may signal. Both are refused: a verification cancel must not take the
+/// rest of the process — on a GitHub-hosted runner, that rest includes the
+/// runner agent (issue #2103).
+pub(crate) fn process_group_signal_target(pid: u32) -> Option<i32> {
+    let pgid = i32::try_from(pid).ok()?;
+    if pgid <= 1 {
+        None
+    } else {
+        pgid.checked_neg()
+    }
+}
+
+/// Signal every member of the process group led by `pid`.
+///
+/// The child must already be the leader (`CommandExt::process_group(0)`).
+/// The signal is `kill(2)` with the whole negative id.
+///
+/// Do not shell out to procps `kill` for this. Without `--`, Ubuntu 24.04's
+/// `kill -KILL -<pid>` keeps only the first digit of the id. A pid whose
+/// first digit is 1 becomes `-1`, and that signal reaches every process the
+/// user can kill. The `services` shard lost its runner that way once tests
+/// ran in parallel and the cancelled verification's pid landed in that range.
+pub fn kill_process_group(pid: u32) {
+    let Some(target) = process_group_signal_target(pid) else {
+        return;
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: `target` is a negative process-group id, never 0 or -1.
+        // `kill(2)` delivers a signal; it does not free memory or take a lock.
+        unsafe {
+            kill(target, SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+    }
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
 /// Forcefully terminate a process and all of its descendants.
 ///
 /// On Windows, `TerminateProcess` (what portable-pty's `Child::kill` calls)
@@ -604,6 +656,72 @@ mod tests {
             panic!("{owned}");
         });
         assert!(!ok);
+    }
+
+    #[test]
+    fn process_group_signal_keeps_the_full_id_and_never_targets_every_process() {
+        // procps without `--` reduces -1003247 to its first digit, -1.
+        // -1 means every process the caller may signal, which on CI is the runner.
+        assert_eq!(process_group_signal_target(1_003_247), Some(-1_003_247));
+        assert_eq!(process_group_signal_target(15_234), Some(-15_234));
+        assert_eq!(process_group_signal_target(1), None);
+        assert_eq!(process_group_signal_target(0), None);
+    }
+
+    /// A bystander in another process group must survive a signal aimed at a
+    /// group id procps would have rewritten to -1, and a real group must die.
+    #[cfg(unix)]
+    #[test]
+    fn kill_process_group_signals_only_that_group() {
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let spawn = || {
+            let mut command = command_no_window("sleep");
+            command
+                .arg("30")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            command
+                .spawn()
+                .expect("spawn a sleeper in its own process group")
+        };
+        let mut canary = spawn();
+        let mut victim = spawn();
+
+        kill_process_group(1_003_247);
+        assert!(
+            canary.try_wait().unwrap().is_none(),
+            "signalling an absent group whose id starts with 1 must not reach the canary"
+        );
+        assert!(
+            victim.try_wait().unwrap().is_none(),
+            "the absent-group signal must not reach the victim either"
+        );
+
+        kill_process_group(victim.id());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut victim_status = victim.try_wait().unwrap();
+        while victim_status.is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            victim_status = victim.try_wait().unwrap();
+        }
+        assert!(
+            victim_status.is_some(),
+            "the victim's own process group must receive the signal"
+        );
+        assert!(
+            canary.try_wait().unwrap().is_none(),
+            "a process in another group must still be running"
+        );
+        kill_process_group(canary.id());
+        let _ = canary.wait();
+        let _ = victim.wait();
     }
 
     #[test]

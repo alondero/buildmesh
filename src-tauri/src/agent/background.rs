@@ -68,13 +68,7 @@ impl BackgroundProcessGuard {
         if self.job.is_none() {
             crate::process_util::kill_process_tree(self.pid);
         }
-        #[cfg(unix)]
-        {
-            let group = format!("-{}", self.pid);
-            let _ = crate::process_util::command_no_window("kill")
-                .args(["-KILL", "--", &group])
-                .status();
-        }
+        crate::process_util::kill_process_group(self.pid);
     }
 }
 

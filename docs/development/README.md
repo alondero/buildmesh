@@ -93,40 +93,14 @@ requests.
 
 ## Common change checklists
 
-### Adding or changing a harness/provider
+The file-by-file order for a cross-cutting change is a skill. This page links
+to that skill instead of keeping a second copy. `npm run check:docs` fails
+when a path named in a skill does not exist.
 
-- Update the Rust adapter and its capability inventory (`capabilities()` /
-  the trait methods it composes). Add the `Provider` variant,
-  `BUILTIN_HARNESS_IDS` entry, and `inspector_label` match arm.
-- Declare the harness's Circuit observation strategy in the adapter
-  (`circuit_observation()`): the hook parser, native pull, identity and
-  owned-work coverage, report source and reconciliation budget it really
-  supports. The default is unwired; the Circuit worker and its diagnostics both
-  read this declaration, so do not add a harness-name branch under
-  `services/circuit_worker` (see
-  [Circuit session observation](circuit-session-observation.md#harness-owned-observation-strategies)).
-- Do not hand-edit a TypeScript capability table. Run `cargo test` from
-  `src-tauri/` so `HarnessCapabilitiesTable.ts` regenerates; CI's
-  `git diff --exit-code src/types/generated` is the drift gate (ADR-0037).
-- Regenerate committed wire types with `cargo test` when a wire struct changes.
-- Add fresh and resume coverage, plus attention/transcript behavior where the
-  harness supports it.
-- Update [the user guide](../user-guide.md), the README's harness summary when
-  needed, and [troubleshooting](../troubleshooting.md) for runtime caveats.
-- Capture externally verified CLI behavior in `docs/learning/` or `docs/research/`
-  with a source link instead of copying uncertain assumptions into the user
-  guide.
-
-### Adding a Tauri command or HTTP route
-
-- Keep the external boundary thin and register new Tauri commands in
-  `src-tauri/src/lib.rs`.
-- Derive and regenerate Rust↔TypeScript wire types; never hand-edit generated
-  files.
-- Test malformed input, unavailable dependencies, auth/error status, and
-  acknowledged success at the real boundary where practical.
-- Document the user-visible behavior or the developer/API contract and record
-  security or lifecycle decisions in an ADR.
+- [Add or change a harness adapter](../../.claude/skills/add-harness-adapter/SKILL.md)
+- [Add a Tauri command or HTTP route](../../.claude/skills/add-tauri-command/SKILL.md)
+- [Change the database schema](../../.claude/skills/db-migration/SKILL.md)
+- [Add or change a setting](../../.claude/skills/add-setting/SKILL.md)
 
 ### Changing a user-visible feature
 

@@ -32,6 +32,12 @@ const srcRoot = process.argv[2]
 const PATTERNS = [/\.creation_flags\(/, /std::process::Command::new\("git"\)/];
 const MARKER = '// allow-inline-process-spawn';
 const EXCLUDED_BASENAMES = new Set(['tests.rs', 'process_util.rs']);
+// procps `kill -KILL -<pid>` (no `--`) keeps only the first digit of a
+// negative process-group id. A pid whose first digit is 1 becomes -1, and
+// kill(2) of -1 signals every process the user can reach — on a hosted
+// runner, that is the runner agent (issue #2103). The spawn-allow marker
+// does not excuse it: that marker is about console windows, not signals.
+const KILL_GROUP = /command_no_window\(\s*"kill"\s*\)/;
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -174,8 +180,17 @@ try {
 }
 
 const findings = [];
+const killGroupFindings = [];
 let scanned = 0;
 let skippedModules = 0;
+
+// `process_util.rs` is exempt from the console-window rules because it is
+// the module those rules point at. It is not exempt from the process-group
+// rule: the helper that replaced the shell-out lives there, and a regression
+// to `command_no_window("kill")` inside it would be invisible otherwise.
+const killGroupFiles = [...files];
+const processUtil = path.join(srcRoot, 'process_util.rs');
+if (fs.existsSync(processUtil) && !killGroupFiles.includes(processUtil)) killGroupFiles.push(processUtil);
 
 for (const file of files) {
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
@@ -190,19 +205,40 @@ for (const file of files) {
   scanned++;
 }
 
+for (const file of killGroupFiles) {
+  const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  lines.forEach((line, index) => {
+    if (!KILL_GROUP.test(line)) return;
+    killGroupFindings.push({ file: path.relative(repoRoot, file).replaceAll('\\', '/'), line: index + 1, text: line.trim() });
+  });
+}
+
 console.log(`Scanned ${scanned} Rust file(s) for inline process-spawn patterns.`);
 console.log(`Skipped an inline #[cfg(test)] module in ${skippedModules} file(s).`);
 
-if (findings.length > 0) {
+if (findings.length > 0 || killGroupFindings.length > 0) {
   console.error('');
   for (const finding of findings) {
     console.error(`  ${finding.file}:${finding.line}  ${finding.text}`);
   }
-  console.error(
-    `\n::error::${findings.length} inline process-spawn pattern(s) outside process_util ` +
-      '(issue #665 / #690). Use crate::process_util::command_no_window("program") so ' +
-      'CREATE_NO_WINDOW is set on Windows, or add `// allow-inline-process-spawn` with a reason.',
-  );
+  if (findings.length > 0) {
+    console.error(
+      `\n::error::${findings.length} inline process-spawn pattern(s) outside process_util ` +
+        '(issue #665 / #690). Use crate::process_util::command_no_window("program") so ' +
+        'CREATE_NO_WINDOW is set on Windows, or add `// allow-inline-process-spawn` with a reason.',
+    );
+  }
+  for (const finding of killGroupFindings) {
+    console.error(`  ${finding.file}:${finding.line}  ${finding.text}`);
+  }
+  if (killGroupFindings.length > 0) {
+    console.error(
+      `\n::error::${killGroupFindings.length} procps kill process-group signal(s) (issue #2103). ` +
+        'Ubuntu 24.04 `kill` keeps only the first digit of a negative process-group id, so a pid ' +
+        'starting with 1 becomes -1 and signals every process the user can kill, including the CI runner. ' +
+        'Call process_util::kill_process_group, which uses kill(2) with the whole id.',
+    );
+  }
   process.exit(1);
 }
 

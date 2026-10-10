@@ -58,6 +58,29 @@ test('honors the inline allow marker and existing test-file exclusions', () => {
   assert.match(result.stdout, /Process-spawn discipline: clean\./);
 });
 
+test('a procps kill of a process group fails even with the spawn-allow marker', () => {
+  const result = runScanner({
+    'worker.rs': [
+      'fn stop(pid: u32) {',
+      '    let group = format!("-{}", pid);',
+      '    crate::process_util::command_no_window("kill") // allow-inline-process-spawn: not a console flag',
+      '        .args(["-KILL", &group]);',
+      '}',
+    ].join('\n'),
+    'ok.rs': 'crate::process_util::kill_process_group(pid);',
+  });
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /worker\.rs:3/);
+  assert.match(result.stderr, /issue #2103/);
+  assert.doesNotMatch(result.stderr, /ok\.rs/);
+});
+
+test('the crate does not ask procps to signal a process group', () => {
+  const result = spawnSync(process.execPath, [scriptPath], { encoding: 'utf8' });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+});
+
 test('scans the whole file when an inline test module cannot be balanced', () => {
   const result = runScanner({
     'lib.rs': [

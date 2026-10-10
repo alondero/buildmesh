@@ -10,6 +10,7 @@ import {
   checkAlwaysLoadedBudgets,
   checkBacktickedRepoPaths,
   checkDocumentation,
+  checkSkillPaths,
   checkDocumentationImpact,
   checkLocalLinks,
   changedFilesSince,
@@ -271,4 +272,30 @@ test('archived records may name paths as they were when written', () => {
 
 test('the real repository has no stale backticked pointers left by the split', () => {
   assert.deepEqual(checkBacktickedRepoPaths({ root }), []);
+});
+
+test('a task-recipe skill cannot name a repository path that does not exist', () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), 'buildmesh-skill-path-'));
+  try {
+    const skillDir = join(fixtureRoot, '.claude', 'skills', 'example');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(join(skillDir, 'SKILL.md'), [
+      '# Example',
+      '',
+      'Open `src/missing.rs` and `src/real.rs`.',
+      'A template `src/commands/<area>.rs` is not a path.',
+      '```',
+      '`src/only-in-a-fence.rs`',
+      '```',
+    ].join('\n'));
+    mkdirSync(join(fixtureRoot, 'src'), { recursive: true });
+    writeFileSync(join(fixtureRoot, 'src', 'real.rs'), '');
+
+    const failures = checkSkillPaths({ root: fixtureRoot });
+    assert.deepEqual(failures, [
+      '.claude/skills/example/SKILL.md: skill path "src/missing.rs" does not exist',
+    ]);
+  } finally {
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
 });

@@ -160,6 +160,14 @@ pub(crate) fn background_command(
     // The recipe's own deliberate env is applied by the caller afterwards, so
     // scrubbing here clears only what the launching session contributed.
     strip_claude_session_markers_from_command(&mut cmd);
+    // The guard signals this process's group (`kill(-pid)`). A child that
+    // merely inherited our group has no group whose id is its pid, so that
+    // signal is ESRCH and cancellation would leave descendants running.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
 }
 
@@ -531,6 +539,81 @@ mod tests {
                 "{key} must be explicitly removed from the background launch env"
             );
         }
+    }
+
+    /// `BackgroundProcessGuard` signals the group led by the child. Background
+    /// inference is built here, so this command has to be that leader. Otherwise
+    /// `kill(-pid)` names a group that does not exist and cancellation leaves
+    /// the CLI's descendants running.
+    #[cfg(unix)]
+    #[test]
+    fn background_inference_leads_its_own_group_so_cancel_reaps_descendants() {
+        use std::io::{BufRead, Read};
+        use std::process::Stdio;
+
+        let _env = crate::env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let recipe = SpawnRecipe {
+            binary: "sh",
+            base_args: vec![
+                "-c".into(),
+                "echo ready; sh -c 'echo child-ready; sleep 60' & wait".into(),
+            ],
+            trailing_args: vec![],
+            windows_shell: WindowsShell::Direct,
+        };
+        let mut command = super::background_command(&recipe, None);
+        command.stdout(Stdio::piped());
+        let mut child = Reap(
+            command
+                .spawn()
+                .expect("spawn background inference in its own process group"),
+        );
+        let pid = child.0.id();
+        // SAFETY: `getpgid` only reads the group id of this live child. A pid
+        // that has already exited returns -1, which the assertion rejects.
+        let pgid = unsafe { getpgid(i32::try_from(pid).unwrap()) };
+        let mut reader = std::io::BufReader::new(child.0.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "ready");
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), "child-ready");
+        assert_eq!(
+            pgid,
+            i32::try_from(pid).unwrap(),
+            "background inference must lead its own process group (pgid {pgid}, pid {pid})"
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drain = std::thread::spawn(move || {
+            let mut remaining = String::new();
+            tx.send(reader.read_to_string(&mut remaining)).unwrap();
+        });
+        drop(crate::agent::background::BackgroundProcessGuard::new(pid));
+        let closed = rx.recv_timeout(std::time::Duration::from_secs(5));
+        closed
+            .expect("cancelling background inference must reap descendants")
+            .unwrap();
+        drain.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    struct Reap(std::process::Child);
+
+    #[cfg(unix)]
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            crate::process_util::kill_process_group(self.0.id());
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[cfg(unix)]
+    extern "C" {
+        fn getpgid(pid: i32) -> i32;
     }
 
     /// The scrub is an explicit list precisely because Buildmesh sets `CLAUDE_*`

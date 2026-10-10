@@ -12,6 +12,22 @@ interface RemoteAccessModalProps {
   onClose: () => void;
 }
 
+// Every QR in this modal shares one encoding contract.
+//
+// color.dark MUST be a dark colour. The Android client scans with
+// zxing-android-embedded, whose HybridBinarizer assumes dark modules on a
+// light background and has no inverted fallback. An inverted code throws
+// NotFoundException on every frame, so the camera preview runs forever and
+// never decodes: the user points the phone at the QR and nothing happens.
+//
+// 384px matches the w-96 render box so the browser never upscales and blurs
+// the modules; a smaller raster degrades scan reliability at distance.
+const QR_OPTIONS = {
+  width: 384,
+  margin: 2,
+  color: { dark: '#000000', light: '#ffffff' },
+};
+
 // Issue #1527: the "trusted root was reset" banner must surface across
 // modal opens — the previous in-component `useState` was reset on every
 // mount, so the banner could only render in the same session that
@@ -243,20 +259,8 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
         // with no `ca.key.der`) is silently swallowed and the iOS tab is
         // hidden, matching the existing Android tab's failure semantics.
         const [connectResult, installResult, installIosResult] = await Promise.allSettled([
-          QRCode.toDataURL(url, {
-            width: 384,
-            margin: 2,
-            color: { dark: '#e0e0e0', light: '#1a1a1a' },
-          }),
-          // Encode at the SAME pixel size as the render box (w-96 = 384px).
-          // A 256px raster upscaled by the browser blurs the QR modules
-          // and degrades scan reliability at distance — the whole point
-          // of the tabs layout.
-          QRCode.toDataURL(installUrlValue!, {
-            width: 384,
-            margin: 2,
-            color: { dark: '#e0e0e0', light: '#1a1a1a' },
-          }),
+          QRCode.toDataURL(url, QR_OPTIONS),
+          QRCode.toDataURL(installUrlValue!, QR_OPTIONS),
           // iOS `.mobileconfig` QR (issue #713). Payload is a
           // `data:application/x-apple-aspen-config;base64,…` URL —
           // built inline because the base64 string lives only here
@@ -265,11 +269,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
             .getRootCertMobileconfig()
             .then(b64 => `data:application/x-apple-aspen-config;base64,${b64}`)
             .then(payload =>
-              QRCode.toDataURL(payload, {
-                width: 384,
-                margin: 2,
-                color: { dark: '#e0e0e0', light: '#1a1a1a' },
-              }),
+              QRCode.toDataURL(payload, QR_OPTIONS),
             ),
         ]);
         // Issue #1251: the QR-generation chain runs to completion
@@ -451,11 +451,7 @@ export function RemoteAccessModal({ onClose }: RemoteAccessModalProps) {
       try {
         const b64 = await api.getRootCertMobileconfig();
         const payload = `data:application/x-apple-aspen-config;base64,${b64}`;
-        const iosQr = await QRCode.toDataURL(payload, {
-          width: 384,
-          margin: 2,
-          color: { dark: '#e0e0e0', light: '#1a1a1a' },
-        });
+        const iosQr = await QRCode.toDataURL(payload, QR_OPTIONS);
         setInstallIosQrDataUrl(iosQr);
       } catch (e) {
         // Don't fail the whole modal for an iOS-QR-only failure.

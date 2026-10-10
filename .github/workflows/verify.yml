@@ -715,7 +715,13 @@ jobs:
   #
   # The job cap is the price of a lost runner: the guard below cannot fire on
   # a runner that is gone, so the job waits out `timeout-minutes` before the
-  # CI retry can re-run it. At 40 minutes each of the five lost `services`
+  # CI retry can re-run it. The October 2026 `services` losses were this
+  # shape for a specific reason: cancelling a verification shelled out to
+  # procps `kill -KILL -<pid>`, and Ubuntu 24.04's kill keeps only the first
+  # digit of a negative id. A pid starting with 1 becomes -1, which signals
+  # every process the runner user can kill, including the runner agent, so
+  # the guard never runs. `process_util::kill_process_group` calls kill(2)
+  # with the whole id instead. At 40 minutes each of the five lost `services`
   # runners in October 2026 held its run for 45-60 minutes. A healthy shard
   # takes ~2 minutes including setup, and a cache miss that recompiles the
   # crate takes about as long as `rust-build` (3-7 minutes), so 15 minutes

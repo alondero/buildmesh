@@ -3,8 +3,9 @@
 //! Adding a new provider:
 //! 1. Create a new `<name>.rs` module here implementing `AgentProvider`.
 //! 2. Expose a `pub static <NAME>: <NameAdapter> = <NameAdapter>;`
-//! 3. Add a `Provider::<Name>` enum variant in `models/mod.rs`.
-//! 4. Add the `Provider::<Name> => &adapters::<NAME>` arm in `Provider::adapter()`.
+//! 3. Add a `Provider::<Name>` variant and the `adapter()` arm in `models/agent.rs`.
+//! 4. Add the id to `BUILTIN_HARNESS_IDS` and an `inspector_label` arm.
+//!    The ordered recipe is `.claude/skills/add-harness-adapter/SKILL.md`.
 //!
 //! Note: MiniMax has **no** adapter here. It is Claude Code with a swapped
 //! backend, so it runs as a dynamic harness profile whose paired model-provider

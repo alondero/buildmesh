@@ -36,6 +36,13 @@ QR still works in the browser. Its fragment carries `pair` and, for HTTPS,
 `ca`, the SHA-256 fingerprint of the desktop root CA. Older desktops require
 pasting the Root CA fingerprint into the app along with the full pairing URL.
 
+Every QR the desktop renders in that modal — connect, Android install and iOS
+install — must be dark-on-light. The scanner binarises on luminance through
+ZXing's `HybridBinarizer`, which assumes dark modules on a light background and
+has no inverted fallback. An inverted code throws `NotFoundException` on every
+frame, so the camera preview runs and never decodes and the user sees no error,
+only a scanner that never responds.
+
 An isolated bootstrap client downloads only `/install-cert.der`, without
 credentials, cookies or redirects. It checks certificate validity and hostname
 and verifies the downloaded root against the fingerprint obtained from the
