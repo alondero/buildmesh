@@ -7,11 +7,17 @@ struct Response {
     body: Option<serde_json::Value>,
     status: u16,
     response: serde_json::Value,
+    /// Path of the follow-up page, advertised through a `rel="next"` `Link`
+    /// header so the paginator issues that request (issue #1528). The fake
+    /// fills in its own address, so a test only names the path.
+    next: Option<&'static str>,
 }
 
 fn server(responses: Vec<Response>) -> (GitHubClient, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
+    let addr = listener.local_addr().unwrap();
+    let base = format!("http://{}", addr);
+    let link_base = base.clone();
     let thread = std::thread::spawn(move || {
         for response in responses {
             let (mut socket, _) = listener.accept().unwrap();
@@ -42,7 +48,11 @@ fn server(responses: Vec<Response>) -> (GitHubClient, std::thread::JoinHandle<()
                 );
             }
             let body = response.response.to_string();
-            write!(socket, "HTTP/1.1 {} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.status, body.len(), body).unwrap();
+            let link_header = response
+                .next
+                .map(|path| format!("Link: <{link_base}{path}>; rel=\"next\"\r\n"))
+                .unwrap_or_default();
+            write!(socket, "HTTP/1.1 {} Response\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}", response.status, link_header, body.len(), body).unwrap();
         }
     });
     (GitHubClient::for_test(&base, "test-token").unwrap(), thread)
@@ -53,18 +63,23 @@ fn repository_labels_follow_pages_and_preserve_names() {
     let first = (0..100)
         .map(|i| serde_json::json!({"name": format!("label-{i}")}))
         .collect::<Vec<_>>();
+    // The paginator follows `rel="next"` rather than a hand-rolled `?page=N`,
+    // so the first request carries only `per_page` and the second takes its
+    // URL from the Link header.
     let (client, thread) = server(vec![
         Response {
-            request: "GET /repos/acme/demo/labels?per_page=100&page=1 HTTP/1.1",
+            request: "GET /repos/acme/demo/labels?per_page=100 HTTP/1.1",
             body: None,
             status: 200,
             response: serde_json::json!(first),
+            next: Some("/repos/acme/demo/labels?page=2"),
         },
         Response {
-            request: "GET /repos/acme/demo/labels?per_page=100&page=2 HTTP/1.1",
+            request: "GET /repos/acme/demo/labels?page=2 HTTP/1.1",
             body: None,
             status: 200,
             response: serde_json::json!([{"name":"team/ui"}, {"name":"ready-for-agent"}]),
+            next: None,
         },
     ]);
     let labels = client.list_repo_labels("acme", "demo").unwrap();
@@ -80,10 +95,11 @@ fn repository_labels_reject_errors_and_malformed_payloads() {
         (200, serde_json::json!([{"color":"abc"}])),
     ] {
         let (client, thread) = server(vec![Response {
-            request: "GET /repos/acme/demo/labels?per_page=100&page=1 HTTP/1.1",
+            request: "GET /repos/acme/demo/labels?per_page=100 HTTP/1.1",
             body: None,
             status,
             response,
+            next: None,
         }]);
         assert!(client.list_repo_labels("acme", "demo").is_err());
         thread.join().unwrap();
@@ -98,18 +114,21 @@ fn label_mutations_send_one_label_and_encode_removal() {
             body: Some(serde_json::json!({"labels":["team/ui"]})),
             status: 200,
             response: serde_json::json!([{"name":"team/ui"}]),
+            next: None,
         },
         Response {
             request: "DELETE /repos/acme/demo/issues/101/labels/team%2Fui HTTP/1.1",
             body: None,
             status: 200,
             response: serde_json::json!([]),
+            next: None,
         },
         Response {
             request: "POST /repos/acme/demo/issues/101/labels HTTP/1.1",
             body: Some(serde_json::json!({"labels":["missing"]})),
             status: 422,
             response: serde_json::json!({"message":"Label does not exist"}),
+            next: None,
         },
     ]);
     client
@@ -137,12 +156,14 @@ fn removal_404_is_success_only_when_an_accessible_issue_confirms_absence() {
                 body: None,
                 status: 404,
                 response: serde_json::json!({"message":"Not Found"}),
+                next: None,
             },
             Response {
-                request: "GET /repos/acme/demo/issues/101/labels?per_page=100&page=1 HTTP/1.1",
+                request: "GET /repos/acme/demo/issues/101/labels?per_page=100 HTTP/1.1",
                 body: None,
                 status: read_status,
                 response: labels,
+                next: None,
             },
         ]);
         assert_eq!(
@@ -162,6 +183,7 @@ fn worker_removal_keeps_missing_label_idempotent_without_a_verification_read() {
         body: None,
         status: 404,
         response: serde_json::json!({"message":"Not Found"}),
+        next: None,
     }]);
     client
         .remove_issue_label("acme", "demo", 101, "team/ui")

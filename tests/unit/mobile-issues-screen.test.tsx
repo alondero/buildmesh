@@ -72,7 +72,24 @@ const LIST_ISSUES_PATH = /^\/api\/meshes\/1\/issues(\?|$)/;
 function mockListIssues(issues: GitHubIssue[]) {
   const fn = vi.fn().mockImplementation(async (url: string) => {
     if (LIST_ISSUES_PATH.test(url)) {
-      return { ok: true, status: 200, json: async () => issues };
+      // Issue #2024 rank 6 — the route returns the feed wrapper
+      // `{ items, completeness }`, not a bare array, so a paginated read can
+      // state its truncation. `complete: true` here keeps these tests focused
+      // on the screen's own behaviour.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          items: issues,
+          completeness: {
+            returned: issues.length,
+            pages_fetched: issues.length > 0 ? 1 : 0,
+            complete: true,
+            incomplete_reason: null,
+            reported_total: null,
+          },
+        }),
+      };
     }
     return { ok: true, status: 200, json: async () => ({}) };
   });

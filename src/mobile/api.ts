@@ -167,31 +167,24 @@ export interface GitSummary {
   deleted: number;
 }
 
-export interface DiffLine {
-  line_type: string; // "add" | "remove" | "context"
-  content: string;
-  old_line_no: number | null;
-  new_line_no: number | null;
-}
-
-export interface DiffHunk {
-  old_start: number;
-  old_lines: number;
-  new_start: number;
-  new_lines: number;
-  lines: DiffLine[];
-  old_highlighted: string;
-  new_highlighted: string;
-}
-
-export interface FileDiff {
-  path: string;
-  hunks: DiffHunk[];
-}
-
-export interface DiffResult {
-  files: FileDiff[];
-}
+// Issue #2024 rank 10 — the diff types are the generated ones, not
+// hand-declared. The hand-written interfaces below were wrong about the
+// field names (`old_line_no`/`new_line_no` instead of the wire's
+// `old_num`/`new_num`) and, worse, dropped `FileDiff.status`, `old_path`,
+// `additions`, `deletions` and `binary` entirely. A changed binary file
+// carries no text hunks, so the screen could only see "zero hunks" and
+// announced "No diff (file matches HEAD)" for a file that demonstrably
+// changed. Consuming the generated type makes the missing signal visible
+// at compile time instead of at runtime.
+import type { DiffLine } from "../types/generated/DiffLine";
+import type { DiffHunk } from "../types/generated/DiffHunk";
+import type { FileDiff } from "../types/generated/FileDiff";
+import type { DiffResult } from "../types/generated/DiffResult";
+// Issue #2024 rank 4 — PR wire types are generated too, so the client
+// cannot drift from the Rust structs the routes serialise.
+import type { PrSource } from "../types/generated/PrSource";
+import type { CreatePrResult } from "../types/generated/CreatePrResult";
+export type { DiffLine, DiffHunk, FileDiff, DiffResult };
 
 export async function gitStatus(agentId: number): Promise<GitStatusEntry[]> {
   return (await apiFetch(`/api/agents/${agentId}/git/status`)).json();
@@ -218,16 +211,48 @@ export async function ghAuthOk(): Promise<boolean> {
   return j.ok;
 }
 
+/**
+ * Preview the source/base pair a create-PR would use.
+ *
+ * Issue #2024 rank 4 / #1567: the sheet used to show the node's branch as
+ * the source while the request itself resolved the *mesh root*, so the
+ * display and the result disagreed. Both now come from the same backend
+ * resolver, called with the node's id.
+ */
+export async function prSource(meshId: number, nodeId: number): Promise<PrSource> {
+  const resp = await apiFetch(
+    `/api/meshes/${meshId}/pr/source?node_id=${nodeId}`,
+  );
+  return resp.json();
+}
+
+/**
+ * Create a PR from an agent node's worktree.
+ *
+ * `nodeId` is required: without it the backend could only resolve
+ * `mesh.path`, which published the mesh root's branch — a `main -> main`
+ * PR, or the wrong feature branch entirely (issue #2024 rank 4 / #1567).
+ *
+ * `expectedHead` pins the branch that was previewed; if the worktree moved
+ * in between, the backend rejects rather than silently publishing
+ * something the user never saw. Omitting `baseBranch` lets the mesh's own
+ * `base_ref` decide, so the client never has to assume `main`.
+ */
 export async function createPr(
   meshId: number,
+  nodeId: number,
   title: string,
   body: string,
-  baseBranch: string,
-): Promise<{ url: string }> {
+  baseBranch?: string,
+  expectedHead?: string,
+): Promise<CreatePrResult> {
+  const payload: Record<string, unknown> = { title, body, node_id: nodeId };
+  if (baseBranch) payload.base_branch = baseBranch;
+  if (expectedHead) payload.head_branch = expectedHead;
   const resp = await apiFetch(`/api/meshes/${meshId}/pr`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, body, base_branch: baseBranch }),
+    body: JSON.stringify(payload),
   });
   return resp.json();
 }
@@ -293,8 +318,17 @@ export async function importAndResume(
   return resp.json();
 }
 
+/**
+ * Issue #2024 rank 6 — the route returns the feed wrapper, not a bare array,
+ * so the phone can distinguish "page 1" from "everything". Callers get the
+ * items; `completeness` is available on the raw response for any surface that
+ * wants to state the truncation.
+ */
 export async function listIssues(meshId: number): Promise<GitHubIssue[]> {
-  return (await apiFetch(`/api/meshes/${meshId}/issues`)).json();
+  const feed = (await (await apiFetch(`/api/meshes/${meshId}/issues`)).json()) as {
+    items: GitHubIssue[];
+  };
+  return feed.items;
 }
 
 export async function spawnFromIssue(

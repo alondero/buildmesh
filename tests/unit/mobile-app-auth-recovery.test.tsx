@@ -9,6 +9,10 @@ const appState = vi.hoisted(() => ({
   openIssues: null as (() => void) | null,
   lateSpawn: null as (() => void) | null,
   replyCompletion: null as (() => void) | null,
+  // Retained so a test can replay a completion from a sheet that has
+  // already been dismissed (issue #2024 rank 9).
+  lastSheetCreate: null as ((url: string, sheetId: number) => void) | null,
+  lastSheetId: 0,
   connectRenders: vi.fn(),
 }));
 
@@ -188,8 +192,15 @@ vi.mock("../../src/mobile/screens/IssuesScreen", () => ({
 }));
 
 vi.mock("../../src/mobile/screens/CreatePrSheet", () => ({
-  default: (props: { onAuthFailed: () => void }) =>
-    createElement(
+  default: (props: {
+    onAuthFailed: () => void;
+    onBusyChange?: (busy: boolean) => void;
+    onCreated?: (url: string, sheetId: number) => void;
+    sheetId: number;
+  }) => {
+    appState.lastSheetId = props.sheetId;
+    appState.lastSheetCreate = props.onCreated ?? null;
+    return createElement(
       "div",
       { "data-testid": "create-pr-sheet" },
       createElement(
@@ -197,7 +208,26 @@ vi.mock("../../src/mobile/screens/CreatePrSheet", () => ({
         { "data-testid": "sheet-auth", onClick: props.onAuthFailed },
         "expired",
       ),
-    ),
+      // Issue #2024 rank 9: the sheet publishes its in-flight state so the
+      // app's back route honours the same dismissal decision.
+      createElement(
+        "button",
+        {
+          "data-testid": "sheet-busy",
+          onClick: () => props.onBusyChange?.(true),
+        },
+        "busy",
+      ),
+      createElement(
+        "button",
+        {
+          "data-testid": "sheet-complete",
+          onClick: () => props.onCreated?.("https://example.test/pr/1", props.sheetId),
+        },
+        "complete",
+      ),
+    );
+  },
 }));
 
 describe("mobile App auth recovery", () => {
@@ -416,8 +446,127 @@ describe("mobile App auth recovery", () => {
     expect(screen.queryByTestId("create-pr-sheet")).toBeNull();
   });
 
+  it("keeps the PR sheet open on a back gesture while a create is in flight, and preserves history depth (issue #2024 rank 9)", async () => {
+    // Cancel and the backdrop are gated by the sheet's own busy flag; the
+    // OS/browser Back route is gated by App. Before the fix, back closed
+    // the sheet unconditionally — the deferred request then completed into
+    // an unmounted sheet and popped the *screen's* history entry.
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => screen.getByTestId("open-pr").click());
+    expect(await screen.findByTestId("create-pr-sheet")).toBeTruthy();
+
+    const pushedBeforeBusy = pushState.mock.calls.length;
+    await act(async () => screen.getByTestId("sheet-busy").click());
+
+    // The browser back gesture arrives while the sheet is busy.
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(screen.getByTestId("create-pr-sheet")).toBeTruthy();
+    expect(historyBack).not.toHaveBeenCalled();
+    // The consumed entry is re-pushed so the stack keeps its depth and the
+    // user's next back press still lands where they expect.
+    expect(pushState.mock.calls.length).toBe(pushedBeforeBusy + 1);
+
+    pushState.mockRestore();
+    historyBack.mockRestore();
+  });
+
+  it("closes the sheet on a back gesture when it is not busy", async () => {
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => screen.getByTestId("open-pr").click());
+    expect(await screen.findByTestId("create-pr-sheet")).toBeTruthy();
+
+    const pushedBefore = pushState.mock.calls.length;
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(screen.queryByTestId("create-pr-sheet")).toBeNull();
+    // No re-push on the normal dismissal path — the gesture is allowed to
+    // consume the entry the sheet pushed.
+    expect(pushState.mock.calls.length).toBe(pushedBefore);
+
+    pushState.mockRestore();
+    historyBack.mockRestore();
+  });
+
+  it("pops the sheet's entry on success without navigating the screen below (issue #2024 rank 9)", async () => {
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => screen.getByTestId("open-pr").click());
+    expect(await screen.findByTestId("create-pr-sheet")).toBeTruthy();
+
+    await act(async () => screen.getByTestId("sheet-complete").click());
+
+    // Exactly one back: the sheet's own entry. If completion were not
+    // scoped, a stale sheet's completion would pop a second entry and
+    // navigate the Changes screen out from under the user.
+    expect(historyBack).toHaveBeenCalledTimes(1);
+    expect(await screen.findByTestId("pr-success-toast")).toBeTruthy();
+
+    pushState.mockRestore();
+    historyBack.mockRestore();
+  });
+
+  it("ignores a completion from a sheet that is no longer the open one (issue #2024 rank 9)", async () => {
+    const historyBack = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const pushState = vi.spyOn(window.history, "pushState");
+
+    render(<App />);
+    await screen.findByTestId("mock-node-list");
+    await act(async () => screen.getByTestId("open-terminal").click());
+    await act(async () => screen.getByTestId("open-changes").click());
+    await act(async () => screen.getByTestId("open-pr").click());
+    expect(await screen.findByTestId("create-pr-sheet")).toBeTruthy();
+
+    // Dismiss the sheet, then replay the completion the retired sheet was
+    // still holding. App must not treat it as its own.
+    const retired = appState.lastSheetCreate;
+    const retiredId = appState.lastSheetId;
+    expect(typeof retired).toBe("function");
+    const pushedBefore = pushState.mock.calls.length;
+    await act(async () => {
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await act(async () => retired!("https://example.test/pr/2", retiredId));
+
+    expect(historyBack).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("pr-success-toast")).toBeNull();
+    expect(screen.queryByTestId("create-pr-sheet")).toBeNull();
+    expect(pushState.mock.calls.length).toBe(pushedBefore);
+
+    pushState.mockRestore();
+    historyBack.mockRestore();
+  });
+
   it("does not pop history on auth failure when no PR sheet was open", async () => {
-    // Counterpart to the sheet-open case: an auth failure on the node list
     // (no sheet) must NOT call window.history.back() — there is no entry
     // pushed by openPrSheet to pop, and a stray back() leaves the SPA.
     const historyBack = vi

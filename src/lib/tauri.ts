@@ -39,6 +39,8 @@ import type { FileNode } from '../types/generated/FileNode';
 import type { FreeResult } from '../types/generated/FreeResult';
 import type { GitBranchStatus } from '../types/generated/GitBranchStatus';
 import type { GitHubIssue } from '../types/generated/GitHubIssue';
+import type { GitHubIssueFeed } from '../types/generated/GitHubIssueFeed';
+import type { GitHubPullRequestFeed } from '../types/generated/GitHubPullRequestFeed';
 import type { GitHubPullRequest } from '../types/generated/GitHubPullRequest';
 import type { GitRepoPruneInfo } from '../types/generated/GitRepoPruneInfo';
 import type { GitSummary } from '../types/generated/GitSummary';
@@ -59,6 +61,7 @@ import type { PrMergeability } from '../types/generated/PrMergeability';
 import type { ProbeSpawnPromptDefaults } from '../types/generated/ProbeSpawnPromptDefaults';
 import type { PrMergeabilityEntry } from '../types/generated/PrMergeabilityEntry';
 import type { PrFileEntry } from '../types/generated/PrFileEntry';
+import type { PrFileFeed } from '../types/generated/PrFileFeed';
 import type { RealizedBind } from '../types/generated/RealizedBind';
 import type { RestoreResult } from '../types/generated/RestoreResult';
 import type { SpawnAgentRequest } from '../types/generated/SpawnAgentRequest';
@@ -659,7 +662,10 @@ export const getGitHubUrlForMesh = (meshId: number) =>
 export type { GitHubIssue };
 
 export const getRepoIssues = (meshId: number) =>
-  _invoke<GitHubIssue[]>('get_repo_issues', { meshId });
+/// Returns the feed wrapper, not a bare array: a paginated read must be able to
+/// say it is incomplete instead of letting the panel imply that page 1 is the
+/// whole repository (issue #2024 rank 6 / #1528).
+  _invoke<GitHubIssueFeed>('get_repo_issues', { meshId });
 
 export const getRepoLabels = (meshId: number) =>
   _invoke<string[]>('get_repo_labels', { meshId });
@@ -680,7 +686,7 @@ export type { GitHubPullRequest, PrMergeability, PrMergeabilityEntry, PrFileEntr
  * The panel consumes this single call and never orchestrates per-row
  * enrichment. */
 export const getRepoPulls = (meshId: number, state: 'open' | 'closed') =>
-  _invoke<GitHubPullRequest[]>('get_repo_pulls', { meshId, state });
+  _invoke<GitHubPullRequestFeed>('get_repo_pulls', { meshId, state });
 
 /// Per-PR mergeability enrichment — the `/pulls` list endpoint omits it, so
 /// the panel fetches this once per open PR. `mergeable` is `null` while
@@ -706,7 +712,7 @@ export const getPrsMergeability = (meshId: number, prNumbers: number[]) =>
 /// `getPrMergeability` because the panel needs the diff payload, not just
 /// the metadata.
 export const getPrFiles = (meshId: number, prNumber: number) =>
-  _invoke<PrFileEntry[]>('get_pr_files', { meshId, prNumber });
+  _invoke<PrFileFeed>('get_pr_files', { meshId, prNumber });
 
 export const spawnIssueAgent = (meshId: number, issueNumber: number, issueTitle: string, provider?: string) =>
   _invoke<AgentNode>('spawn_issue_agent', { meshId, issueNumber, issueTitle, provider });

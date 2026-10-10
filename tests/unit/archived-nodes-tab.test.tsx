@@ -48,6 +48,7 @@ const SESSIONS: ArchivedAgentNode[] = [
     cwd: '/repos/demo',
     timestamp: new Date(Date.now() - 5 * 60_000).toISOString(),
     worktree_name: 'agent-v2',
+    resumable: true,
   },
   {
     session_id: 's-abc-2',
@@ -56,8 +57,22 @@ const SESSIONS: ArchivedAgentNode[] = [
     cwd: '/repos/demo',
     timestamp: new Date(Date.now() - 2 * 86_400_000).toISOString(),
     worktree_name: null,
+    resumable: true,
   },
 ];
+
+// Issue #1065 — a durable archived row whose transcript is gone (or was
+// never written, e.g. an archived Terminal node). The backend lists it with
+// `resumable: false`; the tab must show it and refuse to offer a Resume.
+const DURABLE_ROW: ArchivedAgentNode = {
+  session_id: 'node-77',
+  first_message: 'brave-fox',
+  branch: 'feat/1065',
+  cwd: '/repos/demo/.claude/worktrees/brave-fox',
+  timestamp: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+  worktree_name: 'brave-fox',
+  resumable: false,
+};
 
 // Issue #575 / ADR-0016 — Spawn Options carry the full wire shape
 // (harness_id, provider_id, is_proxied, group_key). The fixture here
@@ -383,5 +398,38 @@ describe('ArchivedNodesTab (#378)', () => {
 
     expect(await screen.findByText('Failed to discover sessions')).toBeTruthy();
     expect(screen.getByText('claude dir not found')).toBeTruthy();
+  });
+
+  // Issue #1065 — historical identity (the archived node's row, worktree and
+  // branch) lives in the DB; resumability lives on disk. A durable row with
+  // no discoverable transcript is listed, and its Resume is explained rather
+  // than offered.
+  describe('durable archived rows (issue #1065)', () => {
+    it('lists a durable row and explains that Resume is unavailable', async () => {
+      mockBackend({ sessions: [...SESSIONS, DURABLE_ROW] });
+      render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+      // The durable node's own label and metadata are displayed (the name
+      // appears both as the row title and as its worktree tag).
+      expect((await screen.findAllByText('brave-fox')).length).toBeGreaterThan(0);
+
+      // Only the two discovered sessions carry a Resume control.
+      const resumes = await screen.findAllByText('Resume');
+      expect(resumes).toHaveLength(SESSIONS.length);
+      expect(screen.getAllByText('Resume unavailable')).toHaveLength(1);
+    });
+
+    it('never calls the import command for a durable row', async () => {
+      mockBackend({ sessions: [DURABLE_ROW] });
+      render(<ArchivedNodesTab meshId={MESH.id} meshPath={MESH.path} />);
+
+      await screen.findAllByText('brave-fox');
+      expect(screen.queryByText('Resume')).toBeNull();
+      expect(screen.getByText('Resume unavailable')).toBeTruthy();
+      expect(invoke).not.toHaveBeenCalledWith(
+        'import_discovered_agent_node',
+        expect.anything(),
+      );
+    });
   });
 });

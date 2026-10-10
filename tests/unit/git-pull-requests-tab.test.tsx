@@ -33,6 +33,23 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore } from '../../src/stores/agentNodeStore';
 import type { GitHubPullRequest } from '../../src/types/generated/GitHubPullRequest';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 // `@tauri-apps/plugin-opener`'s `openUrl` shells out to the OS to open an
 // external URL. Tauri 2's WebView silently drops `target="_blank"` without
@@ -143,7 +160,7 @@ function mockBackend(opts: { open?: GitHubPullRequest[]; closed?: GitHubPullRequ
     switch (cmd) {
       case 'get_repo_pulls': {
         const state = (args as { state?: string })?.state;
-        return Promise.resolve(state === 'closed' ? (opts.closed ?? CLOSED_PRS) : (opts.open ?? OPEN_PRS));
+        return Promise.resolve(feed(state === 'closed' ? (opts.closed ?? CLOSED_PRS) : (opts.open ?? OPEN_PRS)));
       }
       case 'list_providers':
         return Promise.resolve(opts.providers ?? PROVIDERS);
@@ -788,10 +805,12 @@ describe('GitPullRequestsTab', () => {
           pullsCalls += 1;
           // First load: PR 204 unknown; the re-poll sees it resolved.
           return Promise.resolve(
-            OPEN_PRS.map((pr) =>
-              pr.number === 204 && pullsCalls > 1
-                ? { ...pr, mergeable: true, mergeable_state: 'clean' }
-                : pr,
+            feed(
+              OPEN_PRS.map((pr) =>
+                pr.number === 204 && pullsCalls > 1
+                  ? { ...pr, mergeable: true, mergeable_state: 'clean' }
+                  : pr,
+              ),
             ),
           );
         }
@@ -867,7 +886,7 @@ describe('GitPullRequestsTab', () => {
       vi.mocked(invoke).mockImplementation((cmd: string) => {
         if (cmd === 'get_repo_pulls') {
           pullsCalls += 1;
-          return Promise.resolve(OPEN_PRS);
+          return Promise.resolve(feed(OPEN_PRS));
         }
         return Promise.resolve({});
       });
@@ -981,7 +1000,7 @@ describe('GitPullRequestsTab', () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'get_repo_pulls') {
         pullsCalls += 1;
-        return pullsCalls === 1 ? firstGate : secondGate;
+        return (pullsCalls === 1 ? firstGate : secondGate).then(feed);
       }
       return Promise.resolve({});
     });
@@ -1287,9 +1306,9 @@ describe('GitPullRequestsTab', () => {
     // Override the PR list to omit head_sha for PR 201 (the first row).
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
       if (cmd === 'get_repo_pulls') {
-        return Promise.resolve(OPEN_PRS.map((pr) =>
+        return Promise.resolve(feed(OPEN_PRS.map((pr) =>
           pr.number === 201 ? { ...pr, head_sha: '' } : pr,
-        ));
+        )));
       }
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_pr_node') return Promise.resolve(PR_DRAFT);
@@ -1318,7 +1337,7 @@ describe('GitPullRequestsTab', () => {
     // a fork PR that the backend refuses, etc.). The error surfaces inline
     // on the row, the spawning label clears.
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_repo_pulls') return Promise.resolve(feed(OPEN_PRS));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_pr_node') return Promise.reject(new Error("PR's fork info is incomplete (head_repo_owner and head_repo_clone_url must both be present, or both absent). Reload the PR list and retry."));
@@ -1347,7 +1366,7 @@ describe('GitPullRequestsTab', () => {
   it('disables the split button while a spawn is in flight to block double-clicks', async () => {
     let resolveCreate!: (v: typeof PR_DRAFT) => void;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
-      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_repo_pulls') return Promise.resolve(feed(OPEN_PRS));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'create_pr_node') return new Promise((res) => { resolveCreate = res; });
@@ -1702,7 +1721,7 @@ describe('GitPullRequestsTab', () => {
 
   it('renders a "View on GitHub" header link to the repo pull requests list', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_repo_pulls') return Promise.resolve(feed(OPEN_PRS));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') {
@@ -1720,7 +1739,7 @@ describe('GitPullRequestsTab', () => {
 
   it('clicking the "View on GitHub" header link opens the pull requests list URL', async () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_repo_pulls') return Promise.resolve(feed(OPEN_PRS));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') {
@@ -1748,7 +1767,7 @@ describe('GitPullRequestsTab', () => {
     // fallback is caught at the seam named in the user's "links
     // aren't links" bug report.
     vi.mocked(invoke).mockImplementation((cmd: string) => {
-      if (cmd === 'get_repo_pulls') return Promise.resolve(OPEN_PRS);
+      if (cmd === 'get_repo_pulls') return Promise.resolve(feed(OPEN_PRS));
       if (cmd === 'list_providers') return Promise.resolve(PROVIDERS);
       if (cmd === 'get_default_provider') return Promise.resolve('anthropic');
       if (cmd === 'get_github_url_for_mesh') return Promise.resolve(null);

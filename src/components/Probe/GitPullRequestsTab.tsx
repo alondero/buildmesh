@@ -89,6 +89,8 @@ import { SpawnButtonCluster } from '../Sidebar/SpawnButtonCluster';
 import { ProbeRow } from './ProbeRow';
 import { ContributorPill } from './ContributorPill';
 import { ProbeTabBody } from './ProbeTabBody';
+import { FeedCompletenessNote } from './FeedCompletenessNote';
+import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -288,6 +290,10 @@ export function GitPullRequestsTab() {
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
   const [prs, setPrs] = useState<GitHubPullRequest[]>([]);
+  // Issue #2024 rank 6 — paginated read; the tab must be able to say the list
+  // is truncated instead of implying it is every PR in the repository.
+  const [completeness, setCompleteness] =
+    useState<GitHubPageCompleteness | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [stateFilter, setStateFilter] = useState<StateFilter>('open');
@@ -419,12 +425,16 @@ export function GitPullRequestsTab() {
         const result = await getRepoPulls(activeMeshId, stateFilter);
         // The mesh / filter could have changed mid-flight — drop a stale result.
         if (signal.aborted) return;
-        setPrs(result);
+        // Issue #2024 rank 6 — the read is paginated; keep the completeness
+        // so the tab can say the list is truncated rather than imply it is
+        // every PR in the repository.
+        setCompleteness(result.completeness);
+        setPrs(result.items);
         // Closed PRs show no merge control, so unknown mergeability there
         // needs no resolution. Drafts render "Draft" without consulting it.
         const stillNull =
           stateFilter === 'open' &&
-          result.some((pr) => !pr.draft && (pr.mergeable ?? null) === null);
+          result.items.some((pr) => !pr.draft && (pr.mergeable ?? null) === null);
         if (!stillNull) {
           pollAttempts.current = 0;
           setPollExhausted(false);
@@ -723,6 +733,7 @@ export function GitPullRequestsTab() {
           />
         ) : (
           <div className="space-y-1">
+            <FeedCompletenessNote completeness={completeness} label="pull requests" />
             {filteredPrs.map((pr) => {
               const status = deriveMergeStatus(pr, pollExhausted);
               const isMerging = merging === pr.number;
