@@ -82,7 +82,8 @@ the finished composer and what was submitted.
 
 The fix is the adapter capability `paste_requires_cr_newlines`
 (`AgentProvider`), true for Grok, applied by `circuit::delivery::paste_text_for`
-in `write_prompt_to_pty`. Other harnesses are unchanged.
+in `stage_prompt_write`. All PTY prompt writes (handover to node, circuit turns,
+continuations, and nudges) go through this chokepoint. Other harnesses are unchanged.
 
 ### Codex 0.162.1, same probe
 

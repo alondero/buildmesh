@@ -66,8 +66,12 @@ const MAX_ENTER_ATTEMPTS: u32 = 3;
 /// burst as a bracketed paste is treated as part of the paste — the prompt
 /// sits staged in the input box and is never submitted (issue #874, node
 /// 2328: the correction was visibly pasted, the run stalled forever).
+pub(crate) fn is_multiline_prompt(text: &str) -> bool {
+    text.contains('\n') || text.contains('\r')
+}
+
 pub(crate) fn injection_payload(text: &str) -> String {
-    if text.contains('\n') || text.contains('\r') {
+    if is_multiline_prompt(text) {
         format!("\x1b[200~{}\x1b[201~", text)
     } else {
         text.to_string()
@@ -114,19 +118,10 @@ pub(crate) fn output_seen_within(ms_since_output: Option<u128>, ms_since_mark: u
 /// retried remote requests, which an in-process turn reaction doesn't
 /// have. If `AgentDriver` grows multi-line paste support, converge on it.
 pub(crate) fn write_prompt_to_pty(node_id: i64, text: &str, app: &AppHandle) -> Result<(), String> {
-    // Best effort: an unknown node keeps the text as given, and the liveness
-    // gate in the guarded writer reports it.
-    let text = crate::db::get_agent_node_by_id(node_id)
-        .ok()
-        .map(|node| crate::preferences::resolve_harness_provider(&node.provider))
-        .map_or_else(
-            || text.to_string(),
-            |resolved| paste_text_for(resolved.adapter(), text),
-        );
     write_prompt_to_pty_guarded(
         &crate::agent::process::PROCESS_REGISTRY,
         node_id,
-        &text,
+        text,
         app,
         None,
     )
@@ -184,7 +179,21 @@ fn stage_prompt_write(
     expected_input: Option<&str>,
 ) -> Result<Option<(Option<String>, PromptReadiness)>, String> {
     ensure_prompt_target_alive(registry, node_id)?;
-    let mut readiness = paste_readiness(node_id, text)?;
+    let text = match crate::db::get_agent_node_by_id(node_id) {
+        Ok(node) => {
+            let resolved = crate::preferences::resolve_harness_provider(&node.provider);
+            paste_text_for(resolved.adapter(), text)
+        }
+        Err(error) => {
+            if evaluator::is_circuit_piloted(node_id) {
+                return Err(format!(
+                    "could not identify prompt target {node_id}: {error}"
+                ));
+            }
+            text.to_string()
+        }
+    };
+    let mut readiness = paste_readiness(node_id, &text)?;
     let payload = match &mut readiness.paste {
         PasteReadiness::RenderedMultiline {
             split_marker_prompt: Some(prompt),
@@ -194,7 +203,7 @@ fn stage_prompt_write(
             // the PTY write so a split CSI cannot change what the proof counts.
             injection_payload(&std::mem::take(&mut prompt.composer_text))
         }
-        _ => injection_payload(text),
+        _ => injection_payload(&text),
     };
     let guarded = if let Some(expected) = expected_input {
         // `Ok(None)` is only ever "the guard was lost" — the draft now belongs
@@ -208,6 +217,7 @@ fn stage_prompt_write(
         else {
             return Ok(None);
         };
+
         Some(next)
     } else {
         retry_backpressured(|| {
@@ -324,7 +334,7 @@ fn paste_readiness(node_id: i64, text: &str) -> Result<PromptReadiness, String> 
         readiness.receipt = crate::services::muse_watcher::PromptReceipt::capture(&node, text)?;
     }
     let policy = adapter.paste_gate_policy();
-    if text.contains('\n') && !matches!(policy, PasteGatePolicy::Generic) {
+    if is_multiline_prompt(text) && !matches!(policy, PasteGatePolicy::Generic) {
         let split_marker_prompt = (policy == PasteGatePolicy::RenderedWithSplitMarker)
             .then(|| RenderedPastePrompt::new(text));
         let (chars, normalized_chars, content) = match &split_marker_prompt {
@@ -941,6 +951,49 @@ mod tests {
             assert_eq!(paste_text_for(&ANTHROPIC, text), text);
             assert_eq!(paste_text_for(&CODEX, text), text);
         }
+    }
+
+    #[test]
+    fn grok_staged_prompt_write_normalizes_newlines_and_brackets_payload() {
+        let _db = crate::db::test_support::isolated();
+        let path = std::env::temp_dir().join(format!("grok-stage-test-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("grok stage mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "worker",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "grok",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = node.id;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+
+        let prompt = "one\ntwo\r\nthree";
+        let expected = registry.input_stamp(id).unwrap();
+        let (guard, _) = stage_prompt_write(&registry, id, prompt, Some(&expected))
+            .unwrap()
+            .unwrap();
+        assert!(guard.is_some());
+
+        let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
+        let expected_payload = b"\x1b[200~one\rtwo\rthree\x1b[201~".to_vec();
+        assert_eq!(written, expected_payload);
+        assert!(!written.contains(&b'\n'));
+
+        evaluator::unregister(id);
+        registry.kill_session(id);
     }
 
     #[test]
