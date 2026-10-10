@@ -38,7 +38,9 @@ and a CRLF is an Enter. A terminal selection is CRLF-joined on Windows, so an
 unmodified Grok handover submitted line 1 and queued the rest as separate messages.
 A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok) gets
 CR line endings inside the bracketed paste, which is what xterm.js sends for a
-manual paste. Other harnesses keep their text as given. See the
+manual paste. Other harnesses keep their line endings as given, but any prompt
+containing CR or LF is treated as multiline: bracketed by `injection_payload` and
+subject to non-generic rendered-paste gates (such as Codex and Muse). See the
 [Grok paste investigation](../learning/grok-terminal-paste.md) for runtime evidence.
 
 ## PTY output streaming (issue #1385 / #1393)

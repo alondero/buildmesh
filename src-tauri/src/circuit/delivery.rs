@@ -100,14 +100,28 @@ pub(crate) fn paste_text_for(adapter: &dyn AgentProvider, text: &str) -> String 
 /// A prompt whose line endings and payload formatting have been resolved for
 /// its target harness (`AgentProvider::paste_requires_cr_newlines`).
 ///
-/// Constructing a `PreparedPrompt` is the single owner of newline conversion,
-/// guaranteeing that the text hashed for the evidence ledger (`submission_digest`)
-/// and the bytes staged into the PTY (`injection_payload`) operate on the exact
-/// same transformed text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Constructing a `PreparedPrompt` is the single owner of newline conversion.
+/// For Generic-policy harnesses, this guarantees that the text hashed for the
+/// evidence ledger (`submission_digest`) and the bytes staged into the PTY
+/// (`injection_payload`) operate on the exact same transformed text. Specialized
+/// harnesses with custom composer sanitation (such as Codex's split-marker handling)
+/// sanitize terminal escapes for the PTY independently.
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct PreparedPrompt {
     node_id: i64,
     text: String,
+}
+
+impl std::fmt::Debug for PreparedPrompt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedPrompt")
+            .field("node_id", &self.node_id)
+            .field(
+                "text",
+                &format_args!("<redacted: {} chars>", self.text.chars().count()),
+            )
+            .finish()
+    }
 }
 
 impl PreparedPrompt {
@@ -130,8 +144,9 @@ impl PreparedPrompt {
                         "could not identify prompt target {node_id}: {error}"
                     ));
                 }
-                // Best effort: an unpersisted non-circuit node keeps the text
-                // as given without conversion.
+                // Best effort for unpersisted non-circuit nodes (e.g. terminal handovers
+                // to nodes running outside database supervision, or on transient DB read error):
+                // keep the raw text as given rather than dropping the delivery entirely.
                 tracing::warn!(
                     "could not identify prompt target {node_id} for newline normalization: {error}"
                 );
@@ -1046,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn piloted_node_without_db_row_fails_staging_loudly() {
+    fn piloted_node_without_db_row_fails_preparation_loudly() {
         let _db = crate::db::test_support::isolated();
         let id = 999_999;
         let (registry, _) = crate::agent::process::testing::capturing_registry(id);
@@ -1182,14 +1197,16 @@ mod tests {
     }
 
     #[test]
-    fn grok_continuation_and_nudge_prompts_are_prepared_with_cr_newlines() {
+    fn grok_prompt_preparation_converts_newlines_on_continuation_and_nudge_shaped_text() {
         let _db = crate::db::test_support::isolated();
         let path = std::env::temp_dir().join(format!("grok-cont-test-{}", std::process::id()));
         let path = path.to_string_lossy();
         let mesh = crate::db::create_mesh("grok cont mesh", &path).unwrap();
-        let node = crate::db::create_agent_node(
+
+        // Continuation prompt generated through prepare_continuation
+        let cont_node = crate::db::create_agent_node(
             mesh.id,
-            "worker",
+            "worker-cont",
             &path,
             "main",
             crate::models::EnvType::Windows,
@@ -1204,19 +1221,132 @@ mod tests {
             None,
         )
         .unwrap();
-        let id = node.id;
+        let cont_id = cont_node.id;
+        let (registry_cont, writes_cont) =
+            crate::agent::process::testing::capturing_registry(cont_id);
+        evaluator::register(cont_id);
 
-        // Continuation prompt
-        let continuation = "first line\nsecond line\r\nthird line";
-        let prepared_cont = PreparedPrompt::prepare(id, continuation).unwrap();
-        assert_eq!(prepared_cont.text(), "first line\rsecond line\rthird line");
+        let raw_continuation = "first line\nsecond line\r\nthird line";
+        let cont_prompt = crate::circuit::handoff::prepare_continuation(
+            42,
+            cont_id,
+            cont_node.env,
+            raw_continuation,
+        );
+        let prepared_cont = PreparedPrompt::prepare(cont_id, &cont_prompt).unwrap();
+        assert!(prepared_cont.text().contains('\r'));
         assert!(!prepared_cont.text().contains('\n'));
 
+        let expected_cont = registry_cont.input_stamp(cont_id).unwrap();
+        let (guard, _) = stage_prompt_write(&registry_cont, &prepared_cont, Some(&expected_cont))
+            .unwrap()
+            .unwrap();
+        assert!(guard.is_some());
+        let written_cont = writes_cont.recv_timeout(Duration::from_secs(1)).unwrap();
+        let expected_payload = injection_payload(prepared_cont.text()).into_bytes();
+        assert_eq!(written_cont, expected_payload);
+
+        evaluator::unregister(cont_id);
+        registry_cont.kill_session(cont_id);
+
         // Wake-up nudge prompt
+        let nudge_node = crate::db::create_agent_node(
+            mesh.id,
+            "worker-nudge",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "grok",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let nudge_id = nudge_node.id;
+        let (registry_nudge, writes_nudge) =
+            crate::agent::process::testing::capturing_registry(nudge_id);
+        evaluator::register(nudge_id);
+
         let nudge = "wake up line 1\nwake up line 2";
-        let prepared_nudge = PreparedPrompt::prepare(id, nudge).unwrap();
+        let prepared_nudge = PreparedPrompt::prepare(nudge_id, nudge).unwrap();
         assert_eq!(prepared_nudge.text(), "wake up line 1\rwake up line 2");
         assert!(!prepared_nudge.text().contains('\n'));
+
+        let expected_nudge = registry_nudge.input_stamp(nudge_id).unwrap();
+        let (guard, _) =
+            stage_prompt_write(&registry_nudge, &prepared_nudge, Some(&expected_nudge))
+                .unwrap()
+                .unwrap();
+        assert!(guard.is_some());
+        let written_nudge = writes_nudge.recv_timeout(Duration::from_secs(1)).unwrap();
+        let expected_nudge_payload = injection_payload(prepared_nudge.text()).into_bytes();
+        assert_eq!(written_nudge, expected_nudge_payload);
+
+        evaluator::unregister(nudge_id);
+        registry_nudge.kill_session(nudge_id);
+    }
+
+    #[test]
+    fn codex_cr_only_prompt_is_bracketed_and_enters_rendered_paste_gate() {
+        let _db = crate::db::test_support::isolated();
+        let path = std::env::temp_dir().join(format!("codex-cr-test-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("codex cr mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "source",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = node.id;
+        evaluator::register(id);
+        let prompt = "step 1\rstep 2\rstep 3";
+        let prepared = PreparedPrompt::prepare(id, prompt).unwrap();
+        assert_eq!(prepared.text(), prompt);
+        let payload = injection_payload(prepared.text());
+        assert_eq!(payload, format!("\x1b[200~{prompt}\x1b[201~"));
+
+        let readiness = paste_readiness(id, prepared.text()).unwrap();
+        assert!(
+            matches!(readiness.paste, PasteReadiness::RenderedMultiline { .. }),
+            "a CR-separated multiline prompt to Codex must enter the rendered paste gate"
+        );
+        evaluator::unregister(id);
+    }
+
+    #[test]
+    fn muse_cr_only_prompt_is_bracketed_and_enters_rendered_paste_gate() {
+        let _db = crate::db::test_support::isolated();
+        let id = muse_publisher_node("muse-cr-paste");
+        evaluator::register(id);
+        let prompt = "step 1\rstep 2\rstep 3";
+        let prepared = PreparedPrompt::prepare(id, prompt).unwrap();
+        assert_eq!(prepared.text(), prompt);
+        let payload = injection_payload(prepared.text());
+        assert_eq!(payload, format!("\x1b[200~{prompt}\x1b[201~"));
+
+        let readiness = paste_readiness(id, prepared.text()).unwrap();
+        assert!(
+            matches!(readiness.paste, PasteReadiness::RenderedMultiline { .. }),
+            "a CR-separated multiline prompt to Muse must enter the rendered paste gate"
+        );
+        evaluator::unregister(id);
     }
 
     #[test]

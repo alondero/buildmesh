@@ -84,7 +84,9 @@ The fix is the adapter capability `paste_requires_cr_newlines`
 (`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
 Circuit prompt dispatches (turns, continuations, and nudges) and terminal handovers
 go through this preparation. The coordinator's `AgentDriver::send_prompt` is single-line
-by contract and bypasses staged delivery. Other harnesses are unchanged.
+by contract and bypasses staged delivery. Other harnesses keep their line endings
+as given (though any prompt containing CR or LF is treated as multiline, bracketed
+by `injection_payload`, and subject to non-Generic paste gates).
 
 ### Codex 0.162.1, same probe
 
