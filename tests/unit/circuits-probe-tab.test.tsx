@@ -1003,7 +1003,7 @@ describe('CircuitsProbeTab run diagnostics (#1468)', () => {
     // body scrolls) not width (which it must not).
     expect(timeline.className).toContain('flex-col');
     // The headline still summarises without needing the timeline.
-    expect(screen.getByTestId('run-activity-20').textContent).toContain('Running');
+    expect(screen.getByTestId('run-state-20').textContent).toBe('Running');
     expect(screen.getByTestId('run-activity-20').textContent).toContain('merge');
     expect(screen.getByTestId('run-progress-20').textContent).toBe('10/12 steps');
   });
