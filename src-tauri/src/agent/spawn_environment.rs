@@ -7,7 +7,10 @@
 //!   (Seatbelt containment to the worktree — see `agent::sandbox`, issue #497)
 //! - macOS, sandbox not requested: direct invocation
 //! - Windows native + PowerShell shell: `powershell.exe -NoLogo -EncodedCommand <base64>`
-//!   (used by Codex so ANSI escapes propagate correctly through ConPTY)
+//!   (used by Codex so ANSI escapes propagate correctly through ConPTY). For a
+//!   UNC spawn directory this invokes the `.ps1` twin npm writes beside the
+//!   `.cmd` shim, because PowerShell would otherwise delegate to a cmd.exe
+//!   that rejects the directory — see [`powershell_invocation_target`].
 //! - Windows native + Cmd shell: `cmd.exe /c "<binary> <args>"`
 //!   (used by node-shim providers whose binary is a `.cmd` batch file)
 //! - Windows native + Direct: spawn the binary directly (rare; mainly for tests)
@@ -124,6 +127,56 @@ fn format_powershell_command(binary: &str, args: &[String]) -> String {
     format!("& {}", parts.join(" "))
 }
 
+/// True when `path` is a Windows UNC path in either separator style — the form
+/// both cmd.exe and PowerShell treat as "not a drive".
+fn is_unc_path(path: &str) -> bool {
+    path.starts_with("\\\\") || path.starts_with("//")
+}
+
+/// The file a PowerShell-wrapped spawn should actually invoke, or `None` to
+/// keep `executable` as resolved.
+///
+/// PowerShell cannot run a `.cmd`/`.bat` shim itself — it hands the file to
+/// `cmd.exe /c` — and cmd.exe refuses a UNC current directory, silently
+/// starting the agent in `C:\Windows` instead of the node's directory. A node
+/// whose runtime is Windows but whose directory lives in WSL runs exactly that
+/// way: `apply_harness_runtime` hands the spawn that directory's UNC host path.
+///
+/// npm writes a `.ps1` twin beside every `.cmd` bin shim, and PowerShell runs
+/// that directly, which keeps cmd.exe out of the chain and the UNC directory
+/// intact. It is also what PowerShell's own bare-stem resolution picks (`.ps1`
+/// outranks `.cmd`), so preferring it restores the pre-#2150 dispatch while
+/// keeping the resolved absolute path #2150 introduced.
+///
+/// Deliberately narrowed to the UNC case. A drive-letter directory launches
+/// through the `.cmd` shim correctly today, and swapping it unconditionally
+/// would put the host's PowerShell execution policy on the critical path of
+/// every spawn. `None` is also the answer for a hand-written `.cmd` with no
+/// `.ps1` twin.
+fn powershell_invocation_target(
+    executable: &str,
+    spawn_path: &str,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<String> {
+    if !is_unc_path(spawn_path) {
+        return None;
+    }
+    let executable = std::path::Path::new(executable);
+    let is_batch_shim = matches!(
+        executable
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("cmd" | "bat")
+    );
+    if !is_batch_shim {
+        return None;
+    }
+    let twin = executable.with_extension("ps1");
+    exists(&twin).then(|| twin.to_string_lossy().into_owned())
+}
+
 /// Pipe-based background tasks still need the adapter's Windows shell for npm shims.
 pub(crate) fn background_command(
     recipe: &SpawnRecipe,
@@ -197,10 +250,13 @@ pub fn wrap(
             args.extend(recipe.base_args.clone());
             format_powershell_command("cmd.exe", &args)
         } else {
+            let target =
+                powershell_invocation_target(executable, spawn_path, &|path| path.is_file())
+                    .unwrap_or_else(|| executable.to_string());
             format!(
                 "Set-Location -LiteralPath {}; {}",
                 ps_single_quote(spawn_path),
-                format_powershell_command(executable, &recipe.base_args)
+                format_powershell_command(&target, &recipe.base_args)
             )
         };
         let mut command = CommandBuilder::new("powershell.exe");
@@ -289,9 +345,12 @@ pub fn wrap(
     } else {
         Ok(match recipe.windows_shell {
             WindowsShell::PowerShell => {
+                let target =
+                    powershell_invocation_target(executable, spawn_path, &|path| path.is_file())
+                        .unwrap_or_else(|| executable.to_string());
                 tracing::info!(
                     "spawn_environment: building Windows powershell.exe for {}",
-                    executable
+                    target
                 );
                 // Build a PowerShell script that calls the binary with each arg
                 // single-quoted, then Base64/UTF-16LE encode it for
@@ -299,7 +358,7 @@ pub fn wrap(
                 // (e.g. handover prefills containing `1. ...` numbered lists or
                 // backticks) would otherwise be parsed as separate PowerShell
                 // statements after newline boundaries.
-                let cmd_str = format_powershell_command(executable, &recipe.base_args);
+                let cmd_str = format_powershell_command(&target, &recipe.base_args);
                 let encoded = encode_for_powershell(&cmd_str);
                 let mut c = CommandBuilder::new("powershell.exe");
                 // -NoProfile skips loading the user's PowerShell profile, which
@@ -807,6 +866,188 @@ mod tests {
                 .unwrap()
                 .trim(),
             "native-in-guest"
+        );
+    }
+
+    /// The same Windows-runtime-in-a-WSL-directory node, on the
+    /// `WindowsShell::PowerShell` arm Codex uses. PowerShell cannot execute a
+    /// `.cmd` shim itself — it delegates to cmd.exe, which rejects the UNC
+    /// directory and starts the agent in `C:\Windows` — so the probe must come
+    /// from the `.ps1` twin npm writes beside every `.cmd` bin shim.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "requires an installed default WSL distribution and a PowerShell \
+                execution policy that permits local scripts"]
+    fn live_wsl_directory_runs_windows_powershell_harness_from_the_ps1_twin() {
+        let home = crate::env::wsl_home().unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("buildmesh-native-ps-")
+            .tempdir_in(crate::env::to_host_path(&home.to_string_lossy()))
+            .unwrap();
+        let npm_dir = tempfile::tempdir().unwrap();
+        let cmd_shim = npm_dir.path().join("probe.cmd");
+        std::fs::write(&cmd_shim, "@echo off\r\necho cmd-shim> probe.txt\r\n").unwrap();
+        std::fs::write(
+            npm_dir.path().join("probe.ps1"),
+            "[IO.File]::WriteAllText((Join-Path $PWD.ProviderPath 'probe.txt'), 'ps-twin')",
+        )
+        .unwrap();
+        let mut resolved = crate::env::resolve_raw_path(directory.path().to_str().unwrap());
+        crate::env::apply_harness_runtime(&mut resolved, crate::models::EnvType::Windows);
+        let recipe = crate::agent::provider::SpawnRecipe {
+            binary: "probe",
+            base_args: vec![],
+            trailing_args: vec![],
+            windows_shell: crate::agent::provider::WindowsShell::PowerShell,
+        };
+        let command = super::wrap(
+            recipe,
+            resolved.env_type,
+            None,
+            cmd_shim.to_str(),
+            &resolved.spawn_path,
+            8125,
+            false,
+        )
+        .unwrap();
+        let pair = crate::agent::spawn::open_pty_pair(24, 80).unwrap();
+        let mut child = crate::agent::spawn::spawn_child(&pair, command).unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("probe.txt"))
+                .unwrap()
+                .trim(),
+            "ps-twin",
+            "a PowerShell-wrapped spawn in a WSL directory ran the .cmd shim, so cmd.exe \
+             discarded the UNC working directory"
+        );
+    }
+
+    /// Decode the `-EncodedCommand` payload `wrap` handed to PowerShell, so a
+    /// test can assert on the script rather than the opaque Base64.
+    fn wrap_powershell_script(
+        executable: &str,
+        spawn_path: &str,
+        windows_shell: WindowsShell,
+    ) -> String {
+        let recipe = SpawnRecipe {
+            binary: "codex",
+            base_args: vec!["--sandbox".into(), "danger-full-access".into()],
+            trailing_args: vec![],
+            windows_shell,
+        };
+        let command = super::wrap(
+            recipe,
+            EnvType::Windows,
+            None,
+            Some(executable),
+            spawn_path,
+            8126,
+            false,
+        )
+        .unwrap();
+        let argv: Vec<String> = command
+            .get_argv()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let payload = argv
+            .iter()
+            .position(|arg| arg == "-EncodedCommand")
+            .map(|index| argv[index + 1].clone())
+            .expect("the PowerShell arm passes its script as -EncodedCommand");
+        decode_ps(&payload)
+    }
+
+    /// A generic UNC share, not a WSL one: the behaviour under test is "the
+    /// spawn directory is UNC", which cmd.exe rejects for any share, so the
+    /// test stays hermetic and platform-independent.
+    const UNC_SPAWN_PATH: &str = r"\\server\share\project";
+
+    /// The regression: Codex is the one `WindowsShell::PowerShell` holder, and
+    /// a Windows node whose directory is a UNC host path is exactly the shape
+    /// that lost its working directory. The script must call the `.ps1` twin.
+    #[test]
+    fn powershell_spawn_in_a_unc_directory_invokes_the_ps1_twin() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        let twin = npm_dir.path().join("codex.ps1");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        std::fs::write(&twin, "").unwrap();
+
+        let script = wrap_powershell_script(
+            shim.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            WindowsShell::PowerShell,
+        );
+
+        assert!(
+            script.contains(&twin.to_string_lossy().into_owned()),
+            "a UNC spawn directory must run the .ps1 twin, because cmd.exe rejects the \
+             directory and would start the agent in C:\\Windows; got: {script}"
+        );
+        assert!(
+            !script.contains(&shim.to_string_lossy().into_owned()),
+            "the .cmd shim must not reach the script; got: {script}"
+        );
+    }
+
+    /// The control that keeps this narrow: a drive-letter directory launches
+    /// through the `.cmd` shim today, so it must keep doing so rather than
+    /// putting the host's PowerShell execution policy on every spawn's path.
+    #[test]
+    fn powershell_spawn_in_a_drive_letter_directory_keeps_the_cmd_shim() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("codex.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+        std::fs::write(npm_dir.path().join("codex.ps1"), "").unwrap();
+
+        let script = wrap_powershell_script(
+            shim.to_str().unwrap(),
+            npm_dir.path().to_str().unwrap(),
+            WindowsShell::PowerShell,
+        );
+
+        assert!(
+            script.contains(&shim.to_string_lossy().into_owned()),
+            "a drive-letter directory is not affected by the cmd.exe UNC rejection, so \
+             the resolved .cmd shim must be kept; got: {script}"
+        );
+    }
+
+    /// A native executable needs no twin — PowerShell runs it directly and the
+    /// UNC directory is never handed to cmd.exe.
+    #[test]
+    fn powershell_keeps_a_native_executable_in_a_unc_directory() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        let native = bin_dir.path().join("codex.exe");
+        std::fs::write(&native, "MZ").unwrap();
+
+        let script = wrap_powershell_script(
+            native.to_str().unwrap(),
+            UNC_SPAWN_PATH,
+            WindowsShell::PowerShell,
+        );
+
+        assert!(
+            script.contains(&native.to_string_lossy().into_owned()),
+            "a .exe is executed by PowerShell directly and never reaches cmd.exe; got: {script}"
+        );
+    }
+
+    /// A hand-written `.cmd` with no npm `.ps1` twin keeps today's behaviour:
+    /// the resolver returns `None` rather than inventing a target.
+    #[test]
+    fn powershell_keeps_a_batch_shim_that_has_no_ps1_twin() {
+        let npm_dir = tempfile::tempdir().unwrap();
+        let shim = npm_dir.path().join("probe.cmd");
+        std::fs::write(&shim, "@echo off\r\n").unwrap();
+
+        assert_eq!(
+            super::powershell_invocation_target(shim.to_str().unwrap(), UNC_SPAWN_PATH, &|path| {
+                path.is_file()
+            },),
+            None
         );
     }
 

@@ -391,6 +391,21 @@ the verified original conversation before rechecking the run. Rechecking alone
 cannot establish which conversation belongs to the implementer. See
 [the runs 276/277 investigation](archive/2026-10/circuit-runs-276-277.md).
 
+## An agent in a WSL-hosted directory starts in `C:\Windows`
+
+A node can have a **Windows** runtime while its directory lives in WSL. That
+node is spawned with a `\\wsl$\...` current directory, and cmd.exe cannot use
+one: it reports that UNC paths are unsupported and falls back to `C:\Windows`.
+The agent then starts with no repository, no worktree, and no transcript where
+Buildmesh expects one — the visible symptom on Codex, whose Windows shell is
+PowerShell, which cannot run npm's `.cmd` shim directly and so delegates to
+exactly that cmd.exe.
+
+Buildmesh works around this on both Windows shells. On an older build, either
+launch the node on the **WSL** runtime rather than Windows (if the harness is
+installed in the distribution), or keep the node's directory on a Windows
+drive.
+
 ## Muse fails to start with `os error 267` or `Not a directory`
 
 `AGENTS.md` and `.agents/skills` are Git symlinks. On Windows checkouts

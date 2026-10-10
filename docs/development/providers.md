@@ -286,6 +286,18 @@ remembering:
 - `Direct` — the provider ships a native executable. The plain terminal
   harness is one of these: it *is* the terminal, so there is nothing to wrap.
 
+A Windows-runtime node whose directory lives in WSL spawns with a UNC current
+directory, and **cmd.exe rejects one** — it silently starts in `C:\Windows`
+instead. `Cmd` answers that with its own `pushd`, which maps the share for the
+lifetime of that shell. `PowerShell` needs a different answer, because it cannot
+run a `.cmd`/`.bat` shim at all: it delegates to `cmd.exe /c`, which reintroduces
+the rejection. So `powershell_invocation_target` resolves npm's `.ps1` twin —
+which npm writes beside every `.cmd` bin shim, and which PowerShell executes
+directly — keeping cmd.exe out of the chain and the directory intact. That
+preference is scoped to UNC directories; a drive-letter directory still launches
+through the resolved `.cmd`, so a host's PowerShell execution policy is not on
+the critical path of an ordinary spawn.
+
 Read the adapter rather than trusting any list, including this one; a per-adapter
 table rots silently as adapters are added, which is why the adapter is the only
 place that decides and its own unit test is what pins the value.
