@@ -246,6 +246,47 @@ export function checkBacktickedRepoPaths({ root = repoRoot, files = collectMarkd
   return failures;
 }
 
+const SKILL_PATH_TOKEN = /`([^`\n]+)`/g;
+
+function isSkillRepoPath(token) {
+  return /^(?:src|src-tauri|tests|scripts|docs|\.claude|\.github)\/\S+$/.test(token)
+    || /^(?:README|CLAUDE|CONTEXT|CONTRIBUTING)\.md$/.test(token);
+}
+
+export function collectSkillFiles(root = repoRoot) {
+  return walkMarkdown(resolve(root, '.claude', 'skills'));
+}
+
+// Task-recipe skills name the files an agent must open. A backticked path
+// that does not exist sends that agent to a guess. This check proves the
+// path exists. It does not prove the path is the right file for the step.
+// Templates (`<area>`, `*`) are skipped. Fenced examples are skipped with
+// the rest of the docs gate.
+export function checkSkillPaths({ root = repoRoot, files = collectSkillFiles(root) } = {}) {
+  const failures = [];
+  for (const source of files) {
+    const markdown = stripFencedCode(readFileSync(source, 'utf8'));
+    const relativePath = relative(root, source).replaceAll('\\', '/');
+    for (const match of markdown.matchAll(SKILL_PATH_TOKEN)) {
+      const token = match[1];
+      if (!isSkillRepoPath(token) || /[<>*]/.test(token) || token.includes('...')) continue;
+      // A backticked doc link may name a heading (`file.md#anchor`). The file
+      // is what has to exist; the heading is not a filesystem path.
+      const withoutFragment = token.split('#', 1)[0].split('?', 1)[0];
+      const bare = withoutFragment.endsWith('/') ? withoutFragment.slice(0, -1) : withoutFragment;
+      const target = resolve(root, bare);
+      if (!pathExistsExactly(root, target)) {
+        failures.push(`${relativePath}: skill path "${token}" does not exist`);
+        continue;
+      }
+      if (token.endsWith('/') && !statSync(target).isDirectory()) {
+        failures.push(`${relativePath}: skill path "${token}" is not a directory`);
+      }
+    }
+  }
+  return failures;
+}
+
 export function checkDocumentation({ root = repoRoot, files = collectMarkdownFiles(root) } = {}) {
   const failures = [];
   const add = (anchor, message) => failures.push(`[${anchor}] ${message}`);
@@ -332,6 +373,7 @@ export function checkDocumentation({ root = repoRoot, files = collectMarkdownFil
   for (const failure of checkLocalLinks({ root, files })) add('local-links', failure);
   for (const failure of checkBacktickedRepoPaths({ root, files })) add('stale-pointer', failure);
   for (const failure of checkAlwaysLoadedBudgets({ root })) add('read-cost', failure);
+  for (const failure of checkSkillPaths({ root })) add('skill-path', failure);
   return failures;
 }
 
