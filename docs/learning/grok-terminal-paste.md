@@ -81,10 +81,10 @@ paste: that comparison watched the composer fill incrementally, this one compare
 the finished composer and what was submitted.
 
 The fix is the adapter capability `paste_requires_cr_newlines`
-(`AgentProvider`), true for Grok, applied by `circuit::delivery::paste_text_for`
-in `stage_prompt_write`. Circuit prompt dispatches (turns, continuations, and nudges)
-and terminal handovers go through this chokepoint (the coordinator's `AgentDriver::send_prompt`
-is single-line by contract). Other harnesses are unchanged.
+(`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
+Circuit prompt dispatches (turns, continuations, and nudges) and terminal handovers
+go through this preparation. The coordinator's `AgentDriver::send_prompt` is single-line
+by contract and bypasses staged delivery. Other harnesses are unchanged.
 
 ### Codex 0.162.1, same probe
 

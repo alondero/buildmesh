@@ -2047,12 +2047,10 @@ pub(super) fn execute_effects(
                             &prompt,
                             requests_result,
                         );
-                        let resolved =
-                            crate::preferences::resolve_harness_provider(&target_node.provider);
-                        let delivered_prompt = crate::circuit::delivery::paste_text_for(
-                            resolved.adapter(),
+                        let prepared = crate::circuit::delivery::PreparedPrompt::prepare(
+                            target,
                             &staged.delivered,
-                        );
+                        )?;
                         crate::circuit::handoff::set_agent_turn(
                             active.run.id,
                             target,
@@ -2067,8 +2065,7 @@ pub(super) fn execute_effects(
                             active.run.id,
                             node_id,
                             attempt,
-                            target,
-                            &delivered_prompt,
+                            &prepared,
                         ) {
                             Ok(revision) => {
                                 view.context.set("evidence.revision", revision.to_string())
@@ -2093,8 +2090,7 @@ pub(super) fn execute_effects(
                                     )?;
                                 crate::circuit::delivery::write_prompt_to_pty_guarded(
                                     &crate::agent::process::PROCESS_REGISTRY,
-                                    target,
-                                    &delivered_prompt,
+                                    &prepared,
                                     app,
                                     Some(&input),
                                 )
@@ -2190,12 +2186,11 @@ pub(super) fn execute_effects(
                     node.env,
                     prompt,
                 );
-                let resolved = crate::preferences::resolve_harness_provider(&node.provider);
-                let prompt = crate::circuit::delivery::paste_text_for(resolved.adapter(), &prompt);
+                let prepared =
+                    crate::circuit::delivery::PreparedPrompt::prepare(*target_agent_id, &prompt)?;
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
-                    *target_agent_id,
-                    &prompt,
+                    &prepared,
                     app,
                     Some(expected),
                 ) {
@@ -2280,9 +2275,8 @@ pub(super) fn execute_effects(
                     .context
                     .get(&format!("node.{node_id}.nudge.input"))
                     .ok_or_else(|| "Wake-up lacks an input ownership stamp".to_string())?;
-                let resolved = crate::preferences::resolve_harness_provider(&node.provider);
-                let prompt_text =
-                    crate::circuit::delivery::paste_text_for(resolved.adapter(), prompt);
+                let prepared =
+                    crate::circuit::delivery::PreparedPrompt::prepare(*target_agent_id, prompt)?;
                 // The nudge is a real prompt submission, so it is recorded the
                 // same way an injected one is: the receipt it may produce has to
                 // bind to a submission Buildmesh itself made.
@@ -2290,8 +2284,7 @@ pub(super) fn execute_effects(
                     active.run.id,
                     node_id,
                     attempt,
-                    *target_agent_id,
-                    &prompt_text,
+                    &prepared,
                 ) {
                     tracing::warn!(
                         "circuits: run {}: could not record wake-up submission: {}",
@@ -2309,8 +2302,7 @@ pub(super) fn execute_effects(
                 }
                 match crate::circuit::delivery::write_prompt_to_pty_guarded(
                     &crate::agent::process::PROCESS_REGISTRY,
-                    *target_agent_id,
-                    &prompt_text,
+                    &prepared,
                     app,
                     Some(expected),
                 ) {

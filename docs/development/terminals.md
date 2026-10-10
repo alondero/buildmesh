@@ -29,16 +29,16 @@ host with a Windows node. WSL and mobile/remote paste must send their own text,
 since they do not share the desktop clipboard. Programmatic `term.paste(text)`
 retains its existing semantics.
 
-Backend prompt injection (`circuit::delivery::stage_prompt_write`, used by
+Backend prompt injection (`circuit::delivery::PreparedPrompt`, used by
 "Handover to node" and by Circuit prompt dispatches including turns, continuations,
-and nudges; coordinator `send_prompt` is single-line by contract) cannot use the
-clipboard, so it fixes the paste body instead. ConPTY turns every pasted byte
-into a key event: an LF is dropped and a CRLF is an Enter. A terminal selection
-is CRLF-joined on Windows, so an unmodified Grok handover submitted line 1 and
-queued the rest as separate messages. A harness whose adapter returns true from
-`paste_requires_cr_newlines` (Grok) gets CR line endings inside the bracketed
-paste, which is what xterm.js sends for a manual paste. Other harnesses keep
-their text as given. See the
+and nudges) cannot use the clipboard, so it fixes the paste body instead. The
+coordinator's `AgentDriver::send_prompt` is single-line by contract and bypasses
+staged delivery. ConPTY turns every pasted byte into a key event: an LF is dropped
+and a CRLF is an Enter. A terminal selection is CRLF-joined on Windows, so an
+unmodified Grok handover submitted line 1 and queued the rest as separate messages.
+A harness whose adapter returns true from `paste_requires_cr_newlines` (Grok) gets
+CR line endings inside the bracketed paste, which is what xterm.js sends for a
+manual paste. Other harnesses keep their text as given. See the
 [Grok paste investigation](../learning/grok-terminal-paste.md) for runtime evidence.
 
 ## PTY output streaming (issue #1385 / #1393)

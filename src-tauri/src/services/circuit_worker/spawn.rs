@@ -346,18 +346,21 @@ pub(super) fn deliver_circuit_initial_prompt(
     let result = match delivery {
         InitialPromptDelivery::Prefill => Ok(()),
         InitialPromptDelivery::InjectAfterSpawn => {
-            crate::circuit::delivery::write_prompt_to_pty_guarded(
-                &crate::agent::process::PROCESS_REGISTRY,
-                node_id,
-                prompt,
-                app,
-                expected_input,
-            )
-            .and_then(|submitted| {
-                submitted.then_some(()).ok_or_else(|| {
-                    "Input ownership changed before initial prompt submission completed".into()
+            crate::circuit::delivery::PreparedPrompt::prepare(node_id, prompt)
+                .map_err(|e| format!("Could not prepare initial prompt: {e}"))
+                .and_then(|prepared| {
+                    crate::circuit::delivery::write_prompt_to_pty_guarded(
+                        &crate::agent::process::PROCESS_REGISTRY,
+                        &prepared,
+                        app,
+                        expected_input,
+                    )
                 })
-            })
+                .and_then(|submitted| {
+                    submitted.then_some(()).ok_or_else(|| {
+                        "Input ownership changed before initial prompt submission completed".into()
+                    })
+                })
         }
         InitialPromptDelivery::Fresh => Ok(()),
     };
