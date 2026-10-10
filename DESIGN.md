@@ -11,6 +11,9 @@ The **source of truth lives in code**, not in this file:
 - Desktop tokens: the `@theme` block in `src/App.css` (dark), re-pointed by
   the `[data-theme="light"]` override in the same file.
 - Mobile tokens: the `:root` block in `src/mobile/styles.css`.
+- Native Android: `Theme.kt` mirrors the desktop dark palette across Material
+  colour roles, with bundled Geist and generated Relay vectors. See
+  [Android styling](docs/development/android.md#screens-and-ownership).
 - Status vocabulary (labels, dot glyphs, colours): `src/lib/status.ts`.
 - Mesh accent palette (user-pickable): `src/lib/meshColors.ts`.
 - Terminal palettes: `src/components/Terminal/terminalConfig.ts` (xterm.js

@@ -1,0 +1,12 @@
+<!-- Generated from docs/brand/b3-relay-icon.svg by npm run brand:build; do not edit by hand. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="96" android:viewportHeight="96">
+    <path android:fillColor="@android:color/transparent" android:pathData="M16 74 L30 24" android:strokeColor="#ffffff" android:strokeWidth="9" android:strokeLineCap="round" />
+    <path android:fillColor="@android:color/transparent" android:pathData="M30 24 L48 52" android:strokeColor="#ffffff" android:strokeWidth="9" android:strokeLineCap="round" />
+    <path android:fillColor="@android:color/transparent" android:pathData="M48 52 L66 24" android:strokeColor="#ffffff" android:strokeWidth="9" android:strokeLineCap="round" />
+    <path android:fillColor="@android:color/transparent" android:pathData="M66 24 L80 74" android:strokeColor="#ffffff" android:strokeWidth="9" android:strokeLineCap="round" />
+    <path android:fillColor="#ffffff" android:pathData="M12.5,66h7a4.5,4.5 0,0 1,4.5,4.5v7a4.5,4.5 0,0 1,-4.5,4.5h-7a4.5,4.5 0,0 1,-4.5,-4.5v-7a4.5,4.5 0,0 1,4.5,-4.5z" />
+    <path android:fillColor="#ffffff" android:pathData="M26,14h8a6,6 0,0 1,6,6v8a6,6 0,0 1,-6,6h-8a6,6 0,0 1,-6,-6v-8a6,6 0,0 1,6,-6z" />
+    <path android:fillColor="#ffffff" android:pathData="M44,43h8a5,5 0,0 1,5,5v8a5,5 0,0 1,-5,5h-8a5,5 0,0 1,-5,-5v-8a5,5 0,0 1,5,-5z" />
+    <path android:fillColor="#ffffff" android:pathData="M62,14h8a6,6 0,0 1,6,6v8a6,6 0,0 1,-6,6h-8a6,6 0,0 1,-6,-6v-8a6,6 0,0 1,6,-6z" />
+    <path android:fillColor="#ffffff" android:pathData="M76.5,66h7a4.5,4.5 0,0 1,4.5,4.5v7a4.5,4.5 0,0 1,-4.5,4.5h-7a4.5,4.5 0,0 1,-4.5,-4.5v-7a4.5,4.5 0,0 1,4.5,-4.5z" />
+</vector>

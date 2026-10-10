@@ -27,7 +27,8 @@
 import { chromium } from '@playwright/test';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { JSDOM } from 'jsdom';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -38,6 +39,58 @@ const LOCKUP_ON_LIGHT = 'docs/brand/b3-relay-lockup-light.svg';
 
 /** Verbatim copies of COMPACT, for the two bundles that need a served path. */
 const SVG_COPIES = ['src/assets/logo.svg', 'mobile/public/favicon.svg'];
+
+const ANDROID_VECTORS = [
+  { src: COMPACT, out: 'android/app/src/main/res/drawable/ic_buildmesh.xml' },
+  { src: 'docs/brand/b3-relay-mark.svg', out: 'android/app/src/main/res/drawable/relay_mark.xml' },
+  { src: COMPACT, out: 'android/app/src/main/res/drawable/relay_monochrome.xml', monochrome: true },
+];
+
+/** Convert the paths, rounded plates and nodes used by the canonical Relay SVGs. */
+export function androidVector(svgMarkup, source, monochrome = false) {
+  const dom = new JSDOM(svgMarkup, { contentType: 'image/svg+xml' });
+  try {
+    const svg = dom.window.document.documentElement;
+    const plate = monochrome ? svg.querySelector('rect') : null;
+    const [, , width, height] = svg.getAttribute('viewBox').split(/\s+/).map(Number);
+    const paths = [];
+    function visit(element, inherited = { fill: 'none' }) {
+      if (element === plate) return;
+      const attrs = { ...inherited, ...Object.fromEntries([...element.attributes].map(attr => [attr.name, attr.value])) };
+      const number = name => Number(attrs[name] ?? 0);
+      let data;
+      if (element.localName === 'path') data = attrs.d;
+      else if (element.localName === 'circle') {
+        const x = number('cx'), y = number('cy'), r = number('r');
+        data = `M${x - r},${y}a${r},${r} 0,1 0,${2 * r},0a${r},${r} 0,1 0,${-2 * r},0`;
+      } else if (element.localName === 'rect') {
+        const x = number('x'), y = number('y'), w = number('width'), h = number('height'), r = number('rx');
+        data = `M${x + r},${y}h${w - 2 * r}a${r},${r} 0,0 1,${r},${r}v${h - 2 * r}a${r},${r} 0,0 1,${-r},${r}h${2 * r - w}a${r},${r} 0,0 1,${-r},${-r}v${2 * r - h}a${r},${r} 0,0 1,${r},${-r}z`;
+      } else if (!['svg', 'g', 'title'].includes(element.localName)) {
+        throw new Error(`Unsupported Relay SVG element: ${element.localName}`);
+      }
+      if (data) {
+        const fields = [`android:fillColor="${attrs.fill === 'none' ? '@android:color/transparent' : monochrome ? '#ffffff' : attrs.fill}"`, `android:pathData="${data}"`];
+        for (const [svgAttr, androidAttr] of [['stroke', 'strokeColor'], ['stroke-width', 'strokeWidth'], ['stroke-linecap', 'strokeLineCap']]) {
+          if (attrs[svgAttr]) fields.push(`android:${androidAttr}="${monochrome && svgAttr === 'stroke' ? '#ffffff' : attrs[svgAttr]}"`);
+        }
+        paths.push(`    <path ${fields.join(' ')} />`);
+      }
+      for (const child of element.children) visit(child, attrs);
+    }
+    visit(svg);
+    return `<!-- Generated from ${source} by npm run brand:build; do not edit by hand. -->\n<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="${width}dp" android:height="${height}dp" android:viewportWidth="${width}" android:viewportHeight="${height}">\n${paths.join('\n')}\n</vector>\n`;
+  } finally {
+    dom.window.close();
+  }
+}
+
+export function writeAndroidVectors() {
+  for (const { src, out, monochrome } of ANDROID_VECTORS) {
+    writeFileSync(resolve(repoRoot, out), androidVector(readFileSync(resolve(repoRoot, src), 'utf8'), src, monochrome));
+    console.log(`  ${out}  <- ${src}`);
+  }
+}
 
 export const GENERATED_BANNER =
   `<!-- Generated from ${COMPACT} by \`npm run brand:build\` — do not edit by hand. -->`;
@@ -109,14 +162,22 @@ async function rasterise() {
 }
 
 async function main() {
+  if (process.argv.includes('--android-only')) {
+    writeAndroidVectors();
+    return;
+  }
   console.log(`SVG copies from ${COMPACT}:`);
   writeSvgCopies();
+  console.log('\nAndroid vectors:');
+  writeAndroidVectors();
   console.log('\nRasters:');
   await rasterise();
   console.log(`\nDone. Repo root: ${relative(process.cwd(), repoRoot) || '.'}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

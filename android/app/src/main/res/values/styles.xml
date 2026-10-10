@@ -3,6 +3,8 @@
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowActionModeOverlay">true</item>
-        <item name="android:colorAccent">#00d4ff</item>
+        <item name="android:colorAccent">@color/buildmesh_accent</item>
+        <item name="android:windowBackground">@color/buildmesh_background</item>
+        <item name="android:navigationBarColor">@color/buildmesh_background</item>
     </style>
 </resources>

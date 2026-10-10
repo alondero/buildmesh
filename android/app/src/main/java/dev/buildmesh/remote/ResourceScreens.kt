@@ -70,7 +70,7 @@ fun ResourceScreen(api: BuildmeshApi, meshId: Long, screen: String, state: Remot
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(if (screen == "issues") "#${item.number("number")} ${item.text("title")}" else item.text("first_message").ifEmpty { "Archived session" }, style = MaterialTheme.typography.titleMedium)
                     Text(if (screen == "issues") item.text("body").take(500) else "${item.text("branch")} · ${item.text("timestamp")}", color = MeshColors.secondary)
-                    Button(enabled = !state.busy && options.isNotEmpty(), onClick = { selected = item }) { Text(if (screen == "issues") "Start agent" else "Import and resume") }
+                    Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && options.isNotEmpty(), onClick = { selected = item }) { Text(if (screen == "issues") "Start agent" else "Import and resume") }
                     if (screen == "issues" && item.text("url").startsWith("https://")) ExternalLink(item.text("url"), "View issue")
                 }
             }
@@ -153,10 +153,10 @@ fun CreatePrScreen(meshId: Long, vm: BuildmeshViewModel) {
     var result by rememberSaveable(state.draftNamespace, meshId) { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("Create a PR from the mesh's current branch. For an agent worktree, ask the agent to open its PR through the terminal.", color = MeshColors.secondary)
-        OutlinedTextField(enabled = !state.busy, value = title, onValueChange = { title = it; vm.saveDraft("pr-title-$meshId", it) }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(enabled = !state.busy, value = body, onValueChange = { body = it; vm.saveDraft("pr-body-$meshId", it) }, label = { Text("Description") }, minLines = 4, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(enabled = !state.busy, value = base, onValueChange = { base = it }, label = { Text("Base branch") }, modifier = Modifier.fillMaxWidth())
-        Button(enabled = !state.busy && title.isNotBlank() && base.isNotBlank() && result.isEmpty(), onClick = {
+        OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = title, onValueChange = { title = it; vm.saveDraft("pr-title-$meshId", it) }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = body, onValueChange = { body = it; vm.saveDraft("pr-body-$meshId", it) }, label = { Text("Description") }, minLines = 4, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = base, onValueChange = { base = it }, label = { Text("Base branch") }, modifier = Modifier.fillMaxWidth())
+        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && title.isNotBlank() && base.isNotBlank() && result.isEmpty(), onClick = {
             vm.action { api ->
                 val auth = api.get("/api/gh/auth").obj()
                 check(auth.flag("ok")) { "Sign in to GitHub with gh on the desktop first." }

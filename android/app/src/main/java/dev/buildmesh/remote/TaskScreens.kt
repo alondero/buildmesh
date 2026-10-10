@@ -37,15 +37,15 @@ fun NodeScreen(node: JsonObject, vm: BuildmeshViewModel, terminal: () -> Unit, c
         if (node.text("signal_health") == "unverified") Text("Session observation has not been verified yet.", color = MeshColors.secondary)
         lifecycle?.text("message")?.takeIf { it.isNotBlank() }?.let { Text(it) }
         lifecycle?.objectAt("semantic_turn")?.text("description")?.takeIf { it.isNotBlank() && it != lifecycle.text("message") }?.let { Text(it) }
-        Button(onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
-        OutlinedButton(onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
+        Button(shape = MaterialTheme.shapes.small, onClick = terminal, modifier = Modifier.fillMaxWidth()) { Text("Open terminal") }
+        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = changes, modifier = Modifier.fillMaxWidth()) { Text("Review changes") }
         if (canReply || draft.isNotEmpty()) {
             Text("Reply to agent", style = MaterialTheme.typography.titleMedium)
             choices.forEach { choice -> Text("• $choice", color = MeshColors.secondary) }
-            OutlinedTextField(enabled = !state.busy, value = draft, onValueChange = { draft = it; vm.saveDraft("reply-$id", it) }, label = { Text("Your reply") }, modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 8)
+            OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = draft, onValueChange = { draft = it; vm.saveDraft("reply-$id", it) }, label = { Text("Your reply") }, modifier = Modifier.fillMaxWidth(), minLines = 3, maxLines = 8)
             val fits = runCatching { inputBody(draft.trim() + "\r") }.isSuccess
             if (!fits) Text("Reply is too long. Use the terminal for longer text.", color = MeshColors.amber)
-            Button(enabled = canReply && fits && draft.isNotBlank(), onClick = { send(draft.trim() + "\r") }, modifier = Modifier.fillMaxWidth()) { Text("Send reply") }
+            Button(shape = MaterialTheme.shapes.small, enabled = canReply && fits && draft.isNotBlank(), onClick = { send(draft.trim() + "\r") }, modifier = Modifier.fillMaxWidth()) { Text("Send reply") }
         }
     }
 }
@@ -62,12 +62,12 @@ fun TaskScreen(state: RemoteState, vm: BuildmeshViewModel, selectedMesh: Long, s
         Text("Start something", style = MaterialTheme.typography.headlineSmall)
         Text("Give an agent a task, or leave the prompt empty to open a new session.", color = MeshColors.secondary)
         Selector("Mesh", state.meshes.map { it.number("id") to it.text("name") }, selectedMesh, selectMesh, enabled = !state.busy)
-        OutlinedTextField(enabled = !state.busy, value = prompt, onValueChange = { prompt = it; vm.saveDraft("capture", it) }, label = { Text("What should the agent do?") }, modifier = Modifier.fillMaxWidth(), minLines = 5, maxLines = 12)
+        OutlinedTextField(colors = buildmeshTextFieldColors(), enabled = !state.busy, value = prompt, onValueChange = { prompt = it; vm.saveDraft("capture", it) }, label = { Text("What should the agent do?") }, modifier = Modifier.fillMaxWidth(), minLines = 5, maxLines = 12)
         Selector("Launch configuration", options.map { it.text("id") to it.text("label") }, provider, { provider = it }, enabled = !state.busy)
         if (options.isEmpty()) Text("No available launch configuration supports this task. Configure an agent harness on the desktop.", color = MeshColors.amber)
         val fits = prompt.toByteArray(Charsets.UTF_8).size <= 16_000
         if (!fits) Text("The prompt must be at most 16000 bytes.", color = MeshColors.amber)
-        Button(enabled = !state.busy && mesh != null && provider.isNotEmpty() && fits, onClick = {
+        Button(shape = MaterialTheme.shapes.small, enabled = !state.busy && mesh != null && provider.isNotEmpty() && fits, onClick = {
             vm.action { api ->
                 val node = api.post("/api/nodes/create", buildJsonObject {
                     put("mesh_id", selectedMesh); put("provider", provider); put("rows", 24); put("cols", 80)

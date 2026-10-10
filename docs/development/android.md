@@ -67,6 +67,21 @@ form; they do not authorize or pair automatically.
 
 ## Screens and ownership
 
+The native UI uses the Desktop dark palette from `src/App.css`, mapped across
+all Material colour roles in `Theme.kt`. Selected controls use cyan on the
+selection surface; panels, menus and navigation retain the neutral surface
+steps. Geist is bundled in the APK, including its SIL Open Font License, so
+typography and the wordmark work offline. Controls keep Android touch targets
+with 8dp corners, 10dp cards and fields, and 12dp dialogs.
+
+Pairing and the home app bar show the full Relay badge beside the lowercase,
+two-colour `buildmesh` wordmark. Detail screens retain their contextual titles.
+The adaptive launcher icon uses the compact Relay mark, with a transparent
+monochrome silhouette for Android's themed icons. The vector resources
+are generated from `docs/brand/` by `npm run brand:build -- --android-only`;
+edit the canonical SVGs rather than native copies. The native client currently
+uses the dark theme regardless of the phone's system appearance.
+
 Compose owns Overview/Work, mesh selection and search, node details and replies,
 task capture, issue spawning, archive import/resume, changed files, selectable
 diffs, mesh-branch PR creation and connection settings. Launch selections come

@@ -107,8 +107,8 @@ fun TerminalPane(api: BuildmeshApi, nodeId: Long, vm: BuildmeshViewModel) {
             }
         }
         Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(value = input, onValueChange = { input = it }, label = { Text("Terminal input") }, modifier = Modifier.weight(1f), maxLines = 3)
-            Button(enabled = status == "Connected", onClick = {
+            OutlinedTextField(colors = buildmeshTextFieldColors(), value = input, onValueChange = { input = it }, label = { Text("Terminal input") }, modifier = Modifier.weight(1f), maxLines = 3)
+            Button(shape = MaterialTheme.shapes.small, enabled = status == "Connected", onClick = {
                 if (socket.send(input + "\r")) input = "" else vm.notice("Input was not sent. Reconnect the terminal.")
             }) { Text("Send") }
         }

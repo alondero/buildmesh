@@ -46,7 +46,12 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
     }
     Scaffold(
         topBar = {
-            if (state.paired) TopAppBar(title = { Text(title, maxLines = 1) },
+            if (state.paired) TopAppBar(title = {
+                if (screen == "home") BuildmeshWordmark() else Text(title, maxLines = 1)
+            }, colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = MeshColors.surface, scrolledContainerColor = MeshColors.surface,
+                navigationIconContentColor = MeshColors.secondary, actionIconContentColor = MeshColors.secondary,
+            ),
                 navigationIcon = {
                     if (screen != "home") IconButton(onClick = ::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") }
                 }, actions = {
@@ -55,9 +60,13 @@ fun BuildmeshApp(vm: BuildmeshViewModel, invitation: String = "") {
                 })
         },
         bottomBar = {
-            if (state.paired && screen == "home") NavigationBar {
+            if (state.paired && screen == "home") NavigationBar(containerColor = MeshColors.surface, tonalElevation = 0.dp) {
                 listOf("Overview" to Icons.Default.Dashboard, "Work" to Icons.Default.Work, "Capture" to Icons.Default.Add).forEach { (label, icon) ->
-                    NavigationBarItem(selected = tab == label, onClick = {
+                    NavigationBarItem(selected = tab == label, colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MeshColors.accent, selectedTextColor = MeshColors.accent,
+                        indicatorColor = MeshColors.selection,
+                        unselectedIconColor = MeshColors.secondary, unselectedTextColor = MeshColors.secondary,
+                    ), onClick = {
                         if (label == "Capture") screen = "capture" else tab = label
                     }, icon = { Icon(icon, label) }, label = { Text(label) })
                 }
@@ -113,16 +122,15 @@ fun PairScreen(invitation: String, busy: Boolean, pair: (String, String) -> Unit
     val scanner = rememberLauncherForActivityResult(ScanContract()) { result -> result.contents?.let { url = it } }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Spacer(Modifier.height(28.dp))
-        Icon(Icons.Default.Hub, null, tint = MeshColors.accent, modifier = Modifier.size(56.dp))
-        Text("Buildmesh", style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
+        BuildmeshWordmark(markSize = 64.dp)
         Text("Your agents, wherever you are.", color = MeshColors.secondary)
         Text("On your desktop, enable Settings → Remote Access. Connect to the same network or VPN, then scan the pairing QR code.")
-        Button(enabled = !busy, onClick = {
+        Button(shape = MaterialTheme.shapes.small, enabled = !busy, onClick = {
             scanner.launch(ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE).setPrompt("Scan the Buildmesh pairing QR").setBeepEnabled(false).setOrientationLocked(false))
         }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.QrCodeScanner, null); Spacer(Modifier.width(8.dp)); Text("Scan pairing QR") }
-        OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Pairing URL") }, supportingText = { Text("Or paste the complete URL, including #pair=…") }, modifier = Modifier.fillMaxWidth(), maxLines = 4, enabled = !busy)
-        if (!url.contains("&ca=")) OutlinedTextField(value = fingerprint, onValueChange = { fingerprint = it }, label = { Text("Root CA SHA-256 fingerprint") }, supportingText = { Text("For older desktops, copy this from Remote Access → Certificate.") }, modifier = Modifier.fillMaxWidth(), maxLines = 3, enabled = !busy)
-        Button(enabled = !busy && url.isNotBlank(), onClick = { pair(url, fingerprint) }, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Pairing…" else "Pair with desktop") }
+        OutlinedTextField(colors = buildmeshTextFieldColors(), value = url, onValueChange = { url = it }, label = { Text("Pairing URL") }, supportingText = { Text("Or paste the complete URL, including #pair=…") }, modifier = Modifier.fillMaxWidth(), maxLines = 4, enabled = !busy)
+        if (!url.contains("&ca=")) OutlinedTextField(colors = buildmeshTextFieldColors(), value = fingerprint, onValueChange = { fingerprint = it }, label = { Text("Root CA SHA-256 fingerprint") }, supportingText = { Text("For older desktops, copy this from Remote Access → Certificate.") }, modifier = Modifier.fillMaxWidth(), maxLines = 3, enabled = !busy)
+        Button(shape = MaterialTheme.shapes.small, enabled = !busy && url.isNotBlank(), onClick = { pair(url, fingerprint) }, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Pairing…" else "Pair with desktop") }
         Text("Invitations expire after five minutes and work once. Your paired device can be revoked from the desktop.", style = MaterialTheme.typography.bodySmall, color = MeshColors.secondary)
     }
 }
@@ -143,7 +151,7 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
         }
         item {
             Selector("Mesh", listOf(0L to "All meshes") + state.meshes.map { it.number("id") to it.text("name") }, meshId, selectMesh)
-            OutlinedTextField(value = query, onValueChange = { query = it }, label = { Text("Search agents or branches") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
+            OutlinedTextField(colors = buildmeshTextFieldColors(), value = query, onValueChange = { query = it }, label = { Text("Search agents or branches") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
             FilterChip(selected = attentionOnly, onClick = { attentionOnly = !attentionOnly }, label = { Text("Needs attention") })
         }
         if (tab == "Overview") items(state.meshes, key = { "mesh-${it.number("id")}" }) { mesh ->
@@ -177,7 +185,7 @@ fun Dashboard(state: RemoteState, tab: String, meshId: Long, selectMesh: (Long) 
 fun <T> Selector(label: String, choices: List<Pair<T, String>>, value: T, onChange: (T) -> Unit, enabled: Boolean = true) {
     var expanded by remember { mutableStateOf(false) }
     Box(Modifier.fillMaxWidth()) {
-        OutlinedButton(enabled = enabled, onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+        OutlinedButton(shape = MaterialTheme.shapes.small, enabled = enabled, onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
             Text("$label: ${choices.firstOrNull { it.first == value }?.second ?: "Choose"}", modifier = Modifier.weight(1f))
             Icon(Icons.Default.ExpandMore, null)
         }
@@ -199,8 +207,8 @@ fun ConnectionScreen(origin: String, vm: BuildmeshViewModel, onForgot: () -> Uni
         Text("Paired desktop", style = MaterialTheme.typography.titleLarge)
         Text(origin, color = MeshColors.secondary)
         Text("Your device session is encrypted on this phone. To revoke access, remove this device in the desktop's Authorized Devices settings.")
-        Button(onClick = vm::refresh) { Text("Retry connection") }
-        OutlinedButton(onClick = { confirm = true }) { Text("Forget this desktop") }
+        Button(shape = MaterialTheme.shapes.small, onClick = vm::refresh) { Text("Retry connection") }
+        OutlinedButton(shape = MaterialTheme.shapes.small, onClick = { confirm = true }) { Text("Forget this desktop") }
     }
     if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Forget this desktop?") }, text = { Text("You'll need a fresh invitation to connect again. Revoke this device on the desktop to remove its authorization there too.") },
         confirmButton = { TextButton(onClick = { vm.forget(); onForgot() }) { Text("Forget") } }, dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } })
