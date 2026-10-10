@@ -215,6 +215,26 @@ pub fn env_for_path(path: &Path) -> Environment {
 /// the `\\`-prefixed input is returned unchanged — both forms keep their
 /// distro embedded rather than being rewritten to the default distro.
 pub fn to_host_path(path: &str) -> String {
+    to_host_path_with_distro(path, default_wsl_distro)
+}
+
+/// The live distro lookup behind [`to_host_path`]. Reading the cached
+/// `Lazy` can force a `wsl.exe -l -v` spawn, so it stays behind a closure
+/// that only the UNC branches call.
+fn default_wsl_distro() -> Option<String> {
+    super::environment::get_default_wsl_distro()
+}
+
+/// Injectable core of [`to_host_path`] (issue #2082): the distribution name
+/// is a parameter rather than a live probe, so the WSL to UNC translation is
+/// testable on a Windows host that has no running distribution. `distro` is
+/// only consulted by the branches that build a `\\wsl$\…` UNC path, and it
+/// resolves lazily, so the ordinary `/mnt/…` and drive-letter arms never
+/// spawn `wsl.exe`.
+pub(crate) fn to_host_path_with_distro<F: FnOnce() -> Option<String>>(
+    path: &str,
+    distro: F,
+) -> String {
     // Only a Windows host has a WSL filesystem to translate into (`\\wsl$\...`
     // UNC paths, drive letters). On macOS and native Linux the path is already
     // host-native, so return it unchanged — otherwise a normal Linux
@@ -277,8 +297,7 @@ pub fn to_host_path(path: &str) -> String {
             format!("{}:{}", drive, tail.replace('/', "\\"))
         } else if path.starts_with("/home/") {
             // /home/user -> \\wsl$\Ubuntu\home\user
-            let distro = super::environment::get_default_wsl_distro()
-                .unwrap_or_else(|| "Ubuntu".to_string());
+            let distro = distro().unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
         } else if path.len() >= 2
             && path.as_bytes()[0] == b'/'
@@ -291,8 +310,7 @@ pub fn to_host_path(path: &str) -> String {
             let tail = &path[2..];
             format!("{}:{}", drive, tail.replace('/', "\\"))
         } else if path == "/root" || path.starts_with("/root/") {
-            let distro = super::environment::get_default_wsl_distro()
-                .unwrap_or_else(|| "Ubuntu".to_string());
+            let distro = distro().unwrap_or_else(|| "Ubuntu".to_string());
             format!("\\\\wsl$\\{}{}", distro, path.replace('/', "\\"))
         } else {
             path.to_string()

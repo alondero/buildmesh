@@ -1201,6 +1201,21 @@ pub(crate) fn cline_db_path_with_resolver<
     spawn_path: &str,
     get: F,
 ) -> Option<PathBuf> {
+    cline_db_path_with_seams(env_type, spawn_path, get, wsl_home)
+}
+
+/// Injectable core of [`cline_db_path_with_resolver`] (issue #2082).
+/// `guest_home` answers the WSL arm's home lookup, so a test can supply a
+/// fake `/home/...` instead of probing a live distribution.
+pub(crate) fn cline_db_path_with_seams<
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+    H: FnOnce() -> Option<PathBuf>,
+>(
+    env_type: EnvType,
+    spawn_path: &str,
+    get: F,
+    guest_home: H,
+) -> Option<PathBuf> {
     if let Some(override_dir) = cline_data_dir_override_for_env(env_type, &get) {
         return Some(override_dir.join("db").join("sessions.db"));
     }
@@ -1216,7 +1231,7 @@ pub(crate) fn cline_db_path_with_resolver<
         }
         EnvType::Wsl => {
             let _ = spawn_path;
-            wsl_home()?.join(".cline")
+            guest_home()?.join(".cline")
         }
     };
     Some(dir.join("data").join("db").join("sessions.db"))
@@ -1247,6 +1262,31 @@ pub(crate) fn cline_db_path_for_host(env_type: EnvType, spawn_path: &str) -> Opt
     let db_path = cline_db_path_for_env(env_type, spawn_path)?;
     let db_str = db_path.to_string_lossy();
     Some(PathBuf::from(super::to_host_path(&db_str)))
+}
+
+/// Injectable core of [`cline_db_path_for_host`] (issue #2082). Both live
+/// dependencies the Windows-side reader needs are passed in - the guest
+/// home probe and the distro lookup - so the WSL to UNC translation can be
+/// asserted on a host with no running distribution, instead of making the
+/// whole `rust-tests` gate depend on that host's virtualisation settings.
+#[cfg(test)]
+pub(crate) fn cline_db_path_for_host_with<
+    F: Fn(&str) -> Option<std::ffi::OsString>,
+    H: FnOnce() -> Option<PathBuf>,
+    D: FnOnce() -> Option<String>,
+>(
+    env_type: EnvType,
+    spawn_path: &str,
+    get: F,
+    guest_home: H,
+    distro: D,
+) -> Option<PathBuf> {
+    let db_path = cline_db_path_with_seams(env_type, spawn_path, get, guest_home)?;
+    let db_str = db_path.to_string_lossy();
+    Some(PathBuf::from(super::to_host_path_with_distro(
+        &db_str,
+        distro,
+    )))
 }
 
 /// Cline session-id capture root for the **current** (running) Buildmesh
