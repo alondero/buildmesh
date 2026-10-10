@@ -468,7 +468,7 @@ struct RenderedPastePrompt {
     composer_text: String,
 }
 
-// Codex 0.160.1 apply_paste normalizes newlines, then sanitize_user_text
+// Codex 0.160.1 / 0.162.1 apply_paste normalizes newlines to LF, then sanitize_user_text
 // removes CSI sequences and controls. Its marker counts the resulting text.
 fn codex_composer_text(prompt: &str) -> String {
     let prompt = prompt.replace("\r\n", "\n").replace('\r', "\n");
@@ -1349,8 +1349,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "#2199: Codex composer_text replaces CRLF/CR with LF, which Windows ConPTY drops inside bracketed paste"]
-    fn codex_circuit_multiline_delivery_reproduces_lf_newline_loss() {
+    #[ignore = "#2199"]
+    fn codex_circuit_multiline_delivery_stages_bare_lf_payload() {
         let _db = crate::db::test_support::isolated();
         let path = std::env::temp_dir().join(format!("codex-repro-{}", std::process::id()));
         let path = path.to_string_lossy();
@@ -1385,9 +1385,16 @@ mod tests {
         // #2199: codex_composer_text converts CRLF/CR to LF (\n), so the staged PTY
         // payload contains bare LF (\x1b[200~line 1\nline 2\x1b[201~), which Windows
         // ConPTY drops during bracketed paste. This assertion checks that bare LF is
-        // NOT sent, reproducing the defect until #2199 lands.
+        // NOT sent (while allowing CRLF or CR), reproducing the defect until #2199 lands.
+        // Note: the glued-lines composer outcome caused by bare LF under Windows ConPTY
+        // is covered by the probe table in docs/learning/grok-terminal-paste.md; this test
+        // verifies the staged PTY byte stream.
+        let has_bare_lf = written
+            .iter()
+            .enumerate()
+            .any(|(i, &b)| b == b'\n' && (i == 0 || written[i - 1] != b'\r'));
         assert!(
-            !written.contains(&b'\n'),
+            !has_bare_lf,
             "staged PTY payload for Codex must not contain bare LF, which ConPTY drops in bracketed paste"
         );
 

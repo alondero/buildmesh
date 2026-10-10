@@ -90,8 +90,9 @@ The Unix basis is inferred from this manual-paste behavior and has not yet been 
 probed on native Linux or macOS PTYs. Circuit prompt dispatches (turns, continuations, and nudges)
 and terminal handovers go through this preparation. The coordinator's `AgentDriver::send_prompt`
 is single-line by contract and bypasses staged delivery. Other harnesses keep their line endings
-as given (though any prompt containing CR or LF is treated as multiline, bracketed
-by `injection_payload`, and subject to non-Generic paste gates).
+as given (with the exception of circuit-piloted Codex nodes, where `codex_composer_text`
+converts CRLF/CR to LF as tracked in #2199; any prompt containing CR or LF is treated
+as multiline, bracketed by `injection_payload`, and subject to non-Generic paste gates).
 
 ### Codex 0.162.1, same probe (tracked in #2199)
 
@@ -116,5 +117,5 @@ Codex was left unchanged because its gate counts burst boundaries and has not be
 re-verified against CR payloads. Follow-up is tracked in #2199 to investigate opting
 Codex into `paste_requires_cr_newlines` or enforcing CRLF staging without breaking
 split-marker burst boundaries; an automated reproduction test is pinned in
-`src-tauri/src/circuit/delivery.rs` as `codex_circuit_multiline_delivery_reproduces_lf_newline_loss`
+`src-tauri/src/circuit/delivery.rs` as `codex_circuit_multiline_delivery_stages_bare_lf_payload`
 (`#[ignore = "#2199"]`).
