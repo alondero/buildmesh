@@ -1349,6 +1349,53 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "#2199: Codex composer_text replaces CRLF/CR with LF, which Windows ConPTY drops inside bracketed paste"]
+    fn codex_circuit_multiline_delivery_reproduces_lf_newline_loss() {
+        let _db = crate::db::test_support::isolated();
+        let path = std::env::temp_dir().join(format!("codex-repro-{}", std::process::id()));
+        let path = path.to_string_lossy();
+        let mesh = crate::db::create_mesh("codex repro mesh", &path).unwrap();
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "source",
+            &path,
+            "main",
+            crate::models::EnvType::Windows,
+            "codex",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let id = node.id;
+        let (registry, writes) = crate::agent::process::testing::capturing_registry(id);
+        evaluator::register(id);
+
+        let prompt = "line 1\r\nline 2";
+        let prepared = PreparedPrompt::prepare(id, prompt).unwrap();
+        let expected = registry.input_stamp(id).unwrap();
+        let _ = stage_prompt_write(&registry, &prepared, Some(&expected)).unwrap();
+
+        let written = writes.recv_timeout(Duration::from_secs(1)).unwrap();
+        // #2199: codex_composer_text converts CRLF/CR to LF (\n), so the staged PTY
+        // payload contains bare LF (\x1b[200~line 1\nline 2\x1b[201~), which Windows
+        // ConPTY drops during bracketed paste. This assertion checks that bare LF is
+        // NOT sent, reproducing the defect until #2199 lands.
+        assert!(
+            !written.contains(&b'\n'),
+            "staged PTY payload for Codex must not contain bare LF, which ConPTY drops in bracketed paste"
+        );
+
+        evaluator::unregister(id);
+        registry.kill_session(id);
+    }
+
+    #[test]
     fn muse_cr_only_prompt_is_bracketed_and_enters_rendered_paste_gate() {
         let _db = crate::db::test_support::isolated();
         let id = muse_publisher_node("muse-cr-paste");

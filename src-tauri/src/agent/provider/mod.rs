@@ -628,8 +628,9 @@ pub trait AgentProvider: Send + Sync {
     /// bracketed-paste markers LF is dropped (lines glue together) and CRLF
     /// submits the first line and queues the rest as separate messages. Across all platforms
     /// (Windows, macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR
-    /// by default, so Grok's terminal composer expects CR-delimited bracketed pastes
-    /// uniformly. (WSL nodes on Windows hosts also route through Windows ConPTY.) Applied
+    /// by default, so delivering CR mirrors standard paste behavior (the Unix basis is
+    /// inferred from this manual-paste behavior and has not yet been probed on native Linux/macOS PTYs).
+    /// (WSL nodes on Windows hosts also route through Windows ConPTY.) Applied
     /// at `circuit::delivery::PreparedPrompt::prepare` for circuit prompt dispatches
     /// (turns, continuations, nudges) and terminal handovers. The coordinator's
     /// `AgentDriver::send_prompt` is single-line by contract and bypasses staged

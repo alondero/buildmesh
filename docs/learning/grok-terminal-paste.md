@@ -84,9 +84,10 @@ The fix is the adapter capability `paste_requires_cr_newlines`
 (`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
 On Windows (and Windows-hosted WSL instances), ConPTY key-event translation causes
 LF to drop newlines and CRLF to submit prematurely; across all platforms (Windows,
-macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR by default, so
-delivering CR mirrors xterm.js's standard paste behavior and matches Grok's terminal
-composer expectations uniformly. Circuit prompt dispatches (turns, continuations, and nudges)
+macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR by default
+(`replace(/\r?\n/g, "\r")`), so delivering CR mirrors xterm.js's standard paste behavior.
+The Unix basis is inferred from this manual-paste behavior and has not yet been directly
+probed on native Linux or macOS PTYs. Circuit prompt dispatches (turns, continuations, and nudges)
 and terminal handovers go through this preparation. The coordinator's `AgentDriver::send_prompt`
 is single-line by contract and bypasses staged delivery. Other harnesses keep their line endings
 as given (though any prompt containing CR or LF is treated as multiline, bracketed
@@ -104,10 +105,16 @@ runtime writing a 12-line bracketed paste inside `\x1b[200~ … \x1b[201~`) to C
 | CR | Composer draft preserves multiline layout across all lines. |
 
 Nothing was submitted in any run. LF dropped the newlines (lines glued together);
-CRLF and CR both kept the lines. A Windows handover into Codex is CRLF and
-therefore already correct. A programmatic LF prompt to Codex can lose its
-newlines. That path is guarded by a rendered-paste check that ignores whitespace,
-so it would not notice. Codex was left unchanged because its gate counts burst
-boundaries and has not been re-verified against CR payloads. Follow-up is tracked
-in #2199 to investigate opting Codex into `paste_requires_cr_newlines` or enforcing
-CRLF staging without breaking split-marker burst boundaries.
+CRLF and CR both kept the lines. A Windows handover into a standalone Codex node
+(outside any circuit) receives CRLF unchanged and is therefore preserved. However,
+for a circuit-piloted Codex node, `paste_readiness` selects the split-marker gate, whose
+payload builder (`codex_composer_text`) normalizes CRLF and CR to LF. As a result, both
+circuit prompt dispatches and handovers to circuit-piloted Codex nodes reach ConPTY as LF,
+triggering the newline-dropping defect where lines glue together. That path is guarded
+by a rendered-paste check that ignores whitespace, so it does not detect the loss.
+Codex was left unchanged because its gate counts burst boundaries and has not been
+re-verified against CR payloads. Follow-up is tracked in #2199 to investigate opting
+Codex into `paste_requires_cr_newlines` or enforcing CRLF staging without breaking
+split-marker burst boundaries; an automated reproduction test is pinned in
+`src-tauri/src/circuit/delivery.rs` as `codex_circuit_multiline_delivery_reproduces_lf_newline_loss`
+(`#[ignore = "#2199"]`).
