@@ -401,12 +401,20 @@ Buildmesh expects one — the visible symptom on Codex, whose Windows shell is
 PowerShell, which cannot run npm's `.cmd` shim directly and so delegates to
 exactly that cmd.exe.
 
-Buildmesh works around this on the Windows shells: it maps the share with cmd's
-own `pushd` before the agent starts, so the agent's working directory is the
-node's. It never substitutes a different executable, so no PowerShell execution
-policy setting affects it. On an older build, either launch the node on the
-**WSL** runtime rather than Windows (if the harness is installed in the
-distribution), or keep the node's directory on a Windows drive.
+Buildmesh handles this where it applies. When a Windows-runtime node would run
+a batch shim in a UNC directory, the agent is launched inside cmd's own `pushd`,
+which maps the share to a drive letter first, so the agent's working directory
+is the node's. It never substitutes a different executable, so no PowerShell
+execution policy setting affects it.
+
+That covers the spawn that actually breaks — Codex, the only harness whose
+Windows shell is PowerShell, which cannot run npm's `.cmd` shim without
+delegating to cmd.exe. Shells and executables that do not reach cmd.exe are
+left exactly as they were, including their working directory.
+
+On an older build, either launch the node on the **WSL** runtime rather than
+Windows (if the harness is installed in the distribution), or keep the node's
+directory on a Windows drive.
 
 ## Muse fails to start with `os error 267` or `Not a directory`
 

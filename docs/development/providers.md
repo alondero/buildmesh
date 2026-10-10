@@ -304,6 +304,20 @@ needs no mapping — which also leaves a drive-letter directory, a `.exe`, and a
 bare stem on today's behaviour, and keeps any host PowerShell execution policy
 out of the picture entirely.
 
+Two mechanical traps in that `pushd` argv, both learned the hard way:
+
+- **Pass the directory raw, never pre-quoted.** `CommandBuilder::args` applies
+  the Windows command-line quoting rules itself and escapes a `"` inside an
+  argument, so `"<unc>"` reaches cmd as `"\"<unc>\""`, `pushd` rejects it with
+  *The filename, directory name, or volume label syntax is incorrect.*, and the
+  `&&` means the agent never starts. The `Cmd` arm passes its path the same way.
+- **Only a mapped spawn drops its working directory.** Handing cmd.exe the UNC
+  anyway prints *Defaulting to Windows directory* and makes a correct spawn look
+  broken. But `Direct` never establishes a location, and PowerShell running a
+  `.exe` or bare stem neither `pushd`s nor `Set-Location`s — suppressing the cwd
+  for those arms makes `portable-pty` fall back to `USERPROFILE` and opens the
+  agent in the home folder.
+
 Read the adapter rather than trusting any list, including this one; a per-adapter
 table rots silently as adapters are added, which is why the adapter is the only
 place that decides and its own unit test is what pins the value.
