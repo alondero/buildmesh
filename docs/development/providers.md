@@ -289,14 +289,20 @@ remembering:
 A Windows-runtime node whose directory lives in WSL spawns with a UNC current
 directory, and **cmd.exe rejects one** — it silently starts in `C:\Windows`
 instead. `Cmd` answers that with its own `pushd`, which maps the share for the
-lifetime of that shell. `PowerShell` needs a different answer, because it cannot
-run a `.cmd`/`.bat` shim at all: it delegates to `cmd.exe /c`, which reintroduces
-the rejection. So `powershell_invocation_target` resolves npm's `.ps1` twin —
-which npm writes beside every `.cmd` bin shim, and which PowerShell executes
-directly — keeping cmd.exe out of the chain and the directory intact. That
-preference is scoped to UNC directories; a drive-letter directory still launches
-through the resolved `.cmd`, so a host's PowerShell execution policy is not on
-the critical path of an ordinary spawn.
+lifetime of that shell. `PowerShell` has the same problem for a different
+reason: it cannot run a `.cmd`/`.bat` shim at all, so it delegates to
+`cmd.exe /c` and lands straight back on the rejection. So when the spawn is a
+batch shim in a UNC directory, the PowerShell arm runs *inside* cmd's `pushd` —
+`cmd.exe /d /c "pushd <unc> && powershell.exe -EncodedCommand …"` — and the
+agent's argv stays in the Base64 payload, so none of it crosses cmd's tokenizer.
+
+The decision is taken from the command and never by probing the filesystem: on
+the `WindowsInterop` arm Buildmesh runs on the Linux host, so a Windows path is
+not on a filesystem it can see and a probe would silently decline. A `.exe` or a
+bare stem is launched by PowerShell itself and never reaches cmd.exe, so it
+needs no mapping — which also leaves a drive-letter directory, a `.exe`, and a
+bare stem on today's behaviour, and keeps any host PowerShell execution policy
+out of the picture entirely.
 
 Read the adapter rather than trusting any list, including this one; a per-adapter
 table rots silently as adapters are added, which is why the adapter is the only
