@@ -307,21 +307,29 @@ export const useMeshStore = create<MeshState>((set) => {
     }
   },
 
+  // Issue #2024 rank 8 — a rejected rename must reject here too. Absorbing
+  // the failure resolved the promise, so `ProjectSettingsTab`'s
+  // `wrappedSave` ran its success branch and the tab reported "Saved" for a
+  // write the backend never accepted, while the sidebar (which only updates
+  // on success) kept the old name. Rethrowing after recording the error is
+  // what lets the caller show the real rejection; the store's `error` field
+  // is still set, so the destination-level banner path is unchanged.
   updateMeshName: async (id, name) => {
     try {
       await api.updateMeshName(id, name);
-      set((state) => {
-        const existing = state.meshesById.get(id);
-        if (!existing) return state;
-        const updated = { ...existing, name };
-        return {
-          meshes: state.meshes.map((m) => (m.id === id ? updated : m)),
-          meshesById: new Map([...state.meshesById, [id, updated]])
-        };
-      });
     } catch (e) {
       set({ error: formatError(e) });
+      throw e;
     }
+    set((state) => {
+      const existing = state.meshesById.get(id);
+      if (!existing) return state;
+      const updated = { ...existing, name };
+      return {
+        meshes: state.meshes.map((m) => (m.id === id ? updated : m)),
+        meshesById: new Map([...state.meshesById, [id, updated]])
+      };
+    });
   },
 
   updateMeshColor: async (id, color) => {

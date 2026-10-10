@@ -1,9 +1,20 @@
-//! Scans Claude Code's on-disk session storage to find resumable agent nodes
-//! that Buildmesh may not already track. The Claude-Code JSONL primitives
-//! (path encoding, synthetic-injection skipping, content-text extraction) live
-//! in `transcript_reader` so this discovery scan and the coordinator's
-//! transcript reader share one source of Claude-Code-format truth
-//! (ADR-0008). A format change breaks in one place.
+//! Builds the Archive list: the on-disk harness sessions Buildmesh may not
+//! track yet, plus the durable archived rows it already tracks (issue #1065).
+//! The Claude-Code JSONL primitives (path encoding, synthetic-injection
+//! skipping, content-text extraction) live in `transcript_reader` so this
+//! discovery scan and the coordinator's transcript reader share one source of
+//! Claude-Code-format truth (ADR-0008). A format change breaks in one place.
+//!
+//! Two kinds of entry reach the caller, and the difference is what the
+//! `resumable` flag on [`ArchivedAgentNode`] carries:
+//!
+//! * **Discovered** — a transcript exists on disk. Resume works.
+//! * **Durable** — an `agent_nodes` row Buildmesh archived, whose transcript
+//!   is gone or was never written (an archived Terminal node has no CLI
+//!   session id at all). The row, its worktree and its branch still exist, so
+//!   it belongs in the Archive list even though there is nothing to resume;
+//!   `resumable: false` tells the surfaces to say so instead of offering a
+//!   Resume that silently does nothing.
 
 use crate::db;
 use crate::env;
@@ -21,10 +32,10 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use ts_rs::TS;
 
-/// A resumable Claude-Code session found on disk. The desktop Tauri
-/// `discover_agent_nodes` command and the mobile HTTP route both serialise
-/// this struct. The `session_id` field is Claude Code's CLI identifier and
-/// stays as-is per CONTEXT.md ambiguity #1.
+/// An entry in the Archive list. The desktop Tauri `discover_agent_nodes`
+/// command and the mobile HTTP route both serialise this struct. The
+/// `session_id` field is Claude Code's CLI identifier and stays as-is per
+/// CONTEXT.md ambiguity #1.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export, export_to = "ArchivedAgentNode.ts")]
 pub struct ArchivedAgentNode {
@@ -34,6 +45,11 @@ pub struct ArchivedAgentNode {
     pub cwd: Option<String>,
     pub timestamp: Option<String>,
     pub worktree_name: Option<String>,
+    /// Whether a transcript for this entry was found on disk, i.e. whether
+    /// Resume can do anything. `false` on a durable archived row with no
+    /// `cli_session_id`, or one whose transcript was deleted (issue #1065).
+    /// The surfaces must not offer Resume on a `false` entry.
+    pub resumable: bool,
 }
 
 /// Extract the worktree name from a Claude-Code encoded project directory
@@ -161,8 +177,14 @@ fn parse_session_file(path: &PathBuf) -> Option<(String, Option<String>, Option<
     None
 }
 
-/// Discover Claude Code sessions on disk for the given mesh path.
-/// Returns sessions that are NOT already tracked by active/idle/suspended Buildmesh nodes.
+/// Build the Archive list for a mesh: every harness session found on disk that
+/// no live node already tracks, plus every durable archived row the disk scan
+/// could not surface (issue #1065).
+///
+/// The DB read happens once, up front: the same rows both exclude session ids
+/// a live node already owns (`tracked_ids`) and supply the durable archived
+/// entries. No filesystem I/O runs while the connection is checked out — the
+/// row set is an owned `Vec` before the scanners start.
 ///
 /// Issue #1519: the mesh row is loaded by id (indexed primary key — path
 /// strings suffer drive-letter casing and slash discrepancies on Windows)
@@ -173,12 +195,14 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     let claude_dir = env::claude_dir();
     let projects_dir = claude_dir.join("projects");
 
-    // Get session IDs already tracked by non-archived Buildmesh nodes for this mesh
-    let tracked_ids: std::collections::HashSet<String> = db::list_agent_nodes_by_mesh(mesh_id)
-        .unwrap_or_default()
-        .into_iter()
+    // One read serves both roles: session ids already owned by a live node
+    // (which must not be re-surfaced as adoptable discoveries) and the
+    // archived rows the Archive list has to keep showing.
+    let mesh_nodes = db::list_agent_nodes_by_mesh(mesh_id).unwrap_or_default();
+    let tracked_ids: std::collections::HashSet<String> = mesh_nodes
+        .iter()
         .filter(|n| n.status != crate::models::SessionStatus::Archived)
-        .filter_map(|n| n.cli_session_id)
+        .filter_map(|n| n.cli_session_id.clone())
         .collect();
 
     // The app default is mesh-independent, so it applies even when the row
@@ -267,6 +291,7 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
                         cwd,
                         timestamp: ts,
                         worktree_name: worktree_name.clone(),
+                        resumable: true,
                     });
                 }
             }
@@ -349,6 +374,11 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
         Some(&effective),
     ));
 
+    // Durable archived rows the disk scan found nothing for. Sorting below
+    // interleaves them with the discovered sessions by timestamp.
+    let durable = durable_archived_entries(&sessions, &mesh_nodes);
+    sessions.extend(durable);
+
     // Sort by timestamp descending (most recent first)
     sessions.sort_by(|a, b| {
         let ta = a.timestamp.as_deref().unwrap_or("");
@@ -357,6 +387,65 @@ pub fn discover(mesh_id: i64, mesh_path: &str) -> Result<Vec<ArchivedAgentNode>,
     });
 
     Ok(sessions)
+}
+
+/// Archived rows the Archive list must keep showing even though no transcript
+/// is discoverable for them (issue #1065).
+///
+/// The pre-#1065 Archive list was built purely from disk, so an archived node
+/// vanished from it as soon as it lost its transcript — or immediately, when it
+/// never had a `cli_session_id` (an archived Terminal node). The row, its
+/// worktree and its branch are all still there, so the archive view lists them
+/// with `resumable: false` and the surfaces say Resume is unavailable.
+///
+/// An archived node whose transcript *is* on disk already appears in
+/// `discovered` (archived ids are excluded from `tracked_ids`), so it is left
+/// alone here: the discovered entry is the resumable one and must not be
+/// duplicated or downgraded.
+fn durable_archived_entries(
+    discovered: &[ArchivedAgentNode],
+    mesh_nodes: &[crate::models::AgentNode],
+) -> Vec<ArchivedAgentNode> {
+    let on_disk: std::collections::HashSet<&str> = discovered
+        .iter()
+        .map(|session| session.session_id.as_str())
+        .collect();
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    mesh_nodes
+        .iter()
+        .filter(|node| node.status == crate::models::SessionStatus::Archived)
+        .filter_map(|node| {
+            let session_id = match node
+                .cli_session_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            {
+                // The disk scan already lists this session, resumably.
+                Some(id) if on_disk.contains(id) => return None,
+                Some(id) => id.to_string(),
+                // No CLI session id to key on (a Terminal node, say). The row
+                // id is the only durable identity the archive view has, and
+                // both surfaces use this value as the React key / test id.
+                None => format!("node-{}", node.id),
+            };
+            if !seen.insert(session_id.clone()) {
+                return None;
+            }
+            Some(ArchivedAgentNode {
+                session_id,
+                // The node's name is the only label a row with no transcript
+                // can offer.
+                first_message: node.name.clone(),
+                branch: Some(node.branch.clone()).filter(|branch| !branch.is_empty()),
+                cwd: Some(node.path.clone()).filter(|path| !path.is_empty()),
+                timestamp: Some(node.created_at.to_rfc3339()),
+                worktree_name: node.worktree_name.clone(),
+                resumable: false,
+            })
+        })
+        .collect()
 }
 
 /// Extract the Buildmesh worktree name from a Cursor project slug (issue
@@ -483,6 +572,7 @@ fn discover_cursor_sessions_in(
                 cwd,
                 timestamp,
                 worktree_name: worktree_name.clone(),
+                resumable: true,
             });
         }
     }
@@ -579,6 +669,7 @@ fn discover_commandcode_sessions_in(
             cwd: (!candidate.directory.is_empty()).then_some(candidate.directory),
             timestamp,
             worktree_name,
+            resumable: true,
         });
     }
     sessions
@@ -696,6 +787,7 @@ fn discover_agy_sessions_in(
             cwd: workspace_path,
             timestamp,
             worktree_name,
+            resumable: true,
         });
     }
     sessions
@@ -1969,5 +2061,168 @@ mod tests {
             .find(|s| s.session_id == "conv-custom-abs")
             .expect("custom-abs conversation present");
         assert_eq!(abs_row.worktree_name.as_deref(), Some("copper-bear"));
+    }
+
+    // --- Durable archived rows in the Archive list (issue #1065) ----------
+
+    /// A mesh plus one archived agent node, in the private database the
+    /// calling test installed. `cli_session_id` is left unset when `None` —
+    /// the shape of an archived Terminal node, which never gets one.
+    fn seed_archived_node(
+        name: &str,
+        cli_session_id: Option<&str>,
+    ) -> (crate::models::Mesh, crate::models::AgentNode) {
+        let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
+        let node = db::create_agent_node(
+            mesh.id,
+            name,
+            "/repos/demo/.claude/worktrees/brave-fox",
+            "feat/1065",
+            EnvType::Windows,
+            "terminal",
+            Some("brave-fox"),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        if let Some(session_id) = cli_session_id {
+            db::update_cli_session_id(node.id, session_id).unwrap();
+        }
+        db::archive_agent_node(node.id).unwrap();
+        let node = db::get_agent_node_by_id(node.id).unwrap();
+        (mesh, node)
+    }
+
+    #[test]
+    fn archived_node_without_cli_session_id_is_still_listed() {
+        // Issue #1065: an archived Terminal node has no CLI session id, so the
+        // pre-#1065 disk-only archive list dropped it entirely even though its
+        // row, worktree and branch all still exist.
+        let _db = db::test_support::isolated();
+        let (mesh, node) = seed_archived_node("brave-fox", None);
+        assert!(node.cli_session_id.is_none());
+
+        let listed = durable_archived_entries(
+            &[],
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
+
+        assert_eq!(listed.len(), 1, "the durable row must still be listed");
+        let entry = &listed[0];
+        assert_eq!(
+            entry.session_id,
+            format!("node-{}", node.id),
+            "a row with no session id is keyed by its node id"
+        );
+        assert_eq!(entry.first_message, "brave-fox");
+        assert_eq!(entry.branch.as_deref(), Some("feat/1065"));
+        assert_eq!(
+            entry.cwd.as_deref(),
+            Some("/repos/demo/.claude/worktrees/brave-fox")
+        );
+        assert_eq!(entry.worktree_name.as_deref(), Some("brave-fox"));
+        assert!(
+            entry.timestamp.is_some(),
+            "a durable row must still sort by time"
+        );
+        assert!(
+            !entry.resumable,
+            "no transcript exists, so Resume must be unavailable"
+        );
+    }
+
+    #[test]
+    fn archived_node_whose_transcript_was_removed_is_still_listed() {
+        // Same bug, other cause: the id survives on the row but the session
+        // directory on disk is gone, so the disk scan finds nothing to show.
+        let _db = db::test_support::isolated();
+        let (mesh, node) =
+            seed_archived_node("lost-transcript", Some("c0ffee00-1111-2222-3333-444455556666"));
+        assert_eq!(
+            node.cli_session_id.as_deref(),
+            Some("c0ffee00-1111-2222-3333-444455556666"),
+            "the row keeps the id whose transcript is gone"
+        );
+
+        let listed = durable_archived_entries(
+            &[],
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].session_id, "c0ffee00-1111-2222-3333-444455556666");
+        assert_eq!(listed[0].first_message, "lost-transcript");
+        assert!(
+            !listed[0].resumable,
+            "a deleted transcript cannot be resumed"
+        );
+    }
+
+    #[test]
+    fn archived_node_with_a_readable_transcript_keeps_the_resumable_entry() {
+        // The behaviour that must not regress: when the transcript IS on disk
+        // the session is discovered like any other, so it keeps the resumable
+        // entry and must not be duplicated by a durable row.
+        let _db = db::test_support::isolated();
+        let (mesh, node) =
+            seed_archived_node("still-resumable", Some("a1b2c3d4-1111-2222-3333-444455556666"));
+        let discovered = vec![ArchivedAgentNode {
+            session_id: "a1b2c3d4-1111-2222-3333-444455556666".to_string(),
+            first_message: "Fix the archive list".to_string(),
+            branch: Some("feat/1065".to_string()),
+            cwd: Some("/repos/demo".to_string()),
+            timestamp: Some("2026-10-01T09:00:00Z".to_string()),
+            worktree_name: Some("brave-fox".to_string()),
+            resumable: true,
+        }];
+
+        let durable = durable_archived_entries(
+            &discovered,
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
+
+        assert!(
+            durable.is_empty(),
+            "an archived row whose transcript was found must not add a second entry"
+        );
+        assert!(discovered[0].resumable, "the discovered entry stays resumable");
+        assert_eq!(node.status, crate::models::SessionStatus::Archived);
+    }
+
+    #[test]
+    fn live_nodes_never_reach_the_durable_archive_list() {
+        // The durable list is the archive's alone; an active/idle node stays
+        // excluded from the Archive view exactly as before.
+        let _db = db::test_support::isolated();
+        let mesh = db::create_mesh("demo", "/repos/demo").unwrap();
+        db::create_agent_node(
+            mesh.id,
+            "live",
+            "/repos/demo",
+            "main",
+            EnvType::Windows,
+            "terminal",
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let listed = durable_archived_entries(
+            &[],
+            &db::list_agent_nodes_by_mesh(mesh.id).unwrap(),
+        );
+
+        assert!(listed.is_empty());
     }
 }

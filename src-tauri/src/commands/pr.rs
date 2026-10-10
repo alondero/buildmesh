@@ -3,7 +3,9 @@
 use crate::db;
 use crate::env;
 use crate::models::SessionStatus;
-use crate::services::github::{self, CreatePrRequest, GitHubClient, GitHubError, PullRequest};
+use crate::services::github::{
+    self, CreatePrRequest, GitHubClient, GitHubError, GitHubPageCompleteness, PullRequest,
+};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
@@ -219,25 +221,74 @@ pub struct PrFileEntry {
 /// Repository failures propagate so an inaccessible mesh cannot masquerade
 /// as a repository with no issues.
 #[command]
-pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+pub async fn get_repo_issues(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
     crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
+}
+
+/// An issue list plus whether GitHub gave us all of it (issue #2024 rank 6).
+///
+/// A bare `Vec` made "page 1" and "everything" indistinguishable, so the panel
+/// presented a 100-row read as the repository's issues. `completeness` rides
+/// alongside so the UI can say "showing first N of M" instead of implying
+/// completeness it cannot prove.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubIssueFeed.ts")]
+pub struct GitHubIssueFeed {
+    pub items: Vec<GitHubIssue>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A pull-request list plus its completeness — see [`GitHubIssueFeed`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubPullRequestFeed.ts")]
+pub struct GitHubPullRequestFeed {
+    pub items: Vec<GitHubPullRequest>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A PR file list plus its completeness — see [`GitHubIssueFeed`]. A PR with
+/// more changed files than one page holds must not render as a whole diff.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrFileFeed.ts")]
+pub struct PrFileFeed {
+    pub items: Vec<PrFileEntry>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A feed we never had to read: the mesh has no GitHub remote, so there is
+/// nothing that *could* be incomplete. Reported complete so the panel keeps
+/// its existing "no issues" empty state rather than showing a truncation
+/// warning about a read that never happened.
+fn empty_feed_completeness() -> GitHubPageCompleteness {
+    GitHubPageCompleteness {
+        returned: 0,
+        pages_fetched: 0,
+        complete: true,
+        incomplete_reason: None,
+        reported_total: None,
+    }
 }
 
 /// Sync core for [`get_repo_issues`]. Kept as a plain fn so the mobile HTTP
 /// route (`http::routes::issues`) can call it directly; the Tauri command
 /// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
-pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
+pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
     let mesh = db::get_mesh_by_id(mesh_id)
         .map_err(|e| e.to_string())?;
 
     let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
-        return Ok(Vec::new());
+        return Ok(GitHubIssueFeed {
+            items: Vec::new(),
+            completeness: empty_feed_completeness(),
+        });
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let issues = client.list_issues_only(&owner, &repo).map_err(|e| e.to_string())?;
+    let page = client
+        .list_issues_only_paged(&owner, &repo)
+        .map_err(|e| e.to_string())?;
 
-    Ok(issues.into_iter().map(|issue| {
+    let items = page.items.into_iter().map(|issue| {
         // Extract `blocked_by` BEFORE moving `issue.body` into the struct
         // literal (Rust's move checker rejects the borrow-after-move).
         // The parser is pure and bounded — see its doc comment.
@@ -259,7 +310,12 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
             // integer fields).
             blocked_by,
         }
-    }).collect())
+    }).collect();
+
+    Ok(GitHubIssueFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
@@ -271,13 +327,13 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
 /// The panel consumes this single call and never orchestrates per-row
 /// enrichment.
 #[command]
-pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<GitHubPullRequestFeed, String> {
     crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
 }
 
 /// Sync core for [`get_repo_pulls`] — see [`get_repo_issues_blocking`] for the
 /// split rationale.
-pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<GitHubPullRequestFeed, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
     let state = if state == "closed" { "closed" } else { "open" };
@@ -285,15 +341,18 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
     let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
-        return Ok(Vec::new());
+        return Ok(GitHubPullRequestFeed {
+            items: Vec::new(),
+            completeness: empty_feed_completeness(),
+        });
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let prs = client
-        .list_pr_summaries(&owner, &repo, state)
+    let page = client
+        .list_pr_summaries_paged(&owner, &repo, state)
         .map_err(|e| e.to_string())?;
 
-    Ok(prs.into_iter().map(|pr| GitHubPullRequest {
+    let items = page.items.into_iter().map(|pr| GitHubPullRequest {
         number: pr.number,
         title: pr.title,
         body: pr.body,
@@ -307,7 +366,12 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
         author: pr.author,
         mergeable: pr.mergeable,
         mergeable_state: pr.mergeable_state,
-    }).collect())
+    }).collect();
+
+    Ok(GitHubPullRequestFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Get a single PR's mergeability for a mesh's repo. The panel calls this once
@@ -524,35 +588,43 @@ where
 }
 
 /// Get the files changed in a single pull request, for the "View changes"
-/// button on the PR tab (issue #421). One call returns the full file list
-/// (≤ 100 — GitHub's default per_page) with each file's unified-diff
-/// `patch`. The Center Diff Overlay parses the patch line-by-line to
-/// colour +/−/context rows in place. Mirrors the other PR commands:
+/// button on the PR tab (issue #421). Returns the file list with each file's
+/// unified-diff `patch`. The Center Diff Overlay parses the patch line-by-line
+/// to colour +/−/context rows in place. Mirrors the other PR commands:
 /// resolves owner/repo via the mesh's `origin` remote, hits the GitHub
 /// REST API, and forwards the HTTP error verbatim.
+///
+/// The list is paginated (issue #2024 rank 6): a PR with more changed files
+/// than one page holds arrives flagged in `completeness` rather than rendering
+/// as a whole diff.
 #[command]
-pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<PrFileFeed, String> {
     crate::commands::run_blocking("get_pr_files", move || get_pr_files_blocking(mesh_id, pr_number)).await
 }
 
 /// Sync core for [`get_pr_files`] — see [`get_repo_issues_blocking`].
-pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<PrFileFeed, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let files = client
-        .list_pr_files(&owner, &repo, pr_number)
+    let page = client
+        .list_pr_files_paged(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())?;
 
-    Ok(files.into_iter().map(|f| PrFileEntry {
+    let items = page.items.into_iter().map(|f| PrFileEntry {
         filename: f.filename,
         status: f.status,
         additions: f.additions,
         deletions: f.deletions,
         patch: f.patch,
         previous_filename: f.previous_filename,
-    }).collect())
+    }).collect();
+
+    Ok(PrFileFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Create a PR for the node
@@ -658,6 +730,206 @@ pub(crate) fn create_pr_for_mesh_blocking_with_client(
     client
         .create_pull_request_idempotent(req)
         .map(|pr| pr.html_url)
+        .map_err(|e| e.to_string())
+}
+
+// ----- node-scoped create-PR (issue #2024 rank 4, issue #1567) ----------
+//
+// The mobile Create-PR flow used to post a mesh id only, and the route
+// resolved `mesh.path`. For a mesh whose root checkout sits on `main`, that
+// published a `main -> main` PR — or, when the root sat on some unrelated
+// feature branch, published *that* branch instead of the agent's. The
+// Changes screen already displayed the node's branch, so the sheet and the
+// PR it produced disagreed.
+//
+// The fix resolves the source from the NODE's worktree
+// (`env::node_working_path`) and derives the base from the mesh's own
+// `base_ref` rather than assuming `main`.
+
+/// The source/target branch pair a create-PR request resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrSource.ts")]
+pub struct PrSource {
+    /// Branch read from the agent node's worktree — the PR's `head`.
+    pub head_branch: String,
+    /// Branch the PR targets — derived from the mesh's `base_ref`.
+    pub base_branch: String,
+}
+
+/// Result of a successful create-PR.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "CreatePrResult.ts")]
+pub struct CreatePrResult {
+    pub url: String,
+    /// Echo of the branches actually used, so the client can display what
+    /// was created instead of what it guessed.
+    pub head_branch: String,
+    pub base_branch: String,
+}
+
+/// Owner/repo parsed from the node worktree's origin. Kept separate from
+/// [`PrSource`] because a preview must still render the branches for a
+/// non-GitHub remote, while creating a PR legitimately cannot.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPrSource {
+    pub source: PrSource,
+    pub owner_repo: Option<(String, String)>,
+}
+
+/// Strip a remote qualifier from a mesh `base_ref`: `origin/main` → `main`,
+/// `upstream/release` → `release`. GitHub's `base=` expects a branch name
+/// without the remote, so a mesh configured against `origin/trunk` must not
+/// silently become `main`.
+///
+/// The prefix is only stripped when it is one of the repository's **configured
+/// remotes**. There is no syntax that separates a remote from the first
+/// segment of a real branch name — `feature/x` and `origin/main` are the same
+/// shape — so guessing from the characters alone would rewrite a branch called
+/// `feature/x` into `x` and target a branch that does not exist. An unrecognised
+/// prefix is left intact.
+pub(crate) fn local_base_branch(base_ref: &str, remotes: &[String]) -> String {
+    let trimmed = base_ref.trim();
+    match trimmed.split_once('/') {
+        Some((remote, rest)) if !rest.is_empty() && remotes.iter().any(|r| r == remote) => {
+            rest.to_string()
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Resolve the source/target branches for a create-PR from an agent node.
+///
+/// Shared by the preview route and the create route so the branches the
+/// sheet shows before submitting are, by construction, the branches the
+/// create will use — they cannot drift apart.
+pub(crate) fn resolve_pr_source_for_node(
+    mesh_id: i64,
+    node_id: i64,
+) -> Result<ResolvedPrSource, String> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
+    // Ownership check: a node id from another mesh must not be usable to
+    // mint a PR against this mesh's repo. Both the HTTP route and this
+    // function enforce it; the route needs the distinction for its status
+    // code, and this function is also reachable as a Tauri command.
+    if node.mesh_id != mesh_id {
+        return Err(format!(
+            "Agent node {node_id} does not belong to mesh {mesh_id}"
+        ));
+    }
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+
+    // The node's worktree, never `mesh.path`. `host_path` is the
+    // Windows-side view; git operations must never see a WSL path
+    // (see `env::host_path`).
+    let info = repo_info(&env::node_working_path(&node).host_path)?;
+    if info.branch.is_empty() {
+        return Err("Could not determine the agent node's current branch".to_string());
+    }
+
+    let base_branch = local_base_branch(&mesh.base_ref, &info.remotes);
+    if info.branch == base_branch {
+        return Err(format!(
+            "Agent node branch '{}' is the same as the mesh Base Ref '{}' — nothing to compare",
+            info.branch, base_branch
+        ));
+    }
+
+    Ok(ResolvedPrSource {
+        source: PrSource {
+            head_branch: info.branch,
+            base_branch,
+        },
+        owner_repo: info.owner_repo,
+    })
+}
+
+/// Create a PR from an agent node's worktree (issue #1567).
+///
+/// `base_branch` is optional: when the client does not pin one, the mesh's
+/// `base_ref` decides it. `expected_head` lets the client assert the branch
+/// it displayed is still the branch on disk, so a worktree that moved
+/// between preview and submit fails loudly instead of publishing something
+/// the user never saw.
+#[command]
+pub async fn create_pr_for_node_source(
+    mesh_id: i64,
+    node_id: i64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    expected_head: Option<String>,
+) -> Result<CreatePrResult, String> {
+    crate::commands::run_blocking("create_pr_for_node_source", move || {
+        let client = GitHubClient::new().map_err(|e| e.to_string())?;
+        create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            &title,
+            &body,
+            base_branch.as_deref(),
+            expected_head.as_deref(),
+        )
+    })
+    .await
+}
+
+/// Sync core for [`create_pr_for_node_source`] — see
+/// [`create_pr_for_mesh_blocking_with_client`] for why the client is injected.
+pub(crate) fn create_pr_for_node_source_blocking_with_client(
+    client: &GitHubClient,
+    mesh_id: i64,
+    node_id: i64,
+    title: &str,
+    body: &str,
+    base_branch: Option<&str>,
+    expected_head: Option<&str>,
+) -> Result<CreatePrResult, String> {
+    let resolved = resolve_pr_source_for_node(mesh_id, node_id)?;
+    let mut source = resolved.source;
+
+    if let Some(expected) = expected_head.map(str::trim).filter(|h| !h.is_empty()) {
+        if expected != source.head_branch {
+            return Err(format!(
+                "Agent node worktree is on '{}', not the source branch '{expected}' that was previewed",
+                source.head_branch
+            ));
+        }
+    }
+
+    if let Some(requested) = base_branch.map(str::trim).filter(|b| !b.is_empty()) {
+        if requested == source.head_branch {
+            return Err(format!(
+                "Source branch '{}' is the same as Base Ref '{requested}' — nothing to compare",
+                source.head_branch
+            ));
+        }
+        source.base_branch = requested.to_string();
+    }
+
+    let (owner, repo) = resolved
+        .owner_repo
+        .ok_or_else(|| "This repository has no GitHub origin remote".to_string())?;
+
+    let req = CreatePrRequest {
+        owner: &owner,
+        repo: &repo,
+        title,
+        body,
+        head: &source.head_branch,
+        base: &source.base_branch,
+    };
+    // `create_pull_request_idempotent` carries the #771 open-PR recovery, and
+    // it keys that recovery on `head` — so running it AFTER source
+    // resolution means the duplicate check consults the node's real branch
+    // rather than the mesh root's.
+    client
+        .create_pull_request_idempotent(req)
+        .map(|pr| CreatePrResult {
+            url: pr.html_url,
+            head_branch: source.head_branch,
+            base_branch: source.base_branch,
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -819,6 +1091,11 @@ struct RepoInfo {
     /// Cached here so [`resolve_open_pr`] and the existing `owner_repo`
     /// call sites don't reparse on every call.
     owner_repo: Option<(String, String)>,
+    /// Names of every configured remote. A `base_ref` like `origin/main` is
+    /// only unambiguous because we know `origin` is a remote and not the
+    /// first segment of a branch named `feature/…` — see
+    /// [`local_base_branch`].
+    remotes: Vec<String>,
 }
 
 impl RepoInfo {
@@ -891,8 +1168,17 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
         .ok()
         .and_then(|r| r.url().map(|u| u.to_string()));
     let owner_repo = remote_url.as_deref().and_then(github::parse_owner_repo);
+    let remotes = repo
+        .remotes()
+        .map(|names| names.iter().flatten().map(|n| n.to_string()).collect())
+        .unwrap_or_default();
 
-    Ok(RepoInfo { branch, remote_url, owner_repo })
+    Ok(RepoInfo {
+        branch,
+        remote_url,
+        owner_repo,
+        remotes,
+    })
 }
 
 /// Resolve a Mesh's GitHub origin for actions that require one.
@@ -1036,8 +1322,15 @@ mod tests {
                 Repository::open(&path).unwrap().remote("origin", url).unwrap();
             }
             let mesh = db::create_mesh("non-github-feed", &path).unwrap();
-            assert!(get_repo_issues_blocking(mesh.id).unwrap().is_empty());
-            assert!(get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap().is_empty());
+            let issues = get_repo_issues_blocking(mesh.id).unwrap();
+            let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap();
+            assert!(issues.items.is_empty());
+            assert!(pulls.items.is_empty());
+            // A read that never happened has nothing to be incomplete about,
+            // and must not render as a truncation warning.
+            assert!(issues.completeness.complete);
+            assert!(pulls.completeness.complete);
+            assert_eq!(issues.completeness.incomplete_reason, None);
             db::delete_mesh(mesh.id).unwrap();
             drop(tmp);
         }
@@ -2423,5 +2716,370 @@ mod tests {
         assert_eq!(normalise_merge_method(None), "squash");
         assert_eq!(normalise_merge_method(Some("octopus".into())), "squash");
         assert_eq!(normalise_merge_method(Some(String::new())), "squash");
+    }
+    // ----- node-scoped create-PR (issue #2024 rank 4, issue #1567) ------
+    //
+    // The bug: the mobile create-PR request carried only a mesh id, and the
+    // route resolved `mesh.path`. For a mesh whose root sits on `main` that
+    // published `main -> main`; for a root sitting on an unrelated feature it
+    // published the wrong branch entirely — while the sheet displayed the
+    // NODE's branch.
+    //
+    // These tests drive the real production resolver against a real git repo
+    // (mesh root + linked agent worktree), so a regression to mesh-root
+    // resolution shows up as a wrong `head_branch`, not as a passing mock.
+
+    /// Mesh root on `root_branch`, agent worktree on `node_branch`, mesh
+    /// `base_ref` as given. Returns `(guard, mesh_id, node_id)`; the caller
+    /// MUST hold `guard` — it owns both repositories.
+    ///
+    /// The worktree is cut from `main` BEFORE the root is moved onto
+    /// `root_branch`, which is the production order: an agent branches from
+    /// the base ref, not from wherever the mesh root happens to be parked.
+    #[allow(clippy::too_many_arguments)]
+    fn make_mesh_root_and_node(
+        origin_url: &str,
+        root_branch: &str,
+        node_branch: &str,
+        base_ref: &str,
+    ) -> (TempGitRepo, i64, i64) {
+        let tmp = TempGitRepo::new();
+        let root = tmp.path().to_path_buf();
+        let repo = init_repo_for_test(&root, &[("README.md", "init\n")]);
+        let head = repo.head().expect("head exists after commit");
+        let head_commit = head.peel_to_commit().expect("head is a commit");
+        // Anchor a real `main` branch. `init_repo_for_test` commits via
+        // `Some("HEAD")` on an unborn HEAD, and the resulting ref shape is
+        // git2-version dependent, so `main` may or may not already exist.
+        let head_is_main = head
+            .shorthand()
+            .map(|s| s == "main")
+            .unwrap_or(false);
+        if !head_is_main {
+            repo.set_head_detached(head_commit.id()).expect("detach");
+            repo.branch("main", &head_commit, true).expect("create main");
+        }
+        repo.set_head("refs/heads/main").expect("set HEAD to main");
+        repo.checkout_head(Some(
+            git2::build::CheckoutBuilder::default().force(),
+        ))
+        .expect("checkout main");
+        repo.remote_set_url("origin", origin_url).expect("set origin");
+
+        let wt_dir = root.join(".claude").join("worktrees").join("agent-1");
+        create_git_worktree(
+            root.to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+            node_branch,
+            "branched",
+            "main",
+        )
+        .expect("worktree creation must succeed");
+
+        // Park the mesh root on its own branch. This is the state that used
+        // to decide what the PR published.
+        if root_branch != "main" {
+            repo.set_head_detached(head_commit.id()).expect("detach");
+            repo.branch(root_branch, &head_commit, true).expect("create root branch");
+            repo.set_head(&format!("refs/heads/{root_branch}")).expect("set root HEAD");
+            repo.checkout_head(Some(
+                git2::build::CheckoutBuilder::default().force(),
+            ))
+            .expect("checkout root branch");
+        }
+
+        let mesh = crate::db::create_mesh_with_base_ref("pr-source-mesh", root.to_str().unwrap(), base_ref)
+            .expect("create_mesh_with_base_ref");
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "agent-1",
+            root.to_str().unwrap(),
+            "main",
+            crate::models::EnvType::Windows,
+            "claude",
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .expect("create_agent_node");
+        (tmp, mesh.id, node.id)
+    }
+
+    #[test]
+    fn pr_source_uses_node_worktree_when_mesh_root_is_on_main() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.head_branch, "agent/fix-x",
+            "the PR source is the agent worktree's branch, never the mesh root's `main`"
+        );
+        assert_eq!(resolved.source.base_branch, "main");
+        assert_eq!(
+            resolved.owner_repo,
+            Some(("test-owner".to_string(), "test-repo".to_string())),
+            "the node worktree inherits the root repo's origin remote"
+        );
+    }
+
+    #[test]
+    fn pr_source_uses_node_worktree_when_mesh_root_is_on_another_feature() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "unrelated/other",
+            "agent/fix-x",
+            "origin/main",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.head_branch, "agent/fix-x",
+            "a mesh root parked on `unrelated/other` must not become the PR source"
+        );
+        assert_eq!(resolved.source.base_branch, "main");
+    }
+
+    #[test]
+    fn pr_source_derives_base_from_mesh_base_ref_not_a_hardcoded_main() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "trunk",
+            "agent/fix-x",
+            "origin/trunk",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.base_branch, "trunk",
+            "a mesh configured against origin/trunk must not be published into main"
+        );
+        assert_eq!(resolved.source.head_branch, "agent/fix-x");
+    }
+
+    #[test]
+    fn pr_source_rejects_node_belonging_to_another_mesh() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp_a, mesh_a, node_in_a) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let (_tmp_b, mesh_b, _node_in_b) = make_mesh_root_and_node(
+            "https://github.com/test-owner/other-repo.git",
+            "main",
+            "agent/fix-y",
+            "origin/main",
+        );
+
+        let err = resolve_pr_source_for_node(mesh_b, node_in_a).expect_err("ownership must fail");
+        assert!(
+            err.contains("does not belong to mesh"),
+            "error must name the ownership violation, got: {err}"
+        );
+        assert!(mesh_a != mesh_b, "the two meshes must actually differ");
+    }
+
+    #[test]
+    fn pr_source_rejects_node_branch_equal_to_the_base_ref() {
+        let _db = ensure_pr_blocking_db();
+        // The node worktree sits on `agent/fix-x` and the mesh's base_ref
+        // points at that same branch — the "nothing to compare" case a
+        // misconfigured mesh produces. It must fail before GitHub is ever
+        // called rather than opening a self-targeting PR. (Pointing the
+        // base at `main` instead would fail earlier, in worktree creation:
+        // the root already owns `main`.)
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/agent/fix-x",
+        );
+
+        let err = resolve_pr_source_for_node(mesh_id, node_id).expect_err("same-branch must fail");
+        assert!(
+            err.contains("nothing to compare"),
+            "error must explain the same-branch case, got: {err}"
+        );
+    }
+
+    #[test]
+    fn local_base_branch_strips_a_configured_remote_but_not_a_real_slash_branch() {
+        // The prefix is stripped only when the repository actually has that
+        // remote. There is no syntax that tells `origin/main` from
+        // `feature/x`, so character-shape guessing would rewrite the latter
+        // into `x` and target a branch that does not exist.
+        let remotes = vec!["origin".to_string(), "upstream".to_string()];
+        // The remote qualifier must go: GitHub's `base=` wants a branch name.
+        assert_eq!(local_base_branch("origin/main", &remotes), "main");
+        assert_eq!(local_base_branch("origin/trunk", &remotes), "trunk");
+        assert_eq!(local_base_branch("upstream/release", &remotes), "release");
+        assert_eq!(local_base_branch("  origin/main  ", &remotes), "main");
+        // Already-local, or a branch whose own name contains a slash.
+        assert_eq!(local_base_branch("main", &remotes), "main");
+        assert_eq!(local_base_branch("feature/x", &remotes), "feature/x");
+        // A prefix that is not a configured remote is left alone.
+        assert_eq!(local_base_branch("origin/main", &[]), "origin/main");
+        assert_eq!(local_base_branch("origin/", &remotes), "origin/");
+        assert_eq!(local_base_branch("", &remotes), "");
+    }
+
+    /// The wire-level proof: the `head=` GitHub is asked about is the NODE's
+    /// branch. The scripted fake asserts the exact percent-encoded head in
+    /// the request line, so a regression to mesh-root resolution fails here
+    /// instead of quietly publishing the root's branch.
+    #[test]
+    fn create_pr_for_node_source_asks_github_about_the_node_branch() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let existing = existing_pr_json(900, "https://github.com/test-owner/test-repo/pull/900");
+        let (base, count, handle) = fake_server(vec![
+            Scripted::CreatePrConflict(
+                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:agent/fix-x."}]}"#.to_string(),
+            ),
+            Scripted::ListPulls {
+                body: existing,
+                // `:` -> %3A, `/` -> %2F. The fake asserts this exact value
+                // appears in the recovery GET's request line.
+                expected_head: "test-owner%3Aagent%2Ffix-x".to_string(),
+            },
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "title",
+            "body",
+            None,
+            None,
+        )
+        .expect("duplicate-create recovery must succeed");
+
+        assert_eq!(result.url, "https://github.com/test-owner/test-repo/pull/900");
+        assert_eq!(
+            result.head_branch, "agent/fix-x",
+            "the echoed source must be the node worktree's branch"
+        );
+        assert_eq!(result.base_branch, "main");
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_a_stale_expected_head() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "title",
+            "body",
+            None,
+            Some("agent/moved-on"),
+        )
+        .expect_err("a worktree that moved since preview must fail");
+
+        assert!(
+            err.contains("agent/fix-x") && err.contains("agent/moved-on"),
+            "error must name both the actual and the previewed branch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_a_base_equal_to_the_node_branch() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "title",
+            "body",
+            Some("agent/fix-x"),
+            None,
+        )
+        .expect_err("base == source must fail");
+
+        assert!(
+            err.contains("nothing to compare"),
+            "error must explain the same-branch case, got: {err}"
+        );
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_cross_mesh_node_before_calling_github() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp_a, _mesh_a, node_in_a) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let (_tmp_b, mesh_b, _node_in_b) = make_mesh_root_and_node(
+            "https://github.com/test-owner/other-repo.git",
+            "main",
+            "agent/fix-y",
+            "origin/main",
+        );
+        // Port 1 refuses connections, so if ownership were not checked first
+        // this test would fail with a connection error instead of the
+        // ownership message.
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_b,
+            node_in_a,
+            "title",
+            "body",
+            None,
+            None,
+        )
+        .expect_err("cross-mesh node must be rejected");
+
+        assert!(
+            err.contains("does not belong to mesh"),
+            "ownership must be checked before any GitHub call, got: {err}"
+        );
     }
 }

@@ -2,6 +2,63 @@
 
 Status: current
 
+## Create PR is node-scoped
+
+A pull request the phone creates comes from an **agent node's worktree**, never from
+the mesh root checkout. `POST /api/meshes/{id}/pr` therefore requires `node_id`, and the
+route validates at the HTTP boundary that the node belongs to that mesh (403 otherwise)
+before doing any work; `commands::pr::create_pr_for_node_source` re-checks the same
+invariant because it is also reachable as a Tauri command. A mesh-scoped request can only
+resolve `mesh.path`, which published the root's branch: `main -> main` for a root parked
+on the base ref, and an unrelated feature branch otherwise — while the sheet displayed the
+node's branch.
+
+Both branches come from one resolver, `resolve_pr_source_for_node`:
+
+- `head` is read from `env::node_working_path(&node)` (the Windows-side view — git never
+  sees a WSL path), so it tracks the worktree rather than any cached DB field.
+- `base` is derived from the mesh's own `base_ref` via `local_base_branch`, which strips a
+  remote qualifier (`origin/trunk` → `trunk`) without mangling a branch whose own name
+  contains a slash (`feature/x`). The client never has to assume `main`.
+
+`GET /api/meshes/{id}/pr/source?node_id=` returns that same `PrSource` struct, so the pair
+the sheet previews is by construction the pair the create path uses — they cannot drift
+apart. The create request may carry `head_branch` as an assertion: if the worktree moved
+between preview and submit, the backend rejects instead of publishing something the user
+never saw. The open-PR recovery from #771 runs *after* source resolution
+(`create_pull_request_idempotent` keys it on `head`), so the duplicate check consults the
+node's real branch. Omitting `base_branch` lets the mesh decide it.
+
+A node whose worktree branch equals the resolved base is rejected as "nothing to compare"
+before GitHub is ever called.
+
+## Sheet dismissal ownership
+
+A sheet with an in-flight request owns its own dismissal. `Sheet` takes a `dismissible`
+flag that gates the backdrop; the sheet gates its Cancel button; and it publishes the flag
+through `onBusyChange` so the shell's popstate handler honours the same decision. While a
+create is in flight the browser/OS Back gesture is *consumed and re-pushed*, so the history
+stack keeps its depth and the sheet keeps the work it was protecting.
+
+Completion is scoped to the sheet instance that started it: `prSheet` carries an
+`instanceId`, and `onCreated` ignores a completion whose id no longer matches the open
+sheet. Without that, a sheet dismissed mid-request (or retired by auth recovery) would
+complete into nothing and pop the *screen's* history entry, navigating the user backwards
+silently. Submitted fields are frozen while the request is in flight, so the values on
+screen always match the ones GitHub received. `Sheet` also carries `role="dialog"`,
+`aria-modal`, and focus containment.
+
+## Mobile diff empty states
+
+The diff route diffs a file against the node's **merge base** with its mesh `base_ref`
+(ADR 0005), never against HEAD, and the copy says so. A hunk-less diff is not
+automatically "no changes": the mobile client consumes the generated `FileDiff` type, so
+`binary`, `status`, `old_path` and the `additions`/`deletions` counters are visible to the
+screen. It distinguishes a modified binary file, a rename with unchanged contents, a
+metadata-only change, and a genuinely unchanged file. Hand-declaring these interfaces
+dropped exactly those fields and collapsed all four cases into "No diff (file matches
+HEAD)" — a false claim about files that demonstrably changed.
+
 ## Mobile task navigation and idea capture
 
 The mobile shell owns screen history and the selected home tab. NodeList owns

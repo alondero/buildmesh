@@ -503,6 +503,7 @@ pub fn run() {
             commands::pr::merge_pr,
             commands::pr::get_current_branch,
             commands::pr::create_pr_for_mesh,
+            commands::pr::create_pr_for_node_source,
             commands::agent::create_pr_node,
             commands::pr::get_repo_issues,
             commands::pr::get_open_pr_for_node,

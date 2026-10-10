@@ -73,6 +73,9 @@ const archived: ArchivedAgentNode = {
   cwd: "/tmp/repo",
   timestamp: "2026-06-11T00:00:00Z",
   worktree_name: "recover-session",
+  // Issue #1065 — a discovered session: its transcript is on disk, so it
+  // keeps the Resume affordance.
+  resumable: true,
 };
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -80,6 +83,25 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+/**
+ * Issue #2024 rank 6 — the issues list route returns the feed wrapper
+ * `{ items, completeness }`, not a bare array, so a truncated read can state
+ * its truncation instead of looking complete. `complete: true` keeps these
+ * tests focused on the flows they were written for.
+ */
+function issueFeed(items: GitHubIssue[]) {
+  return {
+    items,
+    completeness: {
+      returned: items.length,
+      pages_fetched: items.length > 0 ? 1 : 0,
+      complete: true,
+      incomplete_reason: null,
+      reported_total: null,
+    },
+  };
 }
 
 describe("mobile happy paths (issue #1262)", () => {
@@ -100,10 +122,22 @@ describe("mobile happy paths (issue #1262)", () => {
   describe("PR creation", () => {
     it("renders the success toast and calls history.back() on a successful submit", async () => {
       const createdUrl = "https://github.com/alondero/buildmesh/pull/4242";
-      vi.stubGlobal(
-        "fetch",
-        vi.fn().mockResolvedValue(jsonResponse(200, { url: createdUrl })),
-      );
+      // The sheet previews the source before submitting (issue #2024 rank 4),
+      // so fetch must answer both the preview and the create.
+      const fetchMock = vi.fn(async (url: string) => {
+        if (String(url).includes("/pr/source")) {
+          return jsonResponse(200, {
+            head_branch: "feature/auth",
+            base_branch: "main",
+          });
+        }
+        return jsonResponse(200, {
+          url: createdUrl,
+          head_branch: "feature/auth",
+          base_branch: "main",
+        });
+      });
+      vi.stubGlobal("fetch", fetchMock);
       const historyBack = vi
         .spyOn(window.history, "back")
         .mockImplementation(() => {});
@@ -137,10 +171,12 @@ describe("mobile happy paths (issue #1262)", () => {
           {(onCreated) => (
             <CreatePrSheet
               meshId={mesh.id}
+              nodeId={node.id}
+              sheetId={1}
               currentBranch="feature/auth"
               onClose={() => {}}
-              onCreated={(url) => {
-                onCreatedSpy(url);
+              onCreated={(url, sheetId) => {
+                onCreatedSpy(url, sheetId);
                 onCreated(url);
               }}
             />
@@ -155,7 +191,7 @@ describe("mobile happy paths (issue #1262)", () => {
       // The screen-level `onCreated` fires once with the URL — proves the
       // submit fetched, parsed, and routed the success.
       await waitFor(() => {
-        expect(onCreatedSpy).toHaveBeenCalledWith(createdUrl);
+        expect(onCreatedSpy).toHaveBeenCalledWith(createdUrl, 1);
       });
       // App's mirroring: the toast is now visible AND history.back was
       // invoked to pop the sheet's history entry.
@@ -179,7 +215,7 @@ describe("mobile happy paths (issue #1262)", () => {
         "fetch",
         vi.fn().mockImplementation(async (url: string) => {
           if (/\/api\/meshes\/1\/issues(\?|$)/.test(url)) {
-            return jsonResponse(200, [issue]);
+            return jsonResponse(200, issueFeed([issue]));
           }
           // The spawn endpoint (note the `/spawn` suffix) — must be
           // distinguished from the list endpoint by suffix, not substring
@@ -215,7 +251,7 @@ describe("mobile happy paths (issue #1262)", () => {
         "fetch",
         vi.fn().mockImplementation(async (url: string) => {
           if (/\/api\/meshes\/1\/issues(\?|$)/.test(url)) {
-            return jsonResponse(200, [issue]);
+            return jsonResponse(200, issueFeed([issue]));
           }
           if (url.endsWith("/issues/101/spawn")) {
             return jsonResponse(500, { error: "spawn failed" });

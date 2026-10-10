@@ -6,6 +6,11 @@
  * sessions that buildmesh has not yet adopted) and offers a one-click
  * resume.
  *
+ * The list is also the durable half of the archive (issue #1065): an
+ * `agent_nodes` row Buildmesh archived whose transcript is gone or was
+ * never written is listed too, flagged `resumable: false`, because its
+ * worktree and branch still exist even though there is nothing to resume.
+ *
  * Thin wrapper port of the legacy `SessionBrowserModal`. The dock
  * supplies the header and close button, so this component drops the
  * modal's backdrop / header / Escape handler and renders the same
@@ -313,39 +318,54 @@ export function ArchivedNodesTab({ meshId, meshPath }: { meshId?: number; meshPa
                     as Issues/PRs/Sidebar. `getDefaultProvider` is
                     undefined when `activeMeshId === null` so the cluster
                     skips its tooltip fetch (the click path still works
-                    via `handleDefaultResume`'s own null guard). */}
+                    via `handleDefaultResume`'s own null guard).
+
+                    Issue #1065 — a durable archived row with no discoverable
+                    transcript (`resumable: false`) has no resume target at
+                    all: importing it would create a node whose session id
+                    points at a conversation the harness cannot find. Show
+                    the reason instead of a button that cannot work. */}
                 <div
                   className="shrink-0"
                   onMouseDown={e => e.stopPropagation()}
                 >
-                  <SpawnButtonCluster
-                    providers={resumableProviders}
-                    // Issue #1264 — surface prefix keeps this menu's
-                    // `data-dropdown-for` from colliding with a
-                    // node- or mesh-keyed menu on the same id
-                    // (session ids are stringly-typed but the
-                    // collision risk is the same shape).
-                    dropdownKey={dropdownId('session', session.session_id)}
-                    isOpen={openDropdown === session.session_id}
-                    primaryLabel="Resume"
-                    configurationsEnabled={false}
-                    busyLabel="Resuming…"
-                    primaryAriaLabel="Resume session"
-                    onToggleDropdown={() =>
-                      setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
-                    }
-                    onSpawnDefault={() => handleDefaultResume(session)}
-                    onSelectProvider={(providerId) => handleResume(session, providerId)}
-                    disabled={resuming !== null}
-                    isSpawning={resuming === session.session_id}
-                    // The store's `getDefaultProvider` requires a
-                    // non-null mesh id; the cluster calls this from
-                    // hover/focus to populate its tooltip. Drop the
-                    // tooltip affordance when the probe hasn't focused
-                    // a mesh yet (the Resume buttons stay clickable —
-                    // `handleDefaultResume` has its own null guard).
-                    getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
-                  />
+                  {session.resumable ? (
+                    <SpawnButtonCluster
+                      providers={resumableProviders}
+                      // Issue #1264 — surface prefix keeps this menu's
+                      // `data-dropdown-for` from colliding with a
+                      // node- or mesh-keyed menu on the same id
+                      // (session ids are stringly-typed but the
+                      // collision risk is the same shape).
+                      dropdownKey={dropdownId('session', session.session_id)}
+                      isOpen={openDropdown === session.session_id}
+                      primaryLabel="Resume"
+                      configurationsEnabled={false}
+                      busyLabel="Resuming…"
+                      primaryAriaLabel="Resume session"
+                      onToggleDropdown={() =>
+                        setOpenDropdown(openDropdown === session.session_id ? null : session.session_id)
+                      }
+                      onSpawnDefault={() => handleDefaultResume(session)}
+                      onSelectProvider={(providerId) => handleResume(session, providerId)}
+                      disabled={resuming !== null}
+                      isSpawning={resuming === session.session_id}
+                      // The store's `getDefaultProvider` requires a
+                      // non-null mesh id; the cluster calls this from
+                      // hover/focus to populate its tooltip. Drop the
+                      // tooltip affordance when the probe hasn't focused
+                      // a mesh yet (the Resume buttons stay clickable —
+                      // `handleDefaultResume` has its own null guard).
+                      getDefaultProvider={activeMeshId !== null ? () => getDefaultProvider(activeMeshId) : undefined}
+                    />
+                  ) : (
+                    <span
+                      className="text-2xs text-text-secondary"
+                      title="This archived node has no transcript on disk, so there is nothing to resume."
+                    >
+                      Resume unavailable
+                    </span>
+                  )}
                 </div>
               </div>
             ))}

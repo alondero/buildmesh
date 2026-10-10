@@ -82,9 +82,10 @@ export default function DiffScreen({
 }
 
 function DiffBody({ diff }: { diff: DiffResult }) {
-  if (diff.files.length === 0 || diff.files[0].hunks.length === 0) {
+  const file = diff.files[0];
+  if (file === undefined || file.hunks.length === 0) {
     return (
-      <CenterNote testId="diff-empty">No diff (file matches HEAD).</CenterNote>
+      <CenterNote testId="diff-empty">{explainHunklessDiff(diff)}</CenterNote>
     );
   }
   return (
@@ -101,11 +102,45 @@ function DiffBody({ diff }: { diff: DiffResult }) {
         // so users see exact bytes rather than artificial breaks.
       }}
     >
-      {diff.files[0].hunks.map((h, hi) => (
+      {file.hunks.map((h, hi) => (
         <Hunk key={hi} hunk={h} />
       ))}
     </pre>
   );
+}
+
+/**
+ * Why there is no text diff to show.
+ *
+ * The backend already distinguishes the cases on the wire (`binary`,
+ * `status`, `old_path`, `additions`/`deletions`) — the mobile client used to
+ * hand-declare `FileDiff` without those fields, so every one of them looked
+ * like "the file matches HEAD". That is wrong for a modified PNG, a
+ * rename-only change, or a mode-only change, all of which legitimately
+ * produce zero text hunks while being real changes.
+ *
+ * The baseline is the node's merge base with its mesh `base_ref` (ADR 0005),
+ * never "HEAD" — the copy says "since this branch started" so the wording
+ * cannot drift away from what `diff_node_file_against_base` actually diffs.
+ */
+function explainHunklessDiff(diff: DiffResult): string {
+  const file = diff.files[0];
+  if (file === undefined) {
+    return "No changes to this file since the branch point.";
+  }
+  if (file.binary) {
+    return "Binary file changed — no text diff to show.";
+  }
+  const renamed = file.status === "renamed" || file.old_path !== null;
+  if (renamed && file.additions === 0 && file.deletions === 0) {
+    return file.old_path
+      ? `Renamed from ${file.old_path} — contents unchanged.`
+      : "Renamed — contents unchanged.";
+  }
+  if (file.additions === 0 && file.deletions === 0) {
+    return "Changed, but no text lines differ (metadata only).";
+  }
+  return "No text diff to show for this file.";
 }
 
 function Hunk({ hunk }: { hunk: DiffHunk }) {

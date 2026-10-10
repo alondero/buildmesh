@@ -30,11 +30,25 @@
  * Known limitations (out of scope for v1, all documented in the plan):
  *   - Cross-repo blockers aren't detected (we only cross-reference
  *     against this repo's loaded open issues).
- *   - Pagination: `list_issues_only` caps at 100 open issues per page,
- *     so a blocker on page 2+ of a large repo may be missed.
  *   - "Blocks" (reverse direction) is not surfaced — GitHub's issue
  *     editor supports both "Blocked by" and "Blocks" sections, but v1
  *     only handles the former.
+ *
+ * Pagination (issue #1528)
+ * -----------------------
+ * `list_issues_only` no longer stops at one `per_page=100` response: the
+ * backend walks every `rel="next"` page through the shared paginator in
+ * `services::github::pagination`, up to a bounded page budget, so the
+ * blocked-by cross-reference below sees page 2 and beyond.
+ *
+ * Two bounds remain, and neither is silent on the backend: GitHub's search
+ * API caps at 1,000 matches, and the walk itself has a page budget. When
+ * either bites, `GitHubPageCompleteness` says so. This tab cannot render
+ * that banner yet because `get_repo_issues` still returns a bare
+ * `GitHubIssue[]` — see the wire-shape note in
+ * `docs/development/probe-ui.md#github-list-completeness`. Until the command
+ * returns the metadata, a blocker beyond the first 1,000 matches may still go
+ * unflagged.
  */
 
 import { formatError } from '../../lib/errorUtils';
@@ -72,6 +86,8 @@ import { ContributorPill } from './ContributorPill';
 import { IssueLabels } from './IssueLabels';
 import { parseGraph } from '../Circuits/circuitGraphModel';
 import { ProbeTabBody } from './ProbeTabBody';
+import { FeedCompletenessNote } from './FeedCompletenessNote';
+import type { GitHubPageCompleteness } from '../../types/generated/GitHubPageCompleteness';
 import { ProbeToolbar } from './ProbeToolbar';
 import { SafeLink } from '../shared/SafeLink';
 import {
@@ -117,6 +133,10 @@ export function GitIssuesTab() {
   const getDefaultProvider = useMeshStore((s) => s.getDefaultProvider);
 
   const [issues, setIssues] = useState<GitHubIssue[]>([]);
+  // Issue #2024 rank 6 — the read is paginated, so the tab must be able to
+  // say the list is truncated rather than implying it is everything.
+  const [completeness, setCompleteness] =
+    useState<GitHubPageCompleteness | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [spawning, setSpawning] = useState<number | null>(null);
@@ -247,8 +267,8 @@ export function GitIssuesTab() {
 
   // Client-side filter over the loaded list. Title, body, and label
   // names are all matched so a user searching for a label name finds
-  // the issues carrying it. Case-insensitive, no debounce — the list
-  // is already in memory (GitHub caps at 100 per page anyway).
+  // the issues carrying it. Case-insensitive, no debounce — the whole
+  // fetched page set is already in memory (see the pagination note above).
   const filteredIssues = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (q === '') return issues;
@@ -263,6 +283,7 @@ export function GitIssuesTab() {
   useAsyncEffect((signal) => {
     if (activeMeshId === null) {
       setIssues([]);
+      setCompleteness(null);
       setLoadedMeshId(null);
       setLoading(false);
       return;
@@ -275,7 +296,8 @@ export function GitIssuesTab() {
         // IPC returning — drop the result in that case rather than
         // showing issues for a mesh the user no longer has focused.
         if (signal.aborted || issueWriteRevision.current !== writeRevision) return;
-        setIssues(result);
+        setIssues(result.items);
+        setCompleteness(result.completeness);
         setLoadedMeshId(activeMeshId);
       } catch (e) {
         if (signal.aborted) return;
@@ -441,6 +463,7 @@ export function GitIssuesTab() {
           />
         ) : (
           <div className="space-y-1">
+            <FeedCompletenessNote completeness={completeness} label="issues" />
             {filteredIssues.map(issue => {
               const isExpanded = expanded.isExpanded(issue.number);
               return (

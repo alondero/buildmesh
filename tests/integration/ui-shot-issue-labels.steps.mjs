@@ -24,7 +24,17 @@ export default async function ({ page, invoke }) {
       const command = new URL(route.request().url()).pathname.slice(1);
       let response;
       let error = false;
-      if (command === 'get_repo_issues') response = [{ ...issue, labels: [...issue.labels] }];
+      if (command === 'get_repo_issues') {
+        // Issue #2024 rank 6 - the feed commands return an items + completeness
+        // wrapper rather than a bare array, so a truncated read can state its
+        // truncation instead of looking complete. complete: true - this fixture
+        // is not testing pagination.
+        const items = [{ ...issue, labels: [...issue.labels] }];
+        response = {
+          items,
+          completeness: { returned: items.length, pages_fetched: 1, complete: true, incomplete_reason: null, reported_total: null },
+        };
+      }
       else if (command === 'get_repo_labels') { labelReads += 1; response = labels; }
       else if (command === 'list_circuits') response = [circuit];
       else if (command === 'set_issue_label') {

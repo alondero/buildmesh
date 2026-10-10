@@ -17,6 +17,23 @@ import { useMeshStore, type Mesh } from '../../src/stores/meshStore';
 import { useAgentNodeStore, type AgentNode } from '../../src/stores/agentNodeStore';
 import type { DiffResult } from '../../src/lib/tauri';
 import { seedAgentNodes } from './helpers/seedAgentNodes';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 const MESH: Mesh = {
   id: 1,
@@ -177,7 +194,7 @@ describe('CenterDiffOverlay (#379)', () => {
     vi.mocked(invoke).mockImplementation((cmd: string) => {
       if (cmd === 'diff_node_file_against_base') return Promise.resolve(DIFF);
       if (cmd === 'diff_file_against_head') return Promise.resolve(DIFF);
-      if (cmd === 'get_pr_files') return Promise.resolve([]);
+      if (cmd === 'get_pr_files') return Promise.resolve(feed([]));
       return Promise.resolve({});
     });
     const { rerender } = render(<CenterDiffOverlay diff={BASE_CTX} />);

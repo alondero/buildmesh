@@ -181,15 +181,30 @@ export default function ArchivedNodesScreen({
                   onClick={(e) => e.stopPropagation()}
                   style={{ marginTop: 12 }}
                 >
-                  <button
-                    className="btn-primary"
-                    style={{ width: "100%" }}
-                    disabled={busyId !== null}
-                    data-testid={`node-resume-${s.session_id}`}
-                    onClick={() => resume(s)}
-                  >
-                    {busy ? "Resuming…" : "Resume node"}
-                  </button>
+                  {/* Issue #1065 — a durable archived row with no
+                      discoverable transcript carries `resumable: false`.
+                      Importing it would spawn a harness against a
+                      conversation that isn't there, so explain instead of
+                      offering a Resume that cannot work. */}
+                  {s.resumable ? (
+                    <button
+                      className="btn-primary"
+                      style={{ width: "100%" }}
+                      disabled={busyId !== null}
+                      data-testid={`node-resume-${s.session_id}`}
+                      onClick={() => resume(s)}
+                    >
+                      {busy ? "Resuming…" : "Resume node"}
+                    </button>
+                  ) : (
+                    <div
+                      data-testid={`node-unresumable-${s.session_id}`}
+                      style={{ fontSize: 12, color: "var(--text-faint)" }}
+                    >
+                      Resume unavailable — this archived node has no
+                      transcript on disk.
+                    </div>
+                  )}
                 </div>
               )}
             </div>

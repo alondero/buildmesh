@@ -80,12 +80,25 @@ describe("mobile api wire shape (issue #1262)", () => {
   });
 
   describe("createPr", () => {
-    it("posts {title, body, base_branch} to /api/meshes/:id/pr", async () => {
-      fetchMock.mockResolvedValue(okJson({ url: "https://github.com/x/y/pull/1" }));
+    it("posts the node identity and the pinned head to /api/meshes/:id/pr", async () => {
+      // Issue #2024 rank 4 / #1567: `node_id` is REQUIRED. The old mesh-only
+      // request could only resolve the mesh root, so it published the root's
+      // branch — `main -> main`, or an unrelated feature branch.
+      fetchMock.mockResolvedValue(
+        okJson({
+          url: "https://github.com/x/y/pull/1",
+          head_branch: "agent/fix-x",
+          base_branch: "main",
+        }),
+      );
 
-      const { url } = await createPr(1, "Add dark mode", "Please.", "main");
+      const result = await createPr(1, 7, "Add dark mode", "Please.", "main", "agent/fix-x");
 
-      expect(url).toBe("https://github.com/x/y/pull/1");
+      expect(result.url).toBe("https://github.com/x/y/pull/1");
+      // The response echoes the branches actually used, so the sheet can show
+      // what was created rather than what it guessed.
+      expect(result.head_branch).toBe("agent/fix-x");
+      expect(result.base_branch).toBe("main");
       const [path, init] = fetchMock.mock.calls[0];
       expect(path).toBe("/api/meshes/1/pr");
       expect(init.method).toBe("POST");
@@ -95,13 +108,29 @@ describe("mobile api wire shape (issue #1262)", () => {
         title: "Add dark mode",
         body: "Please.",
         // snake_case — must match the Rust `CreatePrRequest` struct.
+        node_id: 7,
         base_branch: "main",
+        head_branch: "agent/fix-x",
+      });
+    });
+
+    it("omits base_branch and head_branch when they are not pinned", async () => {
+      // Omitting the base lets the mesh's own `base_ref` decide it, so the
+      // client never has to assume `main`.
+      fetchMock.mockResolvedValue(
+        okJson({ url: "x", head_branch: "a", base_branch: "trunk" }),
+      );
+      await createPr(1, 7, "title", "");
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+        title: "title",
+        body: "",
+        node_id: 7,
       });
     });
 
     it("round-trips an empty body string", async () => {
       fetchMock.mockResolvedValue(okJson({ url: "x" }));
-      await createPr(1, "title", "", "main");
+      await createPr(1, 7, "title", "", "main");
       expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).body).toBe("");
     });
   });

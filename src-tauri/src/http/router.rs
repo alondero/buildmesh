@@ -212,6 +212,7 @@ enum Handler {
     NodesCreate,
     NodesInput,
     PrCreate,
+    PrSource,
     PrMerge,
     ImportResume,
     IssuesSpawn,
@@ -342,6 +343,19 @@ const ROUTES: &[Route] = &[
         scope: RouteScope::Admin,
         body: BodyPolicy::Cap(64 * 1024),
         handler: Handler::PrCreate,
+    },
+    // Preview the source/base pair a create-PR would use, resolved from the
+    // agent node's worktree (issue #2024 rank 4 / #1567). Registered before
+    // the GitBranch route so the more specific `/pr/source` suffix wins.
+    Route {
+        method: "GET",
+        m: RouteMatch::OneId {
+            prefix: "/api/meshes/",
+            suffix: "/pr/source",
+        },
+        scope: RouteScope::Admin,
+        body: BodyPolicy::None,
+        handler: Handler::PrSource,
     },
     Route {
         method: "POST",
@@ -695,6 +709,7 @@ async fn run_handler(handler: Handler, req: &ParsedRequest) -> DispatchResult {
         Handler::NodesCreate => Http(routes::nodes::create(req).await),
         Handler::NodesInput => Http(routes::nodes::post_input(req).await),
         Handler::PrCreate => Http(routes::pr::create(req).await),
+        Handler::PrSource => Http(routes::pr::pr_source(req).await),
         Handler::PrMerge => Http(routes::pr::merge(req).await),
         Handler::ImportResume => Http(routes::agent_nodes::import_and_resume(req).await),
         Handler::IssuesSpawn => Http(routes::issues::spawn(req).await),
@@ -1007,6 +1022,7 @@ POST /nodes/{id}/prompt -> CoordinatorWrite
 POST /api/nodes/create -> Admin
 POST /api/nodes/{id}/input -> Admin
 POST /api/meshes/{id}/pr -> Admin
+GET /api/meshes/{id}/pr/source -> Admin
 POST /api/meshes/{mesh_id}/pulls/{pr_number}/merge -> Admin
 POST /api/meshes/{id}/agent-nodes/import-and-resume -> Admin
 POST /api/meshes/{mesh_id}/issues/{issue_number}/spawn -> Admin

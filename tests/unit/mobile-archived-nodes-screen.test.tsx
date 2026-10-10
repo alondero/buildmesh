@@ -41,6 +41,7 @@ const ARCHIVE: ArchivedAgentNode[] = [
     cwd: "/tmp/repo",
     timestamp: "2026-08-25T12:00:00Z",
     worktree_name: "wt-flaky",
+    resumable: true,
   },
   {
     session_id: "abc-002",
@@ -49,8 +50,23 @@ const ARCHIVE: ArchivedAgentNode[] = [
     cwd: "/tmp/repo",
     timestamp: "2026-08-20T12:00:00Z",
     worktree_name: null,
+    resumable: true,
   },
 ];
+
+// Issue #1065 — a durable archived row (DB row still present, transcript gone)
+// arrives with `resumable: false`. It must still be listed, and its expanded
+// card must explain that Resume is unavailable instead of offering a button
+// that would spawn a harness against a missing conversation.
+const DURABLE: ArchivedAgentNode = {
+  session_id: "node-77",
+  first_message: "brave-fox",
+  branch: "feat/1065",
+  cwd: "/tmp/repo/.claude/worktrees/brave-fox",
+  timestamp: "2026-08-15T12:00:00Z",
+  worktree_name: "brave-fox",
+  resumable: false,
+};
 
 function mockDiscoverNodes(nodes: ArchivedAgentNode[]) {
   const fn = vi.fn().mockImplementation(async (url: string) => {
@@ -137,6 +153,57 @@ describe("ArchivedNodesScreen", () => {
 
     await waitFor(() => {
       expect(screen.getByText("boom")).toBeTruthy();
+    });
+  });
+
+  // Issue #1065 — the durable half of the archive.
+  it("lists a durable archived row and explains the unavailable Resume", async () => {
+    mockDiscoverNodes([...ARCHIVE, DURABLE]);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    // The row itself is listed — its identity outlives its transcript.
+    const card = await screen.findByTestId("node-node-77");
+    expect(card).toBeTruthy();
+    expect(screen.getByText("brave-fox")).toBeTruthy();
+
+    // Expanding shows the explanation, not a Resume button.
+    await userEvent.click(card);
+    expect(screen.queryByTestId("node-resume-node-77")).toBeNull();
+    expect(screen.getByTestId("node-unresumable-node-77").textContent).toContain(
+      "Resume unavailable",
+    );
+  });
+
+  it("still resumes a discovered session whose transcript is readable", async () => {
+    // The pre-#1065 behaviour must be untouched: a discovered session keeps
+    // its Resume button and imports on tap.
+    const fetchMock = mockDiscoverNodes([DURABLE, ARCHIVE[0]]);
+
+    render(
+      <ArchivedNodesScreen
+        mesh={mesh}
+        onBack={noop}
+        onResumed={noop}
+      />,
+    );
+
+    await userEvent.click(await screen.findByTestId("node-abc-001"));
+    await userEvent.click(screen.getByTestId("node-resume-abc-001"));
+
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.map(([url]) => String(url));
+      expect(
+        calls.some((url) =>
+          url.includes("/api/meshes/1/agent-nodes/import-and-resume"),
+        ),
+      ).toBe(true);
     });
   });
 
