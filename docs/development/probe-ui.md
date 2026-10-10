@@ -97,6 +97,62 @@ without a GitHub origin produce an empty list. WSL ownership trust is an exact
 `safe.directory` entry in Windows Git configuration, independent of GitHub
 authentication (see [troubleshooting](../troubleshooting.md#github-feeds-fail-for-a-wsl-mesh)).
 
+## Configuration saves reject, they never resolve silently
+
+Every Project Settings field saves through `wrappedSave`, which routes success and
+failure to the destination's `SaveIndicator`. That is only meaningful if the store
+action underneath actually rejects: `meshStore.updateMeshName` used to catch the
+`update_mesh_name` IPC failure, write `state.error`, and **resolve**, so `wrappedSave`
+took its success branch and the tab rendered "Saved" for a write the backend refused —
+while the sidebar, which only moves on success, kept the old name. The action now
+rethrows after recording the error, so the caller shows the real rejection and the
+draft the user typed survives for a retry. The pattern generalises: a store action
+that swallows a failure makes every success indicator above it a lie.
+
+## GitHub list completeness
+
+Every GitHub list read goes through one paginator,
+`src-tauri/src/services/github/pagination.rs` (issue #1528). It follows the RFC 8288
+`Link` header's `rel="next"` rather than a hand-rolled `?page=N`, and it backs both the
+REST list endpoints and the `/search/issues` envelopes used by Autopilot and Circuit
+ingest. Three rules are load-bearing:
+
+- **A failed page fails the whole read.** Page 1 succeeding is not evidence the read is
+  complete, so a 500 on page 2 returns `Err`; it never returns page 1 as a success.
+- **Truncation is data, not silence.** Each walk returns a `Page<T>` carrying
+  `GitHubPageCompleteness` (`returned`, `pages_fetched`, `complete`,
+  `incomplete_reason`, `reported_total`), generated into
+  `src/types/generated/`. `incomplete_reason` is `safety_cap` (the page budget ran out),
+  `search_ceiling` (GitHub's search API caps at 1,000 matches), `upstream_incomplete`
+  (GitHub set `incomplete_results`, or the `Link` chain ended before its own
+  `total_count`), or `cancelled`.
+- **Reconciliation ingest refuses a partial feed.** `require_complete_read` turns any
+  incomplete read into `GitHubError::Incomplete`, because a silently shortened trigger
+  set means a labelled issue or PR on page 2 never gets a run. Read-only consumers get
+  the `Page` and show the gap instead.
+
+The three read-only commands return a **wrapper, not a bare array** —
+`GitHubIssueFeed`, `GitHubPullRequestFeed` and `PrFileFeed`, each `{ items, completeness }`
+(generated into `src/types/generated/`). A `Vec` made "page 1" and "everything"
+indistinguishable, which is the whole defect; the wrapper is what lets a caller tell them
+apart. `FeedCompletenessNote` renders the gap in the Issues tab, the Pull Requests tab and
+the PR file list, and names the *reason* because the remedies differ: a safety cap or a
+search ceiling is a permanent limit of the read, while upstream incompleteness or a
+cancellation is transient and worth retrying. A mesh with no GitHub remote reports
+`complete: true` — the read never happened, so there is nothing to be incomplete about,
+and the existing empty state must not turn into a truncation warning. The mobile
+`GET /api/meshes/{id}/issues` route serialises the same wrapper, so `listIssues` reads
+`.items` off it.
+
+The walk is bounded and cancellable: `PaginationPolicy::DEFAULT` is 10 pages × 100 =
+1,000 items, matching GitHub's own search ceiling, and both the budget and
+`GitHubClient::cancel` are checked *before* each request, so a stopped read costs no
+further API calls. Ordering is server order across concatenated pages, deduplicated by
+identity so an item created between two requests appears once.
+
+The PR-summaries path uses GraphQL cursors rather than `Link`, but reports through the
+same `GitHubPageCompleteness` and shares the same budget.
+
 ## Probe Panel shell (scroll ownership + narrow width)
 The panel and keyed destination wrapper are layout-only, with `min-h-0`,
 `min-w-0` and `overflow-hidden`. A destination owns one inner

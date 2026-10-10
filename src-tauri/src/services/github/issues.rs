@@ -8,6 +8,7 @@ use regex::Regex;
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
+use super::pagination::require_complete_read;
 use super::sync::{rest_failure, GitHubClient, GitHubError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -340,58 +341,36 @@ impl GitHubClient {
     }
 
     fn list_labels(&self, path: &str) -> Result<Vec<String>, GitHubError> {
-        let mut labels = Vec::new();
-        let mut page = 1;
-        loop {
-            let resp = self
-                .client
-                .get(self.rest_url(&format!("{path}?per_page=100&page={page}")))
-                .header(AUTHORIZATION, format!("Bearer {}", self.token))
-                .header(USER_AGENT, "buildmesh")
-                .header(ACCEPT, "application/vnd.github+json")
-                .send()?;
-            let status = resp.status();
-            if !status.is_success() {
-                return Err(rest_failure(status, resp.text().unwrap_or_default()));
-            }
-            let batch: Vec<RawLabel> = resp.json()?;
-            let last_page = batch.len() < 100;
-            labels.extend(batch.into_iter().map(|label| label.name));
-            if last_page {
-                return Ok(labels);
-            }
-            page += 1;
-        }
+        // Label lists are tiny (tens), but this path used to loop `?page=N`
+        // with no bound at all. The shared adapter caps the walk and reports
+        // completeness instead of assuming a short page means the end.
+        let url = self.rest_url(&format!(
+            "{path}?per_page={}",
+            super::pagination::DEFAULT_PER_PAGE
+        ));
+        Ok(self
+            .get_all_pages::<RawLabel, String, _>(&url, &Default::default(), |l| l.name.clone())?
+            .into_items()
+            .into_iter()
+            .map(|label| label.name)
+            .collect())
     }
 
-    /// List open issues (excluding pull requests) for a repository.
-    pub fn list_issues_only(&self, owner: &str, repo: &str) -> Result<Vec<Issue>, GitHubError> {
-        // Use the search API which lets us filter to only issues (not PRs)
-        let url = self.rest_url(&format!(
-            "/search/issues?q=repo:{}/{}+is:issue+state:open&per_page=100",
-            owner, repo
-        ));
-        let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header(USER_AGENT, "buildmesh")
-            .header(ACCEPT, "application/vnd.github+json")
-            .send()?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            return Err(rest_failure(status, body));
-        }
-
-        #[derive(Deserialize)]
-        struct SearchResult {
-            items: Vec<Issue>,
-        }
-
-        let result: SearchResult = resp.json()?;
-        Ok(result.items)
+    /// List open issues (excluding pull requests) for a repository, walking
+    /// every page GitHub advertises.
+    ///
+    /// Uses the search API, which is what lets the query filter to issues only
+    /// (the `/issues` REST endpoint returns PRs too and would need client-side
+    /// filtering). Search caps at 1,000 matches, so a repo with more open
+    /// issues than that comes back flagged incomplete rather than presented as
+    /// the whole backlog.
+    pub fn list_issues_only_paged(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<super::pagination::Page<Issue>, GitHubError> {
+        let query = format!("repo:{owner}/{repo} is:issue state:open");
+        self.search_issues(&query, |issue: &Issue| issue.number)
     }
 
     /// List open issues (excluding pull requests) carrying `label`. The
@@ -404,6 +383,13 @@ impl GitHubClient {
     /// spaces) and percent-encoded for the URL; embedded `"` are stripped
     /// (GitHub label names can't contain them, and passing one through
     /// would break the qualifier quoting).
+    ///
+    /// Every matching page is consumed, and an incomplete read is an **error**
+    /// rather than a short list: this is Autopilot's trigger feed, so silently
+    /// dropping page 2 would mean a labelled issue never gets a run with
+    /// nothing in any log. `require_complete_read` turns the cap / ceiling /
+    /// cancellation cases into [`GitHubError::Incomplete`], which the poll
+    /// pass logs and isolates like any other per-circuit failure.
     pub fn list_open_issues_with_label(
         &self,
         owner: &str,
@@ -416,7 +402,8 @@ impl GitHubClient {
             repo,
             label.replace('"', "")
         );
-        self.search_issues(&query)
+        let page = self.search_issues(&query, |issue: &Issue| issue.number)?;
+        require_complete_read(page, &format!("open issues labelled `{label}`"))
     }
 
     /// Percent-encode a label name for safe inclusion in a URL path component.

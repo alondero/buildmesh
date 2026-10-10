@@ -6,6 +6,7 @@
 use reqwest::header::{ACCEPT, AUTHORIZATION, USER_AGENT};
 use serde::{Deserialize, Serialize};
 
+use super::pagination::require_complete_read;
 use super::sync::{
     graphql_repository_or_error, rest_failure, GitHubClient, GitHubError,
     HTTP_WRITE_REQUEST_TIMEOUT,
@@ -542,33 +543,26 @@ impl GitHubClient {
     /// endpoint rather than `/compare/{base}...{head}` so we don't have to
     /// know the head ref or fall back to a `git fetch` if the branch isn't
     /// local — the PR number is the only key the panel needs.
-    pub fn list_pr_files(
+    ///
+    /// Every page is walked, so a PR with more than 100 changed files renders
+    /// all of them; `completeness` says whether the read was truncated, which a
+    /// `Vec` return type cannot express.
+    pub fn list_pr_files_paged(
         &self,
         owner: &str,
         repo: &str,
         pr_number: i64,
-    ) -> Result<Vec<PrFile>, GitHubError> {
+    ) -> Result<super::pagination::Page<PrFile>, GitHubError> {
         let url = self.rest_url(&format!(
-            "/repos/{}/{}/pulls/{}/files?per_page=100",
-            owner, repo, pr_number
+            "/repos/{}/{}/pulls/{}/files?per_page={}",
+            owner,
+            repo,
+            pr_number,
+            super::pagination::DEFAULT_PER_PAGE
         ));
-        let resp = self
-            .client
-            .get(&url)
-            .header(AUTHORIZATION, format!("Bearer {}", self.token))
-            .header(USER_AGENT, "buildmesh")
-            .header(ACCEPT, "application/vnd.github+json")
-            .send()?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            return Err(rest_failure(status, body));
-        }
-
-        // The endpoint returns a bare array, NOT a `{files: [...]}` wrapper.
-        let files: Vec<PrFile> = resp.json()?;
-        Ok(files)
+        self.get_all_pages(&url, &Default::default(), |file: &PrFile| {
+            file.filename.clone()
+        })
     }
 
     /// Merge a pull request with the caller-chosen merge method
@@ -676,6 +670,11 @@ impl GitHubClient {
     /// as [`Self::list_open_issues_with_label`] — the query returns the
     /// current open+labelled set, so a PR closed or untagged while the
     /// app was offline never appears.
+    ///
+    /// Like its issue-side twin, every matching page is consumed and an
+    /// incomplete read is an error rather than a short list — this is the
+    /// Circuit PR-trigger feed (issue #1528), where a silently dropped page 2
+    /// means a labelled PR never gets a run.
     pub fn list_open_pull_requests_with_label(
         &self,
         owner: &str,
@@ -691,7 +690,8 @@ impl GitHubClient {
         // Search results carry the issue-shaped wire form for PRs too;
         // PullRequest's custom Deserialize already tolerates it (the
         // head object is optional with serde defaults).
-        self.search_issues(&query)
+        let page = self.search_issues(&query, |pr: &PullRequest| pr.number)?;
+        require_complete_read(page, &format!("open pull requests labelled `{label}`"))
     }
 
     /// Fetch one page of PR summaries via GitHub's GraphQL connection.
@@ -803,20 +803,26 @@ impl GitHubClient {
     /// Cost is proportional to pages, not PR count: one GraphQL connection
     /// request per page of up to 100 PRs. The UI calls this through
     /// `get_repo_pulls` and never issues per-PR detail requests.
-    pub fn list_pr_summaries(
+    ///
+    /// GraphQL pages by cursor rather than `Link` header, so this walk keeps
+    /// its own `hasNextPage` loop, but it reports through the same
+    /// [`GitHubPageCompleteness`](super::pagination::GitHubPageCompleteness)
+    /// contract as the REST paths (issue #1528).
+    pub fn list_pr_summaries_paged(
         &self,
         owner: &str,
         repo: &str,
         state: &str,
-    ) -> Result<Vec<PullRequestSummary>, GitHubError> {
+    ) -> Result<super::pagination::Page<PullRequestSummary>, GitHubError> {
         let states = graphql_states_for_filter(state);
         let mut all: Vec<PullRequestSummary> = Vec::new();
         let mut after: Option<String> = None;
         // Bound the page walk: a well-behaved server ends it via
-        // `has_next_page == false` (or the cap, first page today), but a
-        // buggy cursor that repeats forever must not park this blocking-pool
-        // thread — same "bound everything" ethos as the HTTP timeouts above.
+        // `has_next_page == false` (or the cap), but a buggy cursor that
+        // repeats forever must not park this blocking-pool thread — same
+        // "bound everything" ethos as the HTTP timeouts above.
         let mut pages_fetched: usize = 0;
+        let mut hit_cap = false;
         loop {
             pages_fetched += 1;
             if pages_fetched > PR_SUMMARY_MAX_PAGES {
@@ -826,6 +832,7 @@ impl GitHubClient {
                     owner,
                     repo
                 );
+                hit_cap = true;
                 break;
             }
             let (mut page, info) = self.fetch_pr_summaries_page(
@@ -836,9 +843,13 @@ impl GitHubClient {
                 after.as_deref(),
             )?;
             all.append(&mut page);
-            // Preserve the REST list's 100-row cap: one page already covers
-            // it, so a second request only fires if the cap is raised later.
-            if all.len() >= PR_SUMMARY_CAP || !info.has_next_page {
+            if !info.has_next_page {
+                break;
+            }
+            if all.len() >= PR_SUMMARY_CAP {
+                // Still more to read — record it rather than returning a
+                // 100-row list that reads as "all the PRs".
+                hit_cap = true;
                 break;
             }
             after = info.end_cursor;
@@ -847,7 +858,30 @@ impl GitHubClient {
             }
         }
         all.truncate(PR_SUMMARY_CAP);
-        Ok(all)
+
+        let mut completeness =
+            super::pagination::GitHubPageCompleteness::rest(all.len(), pages_fetched);
+        if hit_cap {
+            completeness.complete = false;
+            completeness.incomplete_reason =
+                Some(super::pagination::GitHubIncompleteReason::SafetyCap);
+        }
+        Ok(super::pagination::Page {
+            items: all,
+            completeness,
+        })
+    }
+
+    /// Bare-`Vec` view of [`Self::list_pr_summaries_paged`].
+    pub fn list_pr_summaries(
+        &self,
+        owner: &str,
+        repo: &str,
+        state: &str,
+    ) -> Result<Vec<PullRequestSummary>, GitHubError> {
+        Ok(self
+            .list_pr_summaries_paged(owner, repo, state)?
+            .into_items())
     }
 }
 
@@ -896,16 +930,22 @@ pub struct PullRequestSummary {
 }
 
 /// Page size for the GraphQL PR-summaries connection. Matches the REST
-/// list's `per_page=100` so the current 100-row behaviour costs exactly
-/// one HTTP request.
+/// list's `per_page=100`, so one connection page costs the same as one REST
+/// page.
 const PR_SUMMARY_PAGE_SIZE: i64 = 100;
-/// List cap preserved from the REST `per_page=100` behaviour.
-const PR_SUMMARY_CAP: usize = 100;
-/// Hard ceiling on pages per `list_pr_summaries` call. With the 100-row cap
-/// the walk ends on page 1 today; the ceiling only binds a misbehaving
-/// cursor (e.g. a repeated `endCursor` with `hasNextPage: true`) so one
-/// refresh can never issue more than this many requests.
-const PR_SUMMARY_MAX_PAGES: usize = 10;
+/// Item cap for one PR-summaries walk. This used to be the REST list's
+/// single-page 100, which silently truncated a repo with more open PRs than
+/// that (issue #1528). It is now the shared adapter's budget —
+/// [`PaginationPolicy::default`](super::pagination::PaginationPolicy::default):
+/// 10 pages × 100. Crossing it is reported as
+/// [`GitHubIncompleteReason::SafetyCap`](super::pagination::GitHubIncompleteReason::SafetyCap),
+/// not returned as a complete list.
+const PR_SUMMARY_CAP: usize = super::pagination::PaginationPolicy::DEFAULT.max_items();
+/// Hard ceiling on pages per `list_pr_summaries` call. Matches the adapter's
+/// `max_pages`, so the cursor walk and the `Link` walk spend the same worst-case
+/// request budget. It also binds a misbehaving cursor (e.g. a repeated
+/// `endCursor` with `hasNextPage: true`) before the cap does.
+const PR_SUMMARY_MAX_PAGES: usize = super::pagination::DEFAULT_MAX_PAGES;
 
 /// Map the panel's `state` filter to GraphQL `PullRequestState` values.
 /// REST `state=closed` includes merged PRs, so the GraphQL side must ask
@@ -2112,6 +2152,34 @@ pub(crate) mod tests {
         );
     }
 
+    /// Issue #1528: the summaries list used to stop at the REST list's 100-row
+    /// cap, so PR 101 in a busy repo simply never appeared and nothing said so.
+    /// The cap is now the shared page budget and reaching it is reported.
+    #[test]
+    fn list_pr_summaries_includes_the_hundred_and_first_pr_and_reports_completeness() {
+        use std::sync::atomic::Ordering;
+        let p1 = serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let p2 = serde_json::Value::Array((101..=101).map(fake_node).collect::<Vec<_>>());
+        let (base, count, handle) = fake_graphql_server(vec![
+            (p1, true, Some("cursor1".to_string())),
+            (p2, false, None),
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let page = client
+            .list_pr_summaries_paged("acme", "demo", "open")
+            .expect("summaries");
+        assert_eq!(page.items.len(), 101);
+        assert_eq!(
+            page.items.last().map(|pr| pr.number),
+            Some(101),
+            "PR 101 lives on the second cursor page and must arrive"
+        );
+        assert!(page.completeness.complete);
+        assert_eq!(page.completeness.reported_total, None);
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn list_pr_summaries_paginates_by_cursor_not_by_pr() {
         use std::sync::atomic::Ordering;
@@ -2133,6 +2201,32 @@ pub(crate) mod tests {
             2,
             "two pages must cost 2 requests"
         );
+    }
+
+    /// A repo with more open PRs than the page budget still returns its 1,000,
+    /// but must say it stopped there rather than implying it is the whole list.
+    #[test]
+    fn list_pr_summaries_reports_incompleteness_when_the_budget_still_has_pages() {
+        use std::sync::atomic::Ordering;
+        let full_page = serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let pages: Vec<(serde_json::Value, bool, Option<String>)> = (0..PR_SUMMARY_MAX_PAGES)
+            .map(|p| (full_page.clone(), true, Some(format!("cursor{p}"))))
+            .collect();
+        let (base, count, handle) = fake_graphql_server(pages);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+        let page = client
+            .list_pr_summaries_paged("acme", "demo", "open")
+            .expect("summaries");
+
+        assert_eq!(page.items.len(), PR_SUMMARY_CAP);
+        assert!(!page.completeness.complete);
+        assert_eq!(
+            page.completeness.incomplete_reason,
+            Some(crate::services::github::pagination::GitHubIncompleteReason::SafetyCap),
+            "a list that stopped at the budget is not the whole list"
+        );
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), PR_SUMMARY_MAX_PAGES);
     }
 
     #[test]

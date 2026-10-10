@@ -439,6 +439,7 @@ pub(super) fn observe_waits_with(
         if events.iter().any(|e| matches!(e, CircuitEvent::TurnClassified { node_id, .. } if node_id == &step.node_id)) { continue; }
         let mut progress = None;
         let mut observed = None;
+        let mut stalled_task_id = None;
         let (reason, timeout_ms) = if step.status == StepStatus::Blocked {
             (
                 "Waiting for your approval. This gate does not expire while you are away."
@@ -455,6 +456,7 @@ pub(super) fn observe_waits_with(
             progress = wait.progress;
             let observed_here = wait.observed;
             observed = Some(observed_here);
+            stalled_task_id = wait.stalled_task_id;
             let yielded = wait.yielded;
             let reason = if !observed_here {
                 "Waiting for session identity and a readable report; retrying discovery every 10 seconds.".to_string()
@@ -503,6 +505,49 @@ pub(super) fn observe_waits_with(
             reason,
             timeout_ms,
         });
+        // Issue #2105: a yielded session with a finished background task it
+        // cannot learn about on its own. The prompt this produces is the only
+        // thing that starts the turn in which the CLI would have announced the
+        // task, so it is fenced to this turn's stamp and revision and spent
+        // after one use.
+        if let Some(task_id) = stalled_task_id {
+            let Some(agent_id) = step
+                .agent_node_id
+                .or_else(|| view.resolve_target_agent(&step.node_id))
+            else {
+                continue;
+            };
+            // Same identity the continuation fence uses: the lifecycle stamp and
+            // the assistant-report revision describe the turn being observed.
+            let stamp = db::agent_turn_stamp(agent_id)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let revision = db::get_agent_node_by_id(agent_id)
+                .ok()
+                .and_then(|node| {
+                    crate::coordinator::enrichment::assistant_report(&node)
+                        .map(|report| report.revision)
+                })
+                .unwrap_or_default();
+            let input_stamp = crate::agent::process::PROCESS_REGISTRY.input_stamp(agent_id);
+            // Without a real input-ownership stamp the nudge cannot be
+            // delivered safely: a terminal whose input is ambiguous (a staged
+            // draft, a pending key sequence, no live process) must not be
+            // written to. Staying silent here is the safe reading — the normal
+            // wait budget still owns the step.
+            let Some(input_stamp) = input_stamp else {
+                continue;
+            };
+            events.push(CircuitEvent::NudgeIdleSession {
+                node_id: step.node_id.clone(),
+                attempt: step.attempt,
+                stamp,
+                revision: revision.to_string(),
+                input_stamp,
+                task_id,
+            });
+        }
     }
 }
 
@@ -540,6 +585,11 @@ pub(super) struct WaitObservation {
     pub yielded: bool,
     pub yielded_budget_ms: i64,
     pub active_budget_ms: i64,
+    /// A finished background task this harness will never learn about without
+    /// a new turn (issue #2105). `None` for every harness that does not
+    /// delegate background work to the session, and while the session is still
+    /// producing output.
+    pub stalled_task_id: Option<String>,
 }
 
 pub(super) trait Observations {
@@ -673,6 +723,30 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
     let progress =
         crate::coordinator::enrichment::assistant_report(&node).map(|report| report.revision);
     let policy = observer_policy::for_agent(&node);
+    // A session still producing output is never stalled, whatever its
+    // transcript says; only a yielded one can be missing a wake-up.
+    let yielded = matches!(
+        node.status,
+        SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
+    );
+    // Ask the stepper whether a wake-up is even possible *before* touching the
+    // transcript. `live_wait` runs on every poll tick, so probing a session
+    // whose wake-up is already spent, already claimed, or not owned would read
+    // the whole transcript for a decision that cannot change. The revision and
+    // stamp come from the report read above, so this gate costs no extra I/O.
+    let nudge_possible = match &progress {
+        Some(revision) => {
+            let stamp = db::agent_turn_stamp(id).ok().flatten().unwrap_or_default();
+            matches!(
+                view.nudge_decision(&step.node_id, step.attempt, revision, &stamp),
+                crate::circuit::stepper::NudgeDecision::Nudge
+            )
+        }
+        None => false,
+    };
+    let stalled_task_id = (yielded && nudge_possible)
+        .then(|| stalled_background_task(&node))
+        .flatten();
     Some(WaitObservation {
         observed: node
             .cli_session_id
@@ -680,11 +754,29 @@ pub(super) fn live_wait(view: &RunView, step: &StepView, id: i64) -> Option<Wait
             .is_some_and(|id| !id.is_empty())
             || progress.is_some(),
         progress,
-        yielded: matches!(
-            node.status,
-            SessionStatus::AwaitingInput | SessionStatus::Ready | SessionStatus::Completed
-        ),
+        yielded,
         yielded_budget_ms: i64::from(policy.yielded_budget_ms),
         active_budget_ms: i64::from(policy.active_budget_ms),
+        stalled_task_id,
     })
+}
+
+/// The finished background task a yielded session has not read, when its
+/// harness's own runtime state says so.
+///
+/// Pure file I/O against the session's transcript and the harness's task store —
+/// never a database read, so it cannot hold a connection across disk. Any
+/// failure (unknown harness, missing transcript, unparsable record, no task
+/// store) yields `None`: an unreadable session is not evidence of a stall.
+fn stalled_background_task(node: &crate::models::AgentNode) -> Option<String> {
+    let harness = crate::circuit::strategy::selector_for_agent(node)
+        .provider()
+        .map(|provider| provider.adapter().id())?;
+    let format = crate::services::transcript_reader::TranscriptFormat::for_harness(harness)?;
+    crate::services::transcript_reader::stalled_background_task(
+        format,
+        node.cli_session_id.as_deref(),
+        node.worktree_path.as_deref().unwrap_or_default(),
+        chrono::Utc::now().timestamp_millis(),
+    )
 }

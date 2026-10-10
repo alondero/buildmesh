@@ -128,6 +128,7 @@ impl Observations for Script {
             yielded: true,
             yielded_budget_ms: YIELDED_WAIT_MS,
             active_budget_ms: ACTIVE_WAIT_MS,
+            stalled_task_id: None,
         })
     }
 }

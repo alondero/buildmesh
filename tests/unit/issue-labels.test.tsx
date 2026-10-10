@@ -7,6 +7,23 @@ import { useMeshStore } from '../../src/stores/meshStore';
 import { useUIStore } from '../../src/stores/uiStore';
 import type { AutopilotCircuit } from '../../src/types/generated/AutopilotCircuit';
 import type { GitHubIssue } from '../../src/types/generated/GitHubIssue';
+/**
+ * Issue #2024 rank 6 - the GitHub feed commands return `{ items, completeness }`
+ * rather than a bare array, so a truncated read can be stated instead of
+ * silently looking complete. Fixtures below stay plain arrays; this wraps them
+ * at the IPC boundary. `complete: true` keeps these tests focused on the
+ * behaviour they were written for.
+ */
+const feed = <T,>(items: T[]) => ({
+  items,
+  completeness: {
+    returned: items.length,
+    pages_fetched: items.length > 0 ? 1 : 0,
+    complete: true,
+    incomplete_reason: null,
+    reported_total: null,
+  },
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -23,7 +40,7 @@ function circuit(label: string, enabled = true, meshId = 42, type = 'github_issu
 }
 function backend(circuits: AutopilotCircuit[] = []) {
   vi.mocked(invoke).mockImplementation(async (cmd, args) => {
-    if (cmd === 'get_repo_issues') return [{ ...issue, labels: [...issue.labels] }];
+    if (cmd === 'get_repo_issues') return feed([{ ...issue, labels: [...issue.labels] }]);
     if (cmd === 'list_circuits') return circuits;
     if (cmd === 'get_repo_labels') return ['bug', 'ready-for-agent', 'team/ui'];
     if (cmd === 'set_issue_label') {
@@ -82,7 +99,7 @@ describe('GitHub issue tags', () => {
     backend();
     const original = vi.mocked(invoke).getMockImplementation()!;
     vi.mocked(invoke).mockImplementation((cmd, args, opts) => cmd === 'get_repo_issues'
-      ? Promise.resolve([{ ...issue }, { ...issue, number: 102, title: 'Second issue' }])
+      ? Promise.resolve(feed([{ ...issue }, { ...issue, number: 102, title: 'Second issue' }]))
       : original(cmd, args, opts));
     render(<GitIssuesTab />);
     const first = await screen.findByRole('button', { name: 'Edit tags for issue #101' });
@@ -104,7 +121,7 @@ describe('GitHub issue tags', () => {
     vi.mocked(invoke).mockImplementation((cmd, args, opts) => {
       if (cmd === 'get_repo_issues') {
         issueReads += 1;
-        return issueReads === 1 ? Promise.resolve([{ ...issue, labels: ['bug'] }]) : staleSearch.promise;
+        return issueReads === 1 ? Promise.resolve(feed([{ ...issue, labels: ['bug'] }])) : staleSearch.promise.then(feed);
       }
       return original(cmd, args, opts);
     });
@@ -213,7 +230,7 @@ describe('GitHub issue tags', () => {
     const newLabels = deferred<string[]>();
     vi.mocked(invoke).mockImplementation((cmd, args, opts) => {
       const meshId = (args as { meshId?: number } | undefined)?.meshId;
-      if (cmd === 'get_repo_issues') return meshId === 42 ? oldIssues.promise : newIssues.promise;
+      if (cmd === 'get_repo_issues') return (meshId === 42 ? oldIssues.promise : newIssues.promise).then(feed);
       if (cmd === 'list_circuits') return meshId === 42 ? oldCircuits.promise : newCircuits.promise;
       if (cmd === 'get_repo_labels') return meshId === 42 ? oldLabels.promise : newLabels.promise;
       return original(cmd, args, opts);

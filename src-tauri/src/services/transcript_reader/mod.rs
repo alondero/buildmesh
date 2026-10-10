@@ -103,6 +103,46 @@ fn resolve<'a>(
     Ok((path, session_id))
 }
 
+/// How much of a transcript the wake-up probe reads.
+///
+/// The launch acknowledgement can be far back in a long session, so this is a
+/// bound on one read, not on the evidence: a truncated window falls back to a
+/// full read rather than deciding from a partial view.
+const WAKEUP_TAIL_BYTES: u64 = 256 * 1024;
+
+/// Read the finished background task a session cannot learn about on its own
+/// (issue #2105), through the reader that owns the harness's record shape and
+/// runtime layout.
+///
+/// The wake-up probe needs the raw records, not the parsed tail: the finished
+/// background task lives in a `bash_background` acknowledgement the turn parser
+/// skips by design.
+///
+/// A transcript the CLI has not finished flushing is not evidence of a stall,
+/// so an unreadable file is "no signal" rather than a fault, and a harness
+/// whose reader reports no such gap contributes nothing.
+pub(crate) fn stalled_background_task(
+    format: TranscriptFormat,
+    session_id: Option<&str>,
+    node_path: &str,
+    now_ms: i64,
+) -> Option<String> {
+    let (path, _) = resolve(format, session_id, node_path).ok()?;
+    let reader = reader(format);
+    let (lines, truncated) = file::tail_lines(&path, WAKEUP_TAIL_BYTES)?;
+    if let Some(task_id) = reader.stalled_background_task(&lines, node_path, now_ms) {
+        return Some(task_id);
+    }
+    if truncated {
+        // The launch record may have fallen outside the window. A wider read is
+        // rare (only while no task is visibly stalled) and still bounded by the
+        // file's own size.
+        let whole = std::fs::read_to_string(path).ok()?;
+        return reader.stalled_background_task(&whole, node_path, now_ms);
+    }
+    None
+}
+
 fn result(parsed: Result<Parsed, UnavailableReason>, digest: bool) -> TranscriptTail {
     let mut tail = match parsed {
         Ok(parsed) => build_tail(parsed),

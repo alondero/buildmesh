@@ -3,7 +3,9 @@
 use crate::db;
 use crate::env;
 use crate::models::SessionStatus;
-use crate::services::github::{self, CreatePrRequest, GitHubClient, GitHubError, PullRequest};
+use crate::services::github::{
+    self, CreatePrRequest, GitHubClient, GitHubError, GitHubPageCompleteness, PullRequest,
+};
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 use tauri::command;
@@ -219,47 +221,105 @@ pub struct PrFileEntry {
 /// Repository failures propagate so an inaccessible mesh cannot masquerade
 /// as a repository with no issues.
 #[command]
-pub async fn get_repo_issues(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
-    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id)).await
+pub async fn get_repo_issues(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
+    crate::commands::run_blocking("get_repo_issues", move || get_repo_issues_blocking(mesh_id))
+        .await
+}
+
+/// An issue list plus whether GitHub gave us all of it (issue #2024 rank 6).
+///
+/// A bare `Vec` made "page 1" and "everything" indistinguishable, so the panel
+/// presented a 100-row read as the repository's issues. `completeness` rides
+/// alongside so the UI can say "showing first N of M" instead of implying
+/// completeness it cannot prove.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubIssueFeed.ts")]
+pub struct GitHubIssueFeed {
+    pub items: Vec<GitHubIssue>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A pull-request list plus its completeness — see [`GitHubIssueFeed`].
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "GitHubPullRequestFeed.ts")]
+pub struct GitHubPullRequestFeed {
+    pub items: Vec<GitHubPullRequest>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A PR file list plus its completeness — see [`GitHubIssueFeed`]. A PR with
+/// more changed files than one page holds must not render as a whole diff.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrFileFeed.ts")]
+pub struct PrFileFeed {
+    pub items: Vec<PrFileEntry>,
+    pub completeness: GitHubPageCompleteness,
+}
+
+/// A feed we never had to read: the mesh has no GitHub remote, so there is
+/// nothing that *could* be incomplete. Reported complete so the panel keeps
+/// its existing "no issues" empty state rather than showing a truncation
+/// warning about a read that never happened.
+fn empty_feed_completeness() -> GitHubPageCompleteness {
+    GitHubPageCompleteness {
+        returned: 0,
+        pages_fetched: 0,
+        complete: true,
+        incomplete_reason: None,
+        reported_total: None,
+    }
 }
 
 /// Sync core for [`get_repo_issues`]. Kept as a plain fn so the mobile HTTP
 /// route (`http::routes::issues`) can call it directly; the Tauri command
 /// wraps it in `spawn_blocking` (see [`crate::commands::run_blocking`]).
-pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>, String> {
-    let mesh = db::get_mesh_by_id(mesh_id)
-        .map_err(|e| e.to_string())?;
+pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<GitHubIssueFeed, String> {
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
     let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
-        return Ok(Vec::new());
+        return Ok(GitHubIssueFeed {
+            items: Vec::new(),
+            completeness: empty_feed_completeness(),
+        });
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let issues = client.list_issues_only(&owner, &repo).map_err(|e| e.to_string())?;
+    let page = client
+        .list_issues_only_paged(&owner, &repo)
+        .map_err(|e| e.to_string())?;
 
-    Ok(issues.into_iter().map(|issue| {
-        // Extract `blocked_by` BEFORE moving `issue.body` into the struct
-        // literal (Rust's move checker rejects the borrow-after-move).
-        // The parser is pure and bounded — see its doc comment.
-        let blocked_by: Vec<i32> = github::parse_blocked_by(&issue.body)
-            .into_iter()
-            .map(|n| n as i32)
-            .collect();
-        GitHubIssue {
-            number: issue.number,
-            title: issue.title,
-            body: issue.body,
-            url: issue.html_url,
-            state: issue.state,
-            labels: issue.labels,
-            author: issue.author,
-            // Downcast internal `i64` → wire `i32` (issue numbers fit
-            // comfortably in i32's ~2.1B max; matches the existing
-            // `#[ts(as = "i32")]` convention on the wire struct's other
-            // integer fields).
-            blocked_by,
-        }
-    }).collect())
+    let items = page
+        .items
+        .into_iter()
+        .map(|issue| {
+            // Extract `blocked_by` BEFORE moving `issue.body` into the struct
+            // literal (Rust's move checker rejects the borrow-after-move).
+            // The parser is pure and bounded — see its doc comment.
+            let blocked_by: Vec<i32> = github::parse_blocked_by(&issue.body)
+                .into_iter()
+                .map(|n| n as i32)
+                .collect();
+            GitHubIssue {
+                number: issue.number,
+                title: issue.title,
+                body: issue.body,
+                url: issue.html_url,
+                state: issue.state,
+                labels: issue.labels,
+                author: issue.author,
+                // Downcast internal `i64` → wire `i32` (issue numbers fit
+                // comfortably in i32's ~2.1B max; matches the existing
+                // `#[ts(as = "i32")]` convention on the wire struct's other
+                // integer fields).
+                blocked_by,
+            }
+        })
+        .collect();
+
+    Ok(GitHubIssueFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Get pull requests for a mesh, filtered by `state` (`"open"` or `"closed"`).
@@ -271,13 +331,19 @@ pub(crate) fn get_repo_issues_blocking(mesh_id: i64) -> Result<Vec<GitHubIssue>,
 /// The panel consumes this single call and never orchestrates per-row
 /// enrichment.
 #[command]
-pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
-    crate::commands::run_blocking("get_repo_pulls", move || get_repo_pulls_blocking(mesh_id, state)).await
+pub async fn get_repo_pulls(mesh_id: i64, state: String) -> Result<GitHubPullRequestFeed, String> {
+    crate::commands::run_blocking("get_repo_pulls", move || {
+        get_repo_pulls_blocking(mesh_id, state)
+    })
+    .await
 }
 
 /// Sync core for [`get_repo_pulls`] — see [`get_repo_issues_blocking`] for the
 /// split rationale.
-pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec<GitHubPullRequest>, String> {
+pub(crate) fn get_repo_pulls_blocking(
+    mesh_id: i64,
+    state: String,
+) -> Result<GitHubPullRequestFeed, String> {
     // Only ever forward a known filter to GitHub; anything unexpected falls
     // back to "open" rather than letting an arbitrary string reach the API.
     let state = if state == "closed" { "closed" } else { "open" };
@@ -285,29 +351,41 @@ pub(crate) fn get_repo_pulls_blocking(mesh_id: i64, state: String) -> Result<Vec
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
 
     let Some((owner, repo)) = resolve_owner_repo(&mesh.path)? else {
-        return Ok(Vec::new());
+        return Ok(GitHubPullRequestFeed {
+            items: Vec::new(),
+            completeness: empty_feed_completeness(),
+        });
     };
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let prs = client
-        .list_pr_summaries(&owner, &repo, state)
+    let page = client
+        .list_pr_summaries_paged(&owner, &repo, state)
         .map_err(|e| e.to_string())?;
 
-    Ok(prs.into_iter().map(|pr| GitHubPullRequest {
-        number: pr.number,
-        title: pr.title,
-        body: pr.body,
-        url: pr.html_url,
-        state: pr.state,
-        draft: pr.draft,
-        head_ref: pr.head_ref,
-        head_repo_owner: pr.head_repo_owner,
-        head_repo_clone_url: pr.head_repo_clone_url,
-        head_sha: pr.head_sha,
-        author: pr.author,
-        mergeable: pr.mergeable,
-        mergeable_state: pr.mergeable_state,
-    }).collect())
+    let items = page
+        .items
+        .into_iter()
+        .map(|pr| GitHubPullRequest {
+            number: pr.number,
+            title: pr.title,
+            body: pr.body,
+            url: pr.html_url,
+            state: pr.state,
+            draft: pr.draft,
+            head_ref: pr.head_ref,
+            head_repo_owner: pr.head_repo_owner,
+            head_repo_clone_url: pr.head_repo_clone_url,
+            head_sha: pr.head_sha,
+            author: pr.author,
+            mergeable: pr.mergeable,
+            mergeable_state: pr.mergeable_state,
+        })
+        .collect();
+
+    Ok(GitHubPullRequestFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Get a single PR's mergeability for a mesh's repo. The panel calls this once
@@ -322,7 +400,10 @@ pub async fn get_pr_mergeability(mesh_id: i64, pr_number: i64) -> Result<PrMerge
 }
 
 /// Sync core for [`get_pr_mergeability`] — see [`get_repo_issues_blocking`].
-pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Result<PrMergeability, String> {
+pub(crate) fn get_pr_mergeability_blocking(
+    mesh_id: i64,
+    pr_number: i64,
+) -> Result<PrMergeability, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
@@ -331,7 +412,10 @@ pub(crate) fn get_pr_mergeability_blocking(mesh_id: i64, pr_number: i64) -> Resu
         .pull_request_mergeability(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())?;
 
-    Ok(PrMergeability { mergeable, mergeable_state })
+    Ok(PrMergeability {
+        mergeable,
+        mergeable_state,
+    })
 }
 
 /// Get mergeability for a batch of PRs on a mesh's repo (issue #418,
@@ -493,10 +577,7 @@ pub(crate) fn mergeability_from_summaries(
 /// `pull_request_mergeability`. The closure accepts the per-PR probe
 /// function as data, so a test passes its own closure and asserts on
 /// the helper's mapping logic in isolation.
-fn mergeability_entries<F>(
-    pr_numbers: Vec<i64>,
-    probe: F,
-) -> Vec<PrMergeabilityEntry>
+fn mergeability_entries<F>(pr_numbers: Vec<i64>, probe: F) -> Vec<PrMergeabilityEntry>
 where
     F: Fn(i64) -> Result<(Option<bool>, String), GitHubError>,
 {
@@ -524,44 +605,55 @@ where
 }
 
 /// Get the files changed in a single pull request, for the "View changes"
-/// button on the PR tab (issue #421). One call returns the full file list
-/// (≤ 100 — GitHub's default per_page) with each file's unified-diff
-/// `patch`. The Center Diff Overlay parses the patch line-by-line to
-/// colour +/−/context rows in place. Mirrors the other PR commands:
+/// button on the PR tab (issue #421). Returns the file list with each file's
+/// unified-diff `patch`. The Center Diff Overlay parses the patch line-by-line
+/// to colour +/−/context rows in place. Mirrors the other PR commands:
 /// resolves owner/repo via the mesh's `origin` remote, hits the GitHub
 /// REST API, and forwards the HTTP error verbatim.
+///
+/// The list is paginated (issue #2024 rank 6): a PR with more changed files
+/// than one page holds arrives flagged in `completeness` rather than rendering
+/// as a whole diff.
 #[command]
-pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
-    crate::commands::run_blocking("get_pr_files", move || get_pr_files_blocking(mesh_id, pr_number)).await
+pub async fn get_pr_files(mesh_id: i64, pr_number: i64) -> Result<PrFileFeed, String> {
+    crate::commands::run_blocking("get_pr_files", move || {
+        get_pr_files_blocking(mesh_id, pr_number)
+    })
+    .await
 }
 
 /// Sync core for [`get_pr_files`] — see [`get_repo_issues_blocking`].
-pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<Vec<PrFileEntry>, String> {
+pub(crate) fn get_pr_files_blocking(mesh_id: i64, pr_number: i64) -> Result<PrFileFeed, String> {
     let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
     let (owner, repo) = resolve_github_owner_repo(&mesh)?;
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    let files = client
-        .list_pr_files(&owner, &repo, pr_number)
+    let page = client
+        .list_pr_files_paged(&owner, &repo, pr_number)
         .map_err(|e| e.to_string())?;
 
-    Ok(files.into_iter().map(|f| PrFileEntry {
-        filename: f.filename,
-        status: f.status,
-        additions: f.additions,
-        deletions: f.deletions,
-        patch: f.patch,
-        previous_filename: f.previous_filename,
-    }).collect())
+    let items = page
+        .items
+        .into_iter()
+        .map(|f| PrFileEntry {
+            filename: f.filename,
+            status: f.status,
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch,
+            previous_filename: f.previous_filename,
+        })
+        .collect();
+
+    Ok(PrFileFeed {
+        items,
+        completeness: page.completeness,
+    })
 }
 
 /// Create a PR for the node
 #[command]
-pub async fn create_pr(
-    session_id: i64,
-    title: String,
-    body: String,
-) -> Result<String, String> {
+pub async fn create_pr(session_id: i64, title: String, body: String) -> Result<String, String> {
     crate::commands::run_blocking("create_pr", move || {
         let client = GitHubClient::new().map_err(|e| e.to_string())?;
         create_pr_blocking_with_client(&client, session_id, &title, &body)
@@ -582,8 +674,7 @@ pub(crate) fn create_pr_blocking_with_client(
     title: &str,
     body: &str,
 ) -> Result<String, String> {
-    let node = db::get_agent_node_by_id(session_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
 
     let base_branch = &node.branch;
 
@@ -620,9 +711,7 @@ pub async fn create_pr_for_mesh(
 ) -> Result<String, String> {
     crate::commands::run_blocking("create_pr_for_mesh", move || {
         let client = GitHubClient::new().map_err(|e| e.to_string())?;
-        create_pr_for_mesh_blocking_with_client(
-            &client, &mesh_path, &title, &body, &base_branch,
-        )
+        create_pr_for_mesh_blocking_with_client(&client, &mesh_path, &title, &body, &base_branch)
     })
     .await
 }
@@ -661,6 +750,318 @@ pub(crate) fn create_pr_for_mesh_blocking_with_client(
         .map_err(|e| e.to_string())
 }
 
+// ----- node-scoped create-PR (issue #2024 rank 4, issue #1567) ----------
+//
+// The mobile Create-PR flow used to post a mesh id only, and the route
+// resolved `mesh.path`. For a mesh whose root checkout sits on `main`, that
+// published a `main -> main` PR — or, when the root sat on some unrelated
+// feature branch, published *that* branch instead of the agent's. The
+// Changes screen already displayed the node's branch, so the sheet and the
+// PR it produced disagreed.
+//
+// The fix resolves the source from the NODE's worktree
+// (`env::node_working_path`) and derives the base from the mesh's own
+// `base_ref` rather than assuming `main`.
+
+/// The source/target branch pair a create-PR request resolved to.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "PrSource.ts")]
+pub struct PrSource {
+    /// Branch read from the agent node's worktree — the PR's `head`.
+    pub head_branch: String,
+    /// Branch the PR targets — derived from the mesh's `base_ref`.
+    pub base_branch: String,
+}
+
+/// Result of a successful create-PR.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "CreatePrResult.ts")]
+pub struct CreatePrResult {
+    pub url: String,
+    /// Echo of the branches actually used, so the client can display what
+    /// was created instead of what it guessed.
+    pub head_branch: String,
+    pub base_branch: String,
+}
+
+/// Owner/repo parsed from the node worktree's origin. Kept separate from
+/// [`PrSource`] because a preview must still render the branches for a
+/// non-GitHub remote, while creating a PR legitimately cannot.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedPrSource {
+    pub source: PrSource,
+    pub owner_repo: Option<(String, String)>,
+}
+
+/// Strip a remote qualifier from a mesh `base_ref`: `origin/main` → `main`,
+/// `upstream/release` → `release`. GitHub's `base=` expects a branch name
+/// without the remote, so a mesh configured against `origin/trunk` must not
+/// silently become `main`.
+///
+/// The prefix is only stripped when it is one of the repository's **configured
+/// remotes**. There is no syntax that separates a remote from the first
+/// segment of a real branch name — `feature/x` and `origin/main` are the same
+/// shape — so guessing from the characters alone would rewrite a branch called
+/// `feature/x` into `x` and target a branch that does not exist. An unrecognised
+/// prefix is left intact.
+pub(crate) fn local_base_branch(base_ref: &str, remotes: &[String]) -> String {
+    let trimmed = base_ref.trim();
+    match trimmed.split_once('/') {
+        Some((remote, rest)) if !rest.is_empty() && remotes.iter().any(|r| r == remote) => {
+            rest.to_string()
+        }
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Why resolving a PR source failed, in the terms the HTTP layer needs.
+///
+/// This exists because the route cannot infer intent from message text. An
+/// earlier version matched `Err(e) if e.starts_with("Agent node")` to pick
+/// `403`, but three different failures share that prefix — including the
+/// harmless "branch is the same as the Base Ref" validation case — so a
+/// validation error came back as 403, which the mobile client treats as an
+/// auth failure (`isAuthError`) and answers by wiping the session and
+/// bouncing the user to the pairing screen (issue #2190 review).
+///
+/// Each variant maps to exactly one status:
+/// - [`PrSourceError::NotFound`] → 404
+/// - [`PrSourceError::NotOwned`] → 403 (genuinely an authorization failure)
+/// - [`PrSourceError::SameBranch`] / [`PrSourceError::BranchUnknown`] → 422
+/// - [`PrSourceError::Other`] → 500
+#[derive(Debug)]
+pub enum PrSourceError {
+    /// No agent node row with that id.
+    NotFound(i64),
+    /// The node exists but belongs to a different mesh.
+    NotOwned { node_id: i64, mesh_id: i64 },
+    /// The worktree sits on the branch the PR would target — nothing to compare.
+    SameBranch { branch: String, base: String },
+    /// The worktree's checked-out branch could not be read.
+    BranchUnknown,
+    /// The worktree moved off the branch the client previewed, so submitting
+    /// would publish something the user never saw.
+    StaleHead { actual: String, expected: String },
+    /// Git, filesystem, database or GitHub-client failure.
+    Other(String),
+}
+
+impl std::fmt::Display for PrSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrSourceError::NotFound(node_id) => {
+                write!(f, "Agent node {node_id} was not found")
+            }
+            PrSourceError::NotOwned { node_id, mesh_id } => {
+                write!(f, "Agent node {node_id} does not belong to mesh {mesh_id}")
+            }
+            PrSourceError::SameBranch { branch, base } => write!(
+                f,
+                "Agent node branch '{branch}' is the same as the mesh Base Ref '{base}' — nothing to compare"
+            ),
+            PrSourceError::BranchUnknown => {
+                write!(f, "Could not determine the agent node's current branch")
+            }
+            PrSourceError::StaleHead { actual, expected } => write!(
+                f,
+                "Agent node worktree is on '{actual}', not the source branch '{expected}' that was previewed"
+            ),
+            PrSourceError::Other(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for PrSourceError {}
+
+impl From<String> for PrSourceError {
+    fn from(message: String) -> Self {
+        PrSourceError::Other(message)
+    }
+}
+
+/// HTTP status this failure must be reported as. Lives beside the enum so the
+/// mapping is stated once and both routes use it.
+impl PrSourceError {
+    pub(crate) fn status(&self) -> &'static str {
+        match self {
+            PrSourceError::NotFound(_) => "404 Not Found",
+            PrSourceError::NotOwned { .. } => "403 Forbidden",
+            PrSourceError::SameBranch { .. }
+            | PrSourceError::BranchUnknown
+            | PrSourceError::StaleHead { .. } => "422 Unprocessable Entity",
+            PrSourceError::Other(_) => "500 Internal Server Error",
+        }
+    }
+}
+
+/// Resolve the source/target branches for a create-PR from an agent node.
+///
+/// Shared by the preview route and the create route so the branches the
+/// sheet shows before submitting are, by construction, the branches the
+/// create will use — they cannot drift apart.
+pub(crate) fn resolve_pr_source_for_node(
+    mesh_id: i64,
+    node_id: i64,
+) -> Result<ResolvedPrSource, PrSourceError> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|_| PrSourceError::NotFound(node_id))?;
+    // Ownership check: a node id from another mesh must not be usable to mint
+    // a PR against this mesh's repo. Enforced here and in the create route;
+    // both need it, and this is where the distinction between "not yours" and
+    // "not resolvable" is actually made. Not a `#[command]` — the registered
+    // entry point is `create_pr_for_node_source` below.
+    if node.mesh_id != mesh_id {
+        return Err(PrSourceError::NotOwned { node_id, mesh_id });
+    }
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| PrSourceError::Other(e.to_string()))?;
+
+    // The node's worktree, never `mesh.path`. `host_path` is the
+    // Windows-side view; git operations must never see a WSL path
+    // (see `env::host_path`).
+    let info = repo_info(&env::node_working_path(&node).host_path)?;
+    if info.branch.is_empty() {
+        return Err(PrSourceError::BranchUnknown);
+    }
+
+    let base_branch = local_base_branch(&mesh.base_ref, &info.remotes);
+    if info.branch == base_branch {
+        return Err(PrSourceError::SameBranch {
+            branch: info.branch,
+            base: base_branch,
+        });
+    }
+
+    Ok(ResolvedPrSource {
+        source: PrSource {
+            head_branch: info.branch,
+            base_branch,
+        },
+        owner_repo: info.owner_repo,
+    })
+}
+
+/// Create a PR from an agent node's worktree (issue #1567).
+///
+/// `base_branch` is optional: when the client does not pin one, the mesh's
+/// `base_ref` decides it. `expected_head` lets the client assert the branch
+/// it displayed is still the branch on disk, so a worktree that moved
+/// between preview and submit fails loudly instead of publishing something
+/// the user never saw.
+#[command]
+pub async fn create_pr_for_node_source(
+    mesh_id: i64,
+    node_id: i64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    expected_head: Option<String>,
+) -> Result<CreatePrResult, String> {
+    crate::commands::run_blocking("create_pr_for_node_source", move || {
+        let client = GitHubClient::new().map_err(|e| e.to_string())?;
+        create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            &title,
+            &body,
+            base_branch.as_deref(),
+            expected_head.as_deref(),
+        )
+        // Tauri commands surface a plain string; the HTTP route keeps the
+        // typed `PrSourceError` so it can pick a status code.
+        .map_err(|e: PrSourceError| e.to_string())
+    })
+    .await
+}
+
+/// HTTP-facing twin of [`create_pr_for_node_source`].
+///
+/// Identical work, but it hands the caller the typed [`PrSourceError`] so the
+/// route can answer 404 / 403 / 422 / 500 correctly. The `#[command]` version
+/// flattens to `String` because Tauri surfaces command errors as plain text,
+/// which is what loses the distinction — and a validation failure must never
+/// be reported as a server fault (#2190 review).
+pub async fn create_pr_for_node_source_http(
+    mesh_id: i64,
+    node_id: i64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    expected_head: Option<String>,
+) -> Result<CreatePrResult, PrSourceError> {
+    crate::commands::run_blocking_typed("create_pr_for_node_source", move || {
+        let client = GitHubClient::new().map_err(|e| PrSourceError::Other(e.to_string()))?;
+        create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            &title,
+            &body,
+            base_branch.as_deref(),
+            expected_head.as_deref(),
+        )
+    })
+    .await
+}
+
+/// Sync core for [`create_pr_for_node_source`] — see
+/// [`create_pr_for_mesh_blocking_with_client`] for why the client is injected.
+pub(crate) fn create_pr_for_node_source_blocking_with_client(
+    client: &GitHubClient,
+    mesh_id: i64,
+    node_id: i64,
+    title: &str,
+    body: &str,
+    base_branch: Option<&str>,
+    expected_head: Option<&str>,
+) -> Result<CreatePrResult, PrSourceError> {
+    let resolved = resolve_pr_source_for_node(mesh_id, node_id)?;
+    let mut source = resolved.source;
+
+    if let Some(expected) = expected_head.map(str::trim).filter(|h| !h.is_empty()) {
+        if expected != source.head_branch {
+            return Err(PrSourceError::StaleHead {
+                actual: source.head_branch,
+                expected: expected.to_string(),
+            });
+        }
+    }
+
+    if let Some(requested) = base_branch.map(str::trim).filter(|b| !b.is_empty()) {
+        if requested == source.head_branch {
+            return Err(PrSourceError::SameBranch {
+                branch: source.head_branch,
+                base: requested.to_string(),
+            });
+        }
+        source.base_branch = requested.to_string();
+    }
+
+    let (owner, repo) = resolved.owner_repo.ok_or_else(|| {
+        PrSourceError::Other("This repository has no GitHub origin remote".into())
+    })?;
+
+    let req = CreatePrRequest {
+        owner: &owner,
+        repo: &repo,
+        title,
+        body,
+        head: &source.head_branch,
+        base: &source.base_branch,
+    };
+    // `create_pull_request_idempotent` carries the #771 open-PR recovery, and
+    // it keys that recovery on `head` — so running it AFTER source
+    // resolution means the duplicate check consults the node's real branch
+    // rather than the mesh root's.
+    client
+        .create_pull_request_idempotent(req)
+        .map(|pr| CreatePrResult {
+            url: pr.html_url,
+            head_branch: source.head_branch,
+            base_branch: source.base_branch,
+        })
+        .map_err(|e| PrSourceError::Other(e.to_string()))
+}
+
 /// Merge a PR with the caller-chosen strategy + delete the branch.
 /// Accepts a full GitHub PR URL like `https://github.com/owner/repo/pull/123`.
 ///
@@ -675,14 +1076,18 @@ pub async fn merge_pr(pr_url: String, merge_method: Option<String>) -> Result<St
 }
 
 /// Sync core for [`merge_pr`] — see [`get_repo_issues_blocking`].
-pub(crate) fn merge_pr_blocking(pr_url: String, merge_method: Option<String>) -> Result<String, String> {
-    let (owner, repo, pr_number) = parse_pr_url(&pr_url)
-        .ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
+pub(crate) fn merge_pr_blocking(
+    pr_url: String,
+    merge_method: Option<String>,
+) -> Result<String, String> {
+    let (owner, repo, pr_number) =
+        parse_pr_url(&pr_url).ok_or_else(|| format!("Could not parse PR URL: {}", pr_url))?;
 
     let method = normalise_merge_method(merge_method);
 
     let client = GitHubClient::new().map_err(|e| e.to_string())?;
-    client.merge_pull_request(&owner, &repo, pr_number, &method)
+    client
+        .merge_pull_request(&owner, &repo, pr_number, &method)
         .map_err(|e| e.to_string())
 }
 
@@ -704,8 +1109,7 @@ pub async fn get_current_branch(session_id: i64) -> Result<String, String> {
 
 /// Sync core for [`get_current_branch`].
 pub(crate) fn get_current_branch_blocking(session_id: i64) -> Result<String, String> {
-    let node = db::get_agent_node_by_id(session_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(session_id).map_err(|e| e.to_string())?;
 
     // Route through the worktree (if any) — the mesh root is on the base
     // branch for worktree nodes. See `node_working_path` for the rationale.
@@ -755,13 +1159,15 @@ pub struct OpenPr {
 /// Returns `Err(_)` only for true internal failures (DB lookup blows up, etc.).
 #[command]
 pub async fn get_open_pr_for_node(node_id: i64) -> Result<Option<OpenPr>, String> {
-    crate::commands::run_blocking("get_open_pr_for_node", move || get_open_pr_for_node_blocking(node_id)).await
+    crate::commands::run_blocking("get_open_pr_for_node", move || {
+        get_open_pr_for_node_blocking(node_id)
+    })
+    .await
 }
 
 /// Sync core for [`get_open_pr_for_node`] — see [`get_repo_issues_blocking`].
 pub(crate) fn get_open_pr_for_node_blocking(node_id: i64) -> Result<Option<OpenPr>, String> {
-    let node = db::get_agent_node_by_id(node_id)
-        .map_err(|e| e.to_string())?;
+    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
 
     // Archived = closed; saves a GitHub API call and matches the chip's
     // "doesn't show after close" contract. Node deletion removes the row,
@@ -819,6 +1225,11 @@ struct RepoInfo {
     /// Cached here so [`resolve_open_pr`] and the existing `owner_repo`
     /// call sites don't reparse on every call.
     owner_repo: Option<(String, String)>,
+    /// Names of every configured remote. A `base_ref` like `origin/main` is
+    /// only unambiguous because we know `origin` is a remote and not the
+    /// first segment of a branch named `feature/…` — see
+    /// [`local_base_branch`].
+    remotes: Vec<String>,
 }
 
 impl RepoInfo {
@@ -835,10 +1246,7 @@ impl RepoInfo {
 
 /// Pure helper: given a `RepoInfo` and a `GitHubClient`, return the open PR for the
 /// current branch, or `None` if no branch / no PR / not a GitHub remote.
-fn resolve_open_pr(
-    info: &RepoInfo,
-    client: &GitHubClient,
-) -> Result<Option<PullRequest>, String> {
+fn resolve_open_pr(info: &RepoInfo, client: &GitHubClient) -> Result<Option<PullRequest>, String> {
     if info.branch.is_empty() {
         return Ok(None);
     }
@@ -847,7 +1255,6 @@ fn resolve_open_pr(
         .find_open_pr_for_branch(&owner, &repo, &info.branch)
         .map_err(|e| e.to_string())
 }
-
 
 fn safe_directory_command(host_path: &str, windows: bool) -> String {
     let quoted = if windows {
@@ -887,12 +1294,22 @@ fn repo_info(path: &str) -> Result<RepoInfo, String> {
         Err(_) => String::new(),
     };
 
-    let remote_url = repo.find_remote("origin")
+    let remote_url = repo
+        .find_remote("origin")
         .ok()
         .and_then(|r| r.url().map(|u| u.to_string()));
     let owner_repo = remote_url.as_deref().and_then(github::parse_owner_repo);
+    let remotes = repo
+        .remotes()
+        .map(|names| names.iter().flatten().map(|n| n.to_string()).collect())
+        .unwrap_or_default();
 
-    Ok(RepoInfo { branch, remote_url, owner_repo })
+    Ok(RepoInfo {
+        branch,
+        remote_url,
+        owner_repo,
+        remotes,
+    })
 }
 
 /// Resolve a Mesh's GitHub origin for actions that require one.
@@ -903,7 +1320,10 @@ pub(crate) fn resolve_github_owner_repo(
     let info = repo_info(&mesh.path)?;
     info.owner_repo.clone().ok_or_else(|| {
         if info.remote_url.is_some() {
-            format!("Mesh at {} has an `origin` remote, but it isn't a GitHub URL", mesh.path)
+            format!(
+                "Mesh at {} has an `origin` remote, but it isn't a GitHub URL",
+                mesh.path
+            )
         } else {
             format!("Mesh at {} has no `origin` remote", mesh.path)
         }
@@ -995,8 +1415,8 @@ mod tests {
     use super::*;
     use crate::env::test_helpers::init_repo_with_commit as init_repo_for_test;
     use crate::git::worktree::create_git_worktree;
-    use crate::services::github::tests::{fake_server, Scripted};
     use crate::models::AgentNode;
+    use crate::services::github::tests::{fake_server, Scripted};
     use std::fs;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1033,11 +1453,21 @@ mod tests {
         for origin in [None, Some("https://gitlab.com/example/repo.git")] {
             let (tmp, path) = init_repo_with_commit();
             if let Some(url) = origin {
-                Repository::open(&path).unwrap().remote("origin", url).unwrap();
+                Repository::open(&path)
+                    .unwrap()
+                    .remote("origin", url)
+                    .unwrap();
             }
             let mesh = db::create_mesh("non-github-feed", &path).unwrap();
-            assert!(get_repo_issues_blocking(mesh.id).unwrap().is_empty());
-            assert!(get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap().is_empty());
+            let issues = get_repo_issues_blocking(mesh.id).unwrap();
+            let pulls = get_repo_pulls_blocking(mesh.id, "open".to_string()).unwrap();
+            assert!(issues.items.is_empty());
+            assert!(pulls.items.is_empty());
+            // A read that never happened has nothing to be incomplete about,
+            // and must not render as a truncation warning.
+            assert!(issues.completeness.complete);
+            assert!(pulls.completeness.complete);
+            assert_eq!(issues.completeness.incomplete_reason, None);
             db::delete_mesh(mesh.id).unwrap();
             drop(tmp);
         }
@@ -1048,14 +1478,32 @@ mod tests {
     #[ignore = "requires default WSL; changes process-global libgit2 config search path, run serially"]
     fn live_wsl_github_repository_trust() {
         let guest_home = env::wsl_home().expect("WSL home");
-        let fixture = tempfile::Builder::new().prefix("buildmesh-github-")
-            .tempdir_in(env::to_host_path(&guest_home.to_string_lossy())).unwrap();
+        let fixture = tempfile::Builder::new()
+            .prefix("buildmesh-github-")
+            .tempdir_in(env::to_host_path(&guest_home.to_string_lossy()))
+            .unwrap();
         let host_path = fixture.path().to_str().unwrap();
         let guest_path = env::normalize_unc_to_wsl(host_path).into_owned();
         let mut command = crate::process_util::command_no_window("wsl.exe");
-        command.args(["-d", &env::get_default_wsl_distro().unwrap(), "--exec", "git", "init", &guest_path]);
-        let output = crate::process_util::run_command_with_timeout(command, "WSL fixture init", std::time::Duration::from_secs(15)).unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        command.args([
+            "-d",
+            &env::get_default_wsl_distro().unwrap(),
+            "--exec",
+            "git",
+            "init",
+            &guest_path,
+        ]);
+        let output = crate::process_util::run_command_with_timeout(
+            command,
+            "WSL fixture init",
+            std::time::Duration::from_secs(15),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         std::fs::write(fixture.path().join(".git/config"), "[core]\nrepositoryformatversion = 0\nbare = false\n[remote \"origin\"]\nurl = https://github.com/example/wsl-fixture.git\n").unwrap();
 
         let config_dir = tempfile::tempdir().unwrap();
@@ -1063,21 +1511,35 @@ mod tests {
         struct RestoreConfig(std::ffi::CString);
         impl Drop for RestoreConfig {
             fn drop(&mut self) {
-                unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap(); }
+                unsafe {
+                    git2::opts::set_search_path(git2::ConfigLevel::Global, self.0.clone()).unwrap();
+                }
             }
         }
-        let _restore = RestoreConfig(unsafe { git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap() });
-        unsafe { git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap(); }
-        assert_eq!(Repository::open(host_path).err().unwrap().code(), git2::ErrorCode::Owner);
+        let _restore = RestoreConfig(unsafe {
+            git2::opts::get_search_path(git2::ConfigLevel::Global).unwrap()
+        });
+        unsafe {
+            git2::opts::set_search_path(git2::ConfigLevel::Global, config_dir.path()).unwrap();
+        }
+        assert_eq!(
+            Repository::open(host_path).err().unwrap().code(),
+            git2::ErrorCode::Owner
+        );
         let error = resolve_owner_repo(host_path).unwrap_err();
         assert!(error.contains("safe.directory"), "{error}");
         assert!(error.contains("Windows"), "{error}");
-        config.set_str("safe.directory", &host_path.replace('\\', "/")).unwrap();
+        config
+            .set_str("safe.directory", &host_path.replace('\\', "/"))
+            .unwrap();
         let expected = Some(("example".to_string(), "wsl-fixture".to_string()));
         assert_eq!(resolve_owner_repo(host_path).unwrap(), expected);
         assert_eq!(resolve_owner_repo(&guest_path).unwrap(), expected);
         assert_eq!(repo_info(&guest_path).unwrap().owner_repo, expected);
-        assert_eq!(github_url_for_path(&guest_path).unwrap(), Some("https://github.com/example/wsl-fixture".to_string()));
+        assert_eq!(
+            github_url_for_path(&guest_path).unwrap(),
+            Some("https://github.com/example/wsl-fixture".to_string())
+        );
     }
 
     // ----- GitHubIssue wire shape (issue #481 follow-up: blocked_by) -----
@@ -1121,7 +1583,10 @@ mod tests {
             "labels": []
         }"#;
         let issue: GitHubIssue = serde_json::from_str(json).expect("partial wire shape parses");
-        assert!(issue.blocked_by.is_empty(), "missing blocked_by defaults to empty vec");
+        assert!(
+            issue.blocked_by.is_empty(),
+            "missing blocked_by defaults to empty vec"
+        );
     }
 
     /// Round-trip: serialise a populated `blocked_by` and re-parse it
@@ -1176,7 +1641,8 @@ mod tests {
             "blocked_by": [],
             "author": "octocat"
         }"#;
-        let issue: GitHubIssue = serde_json::from_str(json_author).expect("author wire shape parses");
+        let issue: GitHubIssue =
+            serde_json::from_str(json_author).expect("author wire shape parses");
         assert_eq!(issue.author, "octocat");
     }
 
@@ -1221,8 +1687,14 @@ mod tests {
         let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "", "missing head_ref defaults to empty");
         assert_eq!(pr.head_sha, "", "missing head_sha defaults to empty");
-        assert_eq!(pr.mergeable, None, "missing mergeable defaults to None (unknown)");
-        assert_eq!(pr.mergeable_state, "", "missing mergeable_state defaults to empty");
+        assert_eq!(
+            pr.mergeable, None,
+            "missing mergeable defaults to None (unknown)"
+        );
+        assert_eq!(
+            pr.mergeable_state, "",
+            "missing mergeable_state defaults to empty"
+        );
         assert_eq!(pr.author, "", "missing author defaults to empty");
     }
 
@@ -1329,9 +1801,12 @@ mod tests {
             "draft": false,
             "head_ref": "feat/legacy"
         }"#;
-        let pr: GitHubPullRequest =serde_json::from_str(json).expect("partial wire shape parses");
+        let pr: GitHubPullRequest = serde_json::from_str(json).expect("partial wire shape parses");
         assert_eq!(pr.head_ref, "feat/legacy");
-        assert_eq!(pr.head_repo_owner, "", "missing head_repo_owner defaults to empty");
+        assert_eq!(
+            pr.head_repo_owner, "",
+            "missing head_repo_owner defaults to empty"
+        );
         assert_eq!(
             pr.head_repo_clone_url, "",
             "missing head_repo_clone_url defaults to empty"
@@ -1377,9 +1852,11 @@ mod tests {
             "mergeable": null,
             "mergeable_state": "unknown"
         }"#;
-        let entry: PrMergeabilityEntry =
-            serde_json::from_str(json).expect("null mergeable parses");
-        assert_eq!(entry.mergeable, None, "null must stay None, not coerce to Some(false)");
+        let entry: PrMergeabilityEntry = serde_json::from_str(json).expect("null mergeable parses");
+        assert_eq!(
+            entry.mergeable, None,
+            "null must stay None, not coerce to Some(false)"
+        );
         assert_eq!(entry.mergeable_state, "unknown");
     }
 
@@ -1397,8 +1874,7 @@ mod tests {
             "mergeable": null,
             "mergeable_state": "error: GitHub API error (404): Not Found"
         }"#;
-        let entry: PrMergeabilityEntry =
-            serde_json::from_str(json).expect("error state parses");
+        let entry: PrMergeabilityEntry = serde_json::from_str(json).expect("error state parses");
         assert_eq!(entry.mergeable, None);
         assert!(
             entry.mergeable_state.starts_with("error: "),
@@ -1455,7 +1931,10 @@ mod tests {
             Ok((Some(true), "clean".into()))
         });
         assert!(entries.is_empty(), "empty input → empty output");
-        assert!(calls.borrow().is_empty(), "probe must not fire on empty input");
+        assert!(
+            calls.borrow().is_empty(),
+            "probe must not fire on empty input"
+        );
     }
 
     /// All-success path: each probe succeeds, the entry carries the
@@ -1466,15 +1945,12 @@ mod tests {
     /// frontend's PR list.
     #[test]
     fn mergeability_entries_preserves_pr_number_on_success() {
-        let entries = mergeability_entries(
-            vec![201, 202, 204],
-            |n| match n {
-                201 => Ok((Some(true), "clean".into())),
-                202 => Ok((Some(false), "dirty".into())),
-                204 => Ok((None, "unknown".into())),
-                _ => unreachable!(),
-            },
-        );
+        let entries = mergeability_entries(vec![201, 202, 204], |n| match n {
+            201 => Ok((Some(true), "clean".into())),
+            202 => Ok((Some(false), "dirty".into())),
+            204 => Ok((None, "unknown".into())),
+            _ => unreachable!(),
+        });
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].number, 201);
         assert_eq!(entries[0].mergeable, Some(true));
@@ -1497,22 +1973,29 @@ mod tests {
     /// "first failure drops the whole list" behaviour.
     #[test]
     fn mergeability_entries_per_pr_failure_does_not_fail_batch() {
-        let entries = mergeability_entries(
-            vec![1, 2, 3],
-            |n| match n {
-                1 => Ok((Some(true), "clean".into())),
-                2 => Err(GitHubError::Api(404, "Not Found".into())),
-                3 => Ok((Some(false), "dirty".into())),
-                _ => unreachable!(),
-            },
+        let entries = mergeability_entries(vec![1, 2, 3], |n| match n {
+            1 => Ok((Some(true), "clean".into())),
+            2 => Err(GitHubError::Api(404, "Not Found".into())),
+            3 => Ok((Some(false), "dirty".into())),
+            _ => unreachable!(),
+        });
+        assert_eq!(
+            entries.len(),
+            3,
+            "batch must carry one entry per PR even when one fails"
         );
-        assert_eq!(entries.len(), 3, "batch must carry one entry per PR even when one fails");
         // The success entries round-trip unchanged.
         assert_eq!(entries[0].number, 1);
         assert_eq!(entries[0].mergeable, Some(true));
         // The failed entry becomes the "checking" sentinel.
-        assert_eq!(entries[1].number, 2, "failed entry must still carry the PR number");
-        assert_eq!(entries[1].mergeable, None, "failed entry must report mergeable: None");
+        assert_eq!(
+            entries[1].number, 2,
+            "failed entry must still carry the PR number"
+        );
+        assert_eq!(
+            entries[1].mergeable, None,
+            "failed entry must report mergeable: None"
+        );
         assert!(
             entries[1].mergeable_state.starts_with("error: "),
             "failed entry must carry the 'error: ' prefix; got: {}",
@@ -1582,8 +2065,7 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let open = serde_json::Value::Array(vec![fake_node(1)]);
-        let (base, count, handle) =
-            fake_server(vec![Scripted::Page(open, false, None)]);
+        let (base, count, handle) = fake_server(vec![Scripted::Page(open, false, None)]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
         let entries = mergeability_from_summaries(&client, "acme", "demo", vec![1, 1])
             .expect("batch must not fail on duplicates");
@@ -1668,7 +2150,9 @@ mod tests {
             ));
             Self(tmp)
         }
-        fn path(&self) -> &Path { &self.0 }
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
 
     impl Drop for TempGitRepo {
@@ -1723,7 +2207,10 @@ mod tests {
         let (_guard, path) = init_repo_unborn();
         let info = repo_info(&path).expect("repo_info should succeed even with no commits");
         assert_eq!(info.branch, "", "unborn head should produce empty branch");
-        assert!(info.remote_url.is_none(), "no origin configured in this test");
+        assert!(
+            info.remote_url.is_none(),
+            "no origin configured in this test"
+        );
         assert!(info.owner_repo.is_none(), "no origin → no owner_repo");
     }
 
@@ -1732,14 +2219,20 @@ mod tests {
         let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
         let info = repo_info(&path).expect("repo_info");
         assert_eq!(info.branch, "main");
-        assert_eq!(info.owner_repo, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            info.owner_repo,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
     fn repo_info_parses_github_origin_ssh() {
         let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
         let info = repo_info(&path).expect("repo_info");
-        assert_eq!(info.owner_repo, Some(("alondero".to_string(), "buildmesh".to_string())));
+        assert_eq!(
+            info.owner_repo,
+            Some(("alondero".to_string(), "buildmesh".to_string()))
+        );
     }
 
     #[test]
@@ -1771,14 +2264,20 @@ mod tests {
     fn github_url_for_path_https_origin() {
         let (_guard, path) = init_repo_with_origin("https://github.com/alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
-        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/alondero/buildmesh".to_string())
+        );
     }
 
     #[test]
     fn github_url_for_path_ssh_origin() {
         let (_guard, path) = init_repo_with_origin("git@github.com:alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("github_url_for_path should succeed");
-        assert_eq!(url, Some("https://github.com/alondero/buildmesh".to_string()));
+        assert_eq!(
+            url,
+            Some("https://github.com/alondero/buildmesh".to_string())
+        );
     }
 
     #[test]
@@ -1794,14 +2293,20 @@ mod tests {
     fn github_url_for_path_non_github_origin_is_none() {
         let (_guard, path) = init_repo_with_origin("https://gitlab.com/alondero/buildmesh.git");
         let url = github_url_for_path(&path).expect("non-github origin should not error");
-        assert_eq!(url, None, "GitLab URLs must collapse to None so the menu hides the item");
+        assert_eq!(
+            url, None,
+            "GitLab URLs must collapse to None so the menu hides the item"
+        );
     }
 
     #[test]
     fn github_url_for_path_no_origin_is_none() {
         let (_guard, path) = init_repo_with_commit();
         let url = github_url_for_path(&path).expect("no origin should not error");
-        assert_eq!(url, None, "repos with no origin remote must collapse to None");
+        assert_eq!(
+            url, None,
+            "repos with no origin remote must collapse to None"
+        );
     }
 
     /// The agent's HEAD is on the worktree's branch (NOT the mesh root's branch).
@@ -1833,8 +2338,14 @@ mod tests {
     fn node_working_path_resolves_to_mesh_path_for_root_nodes() {
         let (_guard, _root_path, node) = make_root_node();
         let resolved = env::node_working_path(&node).host_path;
-        assert_eq!(resolved, node.path, "non-worktree node must resolve to its own path");
-        assert!(!resolved.contains("worktrees"), "must NOT add a worktree subdir for root nodes");
+        assert_eq!(
+            resolved, node.path,
+            "non-worktree node must resolve to its own path"
+        );
+        assert!(
+            !resolved.contains("worktrees"),
+            "must NOT add a worktree subdir for root nodes"
+        );
     }
 
     /// End-to-end: with a real worktree on branch `agent-1` and the mesh root
@@ -1868,7 +2379,10 @@ mod tests {
         let branch = repo_info(&env::node_working_path(&node).host_path)
             .expect("worktree repo must open")
             .branch;
-        assert_eq!(branch, "agent-1", "must read the worktree's HEAD, not the mesh root's");
+        assert_eq!(
+            branch, "agent-1",
+            "must read the worktree's HEAD, not the mesh root's"
+        );
     }
 
     /// Opt-in live test — runs only with `cargo test -- --ignored` and a valid
@@ -1950,13 +2464,12 @@ mod tests {
             .expect("head exists after init_repo_with_origin")
             .peel_to_commit()
             .expect("head is a commit");
-        repo.branch(branch, &head_commit, true).expect("create branch");
+        repo.branch(branch, &head_commit, true)
+            .expect("create branch");
         let refname = format!("refs/heads/{branch}");
         repo.set_head(&refname).expect("set HEAD to branch");
-        repo.checkout_head(Some(
-            git2::build::CheckoutBuilder::default().force(),
-        ))
-        .expect("checkout branch");
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .expect("checkout branch");
         (guard, path)
     }
 
@@ -1972,10 +2485,8 @@ mod tests {
     fn create_pr_for_mesh_recovers_from_duplicate_create_422() {
         use std::sync::atomic::Ordering;
 
-        let (_guard, mesh_path) = init_repo_on_branch(
-            "https://github.com/test-owner/test-repo.git",
-            "feat/771",
-        );
+        let (_guard, mesh_path) =
+            init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
         let existing = existing_pr_json(771, "https://github.com/test-owner/test-repo/pull/771");
         // Optimistic path: POST first, GitHub answers 422 ("already exists"),
         // we recover by GET'ing the existing PR.
@@ -2021,22 +2532,15 @@ mod tests {
     fn create_pr_for_mesh_happy_path_no_duplicate() {
         use std::sync::atomic::Ordering;
 
-        let (_guard, mesh_path) = init_repo_on_branch(
-            "https://github.com/test-owner/test-repo.git",
-            "feat/771",
-        );
+        let (_guard, mesh_path) =
+            init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
         let created = created_pr_json(772, "https://github.com/test-owner/test-repo/pull/772");
         let (base, count, handle) = fake_server(vec![Scripted::CreatePullRequest(created)]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-        let url = create_pr_for_mesh_blocking_with_client(
-            &client,
-            &mesh_path,
-            "title",
-            "body",
-            "main",
-        )
-        .expect("creates new PR");
+        let url =
+            create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
+                .expect("creates new PR");
 
         assert_eq!(
             url, "https://github.com/test-owner/test-repo/pull/772",
@@ -2059,24 +2563,17 @@ mod tests {
     fn create_pr_for_mesh_propagates_non_422_errors() {
         use std::sync::atomic::Ordering;
 
-        let (_guard, mesh_path) = init_repo_on_branch(
-            "https://github.com/test-owner/test-repo.git",
-            "feat/771",
-        );
+        let (_guard, mesh_path) =
+            init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/771");
         let (base, count, handle) = fake_server(vec![Scripted::CreatePrError(
             403,
             r#"{"message":"Must have admin rights"}"#.to_string(),
         )]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-        let err = create_pr_for_mesh_blocking_with_client(
-            &client,
-            &mesh_path,
-            "title",
-            "body",
-            "main",
-        )
-        .expect_err("403 must propagate, not silently recover");
+        let err =
+            create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
+                .expect_err("403 must propagate, not silently recover");
 
         assert!(
             err.contains("403") || err.contains("admin"),
@@ -2100,9 +2597,8 @@ mod tests {
     fn create_pr_for_mesh_refuses_same_branch_as_base() {
         // init_repo_with_origin lands HEAD on the default branch; pass
         // that as the base_branch and watch the guard reject.
-        let (_guard, mesh_path) = init_repo_with_origin(
-            "https://github.com/test-owner/test-repo.git",
-        );
+        let (_guard, mesh_path) =
+            init_repo_with_origin("https://github.com/test-owner/test-repo.git");
         let (base, _count, _handle) = fake_server(vec![]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
@@ -2116,11 +2612,7 @@ mod tests {
             .unwrap_or_else(|| "main".to_string());
 
         let err = create_pr_for_mesh_blocking_with_client(
-            &client,
-            &mesh_path,
-            "title",
-            "body",
-            &head_name, // base == head → guard rejects
+            &client, &mesh_path, "title", "body", &head_name, // base == head → guard rejects
         )
         .expect_err("must refuse same-branch create");
 
@@ -2145,10 +2637,7 @@ mod tests {
             "https://github.com/test-owner/test-repo.git",
             "feat/with/slashes",
         );
-        let existing = existing_pr_json(
-            773,
-            "https://github.com/test-owner/test-repo/pull/773",
-        );
+        let existing = existing_pr_json(773, "https://github.com/test-owner/test-repo/pull/773");
         // Both `:` (after owner) and `/` (in branch) must percent-encode:
         // `test-owner:feat/with/slashes` → `test-owner%3Afeat%2Fwith%2Fslashes`.
         let (base, _count, handle) = fake_server(vec![
@@ -2166,14 +2655,9 @@ mod tests {
         // request handler — if the client didn't produce the exact encoded
         // head, `handle.join()` would never return (or would panic). So
         // the success of this test IS the URL-encoding pin.
-        let _url = create_pr_for_mesh_blocking_with_client(
-            &client,
-            &mesh_path,
-            "title",
-            "body",
-            "main",
-        )
-        .expect("recovery GET must use percent-encoded head");
+        let _url =
+            create_pr_for_mesh_blocking_with_client(&client, &mesh_path, "title", "body", "main")
+                .expect("recovery GET must use percent-encoded head");
         handle.join().expect("server");
     }
 
@@ -2196,11 +2680,7 @@ mod tests {
     /// expects (`<root>/.claude/worktrees/<name>`). Returns
     /// `(tmp, session_id, branch)` — caller MUST hold `tmp` for the
     /// node's lifetime.
-    fn make_session_node(
-        mesh_name: &str,
-        origin_url: &str,
-        branch: &str,
-    ) -> (TempGitRepo, i64) {
+    fn make_session_node(mesh_name: &str, origin_url: &str, branch: &str) -> (TempGitRepo, i64) {
         let tmp = TempGitRepo::new();
         let root = tmp.path().to_path_buf();
         // Init a real git repo + commit + ensure HEAD sits on a named
@@ -2216,23 +2696,20 @@ mod tests {
         let head_commit = head.peel_to_commit().expect("head is a commit");
         // If HEAD is already on `main`, leave it. Otherwise create
         // `main` and re-anchor HEAD to it.
-        let head_is_main = head
-            .shorthand()
-            .map(|s| s == "main")
-            .unwrap_or(false);
+        let head_is_main = head.shorthand().map(|s| s == "main").unwrap_or(false);
         if !head_is_main {
             repo.set_head_detached(head_commit.id()).expect("detach");
-            repo.branch("main", &head_commit, true).expect("create main");
+            repo.branch("main", &head_commit, true)
+                .expect("create main");
         }
         repo.set_head("refs/heads/main").expect("set HEAD to main");
-        repo.checkout_head(Some(
-            git2::build::CheckoutBuilder::default().force(),
-        ))
-        .expect("checkout main");
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .expect("checkout main");
         // Set the origin remote — required so `repo_info` can resolve
         // owner/repo for the GitHub call. Set on the main repo; the
         // worktree shares the same `.git` and inherits the remote.
-        repo.remote_set_url("origin", origin_url).expect("set origin");
+        repo.remote_set_url("origin", origin_url)
+            .expect("set origin");
         // Create the branched worktree at the production path.
         let wt_dir = root.join(".claude").join("worktrees").join("agent-1");
         create_git_worktree(
@@ -2244,8 +2721,7 @@ mod tests {
         )
         .expect("worktree creation must succeed");
         // Insert a mesh + node row so `db::get_agent_node_by_id` resolves.
-        let mesh = crate::db::create_mesh(mesh_name, root.to_str().unwrap())
-            .expect("create_mesh");
+        let mesh = crate::db::create_mesh(mesh_name, root.to_str().unwrap()).expect("create_mesh");
         let node = crate::db::create_agent_node(
             mesh.id,
             "agent-1",
@@ -2299,13 +2775,8 @@ mod tests {
         ]);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
 
-        let url = create_pr_blocking_with_client(
-            &client,
-            session_id,
-            "new title",
-            "new body",
-        )
-        .expect("must return the existing PR's URL on 422 recovery");
+        let url = create_pr_blocking_with_client(&client, session_id, "new title", "new body")
+            .expect("must return the existing PR's URL on 422 recovery");
 
         assert_eq!(
             url, "https://github.com/test-owner/test-repo/pull/771",
@@ -2330,10 +2801,8 @@ mod tests {
     fn create_pr_for_mesh_does_not_recover_on_unrelated_422() {
         use std::sync::atomic::Ordering;
 
-        let (_guard, mesh_path) = init_repo_on_branch(
-            "https://github.com/test-owner/test-repo.git",
-            "feat/echo",
-        );
+        let (_guard, mesh_path) =
+            init_repo_on_branch("https://github.com/test-owner/test-repo.git", "feat/echo");
         // 422 with a body that contains "already exists" only as a
         // echoed input field — GitHub's "Validation Failed" envelope
         // names a different field ("No commits between main and feat/echo")
@@ -2386,10 +2855,7 @@ mod tests {
         // exact layer the bug lived in — `find_open_pr_for_branch`
         // itself, not its `create_pull_request_idempotent` caller.
         let (base, count, handle) = fake_server(vec![Scripted::ListPulls {
-            body: existing_pr_json(
-                42,
-                "https://github.com/upstream-owner/repo/pull/42",
-            ),
+            body: existing_pr_json(42, "https://github.com/upstream-owner/repo/pull/42"),
             // The exact percent-encoded form the client must produce.
             // NO `upstream-owner:` prefix — the head is pre-qualified.
             expected_head: "fork-user%3Afeat%2Ffork".to_string(),
@@ -2423,5 +2889,388 @@ mod tests {
         assert_eq!(normalise_merge_method(None), "squash");
         assert_eq!(normalise_merge_method(Some("octopus".into())), "squash");
         assert_eq!(normalise_merge_method(Some(String::new())), "squash");
+    }
+    // ----- node-scoped create-PR (issue #2024 rank 4, issue #1567) ------
+    //
+    // The bug: the mobile create-PR request carried only a mesh id, and the
+    // route resolved `mesh.path`. For a mesh whose root sits on `main` that
+    // published `main -> main`; for a root sitting on an unrelated feature it
+    // published the wrong branch entirely — while the sheet displayed the
+    // NODE's branch.
+    //
+    // These tests drive the real production resolver against a real git repo
+    // (mesh root + linked agent worktree), so a regression to mesh-root
+    // resolution shows up as a wrong `head_branch`, not as a passing mock.
+
+    /// Mesh root on `root_branch`, agent worktree on `node_branch`, mesh
+    /// `base_ref` as given. Returns `(guard, mesh_id, node_id)`; the caller
+    /// MUST hold `guard` — it owns both repositories.
+    ///
+    /// The worktree is cut from `main` BEFORE the root is moved onto
+    /// `root_branch`, which is the production order: an agent branches from
+    /// the base ref, not from wherever the mesh root happens to be parked.
+    #[allow(clippy::too_many_arguments)]
+    fn make_mesh_root_and_node(
+        origin_url: &str,
+        root_branch: &str,
+        node_branch: &str,
+        base_ref: &str,
+    ) -> (TempGitRepo, i64, i64) {
+        let tmp = TempGitRepo::new();
+        let root = tmp.path().to_path_buf();
+        let repo = init_repo_for_test(&root, &[("README.md", "init\n")]);
+        let head = repo.head().expect("head exists after commit");
+        let head_commit = head.peel_to_commit().expect("head is a commit");
+        // Anchor a real `main` branch. `init_repo_for_test` commits via
+        // `Some("HEAD")` on an unborn HEAD, and the resulting ref shape is
+        // git2-version dependent, so `main` may or may not already exist.
+        let head_is_main = head.shorthand().map(|s| s == "main").unwrap_or(false);
+        if !head_is_main {
+            repo.set_head_detached(head_commit.id()).expect("detach");
+            repo.branch("main", &head_commit, true)
+                .expect("create main");
+        }
+        repo.set_head("refs/heads/main").expect("set HEAD to main");
+        repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+            .expect("checkout main");
+        repo.remote_set_url("origin", origin_url)
+            .expect("set origin");
+
+        let wt_dir = root.join(".claude").join("worktrees").join("agent-1");
+        create_git_worktree(
+            root.to_str().unwrap(),
+            wt_dir.to_str().unwrap(),
+            node_branch,
+            "branched",
+            "main",
+        )
+        .expect("worktree creation must succeed");
+
+        // Park the mesh root on its own branch. This is the state that used
+        // to decide what the PR published.
+        if root_branch != "main" {
+            repo.set_head_detached(head_commit.id()).expect("detach");
+            repo.branch(root_branch, &head_commit, true)
+                .expect("create root branch");
+            repo.set_head(&format!("refs/heads/{root_branch}"))
+                .expect("set root HEAD");
+            repo.checkout_head(Some(git2::build::CheckoutBuilder::default().force()))
+                .expect("checkout root branch");
+        }
+
+        let mesh = crate::db::create_mesh_with_base_ref(
+            "pr-source-mesh",
+            root.to_str().unwrap(),
+            base_ref,
+        )
+        .expect("create_mesh_with_base_ref");
+        let node = crate::db::create_agent_node(
+            mesh.id,
+            "agent-1",
+            root.to_str().unwrap(),
+            "main",
+            crate::models::EnvType::Windows,
+            "claude",
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .expect("create_agent_node");
+        (tmp, mesh.id, node.id)
+    }
+
+    #[test]
+    fn pr_source_uses_node_worktree_when_mesh_root_is_on_main() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.head_branch, "agent/fix-x",
+            "the PR source is the agent worktree's branch, never the mesh root's `main`"
+        );
+        assert_eq!(resolved.source.base_branch, "main");
+        assert_eq!(
+            resolved.owner_repo,
+            Some(("test-owner".to_string(), "test-repo".to_string())),
+            "the node worktree inherits the root repo's origin remote"
+        );
+    }
+
+    #[test]
+    fn pr_source_uses_node_worktree_when_mesh_root_is_on_another_feature() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "unrelated/other",
+            "agent/fix-x",
+            "origin/main",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.head_branch, "agent/fix-x",
+            "a mesh root parked on `unrelated/other` must not become the PR source"
+        );
+        assert_eq!(resolved.source.base_branch, "main");
+    }
+
+    #[test]
+    fn pr_source_derives_base_from_mesh_base_ref_not_a_hardcoded_main() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "trunk",
+            "agent/fix-x",
+            "origin/trunk",
+        );
+
+        let resolved = resolve_pr_source_for_node(mesh_id, node_id).expect("resolution succeeds");
+
+        assert_eq!(
+            resolved.source.base_branch, "trunk",
+            "a mesh configured against origin/trunk must not be published into main"
+        );
+        assert_eq!(resolved.source.head_branch, "agent/fix-x");
+    }
+
+    #[test]
+    fn pr_source_rejects_node_belonging_to_another_mesh() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp_a, mesh_a, node_in_a) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let (_tmp_b, mesh_b, _node_in_b) = make_mesh_root_and_node(
+            "https://github.com/test-owner/other-repo.git",
+            "main",
+            "agent/fix-y",
+            "origin/main",
+        );
+
+        let err = resolve_pr_source_for_node(mesh_b, node_in_a).expect_err("ownership must fail");
+        // The status is the contract the HTTP route depends on: ownership is
+        // the one case that is genuinely a 403 (#2190 review).
+        assert_eq!(err.status(), "403 Forbidden");
+        assert!(matches!(err, PrSourceError::NotOwned { .. }));
+        assert!(
+            err.to_string().contains("does not belong to mesh"),
+            "error must name the ownership violation, got: {err}"
+        );
+        assert!(mesh_a != mesh_b, "the two meshes must actually differ");
+    }
+
+    #[test]
+    fn pr_source_rejects_node_branch_equal_to_the_base_ref() {
+        let _db = ensure_pr_blocking_db();
+        // The node worktree sits on `agent/fix-x` and the mesh's base_ref
+        // points at that same branch — the "nothing to compare" case a
+        // misconfigured mesh produces. It must fail before GitHub is ever
+        // called rather than opening a self-targeting PR. (Pointing the
+        // base at `main` instead would fail earlier, in worktree creation:
+        // the root already owns `main`.)
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/agent/fix-x",
+        );
+
+        let err = resolve_pr_source_for_node(mesh_id, node_id).expect_err("same-branch must fail");
+        // A validation failure, NOT an auth failure. Reporting it as 403 was
+        // a live bug: the mobile client treats 403 as an expired session and
+        // wipes the credentials (#2190 review).
+        assert_eq!(err.status(), "422 Unprocessable Entity");
+        assert!(matches!(err, PrSourceError::SameBranch { .. }));
+        assert!(
+            err.to_string().contains("nothing to compare"),
+            "error must explain the same-branch case, got: {err}"
+        );
+    }
+
+    #[test]
+    fn local_base_branch_strips_a_configured_remote_but_not_a_real_slash_branch() {
+        // The prefix is stripped only when the repository actually has that
+        // remote. There is no syntax that tells `origin/main` from
+        // `feature/x`, so character-shape guessing would rewrite the latter
+        // into `x` and target a branch that does not exist.
+        let remotes = vec!["origin".to_string(), "upstream".to_string()];
+        // The remote qualifier must go: GitHub's `base=` wants a branch name.
+        assert_eq!(local_base_branch("origin/main", &remotes), "main");
+        assert_eq!(local_base_branch("origin/trunk", &remotes), "trunk");
+        assert_eq!(local_base_branch("upstream/release", &remotes), "release");
+        assert_eq!(local_base_branch("  origin/main  ", &remotes), "main");
+        // Already-local, or a branch whose own name contains a slash.
+        assert_eq!(local_base_branch("main", &remotes), "main");
+        assert_eq!(local_base_branch("feature/x", &remotes), "feature/x");
+        // A prefix that is not a configured remote is left alone.
+        assert_eq!(local_base_branch("origin/main", &[]), "origin/main");
+        assert_eq!(local_base_branch("origin/", &remotes), "origin/");
+        assert_eq!(local_base_branch("", &remotes), "");
+    }
+
+    /// The wire-level proof: the `head=` GitHub is asked about is the NODE's
+    /// branch. The scripted fake asserts the exact percent-encoded head in
+    /// the request line, so a regression to mesh-root resolution fails here
+    /// instead of quietly publishing the root's branch.
+    #[test]
+    fn create_pr_for_node_source_asks_github_about_the_node_branch() {
+        use std::sync::atomic::Ordering;
+
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let existing = existing_pr_json(900, "https://github.com/test-owner/test-repo/pull/900");
+        let (base, count, handle) = fake_server(vec![
+            Scripted::CreatePrConflict(
+                r#"{"message":"Validation Failed","errors":[{"message":"A pull request already exists for test-owner:agent/fix-x."}]}"#.to_string(),
+            ),
+            Scripted::ListPulls {
+                body: existing,
+                // `:` -> %3A, `/` -> %2F. The fake asserts this exact value
+                // appears in the recovery GET's request line.
+                expected_head: "test-owner%3Aagent%2Ffix-x".to_string(),
+            },
+        ]);
+        let client = GitHubClient::for_test(&base, "fake-token").expect("client");
+
+        let result = create_pr_for_node_source_blocking_with_client(
+            &client, mesh_id, node_id, "title", "body", None, None,
+        )
+        .expect("duplicate-create recovery must succeed");
+
+        assert_eq!(
+            result.url,
+            "https://github.com/test-owner/test-repo/pull/900"
+        );
+        assert_eq!(
+            result.head_branch, "agent/fix-x",
+            "the echoed source must be the node worktree's branch"
+        );
+        assert_eq!(result.base_branch, "main");
+        handle.join().expect("server");
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_a_stale_expected_head() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "title",
+            "body",
+            None,
+            Some("agent/moved-on"),
+        )
+        .expect_err("a worktree that moved since preview must fail");
+
+        assert!(
+            err.to_string().contains("agent/fix-x") && err.to_string().contains("agent/moved-on"),
+            "error must name both the actual and the previewed branch, got: {err}"
+        );
+        // The worktree moved after preview: a stale client view, not an
+        // authorization problem (#2190 review).
+        assert_eq!(err.status(), "422 Unprocessable Entity");
+        assert!(matches!(err, PrSourceError::StaleHead { .. }));
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_a_base_equal_to_the_node_branch() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp, mesh_id, node_id) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            "title",
+            "body",
+            Some("agent/fix-x"),
+            None,
+        )
+        .expect_err("base == source must fail");
+
+        assert!(
+            err.to_string().contains("nothing to compare"),
+            "error must explain the same-branch case, got: {err}"
+        );
+        assert_eq!(err.status(), "422 Unprocessable Entity");
+    }
+
+    #[test]
+    fn create_pr_for_node_source_rejects_cross_mesh_node_before_calling_github() {
+        let _db = ensure_pr_blocking_db();
+        let (_tmp_a, _mesh_a, node_in_a) = make_mesh_root_and_node(
+            "https://github.com/test-owner/test-repo.git",
+            "main",
+            "agent/fix-x",
+            "origin/main",
+        );
+        let (_tmp_b, mesh_b, _node_in_b) = make_mesh_root_and_node(
+            "https://github.com/test-owner/other-repo.git",
+            "main",
+            "agent/fix-y",
+            "origin/main",
+        );
+        // Port 1 refuses connections, so if ownership were not checked first
+        // this test would fail with a connection error instead of the
+        // ownership message.
+        let client = GitHubClient::for_test("http://127.0.0.1:1", "fake-token").expect("client");
+
+        let err = create_pr_for_node_source_blocking_with_client(
+            &client, mesh_b, node_in_a, "title", "body", None, None,
+        )
+        .expect_err("cross-mesh node must be rejected");
+
+        assert!(
+            err.to_string().contains("does not belong to mesh"),
+            "ownership must be checked before any GitHub call, got: {err}"
+        );
+        assert_eq!(err.status(), "403 Forbidden");
+    }
+
+    #[test]
+    fn pr_source_missing_node_is_a_404_not_a_server_fault() {
+        // A node id with no DB row used to surface rusqlite's "Query returned
+        // no rows" and answer 500; `create` already answered 404. The typed
+        // error keeps the two routes consistent (#2190 review).
+        let _db = ensure_pr_blocking_db();
+        let err = resolve_pr_source_for_node(1, 987_654_321).expect_err("unknown node must fail");
+        assert_eq!(err.status(), "404 Not Found");
+        assert!(matches!(err, PrSourceError::NotFound(987_654_321)));
     }
 }

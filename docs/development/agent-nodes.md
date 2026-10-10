@@ -31,6 +31,34 @@ attempt or discarding the buffer, so repaired settings can retry on a later turn
 
 **Name uniqueness is load-bearing for Worktree Nodes.** A Worktree Node's `name` is also its `worktree_name`, its worktree directory, and (branched mode) its local branch — see `services/agent_node.rs` (`worktree_db_name = session_name`). Issue/PR spawns and Circuit spawn steps derive that name deterministically (`issue_node_name` / `pr_node_name` / `circuit_step_node_name` → `gh{N}-{slug}` / `pr{N}-{slug}`, plus the review variants), so a second spawn for the same issue or PR derives the same worktree path as the first. `git::worktree::provision_for_spawn` cannot recover from that: its warm path refuses the adoption because the branch is already checked out there, and its cold path's path-exists short-circuit hands the same directory to both nodes. (The warm-failure cleanup used to read "path exists" as "our move created it" and delete the other node's live worktree; it now only removes a target it created itself.) Any new spawn source that derives a name deterministically must therefore make it unique per Mesh — `session_naming::disambiguate_node_name` is the helper, and the PR pill's reviewer spawn (`create_pr_node` with `reviewer`) is the worked example.
 
+### Archive list — durable identity and resumability are separate (issue #1065)
+
+The Archive view (desktop probe tab and mobile `ArchivedNodesScreen`, both fed
+by `services::agent_node_discovery::discover`) is built from two sources that
+answer different questions. **Identity** — does this archived thing exist, with
+a row, a worktree and a branch? — lives in `agent_nodes`. **Resumability** — is
+there a transcript the harness can pick up again? — lives on disk. The list
+must never derive the first from the second: before #1065 it did, so an
+archived Terminal node (no `cli_session_id`) or any node whose transcript had
+been deleted simply disappeared from the archive while its row and worktree
+were still there.
+
+`discover` reads the mesh's nodes once and uses that one read for both jobs:
+ids owned by non-archived nodes are excluded from the disk scan (they are
+already tracked), and archived rows the disk scan found nothing for are added
+as durable entries. A durable entry is keyed by its `cli_session_id` when it
+has one and by `node-<id>` otherwise, is labelled with the node's name, and
+carries `resumable: false`. An archived node whose transcript *is* on disk is
+already in the discovered set, so it keeps the single resumable entry and is
+never duplicated or downgraded.
+
+`resumable` is the only thing the surfaces branch on: a `false` entry renders
+the node with an explanation instead of a Resume control, because importing it
+would create a node whose session id points at a conversation that is not
+there. The resume path itself is unchanged, and `agent::spawn::resume_guard`
+remains the one place that decides whether a stored `cli_session_id` is a live
+resume target (see the anti-pattern in `docs/knowledge-primer.md`).
+
 ### Profile ownership — one process per app-data profile (issue #1521)
 
 Exactly one Buildmesh process may own an app-data profile, and the claim is taken in `setup` before `db::init` and before any worker starts. `instance_guard::with_profile_ownership` owns the ordering: everything that touches the profile lives in `run_profile_startup`, the continuation it only runs for the winner, so a second launch cannot open the database. That is the whole fix — the damage in a two-process profile was never the duplicate window, it was the loser's startup crash sweep running against a database full of live nodes it cannot see (`ProcessRegistry` is process-local), marking the winner's running Agent Nodes suspended so the frontend can resume a second harness in the same Worktree Node.

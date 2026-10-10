@@ -3080,6 +3080,49 @@ mod tests {
     }
 
     #[test]
+    fn a_wake_up_is_recorded_as_a_prompt_submission_for_its_owning_step() {
+        // Issue #2105: the nudge that wakes a stalled session is a real
+        // submission, so it must land in the ledger bound to the step that
+        // earned it — otherwise a later receipt could not be attributed.
+        let db = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&db).unwrap();
+        db.execute_batch("INSERT INTO meshes (id,name,path) VALUES (1,'test','/repo');
+            INSERT INTO agent_nodes (id,mesh_id,name,path) VALUES (9,1,'owned','/repo');
+            INSERT INTO autopilot_circuits (id,mesh_id,name) VALUES (1,1,'test');
+            INSERT INTO autopilot_circuit_runs (id,circuit_id,mesh_id,state) VALUES (1,1,1,'running');
+            INSERT INTO autopilot_circuit_run_steps (run_id,node_id,attempt,status,agent_node_id) VALUES (1,'work',2,'running',9);")
+            .unwrap();
+
+        record_prompt_submission_locked(
+            &db,
+            1,
+            "work",
+            2,
+            9,
+            "Your background task bg_f1045ea6-225e-46cf-bc5f-10249ffa83ca has finished and its result has not been reported yet.",
+        )
+        .unwrap();
+
+        let row: (String, Option<String>, Option<i64>) = db
+            .query_row(
+                "SELECT node_id, detail, attempt FROM circuit_run_history WHERE kind='prompt_submitted'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "work");
+        assert_eq!(row.2, Some(2), "the wake-up belongs to its own attempt");
+        let detail = row.1.unwrap();
+        assert!(
+            !detail.contains("bg_f1045ea6"),
+            "only the digest is persisted, never the prompt text"
+        );
+        let submission: PromptSubmission = serde_json::from_str(&detail).unwrap();
+        assert_eq!(submission.agent_node_id, 9);
+        assert_eq!(submission.submission_seq, 1);
+    }
+
+    #[test]
     fn recheck_retains_ownership_uncertainty_and_cannot_authorize_classifier_completion() {
         use crate::circuit::{
             context::CircuitContext,

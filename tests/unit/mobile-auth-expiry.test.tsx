@@ -62,6 +62,9 @@ const archived: ArchivedAgentNode = {
   cwd: "/tmp/repo",
   timestamp: "2026-06-11T00:00:00Z",
   worktree_name: "recover-session",
+  // Issue #1065 — a discovered session: its transcript is on disk, so it
+  // keeps the Resume affordance.
+  resumable: true,
 };
 
 function response(status: number, body: unknown) {
@@ -74,6 +77,24 @@ function response(status: number, body: unknown) {
 
 function authResponse() {
   return response(401, { error: "session expired" });
+}
+
+/**
+ * Issue #2024 rank 6 — the issues list route returns the feed wrapper
+ * `{ items, completeness }`, not a bare array, so a truncated read can state
+ * its truncation instead of looking complete.
+ */
+function issueFeed(items: GitHubIssue[]) {
+  return {
+    items,
+    completeness: {
+      returned: items.length,
+      pages_fetched: items.length > 0 ? 1 : 0,
+      complete: true,
+      incomplete_reason: null,
+      reported_total: null,
+    },
+  };
 }
 
 function errorResponse(message: string) {
@@ -272,7 +293,7 @@ describe("mobile auth-expiry recovery", () => {
       "fetch",
       vi.fn().mockImplementation(async (url: string) => {
         if (/\/api\/meshes\/1\/issues\/?$/.test(url)) {
-          return response(200, [issue]);
+          return response(200, issueFeed([issue]));
         }
         return authResponse();
       }),
@@ -361,12 +382,50 @@ describe("mobile auth-expiry recovery", () => {
     expect(readStoredToken()).toBeNull();
   });
 
-  it("returns CreatePrSheet to Connect and clears the token on an auth error", async () => {
+  it("returns CreatePrSheet to Connect and clears the token when the source preview 401s", async () => {
+    // Issue #2024 rank 4 made the sheet fetch a source preview on open, so
+    // an expired token can now surface before the user types anything.
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(authResponse()));
 
     renderWithRecovery((onAuthFailed) => (
       <CreatePrSheet
         meshId={mesh.id}
+        nodeId={node.id}
+        sheetId={1}
+        currentBranch="feature/auth"
+        onClose={() => {}}
+        onCreated={() => {}}
+        onAuthFailed={onAuthFailed}
+      />
+    ));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connect-screen")).toBeTruthy();
+    });
+    expect(readStoredToken()).toBeNull();
+  });
+
+  it("returns CreatePrSheet to Connect and clears the token when the submit 401s", async () => {
+    // The preview succeeds and the token expires in the window before the
+    // user submits — the create request must route through recovery too.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (String(url).includes("/pr/source")) {
+          return new Response(
+            JSON.stringify({ head_branch: "feature/auth", base_branch: "main" }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return authResponse();
+      }),
+    );
+
+    renderWithRecovery((onAuthFailed) => (
+      <CreatePrSheet
+        meshId={mesh.id}
+        nodeId={node.id}
+        sheetId={1}
         currentBranch="feature/auth"
         onClose={() => {}}
         onCreated={() => {}}
@@ -393,6 +452,8 @@ describe("mobile auth-expiry recovery", () => {
     render(
       <CreatePrSheet
         meshId={mesh.id}
+        nodeId={node.id}
+        sheetId={1}
         currentBranch="feature/auth"
         onClose={() => {}}
         onCreated={() => {}}

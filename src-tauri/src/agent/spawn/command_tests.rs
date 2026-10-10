@@ -110,6 +110,87 @@ fn mcode_spawn_validates_final_model_for_fresh_and_resumed_sessions() {
     }
 }
 
+/// The Codex launch carries this node's attention hooks as `-c` overrides, on
+/// every runtime, for a fresh and a resumed session. Where the command line is
+/// a re-encoded PowerShell script (Windows) it must stay inside the 32,767
+/// character process limit even with a long initial prompt.
+#[test]
+fn codex_spawn_carries_attention_hooks_for_the_launched_node() {
+    use super::command::build_spawn_command;
+    use super::reader::SessionIdMode;
+
+    for runtime in [EnvType::Windows, EnvType::WindowsInterop, EnvType::Wsl] {
+        let resolved = crate::env::ResolvedPath {
+            host_path: ".".into(),
+            spawn_path: ".".into(),
+            raw_path: ".".into(),
+            env_type: runtime,
+        };
+        for (label, session) in [
+            ("fresh", SessionIdMode::None),
+            (
+                "resumed",
+                SessionIdMode::Resume("019dcb2e-1111-7222-8333-444455556666".into()),
+            ),
+        ] {
+            let command = build_spawn_command(
+                &resolved,
+                Provider::Codex,
+                &[],
+                &session,
+                4242,
+                &ResolvedAgentConfig::default(),
+                None,
+                false,
+            )
+            .unwrap();
+            let argv: Vec<String> = command
+                .get_argv()
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            // On a PowerShell-wrapped launch the arguments live inside the
+            // encoded script; otherwise they are plain argv entries.
+            let launch = match argv.last().filter(|_| {
+                (cfg!(windows) && runtime == EnvType::Windows) || runtime == EnvType::WindowsInterop
+            }) {
+                Some(encoded) => {
+                    use base64::Engine;
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(encoded.as_bytes())
+                        .unwrap();
+                    let utf16: Vec<_> = bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect();
+                    String::from_utf16(&utf16).unwrap()
+                }
+                None => argv.join(" "),
+            };
+            for event in [
+                "SessionStart",
+                "Stop",
+                "PermissionRequest",
+                "UserPromptSubmit",
+                "PreToolUse",
+                "PostToolUse",
+                "Interrupt",
+            ] {
+                assert!(
+                    launch.contains(&format!("hooks.{event}=[")),
+                    "{runtime:?} {label} launch lacks the {event} hook"
+                );
+            }
+            assert!(launch.contains("features.hooks=true"), "{runtime:?}");
+            let command_line: usize = argv.iter().map(|arg| arg.len() + 1).sum();
+            assert!(
+                command_line < 32_767 - 4_000,
+                "{runtime:?}: {command_line} characters leave no room for a prompt"
+            );
+        }
+    }
+}
+
 // -----------------------------------------------------------------
 // Issue #1179: capability / recipe coherence table.
 //
