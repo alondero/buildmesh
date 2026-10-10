@@ -299,8 +299,19 @@ mod windows {
                         file: Some(file),
                     }));
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // A live transaction holds the file with share mode zero.
+                // A live transaction holding the lock file does surface as
+                // `AlreadyExists`. But the exclusive create can fail for other
+                // transient reasons on the same path — a filesystem filter, a
+                // scanner, a changed ACL — and Windows reports those as a
+                // sharing or access-denied error, which no probe of the lock
+                // file can tell apart from contention. Treating those as fatal
+                // aborted a launch on a transient denial (issue #2173); they
+                // are indistinguishable from a busy lock here, so they ride the
+                // same bounded retry.
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        || lock_is_held(&error) =>
+                {
                     // If we can open it exclusively, it is crash residue and
                     // can be removed safely; no age heuristic can mistake a
                     // suspended live process for a stale owner.
@@ -787,7 +798,7 @@ mod tests {
         use crate::agent::provider::{AgentProvider, Platform};
         use crate::models::EnvType;
         use std::os::windows::fs::symlink_dir;
-        use std::path::Path;
+        use std::path::{Path, PathBuf};
         use std::process::{Command, Stdio};
         use tempfile::TempDir;
 
@@ -1320,6 +1331,139 @@ mod tests {
                 .file_type()
                 .is_symlink());
             assert!(git(&root, &["status", "--porcelain"], None).is_empty());
+        }
+
+        /// A write-denying ACE on a directory, removed again on drop.
+        ///
+        /// `Drop` order is the point: declared after the `TempDir`, it runs
+        /// first, so a panicking assertion can never leave the fixture
+        /// undeletable — a directory that outlives its test holding a deny ACE
+        /// is exactly the straggler the fixture guidance warns about.
+        struct WriteDeny {
+            admin: PathBuf,
+        }
+
+        impl WriteDeny {
+            fn apply(admin: &Path) -> Self {
+                let deny = Self {
+                    admin: admin.to_path_buf(),
+                };
+                deny.icacls(&["/deny", &format!("{}:(W)", account())]);
+                deny
+            }
+
+            fn lift(&self) {
+                self.icacls(&["/remove:d", &account()]);
+            }
+
+            fn icacls(&self, args: &[&str]) {
+                let output = crate::process_util::command_no_window("icacls")
+                    .arg(&self.admin)
+                    .args(args)
+                    .output()
+                    .unwrap_or_else(|e| panic!("icacls {:?} failed to run: {e}", &args[..1]));
+                assert!(
+                    output.status.success(),
+                    "icacls {:?} {}: {}",
+                    &args[..1],
+                    self.admin.display(),
+                    String::from_utf8_lossy(&output.stdout)
+                );
+            }
+        }
+
+        impl Drop for WriteDeny {
+            fn drop(&mut self) {
+                let user = std::env::var("USERNAME").expect("USERNAME");
+                let _ = crate::process_util::command_no_window("icacls")
+                    .arg(&self.admin)
+                    .args(["/remove:d", &user])
+                    .output();
+            }
+        }
+
+        fn account() -> String {
+            std::env::var("USERNAME").expect("USERNAME")
+        }
+
+        fn lock_path(admin: &Path) -> PathBuf {
+            admin.join(format!("{}lock", super::super::TRANSACTION_PREFIX))
+        }
+
+        /// Issue #2173: `concurrent_launches_are_serialized_and_idempotent`
+        /// failed under load with `cannot acquire transaction lock: Access is
+        /// denied. (os error 5)` — a hard failure, not a wait. The exclusive
+        /// create was treated as fatal for every error but `AlreadyExists`,
+        /// although a denial from anything transiently touching the path is
+        /// indistinguishable from a busy lock and must ride the same budget.
+        ///
+        /// A deny ACE reproduces the real error code deterministically; both
+        /// preconditions are asserted first so the test cannot pass vacuously.
+        #[test]
+        fn acquire_waits_out_a_refused_create_instead_of_failing() {
+            use std::os::windows::fs::OpenOptionsExt;
+
+            let temp = fixture();
+            let root = temp.path();
+            let admin = root.join(".git");
+            let lock = lock_path(&admin);
+
+            // While a lock is merely *held*, Windows still reports
+            // ERROR_FILE_EXISTS — so the retry these tests protect is only ever
+            // reached through the denial below.
+            let held = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(&lock)
+                .unwrap();
+            let collision = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(&lock)
+                .unwrap_err();
+            assert_eq!(
+                collision.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "a held lock must surface as AlreadyExists, or this test proves nothing"
+            );
+            drop(held);
+            let _ = std::fs::remove_file(&lock);
+
+            let deny = WriteDeny::apply(&admin);
+            let probe = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .share_mode(0)
+                .open(admin.join("probe.lock"));
+            assert!(
+                probe.is_err(),
+                "the deny ACE must actually refuse the create, or the test is a placebo"
+            );
+            drop(probe);
+            let _ = std::fs::remove_file(admin.join("probe.lock"));
+
+            // Release the denial while the acquire loop is waiting on it.
+            let admin_for_worker = admin.clone();
+            let worker = std::thread::spawn(move || {
+                super::super::windows::acquire_transaction(
+                    &admin_for_worker,
+                    std::time::Duration::from_secs(120),
+                )
+            });
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            deny.lift();
+
+            let acquired = worker.join().expect("acquire thread must not panic");
+            assert!(
+                acquired
+                    .expect("a transient denial must not fail the acquire")
+                    .is_some(),
+                "the lock must be taken once the denial is lifted"
+            );
+            assert!(!lock.exists(), "the transaction must release its lock file");
         }
 
         #[test]

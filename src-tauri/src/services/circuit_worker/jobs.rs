@@ -514,19 +514,31 @@ mod tests {
         } else {
             "printf started > ready; while :; do sleep 1; done"
         };
+        // The property under test is that a real spawned shell runs to its
+        // running state and then stops when cancelled — not that a PowerShell
+        // cold start fits a fixed budget. Under concurrent load that start
+        // outlived the old 10 s window, and a loaded run finished in 10.53 s, so
+        // the test was measuring the machine's mood rather than cancellation
+        // (issue #2173).
+        const READY_BUDGET: Duration = Duration::from_secs(120);
+        const CANCEL_BUDGET: Duration = Duration::from_secs(60);
+        const POLL: Duration = Duration::from_millis(50);
         let cancelled = Arc::new(AtomicBool::new(false));
         let token = cancelled.clone();
         let (result_tx, result_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             result_tx.send(super::super::run_verification_command(&path, command, &token, &AtomicBool::new(false))).unwrap();
         });
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !directory.path().join("ready").exists() && Instant::now() < deadline {
-            std::thread::yield_now();
+        let ready = directory.path().join("ready");
+        let deadline = Instant::now() + READY_BUDGET;
+        // Sleep between polls rather than spinning: `yield_now` burns a core
+        // that the spawned shell then has to compete for.
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::sleep(POLL);
         }
-        let started = directory.path().join("ready").exists();
+        let started = ready.exists();
         cancelled.store(true, Ordering::Release);
-        assert!(!result_rx.recv_timeout(Duration::from_secs(10)).expect("cancelled verification must exit"));
+        assert!(!result_rx.recv_timeout(CANCEL_BUDGET).expect("cancelled verification must exit"));
         worker.join().unwrap();
         assert!(started, "real shell command must reach its running state before cancellation");
     }
