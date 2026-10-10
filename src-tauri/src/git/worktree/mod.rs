@@ -97,11 +97,14 @@ fn add_worktree_impl(
     host_path: &std::path::Path,
     use_branched: bool,
     base_ref: &str,
-) -> Result<(), String> {
-    let base_sha = resolve_base_commit(repo, base_ref)?.id().to_string();
+) -> Result<(), AddWorktreeFailure> {
+    let base_sha = resolve_base_commit(repo, base_ref)
+        .map_err(AddWorktreeFailure::other)?
+        .id()
+        .to_string();
     let workdir = repo
         .workdir()
-        .ok_or_else(|| "cannot add a worktree to a bare repository".to_string())?;
+        .ok_or_else(|| AddWorktreeFailure::other("cannot add a worktree to a bare repository"))?;
 
     // `command_no_window` applies CREATE_NO_WINDOW on Windows (no per-OS cfg here).
     let mut cmd = crate::process_util::git_command();
@@ -113,16 +116,121 @@ fn add_worktree_impl(
     }
     cmd.arg(host_path).arg(&base_sha);
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("failed to run `git worktree add`: {}", e))?;
+    let output = cmd.output().map_err(|e| {
+        AddWorktreeFailure::other(format!("failed to run `git worktree add`: {}", e))
+    })?;
     if !output.status.success() {
-        return Err(format!(
-            "Git worktree add failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(AddWorktreeFailure::new(
+            classify_worktree_add_failure(&stderr),
+            format!("Git worktree add failed: {stderr}"),
         ));
     }
     Ok(())
+}
+
+/// Which of the two decisions [`create_git_worktree`] has to make about a failed
+/// `git worktree add` (issue #2195).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddWorktreeFailureKind {
+    /// The target path is already **registered as a worktree** in git's
+    /// metadata — the disk/metadata disagreement that prune-and-retry repairs.
+    RegisteredWorktree,
+    /// Everything else: a branch-name clash, an unresolvable base ref, a failed
+    /// spawn, an unwritable path. Pruning cannot fix any of these, so they are
+    /// returned to the user unchanged.
+    Other,
+}
+
+/// A failed `git worktree add`, carrying the decision the caller owes it.
+///
+/// The message is still the exact text users saw before (`Git worktree add
+/// failed: <git's stderr>`) — only the *decision* moved off prose onto
+/// [`AddWorktreeFailureKind`], so no consumer has to read English git output to
+/// know whether to retry.
+#[derive(Debug, Clone)]
+pub struct AddWorktreeFailure {
+    kind: AddWorktreeFailureKind,
+    message: String,
+}
+
+impl AddWorktreeFailure {
+    fn new(kind: AddWorktreeFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    /// A failure prune-and-retry cannot help. Every non-git-source error (base
+    /// ref, bare repo, spawn) lands here without being classified against git's
+    /// wording at all.
+    fn other(message: impl Into<String>) -> Self {
+        Self::new(AddWorktreeFailureKind::Other, message)
+    }
+
+    pub fn kind(&self) -> AddWorktreeFailureKind {
+        self.kind
+    }
+
+    /// The user-facing text, unchanged from the `Result<(), String>` this
+    /// replaced.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for AddWorktreeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AddWorktreeFailure {}
+
+/// Decide what a failed `git worktree add` was actually complaining about.
+///
+/// Only one conflict is repairable: the target path is **already registered as a
+/// worktree** whose directory is gone (or otherwise disagrees with the metadata).
+/// `prune_stale_worktrees` clears exactly that registration, which is why a
+/// conflict is worth one retry.
+///
+/// The wording is git's, so it moves between versions and locales — hence the
+/// classifier lives here, in the one function that shells out, rather than in
+/// the caller (issue #2195). Verified against git 2.30.0.windows.2:
+///
+/// | git's stderr | kind |
+/// |---|---|
+/// | `fatal: '<path>' is a missing but already registered worktree;` (git ≥ 2.30) | [`RegisteredWorktree`] — **contains neither "already exists" nor "already checked out"**, so the pre-#2195 caller never repaired it |
+/// | `fatal: '<path>' already exists` (older git, same conflict) | [`RegisteredWorktree`] |
+/// | `fatal: '<path>' already used by worktree at '<other>'` (older git, same conflict) | [`RegisteredWorktree`] |
+/// | `fatal: '<branch>' is already checked out at '<path>'` | [`RegisteredWorktree`] |
+/// | `fatal: A branch named '<branch>' already exists.` | [`Other`] — a *branch* clash: pruning removes worktree admin entries, never branches, so the retry fails with this identical error |
+/// | `fatal: Not a valid object name: '<ref>'.` | [`Other`] |
+///
+/// The branch-clash exclusion is the load-bearing case: it is the one failure
+/// this repo can produce from git that contains "already exists" as part of a
+/// *different* failure, and it is exactly what the old substring match fired
+/// on — pruning stale worktrees that had nothing to do with the clash and then
+/// failing anyway. The check runs first so a message naming both reads as the
+/// branch clash (git reports a branch clash before it looks at worktree
+/// registrations).
+fn classify_worktree_add_failure(stderr: &str) -> AddWorktreeFailureKind {
+    let text = stderr.to_lowercase();
+
+    if text.contains("already exists") && text.contains("branch named") {
+        return AddWorktreeFailureKind::Other;
+    }
+
+    if text.contains("already registered worktree")
+        || text.contains("already used by worktree")
+        || text.contains("already checked out")
+        || text.contains("already exists")
+    {
+        return AddWorktreeFailureKind::RegisteredWorktree;
+    }
+
+    AddWorktreeFailureKind::Other
 }
 
 /// Remove worktrees whose on-disk path no longer exists.
@@ -227,12 +335,18 @@ pub fn create_git_worktree(
 
     match add_worktree_impl(&repo, branch_name, host_path, use_branched, base_ref) {
         Ok(()) => {}
-        Err(err) if err.contains("already exists") || err.contains("already checked out") => {
-            tracing::warn!("Worktree already exists in git metadata, attempting to repair...");
+        // Issue #2195: the repair decision reads the failure's *kind*, not the
+        // English in git's stderr. Only a target path that is already
+        // registered as a worktree is repairable by pruning; every other
+        // failure (including a branch-name clash, which also says "already
+        // exists") is returned to the user untouched.
+        Err(err) if err.kind() == AddWorktreeFailureKind::RegisteredWorktree => {
+            tracing::warn!("Worktree already registered in git metadata, attempting to repair...");
             prune_stale_worktrees(&repo);
-            add_worktree_impl(&repo, branch_name, host_path, use_branched, base_ref)?;
+            add_worktree_impl(&repo, branch_name, host_path, use_branched, base_ref)
+                .map_err(|e| e.message().to_string())?;
         }
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.message().to_string()),
     }
 
     apply_worktree_include(project_root, host_path);
@@ -1604,6 +1718,183 @@ mod tests {
         assert!(
             has_husk_marker,
             "husk must be preserved as a sibling under the container"
+        );
+    }
+
+    // ── `git worktree add` failure classification (issue #2195) ─────────────
+
+    /// Every wording this repo's git can produce for the one repairable
+    /// conflict — the target path already registered as a worktree. Pinned with
+    /// the strings git 2.30.0.windows.2 actually printed, because the whole
+    /// point of the split is that the caller stops reading English: if a wording
+    /// is missing here, the repair silently stops firing for it.
+    #[test]
+    fn classify_worktree_add_failure_recognises_the_registered_worktree_conflict() {
+        for stderr in [
+            // git >= 2.30: neither "already exists" nor "already checked out" —
+            // this is the message that the pre-#2195 caller never matched, so the
+            // repair never ran and the user got raw git output.
+            "fatal: 'C:/repo/.claude/worktrees/gh1' is a missing but already registered worktree;\nuse 'add -f' to override, or 'prune' or 'remove' to clear",
+            // Older git, same conflict.
+            "fatal: 'C:/repo/.claude/worktrees/gh1' already exists",
+            "fatal: 'C:/repo/.claude/worktrees/gh1' already used by worktree at 'C:/repo/.claude/worktrees/gh0'",
+            // The two strings the old caller matched.
+            "fatal: 'gh1' is already checked out at 'C:/repo/.claude/worktrees/gh0'",
+        ] {
+            assert_eq!(
+                classify_worktree_add_failure(stderr),
+                AddWorktreeFailureKind::RegisteredWorktree,
+                "must be treated as a prunable conflict: {stderr}"
+            );
+        }
+    }
+
+    /// The failure this repo can produce from git that says "already exists"
+    /// about something else entirely: a *branch name* clash. Pruning removes
+    /// worktree admin entries, never branches, so the old caller's prune-and-
+    /// retry fired here and then failed with the identical message.
+    #[test]
+    fn classify_worktree_add_failure_excludes_a_branch_name_clash() {
+        let stderr = "fatal: A branch named 'gh1' already exists.";
+        assert!(
+            stderr.contains("already exists"),
+            "precondition: the old substring match really did fire on this message"
+        );
+        assert_eq!(
+            classify_worktree_add_failure(stderr),
+            AddWorktreeFailureKind::Other,
+            "a branch clash is not a stale worktree registration"
+        );
+    }
+
+    /// A failure containing neither phrase must never reach the retry.
+    #[test]
+    fn classify_worktree_add_failure_leaves_unrelated_failures_alone() {
+        for stderr in [
+            "fatal: Not a valid object name: 'nosuchref'.",
+            "fatal: could not create work tree dir 'C:/repo/wt': Permission denied",
+            // Non-English locale: the words the old caller matched are absent.
+            "fatal: 'C:/repo/wt' est déjà un worktree enregistré mais manquant",
+            // Degenerate: git produced no stderr at all.
+            "",
+        ] {
+            assert_eq!(
+                classify_worktree_add_failure(stderr),
+                AddWorktreeFailureKind::Other,
+                "must not be retried: {stderr}"
+            );
+        }
+    }
+
+    /// Every path the target is registered under, as git still lists it —
+    /// including registrations whose directory is gone.
+    fn registered_worktree_paths(root: &Path) -> Vec<PathBuf> {
+        let repo = git2::Repository::open(root).expect("repo must open");
+        let names = repo.worktrees().expect("worktrees must list");
+        (0..names.len())
+            .filter_map(|i| names.get(i))
+            .filter_map(|n| repo.find_worktree(n).ok())
+            .map(|w| w.path().to_path_buf())
+            .collect()
+    }
+
+    /// Cut a worktree and then move its directory aside, which is what leaves
+    /// git holding a registration for a path that no longer exists. Returns the
+    /// path the registration still points at.
+    fn leave_stale_registration(root: &Path, name: &str) -> PathBuf {
+        let wt = root.join(".claude").join("worktrees").join(name);
+        create_git_worktree(
+            root.to_str().unwrap(),
+            wt.to_str().unwrap(),
+            name,
+            "detached",
+            "HEAD",
+        )
+        .expect("fixture worktree must be created");
+        fs::rename(
+            &wt,
+            root.join(".claude")
+                .join("worktrees")
+                .join(format!("{name}-gone")),
+        )
+        .expect("fixture worktree dir must move aside");
+        assert!(!wt.exists(), "precondition: the worktree directory is gone");
+        assert!(
+            registered_worktree_paths(root).contains(&wt),
+            "precondition: git still holds a registration for the missing path"
+        );
+        wt
+    }
+
+    /// End-to-end through the production `create_git_worktree`: a stale
+    /// registration must still be recognised and repaired by prune-and-retry.
+    /// On git 2.30 the failing `git worktree add` says "is a missing but already
+    /// registered worktree", which contains neither phrase the pre-#2195 caller
+    /// matched — so before the typed split this create returned git's raw error
+    /// and the worktree was never cut.
+    #[test]
+    fn create_repairs_a_stale_worktree_registration() {
+        let td = TestDir::new("wt_repair_stale");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let stale = leave_stale_registration(td.path(), "wt-repair");
+
+        create_git_worktree(
+            &root,
+            stale.to_str().unwrap(),
+            "wt-repair",
+            "detached",
+            "HEAD",
+        )
+        .expect("a stale registration must be pruned and the create retried");
+
+        assert!(
+            git2::Repository::open(&stale).is_ok(),
+            "the repaired create must leave a real worktree at the target"
+        );
+        assert!(
+            registered_worktree_paths(td.path()).contains(&stale),
+            "the retry must have re-registered the path"
+        );
+    }
+
+    /// The other half of the contract: a failure that pruning cannot fix is
+    /// returned as-is and prunes nothing. A stale registration is left in the
+    /// repo purely as the witness — it is exactly what a prune would have
+    /// removed, so its survival is the proof that no prune-and-retry ran.
+    #[test]
+    fn create_does_not_prune_or_retry_a_branch_name_clash() {
+        let td = TestDir::new("wt_branch_clash");
+        init_repo_with_commit(td.path(), &[("f.txt", "v1\n")]);
+        let root = td.path().to_string_lossy().to_string();
+        let stale = leave_stale_registration(td.path(), "wt-stale");
+
+        // A branch name that is already taken, checked out nowhere.
+        let repo = git2::Repository::open(td.path()).unwrap();
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("clashed", &head, false).unwrap();
+
+        let target = td.path().join(".claude").join("worktrees").join("wt-new");
+        let err = create_git_worktree(
+            &root,
+            target.to_str().unwrap(),
+            "clashed",
+            "branched",
+            "HEAD",
+        )
+        .expect_err("a branch-name clash must fail the create");
+        assert!(
+            err.contains("already exists"),
+            "git's own wording must still reach the user, got: {err}"
+        );
+
+        assert!(
+            registered_worktree_paths(td.path()).contains(&stale),
+            "a non-conflict failure must not prune stale worktrees"
+        );
+        assert!(
+            !target.exists(),
+            "a non-conflict failure must not leave a half-created worktree"
         );
     }
 
