@@ -814,6 +814,86 @@ pub(crate) fn local_base_branch(base_ref: &str, remotes: &[String]) -> String {
     }
 }
 
+/// Why resolving a PR source failed, in the terms the HTTP layer needs.
+///
+/// This exists because the route cannot infer intent from message text. An
+/// earlier version matched `Err(e) if e.starts_with("Agent node")` to pick
+/// `403`, but three different failures share that prefix — including the
+/// harmless "branch is the same as the Base Ref" validation case — so a
+/// validation error came back as 403, which the mobile client treats as an
+/// auth failure (`isAuthError`) and answers by wiping the session and
+/// bouncing the user to the pairing screen (issue #2190 review).
+///
+/// Each variant maps to exactly one status:
+/// - [`PrSourceError::NotFound`] → 404
+/// - [`PrSourceError::NotOwned`] → 403 (genuinely an authorization failure)
+/// - [`PrSourceError::SameBranch`] / [`PrSourceError::BranchUnknown`] → 422
+/// - [`PrSourceError::Other`] → 500
+#[derive(Debug)]
+pub enum PrSourceError {
+    /// No agent node row with that id.
+    NotFound(i64),
+    /// The node exists but belongs to a different mesh.
+    NotOwned { node_id: i64, mesh_id: i64 },
+    /// The worktree sits on the branch the PR would target — nothing to compare.
+    SameBranch { branch: String, base: String },
+    /// The worktree's checked-out branch could not be read.
+    BranchUnknown,
+    /// The worktree moved off the branch the client previewed, so submitting
+    /// would publish something the user never saw.
+    StaleHead { actual: String, expected: String },
+    /// Git, filesystem, database or GitHub-client failure.
+    Other(String),
+}
+
+impl std::fmt::Display for PrSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrSourceError::NotFound(node_id) => {
+                write!(f, "Agent node {node_id} was not found")
+            }
+            PrSourceError::NotOwned { node_id, mesh_id } => {
+                write!(f, "Agent node {node_id} does not belong to mesh {mesh_id}")
+            }
+            PrSourceError::SameBranch { branch, base } => write!(
+                f,
+                "Agent node branch '{branch}' is the same as the mesh Base Ref '{base}' — nothing to compare"
+            ),
+            PrSourceError::BranchUnknown => {
+                write!(f, "Could not determine the agent node's current branch")
+            }
+            PrSourceError::StaleHead { actual, expected } => write!(
+                f,
+                "Agent node worktree is on '{actual}', not the source branch '{expected}' that was previewed"
+            ),
+            PrSourceError::Other(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for PrSourceError {}
+
+impl From<String> for PrSourceError {
+    fn from(message: String) -> Self {
+        PrSourceError::Other(message)
+    }
+}
+
+/// HTTP status this failure must be reported as. Lives beside the enum so the
+/// mapping is stated once and both routes use it.
+impl PrSourceError {
+    pub(crate) fn status(&self) -> &'static str {
+        match self {
+            PrSourceError::NotFound(_) => "404 Not Found",
+            PrSourceError::NotOwned { .. } => "403 Forbidden",
+            PrSourceError::SameBranch { .. }
+            | PrSourceError::BranchUnknown
+            | PrSourceError::StaleHead { .. } => "422 Unprocessable Entity",
+            PrSourceError::Other(_) => "500 Internal Server Error",
+        }
+    }
+}
+
 /// Resolve the source/target branches for a create-PR from an agent node.
 ///
 /// Shared by the preview route and the create route so the branches the
@@ -822,33 +902,32 @@ pub(crate) fn local_base_branch(base_ref: &str, remotes: &[String]) -> String {
 pub(crate) fn resolve_pr_source_for_node(
     mesh_id: i64,
     node_id: i64,
-) -> Result<ResolvedPrSource, String> {
-    let node = db::get_agent_node_by_id(node_id).map_err(|e| e.to_string())?;
-    // Ownership check: a node id from another mesh must not be usable to
-    // mint a PR against this mesh's repo. Both the HTTP route and this
-    // function enforce it; the route needs the distinction for its status
-    // code, and this function is also reachable as a Tauri command.
+) -> Result<ResolvedPrSource, PrSourceError> {
+    let node = db::get_agent_node_by_id(node_id).map_err(|_| PrSourceError::NotFound(node_id))?;
+    // Ownership check: a node id from another mesh must not be usable to mint
+    // a PR against this mesh's repo. Enforced here and in the create route;
+    // both need it, and this is where the distinction between "not yours" and
+    // "not resolvable" is actually made. Not a `#[command]` — the registered
+    // entry point is `create_pr_for_node_source` below.
     if node.mesh_id != mesh_id {
-        return Err(format!(
-            "Agent node {node_id} does not belong to mesh {mesh_id}"
-        ));
+        return Err(PrSourceError::NotOwned { node_id, mesh_id });
     }
-    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| e.to_string())?;
+    let mesh = db::get_mesh_by_id(mesh_id).map_err(|e| PrSourceError::Other(e.to_string()))?;
 
     // The node's worktree, never `mesh.path`. `host_path` is the
     // Windows-side view; git operations must never see a WSL path
     // (see `env::host_path`).
     let info = repo_info(&env::node_working_path(&node).host_path)?;
     if info.branch.is_empty() {
-        return Err("Could not determine the agent node's current branch".to_string());
+        return Err(PrSourceError::BranchUnknown);
     }
 
     let base_branch = local_base_branch(&mesh.base_ref, &info.remotes);
     if info.branch == base_branch {
-        return Err(format!(
-            "Agent node branch '{}' is the same as the mesh Base Ref '{}' — nothing to compare",
-            info.branch, base_branch
-        ));
+        return Err(PrSourceError::SameBranch {
+            branch: info.branch,
+            base: base_branch,
+        });
     }
 
     Ok(ResolvedPrSource {
@@ -887,6 +966,39 @@ pub async fn create_pr_for_node_source(
             base_branch.as_deref(),
             expected_head.as_deref(),
         )
+        // Tauri commands surface a plain string; the HTTP route keeps the
+        // typed `PrSourceError` so it can pick a status code.
+        .map_err(|e: PrSourceError| e.to_string())
+    })
+    .await
+}
+
+/// HTTP-facing twin of [`create_pr_for_node_source`].
+///
+/// Identical work, but it hands the caller the typed [`PrSourceError`] so the
+/// route can answer 404 / 403 / 422 / 500 correctly. The `#[command]` version
+/// flattens to `String` because Tauri surfaces command errors as plain text,
+/// which is what loses the distinction — and a validation failure must never
+/// be reported as a server fault (#2190 review).
+pub async fn create_pr_for_node_source_http(
+    mesh_id: i64,
+    node_id: i64,
+    title: String,
+    body: String,
+    base_branch: Option<String>,
+    expected_head: Option<String>,
+) -> Result<CreatePrResult, PrSourceError> {
+    crate::commands::run_blocking_typed("create_pr_for_node_source", move || {
+        let client = GitHubClient::new().map_err(|e| PrSourceError::Other(e.to_string()))?;
+        create_pr_for_node_source_blocking_with_client(
+            &client,
+            mesh_id,
+            node_id,
+            &title,
+            &body,
+            base_branch.as_deref(),
+            expected_head.as_deref(),
+        )
     })
     .await
 }
@@ -901,32 +1013,32 @@ pub(crate) fn create_pr_for_node_source_blocking_with_client(
     body: &str,
     base_branch: Option<&str>,
     expected_head: Option<&str>,
-) -> Result<CreatePrResult, String> {
+) -> Result<CreatePrResult, PrSourceError> {
     let resolved = resolve_pr_source_for_node(mesh_id, node_id)?;
     let mut source = resolved.source;
 
     if let Some(expected) = expected_head.map(str::trim).filter(|h| !h.is_empty()) {
         if expected != source.head_branch {
-            return Err(format!(
-                "Agent node worktree is on '{}', not the source branch '{expected}' that was previewed",
-                source.head_branch
-            ));
+            return Err(PrSourceError::StaleHead {
+                actual: source.head_branch,
+                expected: expected.to_string(),
+            });
         }
     }
 
     if let Some(requested) = base_branch.map(str::trim).filter(|b| !b.is_empty()) {
         if requested == source.head_branch {
-            return Err(format!(
-                "Source branch '{}' is the same as Base Ref '{requested}' — nothing to compare",
-                source.head_branch
-            ));
+            return Err(PrSourceError::SameBranch {
+                branch: source.head_branch,
+                base: requested.to_string(),
+            });
         }
         source.base_branch = requested.to_string();
     }
 
-    let (owner, repo) = resolved
-        .owner_repo
-        .ok_or_else(|| "This repository has no GitHub origin remote".to_string())?;
+    let (owner, repo) = resolved.owner_repo.ok_or_else(|| {
+        PrSourceError::Other("This repository has no GitHub origin remote".into())
+    })?;
 
     let req = CreatePrRequest {
         owner: &owner,
@@ -947,7 +1059,7 @@ pub(crate) fn create_pr_for_node_source_blocking_with_client(
             head_branch: source.head_branch,
             base_branch: source.base_branch,
         })
-        .map_err(|e| e.to_string())
+        .map_err(|e| PrSourceError::Other(e.to_string()))
 }
 
 /// Merge a PR with the caller-chosen strategy + delete the branch.
@@ -2951,8 +3063,12 @@ mod tests {
         );
 
         let err = resolve_pr_source_for_node(mesh_b, node_in_a).expect_err("ownership must fail");
+        // The status is the contract the HTTP route depends on: ownership is
+        // the one case that is genuinely a 403 (#2190 review).
+        assert_eq!(err.status(), "403 Forbidden");
+        assert!(matches!(err, PrSourceError::NotOwned { .. }));
         assert!(
-            err.contains("does not belong to mesh"),
+            err.to_string().contains("does not belong to mesh"),
             "error must name the ownership violation, got: {err}"
         );
         assert!(mesh_a != mesh_b, "the two meshes must actually differ");
@@ -2975,8 +3091,13 @@ mod tests {
         );
 
         let err = resolve_pr_source_for_node(mesh_id, node_id).expect_err("same-branch must fail");
+        // A validation failure, NOT an auth failure. Reporting it as 403 was
+        // a live bug: the mobile client treats 403 as an expired session and
+        // wipes the credentials (#2190 review).
+        assert_eq!(err.status(), "422 Unprocessable Entity");
+        assert!(matches!(err, PrSourceError::SameBranch { .. }));
         assert!(
-            err.contains("nothing to compare"),
+            err.to_string().contains("nothing to compare"),
             "error must explain the same-branch case, got: {err}"
         );
     }
@@ -3072,9 +3193,13 @@ mod tests {
         .expect_err("a worktree that moved since preview must fail");
 
         assert!(
-            err.contains("agent/fix-x") && err.contains("agent/moved-on"),
+            err.to_string().contains("agent/fix-x") && err.to_string().contains("agent/moved-on"),
             "error must name both the actual and the previewed branch, got: {err}"
         );
+        // The worktree moved after preview: a stale client view, not an
+        // authorization problem (#2190 review).
+        assert_eq!(err.status(), "422 Unprocessable Entity");
+        assert!(matches!(err, PrSourceError::StaleHead { .. }));
     }
 
     #[test]
@@ -3100,9 +3225,10 @@ mod tests {
         .expect_err("base == source must fail");
 
         assert!(
-            err.contains("nothing to compare"),
+            err.to_string().contains("nothing to compare"),
             "error must explain the same-branch case, got: {err}"
         );
+        assert_eq!(err.status(), "422 Unprocessable Entity");
     }
 
     #[test]
@@ -3131,8 +3257,20 @@ mod tests {
         .expect_err("cross-mesh node must be rejected");
 
         assert!(
-            err.contains("does not belong to mesh"),
+            err.to_string().contains("does not belong to mesh"),
             "ownership must be checked before any GitHub call, got: {err}"
         );
+        assert_eq!(err.status(), "403 Forbidden");
+    }
+
+    #[test]
+    fn pr_source_missing_node_is_a_404_not_a_server_fault() {
+        // A node id with no DB row used to surface rusqlite's "Query returned
+        // no rows" and answer 500; `create` already answered 404. The typed
+        // error keeps the two routes consistent (#2190 review).
+        let _db = ensure_pr_blocking_db();
+        let err = resolve_pr_source_for_node(1, 987_654_321).expect_err("unknown node must fail");
+        assert_eq!(err.status(), "404 Not Found");
+        assert!(matches!(err, PrSourceError::NotFound(987_654_321)));
     }
 }

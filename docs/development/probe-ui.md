@@ -153,14 +153,6 @@ identity so an item created between two requests appears once.
 The PR-summaries path uses GraphQL cursors rather than `Link`, but reports through the
 same `GitHubPageCompleteness` and shares the same budget.
 
-**Wire shape still to close.** `get_repo_issues`, `get_repo_pulls`, and `get_pr_files`
-return bare arrays today, so the completeness metadata the backend now produces is
-dropped at the command boundary and the probe tabs cannot yet render a
-"showing first N of M" banner. The paged variants that carry it —
-`list_issues_only_paged`, `list_pr_summaries_paged`, `list_pr_files_paged` — exist and
-are tested; wiring them through `commands::pr` into a `{ items, completeness }` return
-is the remaining step.
-
 ## Probe Panel shell (scroll ownership + narrow width)
 The panel and keyed destination wrapper are layout-only, with `min-h-0`,
 `min-w-0` and `overflow-hidden`. A destination owns one inner

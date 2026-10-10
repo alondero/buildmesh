@@ -32,6 +32,22 @@ node's real branch. Omitting `base_branch` lets the mesh decide it.
 A node whose worktree branch equals the resolved base is rejected as "nothing to compare"
 before GitHub is ever called.
 
+### PR-source failures are typed, not string-matched
+
+`resolve_pr_source_for_node` returns `PrSourceError`, and each variant maps to exactly one
+status: `NotFound` → 404, `NotOwned` → 403, `SameBranch` / `BranchUnknown` / `StaleHead` →
+422, `Other` → 500. The routes read `err.status()`; **they never match on the message
+text**. An earlier version chose 403 with `starts_with("Agent node")`, and three distinct
+failures share that prefix — so an ordinary validation failure came back as 403. Because
+`isAuthError` treats 403 as an expired session, the phone answered by clearing the token
+and bouncing the user to the pairing screen (issue #2190 review).
+
+This is why the status is part of the contract rather than an implementation detail:
+**only a genuine authorization failure may reach `onAuthFailed`.** A 422 stays in the
+sheet's error slot, where the user can pick another node. The same reasoning applies to
+any new mobile route that resolves user-supplied identity — a 4xx that is not 401 must
+not be able to log someone out.
+
 ## Sheet dismissal ownership
 
 A sheet with an in-flight request owns its own dismissal. `Sheet` takes a `dismissible`

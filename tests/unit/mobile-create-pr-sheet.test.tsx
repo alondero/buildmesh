@@ -106,6 +106,9 @@ function renderSheet(overrides: Partial<Parameters<typeof CreatePrSheet>[0]> = {
 
 beforeEach(() => {
   localStorage.clear();
+  // The sheet's api module reads this key; seeding it lets the tests assert
+  // that a validation failure does not wipe the stored session.
+  localStorage.setItem("buildmesh_token", "device-token");
 });
 
 afterEach(() => {
@@ -164,6 +167,63 @@ describe("Sheet — dismissal ownership at the primitive (issue #2024 rank 9)", 
       expect(document.activeElement).toBe(outside);
     });
     outside.remove();
+  });
+});
+
+// Issue #2190 review: the backend used to answer 403 for a same-branch
+// validation failure, because the route picked its status by matching
+// `Err(e) if e.starts_with("Agent node")` and three different failures share
+// that prefix. `isAuthError` treats 403 as an expired session, so the phone
+// answered by wiping the token and bouncing the user to the pairing screen.
+// These tests pin the real status codes: only a genuine auth failure may
+// trigger recovery, and every validation failure must stay in the sheet.
+describe("CreatePrSheet — recovery is reserved for real auth failures (issue #2190)", () => {
+  async function renderPreviewFailure(status: number, message: string) {
+    const onAuthFailed = vi.fn();
+    stubApi({});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse(status, { error: message })),
+    );
+    renderSheet({ onAuthFailed });
+    // Let the mount-time preview settle either way.
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("pr-source-error") !== null ||
+          onAuthFailed.mock.calls.length > 0,
+      ).toBe(true);
+    });
+    return onAuthFailed;
+  }
+
+  it("shows a 422 same-branch rejection in the sheet without touching the session", async () => {
+    const onAuthFailed = await renderPreviewFailure(
+      422,
+      "Agent node branch 'main' is the same as the mesh Base Ref 'main' — nothing to compare",
+    );
+    expect(onAuthFailed).not.toHaveBeenCalled();
+    expect(screen.getByTestId("pr-source-error").textContent).toContain(
+      "nothing to compare",
+    );
+    // The sheet is still open — the user can pick another node.
+    expect(screen.getByTestId("create-pr-sheet")).toBeTruthy();
+    expect(localStorage.getItem("buildmesh_token")).toBe("device-token");
+  });
+
+  it("does not recover on a 404 for a deleted node", async () => {
+    const onAuthFailed = await renderPreviewFailure(
+      404,
+      "Agent node 7 was not found",
+    );
+    expect(onAuthFailed).not.toHaveBeenCalled();
+    expect(screen.getByTestId("create-pr-sheet")).toBeTruthy();
+  });
+
+  it("still recovers on a real 401", async () => {
+    // The recovery path itself must survive: a genuine expired session must
+    // still send the user back to Connect.
+    const onAuthFailed = await renderPreviewFailure(401, "session expired");
+    expect(onAuthFailed).toHaveBeenCalled();
   });
 });
 

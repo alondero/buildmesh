@@ -16,20 +16,20 @@
 /// Issue #1380: an async `#[command]` must not call `db::*`, `std::fs::*`,
 /// or `preferences::load`/`save` on the tokio worker — wrap those through
 /// here (gated by `tests/unit/async-command-blocking.test.ts`).
-pub(crate) use crate::blocking::run_blocking;
+pub(crate) use crate::blocking::{run_blocking, run_blocking_typed};
 
 pub mod agent;
-pub mod app;
-pub mod clipboard;
-#[cfg(test)]
-pub mod agent_tests;
 pub mod agent_node;
 pub mod agent_node_discovery;
+#[cfg(test)]
+pub mod agent_tests;
 pub mod ai_context;
 pub mod ai_context_gitignore;
+pub mod app;
 pub mod attention;
 pub mod build_run;
 pub mod circuit;
+pub mod clipboard;
 pub mod coordinator;
 pub mod devices;
 pub mod diagnostics;
@@ -37,19 +37,19 @@ pub mod diff;
 pub mod file_tree;
 pub mod file_watcher;
 pub mod frontend_log;
-pub mod github;
 pub mod git;
 #[cfg(test)]
 pub mod git_tests;
+pub mod github;
 pub mod mesh;
+pub mod mesh_properties;
 #[cfg(test)]
 pub mod mesh_tests;
-pub mod mesh_properties;
 pub mod muse;
 pub mod network;
 pub mod opencode_oauth;
-pub mod preferences;
 pub mod pr;
+pub mod preferences;
 pub mod project_detect;
 pub mod prune;
 pub mod remote;
