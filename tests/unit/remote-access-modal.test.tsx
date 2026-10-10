@@ -63,6 +63,14 @@ const POST_RESET_CERT: CertChainStatus = {
   root_generation: 2,
 };
 
+/** WCAG relative luminance of a `#rrggbb` colour. Used to assert QR polarity:
+ *  the Android client scans with ZXing, whose binarizer only recognises a code
+ *  whose module colour is darker than its background. */
+function luminance(hex: string): number {
+  const channel = (offset: number) => parseInt(hex.slice(offset, offset + 2), 16) / 255;
+  return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+}
+
 describe('buildRemoteAccessUrl (issue: stale http:// QR scheme)', () => {
   it('carries the native root pin in the fragment while keeping the request URL credential-free', () => {
     const result = buildRemoteAccessUrl(
@@ -228,6 +236,30 @@ describe('RemoteAccessModal', () => {
       `https://192.168.1.10:1992/#pair=pairing-code&ca=${encodeURIComponent(SAMPLE_CERT.root_fingerprint_sha256)}`,
     );
     expect(await screen.findByText(/192\.168\.1\.10:1992/)).toBeTruthy();
+  });
+
+  // --- QR polarity: the phone must be able to decode what we render -------
+  // zxing-android-embedded binarises on luminance and assumes dark modules on
+  // a light background; it has no inverted fallback. The modal used to render
+  // `dark: '#e0e0e0'` on `light: '#1a1a1a'`, so every QR was inverted and the
+  // Android client ran its camera preview forever without ever decoding a
+  // frame — "point the phone at the QR and nothing happens". Assert the
+  // contract on ALL THREE codes (connect, Android install, iOS install), since
+  // a regression in any one of them strands a different pairing path.
+
+  it('renders every QR dark-on-light so the phone scanner can decode it', async () => {
+    mockBackend(
+      status({ exposed_interfaces: [{ address: '192.168.1.10:1992', tls: true }] }),
+    );
+    render(<RemoteAccessModal onClose={() => {}} />);
+
+    // Connect + Android install + iOS install all encode in one batch.
+    await waitFor(() => expect(toDataURL).toHaveBeenCalledTimes(3));
+
+    for (const [, options] of toDataURL.mock.calls) {
+      const { color } = options as { color: { dark: string; light: string } };
+      expect(luminance(color.dark)).toBeLessThan(luminance(color.light));
+    }
   });
 
   it('warns instead of showing a dead URL when exposure is enabled but no interface is bound', async () => {
