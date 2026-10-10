@@ -349,9 +349,7 @@ impl GitHubClient {
             super::pagination::DEFAULT_PER_PAGE
         ));
         Ok(self
-            .get_all_pages::<RawLabel, String, _>(&url, &Default::default(), |l| {
-                l.name.clone()
-            })?
+            .get_all_pages::<RawLabel, String, _>(&url, &Default::default(), |l| l.name.clone())?
             .into_items()
             .into_iter()
             .map(|label| label.name)

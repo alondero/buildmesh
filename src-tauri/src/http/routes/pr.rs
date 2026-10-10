@@ -101,7 +101,10 @@ pub async fn merge(req: &ParsedRequest) -> Response {
 /// could disagree.
 pub async fn pr_source(req: &ParsedRequest) -> Response {
     let mesh_id = req.id0();
-    let Some(node_id) = req.query_param("node_id").and_then(|v| v.parse::<i64>().ok()) else {
+    let Some(node_id) = req
+        .query_param("node_id")
+        .and_then(|v| v.parse::<i64>().ok())
+    else {
         return Response::json_error("400 Bad Request", "node_id query parameter is required");
     };
     match crate::commands::pr::resolve_pr_source_for_node(mesh_id, node_id) {

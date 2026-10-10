@@ -503,7 +503,8 @@ pub fn parse_clone_input(input: &str) -> Option<CloneTarget> {
     // (scheme, backslash, whitespace) so a typo'd host is an error instead of
     // being laundered into a "github.com/…" clone.
     let mut segments = trimmed.split('/');
-    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next()) else {
+    let (Some(owner), Some(repo), None) = (segments.next(), segments.next(), segments.next())
+    else {
         return None;
     };
     let owner = owner.trim();

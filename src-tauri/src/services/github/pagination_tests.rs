@@ -295,7 +295,10 @@ fn next_link_is_absent_on_a_single_page_response() {
     // GitHub omits `Link` entirely on the last page, and a header carrying only
     // `prev`/`last` must not be mistaken for a next page.
     assert_eq!(next_page_url(""), None);
-    assert_eq!(next_page_url("<https://api.github.com/x?page=1>; rel=\"first\""), None);
+    assert_eq!(
+        next_page_url("<https://api.github.com/x?page=1>; rel=\"first\""),
+        None
+    );
     assert_eq!(
         next_page_url(
             "<https://api.github.com/x?page=1>; rel=\"prev\", \
@@ -347,11 +350,9 @@ fn three_pages_arrive_once_each_and_in_server_order() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(ISSUES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(ISSUES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(numbers(&page.items), vec![1, 2, 3, 4, 5, 6]);
@@ -378,11 +379,9 @@ fn an_item_straddling_a_page_boundary_appears_once_at_its_first_position() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(ISSUES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(ISSUES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(numbers(&page.items), vec![1, 2, 3, 4, 5]);
@@ -455,11 +454,9 @@ fn one_hundred_and_one_issues_include_the_hundred_and_first() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .search_all_pages::<Row, i64, _>(
-            &fake.url(SEARCH, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .search_all_pages::<Row, i64, _>(&fake.url(SEARCH, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(page.items.len(), 101);
@@ -485,11 +482,9 @@ fn a_pr_with_more_than_one_hundred_files_reports_every_file_and_completeness() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(FILES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(FILES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(page.items.len(), 101);
@@ -507,11 +502,10 @@ fn a_failing_second_file_page_is_not_a_complete_diff() {
     ]);
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
-    let result = client.get_all_pages::<Row, i64, _>(
-        &fake.url(FILES, 1),
-        &PaginationPolicy::DEFAULT,
-        |r| r.number,
-    );
+    let result =
+        client.get_all_pages::<Row, i64, _>(&fake.url(FILES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        });
     assert!(
         matches!(result, Err(GitHubError::Api(502, _))),
         "the second page's failure must propagate — a 100-file list would \
@@ -534,7 +528,12 @@ fn a_search_past_the_service_ceiling_is_reported_incomplete() {
         .map(|p| {
             let start = (p * 100) as i64 + 1;
             let batch: Vec<i64> = (start..start + 100).collect();
-            Step::linking(SEARCH, p as u32 + 1, search_envelope(&batch, 2400), p as u32 + 2)
+            Step::linking(
+                SEARCH,
+                p as u32 + 1,
+                search_envelope(&batch, 2400),
+                p as u32 + 2,
+            )
         })
         .collect();
     steps[pages - 1].next_page = None;
@@ -542,11 +541,9 @@ fn a_search_past_the_service_ceiling_is_reported_incomplete() {
     let fake = Fake::serve(steps);
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .search_all_pages::<Row, i64, _>(
-            &fake.url(SEARCH, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .search_all_pages::<Row, i64, _>(&fake.url(SEARCH, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(page.items.len(), SEARCH_RESULT_CEILING as usize);
@@ -577,11 +574,9 @@ fn githubs_own_incomplete_results_flag_is_surfaced() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .search_all_pages::<Row, i64, _>(
-            &fake.url(SEARCH, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .search_all_pages::<Row, i64, _>(&fake.url(SEARCH, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     assert_eq!(page.items.len(), 1);
@@ -641,9 +636,8 @@ fn cancelling_mid_walk_stops_before_the_next_request() {
         .collect();
 
     let fake = Fake::bind(steps);
-    let client = Arc::new(
-        GitHubClient::for_test(&fake.base_url, "test-token").expect("test client"),
-    );
+    let client =
+        Arc::new(GitHubClient::for_test(&fake.base_url, "test-token").expect("test client"));
     let server_side = Arc::clone(&client);
     let fake = fake.spawn(move |index| {
         if index == 0 {
@@ -652,11 +646,9 @@ fn cancelling_mid_walk_stops_before_the_next_request() {
     });
 
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(ISSUES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(ISSUES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("a cancelled read still returns what arrived");
 
     assert_eq!(
@@ -686,11 +678,9 @@ fn a_read_cancelled_before_it_starts_issues_no_request_at_all() {
     assert!(client.is_cancelled());
 
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(ISSUES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(ISSUES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("cancellation is not an error");
 
     assert!(page.items.is_empty());
@@ -747,11 +737,9 @@ fn reconciliation_ingest_accepts_a_complete_feed_unchanged() {
 
     let client = GitHubClient::for_test(&fake.base_url, "test-token").expect("test client");
     let page = client
-        .get_all_pages::<Row, i64, _>(
-            &fake.url(ISSUES, 1),
-            &PaginationPolicy::DEFAULT,
-            |r| r.number,
-        )
+        .get_all_pages::<Row, i64, _>(&fake.url(ISSUES, 1), &PaginationPolicy::DEFAULT, |r| {
+            r.number
+        })
         .expect("walk succeeds");
 
     let items = super::pagination::require_complete_read(page, "open issues labelled `run`")

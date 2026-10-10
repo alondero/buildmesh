@@ -163,10 +163,7 @@ impl<T> Page<T> {
 ///
 /// Read-only consumers (the probes) must NOT use this — they show the data
 /// plus [`GitHubPageCompleteness`] so the user can see and judge the gap.
-pub(crate) fn require_complete_read<T>(
-    page: Page<T>,
-    what: &str,
-) -> Result<Vec<T>, GitHubError> {
+pub(crate) fn require_complete_read<T>(page: Page<T>, what: &str) -> Result<Vec<T>, GitHubError> {
     if page.completeness.complete {
         return Ok(page.items);
     }

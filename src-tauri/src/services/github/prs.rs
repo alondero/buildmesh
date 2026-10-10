@@ -2208,16 +2208,9 @@ pub(crate) mod tests {
     #[test]
     fn list_pr_summaries_reports_incompleteness_when_the_budget_still_has_pages() {
         use std::sync::atomic::Ordering;
-        let full_page =
-            serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
+        let full_page = serde_json::Value::Array((1..=100).map(fake_node).collect::<Vec<_>>());
         let pages: Vec<(serde_json::Value, bool, Option<String>)> = (0..PR_SUMMARY_MAX_PAGES)
-            .map(|p| {
-                (
-                    full_page.clone(),
-                    true,
-                    Some(format!("cursor{p}")),
-                )
-            })
+            .map(|p| (full_page.clone(), true, Some(format!("cursor{p}"))))
             .collect();
         let (base, count, handle) = fake_graphql_server(pages);
         let client = GitHubClient::for_test(&base, "fake-token").expect("client");
