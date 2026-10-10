@@ -486,6 +486,97 @@ describe('retained-state semantics under retention (issue #2017)', () => {
   });
 });
 
+describe('inactive entry ordering is LRU, not FIFO (issue #2017 review)', () => {
+  it('moves a re-refreshed inactive key to the most-recently-used position', async () => {
+    // `Map.prototype.set` does NOT move an existing key to the back, so
+    // stamping without deleting first leaves the key at its original
+    // position — and the cap then evicts the entry that was used most
+    // recently instead of the one used least recently.
+    const client = createPathKeyedCache<string>({
+      fetcher: (key) => Promise.resolve(`value:${key}`),
+      maxInactiveEntries: 2,
+    });
+
+    await client.refresh('/key-1');          // LRU: [1]
+    await client.refresh('/key-2');          // LRU: [1, 2]
+    await client.refresh('/key-1');          // used most recently -> [2, 1]
+    await client.refresh('/key-3');          // [2, 1, 3] -> evict 2
+
+    expect(client.read('/key-1')).toBe('value:/key-1');
+    expect(client.read('/key-3')).toBe('value:/key-3');
+    expect(client.read('/key-2')).toBeUndefined();
+  });
+
+  it('moves a key whose in-flight request settles after unmount to the MRU position', async () => {
+    // The unmount stamps the key (a pending request holds a slot), then the
+    // completion stamps it again. Without a delete-then-set the second
+    // stamp leaves the key at its unmount position.
+    const pending = deferred();
+    const client = createPathKeyedCache<string>({
+      fetcher: (key) => (key === '/key-1' ? pending.promise : Promise.resolve(`value:${key}`)),
+      maxInactiveEntries: 2,
+    });
+
+    const off = client.subscribe('/key-1', () => {});
+    const inFlight = client.refresh('/key-1');
+    off();                                     // stamp at release
+    await client.refresh('/key-2');            // LRU: [1, 2]
+    pending.resolve('value:/key-1');
+    await inFlight;                             // re-stamp -> [2, 1]
+
+    await client.refresh('/key-3');             // [2, 1, 3] -> evict 2
+
+    expect(client.read('/key-1')).toBe('value:/key-1');
+    expect(client.read('/key-2')).toBeUndefined();
+  });
+
+  it('keeps re-activating and re-releasing a key at the MRU position', async () => {
+    const client = createPathKeyedCache<string>({
+      fetcher: (key) => Promise.resolve(`value:${key}`),
+      maxInactiveEntries: 2,
+    });
+
+    const touch = async (key: string) => {
+      const off = client.subscribe(key, () => {});
+      await client.refresh(key);
+      off();
+    };
+
+    await touch('/a');
+    await touch('/b');
+    await touch('/a');        // re-activates then re-releases -> [b, a]
+    await touch('/c');        // [b, a, c] -> evict b
+
+    expect(client.read('/a')).toBe('value:/a');
+    expect(client.read('/c')).toBe('value:/c');
+    expect(client.read('/b')).toBeUndefined();
+  });
+
+  it('refreshes the TTL stamp on re-access without moving the key forward wrongly', async () => {
+    // The TTL reads the stamp VALUE, which was always correct; the ordering
+    // bug never touched it. Pin that, so the ordering fix cannot regress
+    // freshness by accident.
+    vi.useFakeTimers();
+    const client = createPathKeyedCache<string>({
+      fetcher: (key) => Promise.resolve(`value:${key}`),
+      inactiveEntryTtlMs: 60_000,
+    });
+
+    const off = client.subscribe('/repo', () => {});
+    await client.refresh('/repo');
+    off();                                     // stamp at t=0
+
+    await vi.advanceTimersByTimeAsync(50_000);
+    await client.refresh('/repo');             // re-stamp at t=50s
+    await vi.advanceTimersByTimeAsync(50_000); // t=100s, past the ORIGINAL stamp
+
+    // Served, because the refresh at t=50s restarted the window.
+    expect(client.read('/repo')).toBe('value:/repo');
+    await vi.advanceTimersByTimeAsync(20_000); // t=120s, past the refreshed stamp
+    expect(client.read('/repo')).toBeUndefined();
+  });
+});
+
 describe('dual-key clients get the same policy (issue #2017)', () => {
   it('bounds an entity-keyed cache across deleted entities', async () => {
     const client = createDualKeyCache<number, string>({

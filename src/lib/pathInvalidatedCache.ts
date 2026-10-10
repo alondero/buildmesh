@@ -79,7 +79,10 @@
  * mounted panel never loses its value to churn or to the clock. When its
  * last subscriber leaves it becomes an inactive entry in `inactiveSince`,
  * which is at once the LRU (Map iteration order is eviction order) and the
- * TTL store (the stamp is the value in that same entry):
+ * TTL store (the stamp is the value in that same entry). Restamping an
+ * already-present key must DELETE it first — `Map.prototype.set` leaves an
+ * existing key at its original position, so stamping alone would make
+ * eviction FIFO-by-first-release and discard the entry used most recently:
  *
  *   - `maxInactiveEntries` (default 200) caps how many inactive entries a
  *     client retains. This is what bounds a long session that walks
@@ -653,6 +656,16 @@ function createInternalClient<K, V>(
     inactiveSince.delete(key);
   };
 
+  // `Map.prototype.set` does NOT move an already-present key to the back —
+  // it preserves the key's original iteration position. Stamping without
+  // the delete therefore yields FIFO-by-first-release, not LRU, and the cap
+  // would evict the entry used most recently while keeping older untouched
+  // ones. The delete is what makes this a real LRU.
+  const recordInactive = (key: K) => {
+    inactiveSince.delete(key);
+    inactiveSince.set(key, Date.now());
+  };
+
   const markInactive = (key: K) => {
     const remaining = (activeCounts.get(key) ?? 1) - 1;
     if (remaining > 0) {
@@ -666,7 +679,7 @@ function createInternalClient<K, V>(
     // state was already wiped (bus eviction, manual `invalidate`) drops
     // any stale stamp instead, so the LRU never counts empty entries
     // against the cap.
-    if (retainsSlot(key)) inactiveSince.set(key, Date.now());
+    if (retainsSlot(key)) recordInactive(key);
     else inactiveSince.delete(key);
     enforceInactiveCap();
   };
@@ -814,8 +827,10 @@ function createInternalClient<K, V>(
           // (imperative callers). A key nobody is watching is an inactive
           // entry from the moment it settles: record it in the LRU so the
           // cap and TTL apply to it exactly as they would after an
-          // unsubscribe. Keys with a live subscriber are pinned instead.
-          if (!activeCounts.has(key)) inactiveSince.set(key, Date.now());
+          // unsubscribe. This also makes a re-refresh count as a USE, so
+          // the entry moves to the MRU position instead of being evicted
+          // for being old. Keys with a live subscriber are pinned instead.
+          if (!activeCounts.has(key)) recordInactive(key);
           enforceInactiveCap();
           scheduleTrailing(key, minRefetchIntervalMs);
           return result;
@@ -836,8 +851,9 @@ function createInternalClient<K, V>(
           console.warn(`${name}: fetch failed for key`, key, err);
           // A recorded error is retained state too — same inactive-LRU
           // treatment as a settled value, so a repeatedly-failing
-          // never-subscribed key cannot grow `errors` without bound.
-          if (!activeCounts.has(key)) inactiveSince.set(key, Date.now());
+          // never-subscribed key cannot grow `errors` without bound, and a
+          // retry counts as a use.
+          if (!activeCounts.has(key)) recordInactive(key);
           enforceInactiveCap();
           scheduleTrailing(key, 0);
           return null;

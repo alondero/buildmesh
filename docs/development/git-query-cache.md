@@ -129,8 +129,18 @@ by the cap, so they are evicted at the lifecycle boundary instead:
 - `src/lib/tauri.ts` — `scratchpadByMesh` / `scratchpadWritesByMesh`, keyed by
   Mesh id. Evicted on rejection and on Mesh deletion.
 
-Each eviction only drops the slot if it still holds *that* promise, so a
-concurrent re-populated entry survives a stale cleanup.
+The two cleanup kinds are deliberately different, and the difference matters:
+
+- **Rejection paths are identity-checked.** `getDefaultProvider` and
+  `getMeshScratchpad` drop a slot only when it still holds *that* promise, so a
+  rejection from a superseded request cannot evict a newer entry that has
+  already replaced it.
+- **Mesh deletion is unconditional.** `deleteMesh` clears all three slots
+  without an identity check, because SQLite can reuse a Mesh rowid after the
+  highest row is deleted. Dropping the stale slot is exactly right for whichever
+  Mesh inherits the id, and it also guarantees a deleted Mesh leaves nothing
+  behind. Deletion only reaches this on the success path — a rejected delete
+  means the Mesh survived, so its cached state stays authoritative.
 
 ## Tests
 
