@@ -53,3 +53,61 @@ They show the CLI comparison, not a running Buildmesh backend. The after replay
 asserts the rendered buffer contains one complete paste marker and the
 100-line preview. The before capture shows the stream still populating the
 composer after 30 seconds.
+
+## Programmatic pastes: line endings (2026-10-10)
+
+"Handover to node" and other backend injection reach Grok as a bracketed paste,
+not a clipboard gesture, so the Ctrl+V route above never applied to them. A
+handover into Grok split into one message per line.
+
+A scratch ConPTY probe (140-by-35, flags `0x2 | 0x4`, run on both the inbox host
+and Buildmesh's bundled 1.24.260710001 runtime with identical results) wrote a
+12-line synthetic paste inside `ESC[200~ … ESC[201~` to Grok 1.0.50 and read the
+rendered composer. Only the line endings differed:
+
+| Line endings in the paste | Result |
+| --- | --- |
+| LF | Every line lands in the composer, newlines dropped, lines glued together. |
+| CRLF | Line 1 is submitted, Grok replies, the remaining lines queue as separate messages. |
+| CR | One composer draft with every newline intact; a later Enter queues it as one message (`+11 lines`), also while Grok is mid-turn. |
+
+xterm.js joins a selection with `\r\n` on Windows, and `handover_to_agent`
+forwarded `getSelection()` unchanged, which is the CRLF row. Circuit prompts are
+LF, the glued row. The frontend's own paste never hit this because xterm.js
+rewrites every line break to CR before it emits a paste.
+
+This differs from the 2026-09-29 note that CR versus LF did not restore a single
+paste: that comparison watched the composer fill incrementally, this one compares
+the finished composer and what was submitted.
+
+The fix is the adapter capability `paste_requires_cr_newlines`
+(`AgentProvider`), true for Grok, applied by `circuit::delivery::PreparedPrompt::prepare`.
+On Windows (and Windows-hosted WSL instances), ConPTY key-event translation causes
+LF to drop newlines and CRLF to submit prematurely; across all platforms (Windows,
+macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR by default, so
+delivering CR mirrors xterm.js's standard paste behavior and matches Grok's terminal
+composer expectations uniformly. Circuit prompt dispatches (turns, continuations, and nudges)
+and terminal handovers go through this preparation. The coordinator's `AgentDriver::send_prompt`
+is single-line by contract and bypasses staged delivery. Other harnesses keep their line endings
+as given (though any prompt containing CR or LF is treated as multiline, bracketed
+by `injection_payload`, and subject to non-Generic paste gates).
+
+### Codex 0.162.1, same probe (tracked in #2199)
+
+Running the same scratch ConPTY probe (140-by-35, flags `0x2 | 0x4`, bundled 1.24.260710001
+runtime writing a 12-line bracketed paste inside `\x1b[200~ … \x1b[201~`) to Codex 0.162.1:
+
+| Line endings in the paste | Result in Codex composer |
+| --- | --- |
+| LF | Every line lands in the composer, newlines dropped (lines glued together). |
+| CRLF | Composer draft preserves multiline layout across all lines. |
+| CR | Composer draft preserves multiline layout across all lines. |
+
+Nothing was submitted in any run. LF dropped the newlines (lines glued together);
+CRLF and CR both kept the lines. A Windows handover into Codex is CRLF and
+therefore already correct. A programmatic LF prompt to Codex can lose its
+newlines. That path is guarded by a rendered-paste check that ignores whitespace,
+so it would not notice. Codex was left unchanged because its gate counts burst
+boundaries and has not been re-verified against CR payloads. Follow-up is tracked
+in #2199 to investigate opting Codex into `paste_requires_cr_newlines` or enforcing
+CRLF staging without breaking split-marker burst boundaries.

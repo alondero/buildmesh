@@ -622,6 +622,22 @@ pub trait AgentProvider: Send + Sync {
         PasteGatePolicy::Generic
     }
 
+    /// Whether a staged multi-line paste must carry CR line endings.
+    ///
+    /// On Windows, ConPTY turns each paste byte into a console key event, so inside
+    /// bracketed-paste markers LF is dropped (lines glue together) and CRLF
+    /// submits the first line and queues the rest as separate messages. Across all platforms
+    /// (Windows, macOS, Linux), manual user pastes in xterm.js rewrite newlines to CR
+    /// by default, so Grok's terminal composer expects CR-delimited bracketed pastes
+    /// uniformly. (WSL nodes on Windows hosts also route through Windows ConPTY.) Applied
+    /// at `circuit::delivery::PreparedPrompt::prepare` for circuit prompt dispatches
+    /// (turns, continuations, nudges) and terminal handovers. The coordinator's
+    /// `AgentDriver::send_prompt` is single-line by contract and bypasses staged
+    /// delivery. Harnesses whose composer requires CR opt in (Grok, `docs/learning/grok-terminal-paste.md`).
+    fn paste_requires_cr_newlines(&self) -> bool {
+        false
+    }
+
     /// Platforms where this provider is available. Used to filter `list_providers`.
     fn available_on(&self) -> &'static [Platform];
 
